@@ -35,18 +35,31 @@ mod device {
         }
 
         pub fn run(&self, case: &OpCase, inputs: &[Tensor]) -> Result<Vec<f32>, String> {
+            self.run_reps(case, inputs, 1)
+        }
+
+        /// Launch the kernel `reps` times over one set of buffers.
+        ///
+        /// The copies happen once, so timing two different `reps` and taking the
+        /// difference gives the launch cost without the transfer.
+        pub fn run_reps(
+            &self,
+            case: &OpCase,
+            inputs: &[Tensor],
+            reps: usize,
+        ) -> Result<Vec<f32>, String> {
             match case.name {
-                "gemv_f32" => self.gemv(case, inputs),
-                "rmsnorm_f32" => self.rmsnorm(case, inputs),
-                "rope_neox_f32" => self.rope(case, inputs),
-                "silu_mul_f32" => self.linear2(case, inputs),
-                "residual_add_f32" => self.linear2(case, inputs),
-                "softmax_f32" => self.softmax(case, inputs),
+                "gemv_f32" => self.gemv(case, inputs, reps),
+                "rmsnorm_f32" => self.rmsnorm(case, inputs, reps),
+                "rope_neox_f32" => self.rope(case, inputs, reps),
+                "silu_mul_f32" => self.linear2(case, inputs, reps),
+                "residual_add_f32" => self.linear2(case, inputs, reps),
+                "softmax_f32" => self.softmax(case, inputs, reps),
                 other => Err(format!("{other} has no device launcher")),
             }
         }
 
-        fn gemv(&self, case: &OpCase, inputs: &[Tensor]) -> Result<Vec<f32>, String> {
+        fn gemv(&self, case: &OpCase, inputs: &[Tensor], reps: usize) -> Result<Vec<f32>, String> {
             let (m, k) = (case.scalar("m") as usize, case.scalar("k") as usize);
             let w = Buffer::from_host(inputs[0].data())?;
             let x = Buffer::from_host(inputs[1].data())?;
@@ -65,12 +78,19 @@ mod device {
                 &mut v_m as *mut _ as *mut c_void,
                 &mut v_k as *mut _ as *mut c_void,
             ];
-            kernel.launch(LaunchConfig::per_row(m, 256), &self.stream, &mut params)?;
+            for _ in 0..reps {
+                kernel.launch(LaunchConfig::per_row(m, 256), &self.stream, &mut params)?;
+            }
             self.stream.synchronize()?;
             y.to_host()
         }
 
-        fn rmsnorm(&self, case: &OpCase, inputs: &[Tensor]) -> Result<Vec<f32>, String> {
+        fn rmsnorm(
+            &self,
+            case: &OpCase,
+            inputs: &[Tensor],
+            reps: usize,
+        ) -> Result<Vec<f32>, String> {
             let n = case.scalar("n") as usize;
             let eps = case.scalar("eps");
             let x = Buffer::from_host(inputs[0].data())?;
@@ -91,12 +111,14 @@ mod device {
                 &mut v_eps as *mut _ as *mut c_void,
             ];
             // The reference case is a single row; one block covers it.
-            kernel.launch(LaunchConfig::per_row(1, 256), &self.stream, &mut params)?;
+            for _ in 0..reps {
+                kernel.launch(LaunchConfig::per_row(1, 256), &self.stream, &mut params)?;
+            }
             self.stream.synchronize()?;
             y.to_host()
         }
 
-        fn rope(&self, case: &OpCase, inputs: &[Tensor]) -> Result<Vec<f32>, String> {
+        fn rope(&self, case: &OpCase, inputs: &[Tensor], reps: usize) -> Result<Vec<f32>, String> {
             let heads = case.scalar("n_heads") as usize;
             let dim = case.scalar("head_dim") as usize;
             let pos = case.scalar("pos") as i32;
@@ -124,13 +146,20 @@ mod device {
                 block: (32, 1, 1),
                 shared_mem_bytes: 0,
             };
-            kernel.launch(cfg, &self.stream, &mut params)?;
+            for _ in 0..reps {
+                kernel.launch(cfg, &self.stream, &mut params)?;
+            }
             self.stream.synchronize()?;
             y.to_host()
         }
 
         /// Two same-length inputs, one output: `silu_mul` and `residual_add`.
-        fn linear2(&self, case: &OpCase, inputs: &[Tensor]) -> Result<Vec<f32>, String> {
+        fn linear2(
+            &self,
+            case: &OpCase,
+            inputs: &[Tensor],
+            reps: usize,
+        ) -> Result<Vec<f32>, String> {
             let n = inputs[0].numel();
             let a = Buffer::from_host(inputs[0].data())?;
             let b = Buffer::from_host(inputs[1].data())?;
@@ -147,12 +176,19 @@ mod device {
                 &mut p_out as *mut _ as *mut c_void,
                 &mut v_n as *mut _ as *mut c_void,
             ];
-            kernel.launch(LaunchConfig::linear(n, 256), &self.stream, &mut params)?;
+            for _ in 0..reps {
+                kernel.launch(LaunchConfig::linear(n, 256), &self.stream, &mut params)?;
+            }
             self.stream.synchronize()?;
             out.to_host()
         }
 
-        fn softmax(&self, case: &OpCase, inputs: &[Tensor]) -> Result<Vec<f32>, String> {
+        fn softmax(
+            &self,
+            case: &OpCase,
+            inputs: &[Tensor],
+            reps: usize,
+        ) -> Result<Vec<f32>, String> {
             let n = case.scalar("n") as usize;
             let x = Buffer::from_host(inputs[0].data())?;
             let y = Buffer::alloc(n)?;
@@ -166,7 +202,9 @@ mod device {
                 &mut p_y as *mut _ as *mut c_void,
                 &mut v_n as *mut _ as *mut c_void,
             ];
-            kernel.launch(LaunchConfig::per_row(1, 256), &self.stream, &mut params)?;
+            for _ in 0..reps {
+                kernel.launch(LaunchConfig::per_row(1, 256), &self.stream, &mut params)?;
+            }
             self.stream.synchronize()?;
             y.to_host()
         }
@@ -190,6 +228,15 @@ impl Launcher {
     }
 
     pub fn run(&self, _case: &OpCase, _inputs: &[Tensor]) -> Result<Vec<f32>, String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    pub fn run_reps(
+        &self,
+        _case: &OpCase,
+        _inputs: &[Tensor],
+        _reps: usize,
+    ) -> Result<Vec<f32>, String> {
         Err("hipml was built without the `hip` feature".to_string())
     }
 }
