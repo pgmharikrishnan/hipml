@@ -15,19 +15,41 @@ no external crates at all.
 
 ## Status
 
-**M0 complete.** The parity harness, the reference kernels and the HIP plumbing
-exist and are tested. No kernel has run on a GPU yet — that is M1, on the box.
+**M1 complete.** Six kernels run on the card and match the reference; a naive
+fp32 GEMV reaches 634 GB/s, which is the card's spec.
 
 | Milestone | What it proves | State |
 |---|---|---|
 | M0 | Every op has a reference, a parity case and a manifest row | done |
-| M1 | Kernels produce the same numbers as the reference on real hardware | next |
-| M2 | Quantized weights + KV cache; tokens match llama.cpp | |
+| M1 | Kernels produce the same numbers as the reference on real hardware | done |
+| M2 | Quantized weights + KV cache; tokens match llama.cpp | next |
 | M3 | Faster than llama.cpp Vulkan on the same card, or the project stops | |
 
-M3 is the go/no-go. The bar is measured, not aspirational: llama.cpp Vulkan
-already runs a 65B dense model at 67% of this card's memory roofline, so a
-hand-written engine has to reach roughly 85% to be worth its maintenance.
+Measured on a Radeon AI PRO R9700 (gfx1201, 32 GB, Windows 11, ROCm 7.2.1):
+
+```
+case                 result  detail
+gemv_f32             PASS    max_abs 5.96e-7  max_rel 4.77e-6
+rmsnorm_f32          PASS    max_abs 9.54e-7  max_rel 4.08e-7
+rope_neox_f32        PASS    max_abs 2.38e-7  max_rel 9.58e-6
+silu_mul_f32         PASS    max_abs 5.96e-8  max_rel 2.02e-7
+softmax_f32          PASS    max_abs 8.94e-8  max_rel 5.01e-7
+residual_add_f32     PASS    max_abs 0.00e0  max_rel 0.00e0
+```
+
+| Case | Launch | Effective bandwidth |
+|---|---:|---:|
+| gemv `[40960, 5120]` fp32 (838 MB) | 1324 µs | **633.6 GB/s** |
+| gemv `[64, 512]` | 0.55 µs | launch-bound |
+
+### What that means for M3
+
+A 12-line naive kernel already streams weights at 99% of the card's 640 GB/s
+spec, so the memory path is not where the remaining speed lives. For reference,
+measured on the same box: llama.cpp Vulkan moves 558 GB/s (87% of roofline) on a
+27B Q4 model, and 422 GB/s (66%) on Ripple-65B, whose architecture has no Flash
+Attention path. The headroom is the missing attention kernel, not the GEMV — so
+M3 targets the case where llama.cpp leaves 34% on the table, not the mature one.
 
 ## Quickstart
 
@@ -41,12 +63,23 @@ cargo run -p hipml-cli -- parity     # every case reports SKIP without a GPU
 
 On the GPU host, with the HIP SDK installed:
 
+The toolchain comes from AMD's ROCm Windows wheels — `rocm_sdk_core` and
+`rocm_sdk_devel` from `repo.radeon.com/rocm/windows/`, installed with pip into a
+directory. That gives you `hipcc` without the driver-touching installer:
+
 ```powershell
-$env:HIP_PATH = "C:\Program Files\AMD\ROCm\6.4"
+pip install --no-deps --target C:\rocm-sdk `
+  https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_core-7.2.1-py3-none-win_amd64.whl `
+  https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_devel-7.2.1-py3-none-win_amd64.whl
+
+$env:HIP_PATH  = "C:\rocm-sdk\_rocm_sdk_core"     # the dir with bin/ and lib/
 $env:HIPML_ARCH = "gfx1201"
+$env:PATH = "$env:HIP_PATH\bin;$env:PATH"          # amdhip64.dll at run time
+
 cargo build --release --features hip
 cargo run --release -p hipml-cli --features hip -- probe
 cargo run --release -p hipml-cli --features hip -- parity
+cargo run --release -p hipml-cli --features hip -- bench
 ```
 
 `parity` exits non-zero if any case fails, so it is the CI gate as well as the
