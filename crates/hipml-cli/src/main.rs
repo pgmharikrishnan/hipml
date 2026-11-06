@@ -3,7 +3,7 @@
 //! The parity runner is the gate: a kernel that is not compared against the
 //! reference here is not a kernel hipml can use.
 
-use hipml_core::parity::{cases, compare, OpCase};
+use hipml_core::parity::{bench_cases, cases, compare, OpCase};
 use hipml_core::tensor::Tensor;
 use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
 
@@ -198,7 +198,8 @@ fn bench() -> i32 {
         "case", "launch_us", "GB/s", "bytes"
     );
 
-    for case in cases() {
+    let all: Vec<OpCase> = cases().into_iter().chain(bench_cases()).collect();
+    for case in all {
         let Some(spec) = hipml_kernels::spec(case.name) else {
             continue;
         };

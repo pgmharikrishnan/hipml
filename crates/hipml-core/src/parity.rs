@@ -199,3 +199,29 @@ pub fn cases() -> Vec<OpCase> {
         },
     ]
 }
+
+/// Production-shape cases, for `hipml bench` only.
+///
+/// The parity shapes are deliberately small so the reference stays cheap; at
+/// those sizes a launch is ~2 µs and the bandwidth figure is launch overhead.
+/// These are the shapes that decide whether a kernel approaches the card's
+/// roofline, so they are measured and never compared against a CPU reference.
+pub fn bench_cases() -> Vec<OpCase> {
+    vec![OpCase {
+        name: "gemv_f32",
+        tol: Tol::DEFAULT,
+        seed: 0xBEEF_1234_5678_9ABC,
+        // Ripple-65B's ffn_up: [40960, 5120] — 838 MB of fp32 weights, which is
+        // the bandwidth-bound case a dense model actually runs.
+        scalars: &[("m", 40960.0), ("k", 5120.0)],
+        build: |rng| {
+            let (m, k) = (40960usize, 5120usize);
+            // Uniform, not normal: 210M Box-Muller draws would take seconds and
+            // the values are irrelevant to a bandwidth measurement.
+            let w = Tensor::from_fn(vec![m, k], |_| (rng.uniform() - 0.5) * 0.04);
+            let x = Tensor::from_fn(vec![k], |_| rng.uniform() - 0.5);
+            let expected = Vec::new();
+            (vec![w, x], expected)
+        },
+    }]
+}
