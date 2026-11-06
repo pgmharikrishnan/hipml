@@ -21,6 +21,7 @@ fn main() {
     match cmd {
         "probe" => probe(),
         "kernels" => kernels(),
+        "bench" => std::process::exit(bench()),
         "parity" => {
             let filter = args.iter().skip(1).find(|a| !a.starts_with('-')).cloned();
             std::process::exit(parity(filter.as_deref()));
@@ -44,6 +45,7 @@ fn help() {
          \x20 probe     show the HIP device and how this binary was built\n\
          \x20 kernels   list the kernel manifest\n\
          \x20 parity    run every parity case (reference vs device); optional name filter\n\
+         \x20 bench     time each kernel launch and report effective bandwidth\n\
          \n\
          build with `--features hip` on a machine with the ROCm/HIP runtime.",
         version = env!("CARGO_PKG_VERSION")
@@ -173,4 +175,86 @@ fn run_case(
             )),
         },
     }
+}
+
+/// Time each kernel launch on the device.
+///
+/// Copies are excluded: the same buffers are launched `REPS` times and the
+/// launch cost is the difference between one repetition and many, so the number
+/// is the kernel, not the transfer.
+fn bench() -> i32 {
+    const REPS: usize = 51;
+
+    let launcher = match hipml_kernels::Launcher::new() {
+        Ok(l) => l,
+        Err(e) => {
+            println!("device: none ({e})");
+            return 1;
+        }
+    };
+    println!("device: {}\n", launcher.device_name);
+    println!(
+        "{:<20} {:>10} {:>10} {:>12}",
+        "case", "launch_us", "GB/s", "bytes"
+    );
+
+    for case in cases() {
+        let Some(spec) = hipml_kernels::spec(case.name) else {
+            continue;
+        };
+        if let KernelKind::HostOnly(_) = spec.kind {
+            continue;
+        }
+        let (inputs, _) = case.reference();
+
+        // Warm up: first launch pays module lookup and cache fills.
+        if let Err(e) = launcher.run_reps(&case, &inputs, 1) {
+            println!("{:<20} {}", case.name, format!("failed: {e}"));
+            continue;
+        }
+
+        let t1 = match timed(|| launcher.run_reps(&case, &inputs, 1)) {
+            Ok(t) => t,
+            Err(e) => {
+                println!("{:<20} {}", case.name, format!("failed: {e}"));
+                continue;
+            }
+        };
+        let tn = match timed(|| launcher.run_reps(&case, &inputs, REPS)) {
+            Ok(t) => t,
+            Err(e) => {
+                println!("{:<20} {}", case.name, format!("failed: {e}"));
+                continue;
+            }
+        };
+
+        let launch_s = (tn - t1) / (REPS - 1) as f64;
+        let bytes = bytes_moved(&case, &inputs);
+        let gbs = bytes as f64 / launch_s / 1e9;
+        println!(
+            "{:<20} {:>10.2} {:>10.1} {:>12}",
+            case.name,
+            launch_s * 1e6,
+            gbs,
+            bytes
+        );
+    }
+    0
+}
+
+fn timed(f: impl FnOnce() -> Result<Vec<f32>, String>) -> Result<f64, String> {
+    let start = std::time::Instant::now();
+    f()?;
+    Ok(start.elapsed().as_secs_f64())
+}
+
+/// Bytes a single launch has to move: every input read once, output written once.
+fn bytes_moved(case: &OpCase, inputs: &[Tensor]) -> usize {
+    let read: usize = inputs.iter().map(|t| t.numel() * 4).sum();
+    let written = match case.name {
+        "gemv_f32" => case.scalar("m") as usize * 4,
+        "rmsnorm_f32" | "softmax_f32" => case.scalar("n") as usize * 4,
+        _ => inputs[0].numel() * 4,
+    };
+    read + written
 }
