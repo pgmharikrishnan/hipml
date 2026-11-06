@@ -81,10 +81,21 @@ Corruption then becomes a load-time error instead of a wrong answer.
 softmax, residual add and top-p sampling; a manifest; a CLI; a HIP layer that
 typechecks without a GPU. 10 tests, no GPU required.
 
-**M1 — first real numbers.** Compile the kernels with `hipcc --genco`, load the
-code object, run `hipml parity` on the box. Success is every non-host case
-`PASS` within tolerance. Then a microbenchmark per kernel so the numbers are
-comparable to `llama-bench`.
+**M1 — first real numbers (done).** Kernels compile to a single 24 KB code
+object with `hipcc --genco`, load with `hipModuleLoad`, and all six device cases
+`PASS` within tolerance on gfx1201. A naive fp32 GEMV at the `ffn_up` shape
+(`[40960, 5120]`, 838 MB) runs at **633.6 GB/s**, i.e. 99% of the card's 640 GB/s
+spec.
+
+Two things had to change to get there, both recorded in the log rather than
+hidden: `hipcc` refuses one `-o` with several sources, so the sources are
+amalgamated into one translation unit; and rope parity failed at 7.1e-5 until
+both sides built the rotation angle in f64, which is a precision-path fix rather
+than a widened tolerance.
+
+The M1 result reframes M3. Since the memory path already reaches the roofline,
+the remaining speed is in the parts llama.cpp does not implement for a given
+architecture — attention without Flash Attention, above all.
 
 **M2 — a model.** Quantized GEMV, KV cache, a tokenizer, and one small model
 generating tokens that match llama.cpp's output on the same prompt. This is where
