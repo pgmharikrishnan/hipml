@@ -56,9 +56,14 @@ pub fn rope_neox_f32(
     for h in 0..n_heads {
         let base = h * head_dim;
         for i in 0..half {
-            let freq = theta_base.powf(-2.0 * i as f32 / head_dim as f32);
-            let ang = pos as f32 * freq;
+            // The angle is built in f64 on purpose: at position 37 it reaches
+            // ~37 rad, and computing it in f32 makes two libms disagree by
+            // ~7e-5. The kernel does the same, so parity compares the rotation
+            // and not two implementations of sinf.
+            let freq = (theta_base as f64).powf(-2.0 * i as f64 / head_dim as f64);
+            let ang = pos as f64 * freq;
             let (sin, cos) = ang.sin_cos();
+            let (sin, cos) = (sin as f32, cos as f32);
             let x1 = x[base + i];
             let x2 = x[base + half + i];
             y[base + i] = x1 * cos - x2 * sin;
