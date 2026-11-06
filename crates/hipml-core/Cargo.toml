@@ -1,0 +1,6 @@
+[package]
+name = "hipml-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Host-side tensors, reference kernels and the parity harness for hipml"

@@ -1,0 +1,12 @@
+[package]
+name = "hipml-hip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal HIP runtime bindings for hipml: device memory, streams, module loading"
+
+[features]
+# Off by default so the workspace builds and tests on a machine without ROCm.
+hip = []
+
+[dependencies]
