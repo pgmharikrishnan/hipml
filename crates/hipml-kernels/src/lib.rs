@@ -48,9 +48,9 @@ pub const KERNELS: &[KernelSpec] = &[
     KernelSpec {
         name: "gemv_q4_k",
         entry: "gemv_q4_k",
-        // One warp per row, 8 rows per block, K_TILE 512 floats in shared.
+        // Two rows per warp, 8 warps: 16 rows per block, K_TILE 512 in shared.
         kind: KernelKind::RowTile {
-            rows: 8,
+            rows: 16,
             block: 256,
         },
     },
@@ -58,7 +58,7 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "gemv_q6_k",
         entry: "gemv_q6_k",
         kind: KernelKind::RowTile {
-            rows: 8,
+            rows: 16,
             block: 256,
         },
     },
