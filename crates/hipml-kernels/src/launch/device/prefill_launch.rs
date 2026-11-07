@@ -6,6 +6,23 @@
 use super::*;
 
 impl Launcher {
+    /// Tiled prefill GEMM with both ends and the weight already on the device:
+    /// `y[t, :] = W @ x[t, :]` for `tokens` rows. This is the prefill graph's
+    /// projection launch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_prefill_resident(
+        &self,
+        name: &str,
+        w: &ByteBuffer,
+        x: &Buffer,
+        y: &Buffer,
+        m: usize,
+        k: usize,
+        tokens: usize,
+    ) -> Result<(), String> {
+        prefill_resident(&self.module, &self.stream, name, w, x, y, m, k, tokens)
+    }
+
     /// Launch a tiled prefill GEMM `reps` times over one upload.
     ///
     /// `x` is `[tokens, k]`, the output is `[tokens, m]`. Returns the output and
@@ -97,4 +114,48 @@ impl Launcher {
         let secs = start.elapsed().as_secs_f64();
         Ok((if download { y.to_host()? } else { Vec::new() }, secs))
     }
+}
+
+/// Tiled prefill GEMM over a resident weight payload.
+///
+/// Free function as well as a `Launcher` method because the gated-delta-net and
+/// attention layers hold their own module/stream handles and drive their own
+/// projection launches.
+#[allow(clippy::too_many_arguments)]
+pub fn prefill_resident(
+    module: &Module,
+    stream: &Stream,
+    name: &str,
+    w: &ByteBuffer,
+    x: &Buffer,
+    y: &Buffer,
+    m: usize,
+    k: usize,
+    tokens: usize,
+) -> Result<(), String> {
+    let spec = crate::spec(name).ok_or_else(|| format!("{name} is not in the manifest"))?;
+    let (rpb, tpb) = match spec.kind {
+        crate::KernelKind::Prefill { rows, tokens, .. } => (rows, tokens),
+        _ => return Err(format!("{name}: not a prefill kernel")),
+    };
+    if k % 64 != 0 {
+        return Err(format!("{name}: k={k} must be a multiple of the 64-value k-tile"));
+    }
+    let kernel = module.kernel(name)?;
+    let mut p_w = w.as_ptr();
+    let mut p_x = x.as_ptr();
+    let mut p_y = y.as_ptr();
+    let mut v_m = m as i32;
+    let mut v_k = k as i32;
+    let mut v_tokens = tokens as i32;
+    let mut params: [*mut c_void; 6] = [
+        &mut p_w as *mut _ as *mut c_void,
+        &mut p_x as *mut _ as *mut c_void,
+        &mut p_y as *mut _ as *mut c_void,
+        &mut v_m as *mut _ as *mut c_void,
+        &mut v_k as *mut _ as *mut c_void,
+        &mut v_tokens as *mut _ as *mut c_void,
+    ];
+    let cfg = LaunchConfig::prefill(m, tokens, rpb, tpb, 256);
+    kernel.launch(cfg, stream, &mut params)
 }

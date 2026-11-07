@@ -22,6 +22,7 @@ struct Args {
     ctx: Option<usize>,
     compare_cpu: bool,
     kv: KvMode,
+    chunk: Option<usize>,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -33,6 +34,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         ctx: None,
         compare_cpu: false,
         kv: KvMode::F32,
+        chunk: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -72,6 +74,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--compare-cpu" => {
                 a.compare_cpu = true;
                 i += 1;
+            }
+            "--chunk" => {
+                a.chunk = Some(need(i)?.parse().map_err(|e| format!("bad --chunk: {e}"))?);
+                i += 2;
             }
             other => return Err(format!("unknown argument {other}")),
         }
@@ -155,15 +161,31 @@ pub fn generate(args: &[String]) -> i32 {
         t0.elapsed().as_secs_f64()
     );
 
+    if a.chunk.is_some() && a.compare_cpu {
+        eprintln!("generate: --chunk returns only the sampled id; --compare-cpu needs the token loop");
+        return 2;
+    }
     let mut st = engine.new_state();
     let t_prefill = Instant::now();
-    let mut logits = match first_logits(&mut engine, &mut st, &prompt_ids) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("generate: prefill: {e}");
-            return 1;
+    let mut first_id: Option<u32> = None;
+    let mut logits = Vec::new();
+    if let Some(chunk) = a.chunk {
+        match engine.prefill_chunked(&prompt_ids, &mut st, chunk) {
+            Ok(id) => first_id = Some(id),
+            Err(e) => {
+                eprintln!("generate: chunked prefill: {e}");
+                return 1;
+            }
         }
-    };
+    } else {
+        logits = match first_logits(&mut engine, &mut st, &prompt_ids) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("generate: prefill: {e}");
+                return 1;
+            }
+        };
+    }
     let prefill_s = t_prefill.elapsed().as_secs_f64();
 
     if a.compare_cpu {
@@ -190,13 +212,16 @@ pub fn generate(args: &[String]) -> i32 {
 
     let mut ids = Vec::with_capacity(a.tokens);
     let mut decode_s = 0.0f64;
+    let mut next = match first_id {
+        Some(id) => id,
+        None => argmax_f32(&logits) as u32,
+    };
     for i in 0..a.tokens {
-        let next = argmax_f32(&logits) as u32;
         println!("  [{i}] {next}");
         ids.push(next);
         if i + 1 < a.tokens {
             let t = Instant::now();
-            logits = match engine.forward_token(next, &mut st) {
+            next = match engine.forward_token_id(next, &mut st) {
                 Ok(v) => v,
                 Err(e) => {
                     eprintln!("generate: decode: {e}");
@@ -230,11 +255,14 @@ fn first_logits(
     st: &mut hipml_model::gpu::GpuState,
     prompt: &[u32],
 ) -> Result<Vec<f32>, String> {
-    let mut logits = Vec::new();
-    for &id in prompt {
-        logits = engine.forward_token(id, st)?;
+    // Every prompt token but the last only has to advance the state; the last
+    // one produces the logits the caller samples from (and, with
+    // `--compare-cpu`, the vector compared against the oracle).
+    let (last, rest) = prompt.split_last().ok_or("empty prompt")?;
+    for &id in rest {
+        engine.forward_token_id(id, st)?;
     }
-    Ok(logits)
+    engine.forward_token(*last, st)
 }
 
 fn cpu_first_logits(path: &str, prompt: &[u32]) -> Result<Vec<f32>, String> {
@@ -253,7 +281,9 @@ struct BenchArgs {
     depth: usize,
     tokens: usize,
     kv: KvMode,
+    kv_set: bool,
     prefill: Option<usize>,
+    chunk: Option<usize>,
 }
 
 fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
@@ -262,7 +292,9 @@ fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
         depth: 0,
         tokens: 8,
         kv: KvMode::Q8,
+        kv_set: false,
         prefill: None,
+        chunk: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -286,10 +318,15 @@ fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
             }
             "--kv" => {
                 a.kv = KvMode::parse(need(i)?)?;
+                a.kv_set = true;
                 i += 2;
             }
             "--prefill" => {
                 a.prefill = Some(need(i)?.parse().map_err(|e| format!("bad --prefill: {e}"))?);
+                i += 2;
+            }
+            "--chunk" => {
+                a.chunk = Some(need(i)?.parse().map_err(|e| format!("bad --chunk: {e}"))?);
                 i += 2;
             }
             other => return Err(format!("unknown argument {other}")),
@@ -331,8 +368,15 @@ pub fn bench(args: &[String]) -> i32 {
         report.upload_secs
     );
 
+    // A prompt tile appends to the f32 cache; the quantized caches are the
+    // decode-at-depth path.
+    let kv = if a.prefill.is_some() && !a.kv_set {
+        KvMode::F32
+    } else {
+        a.kv
+    };
     let n_ctx = if let Some(n) = a.prefill { n } else { a.depth } + a.tokens + 8;
-    let mut engine = match GpuEngine::new(&model, n_ctx, a.kv) {
+    let mut engine = match GpuEngine::new(&model, n_ctx, kv) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("gpu-bench: graph: {e}");
@@ -353,28 +397,27 @@ pub fn bench(args: &[String]) -> i32 {
     let mut st = engine.new_state();
     if let Some(n) = a.prefill {
         let prompt: Vec<u32> = (0..n).map(|i| 100 + (i % 1000) as u32).collect();
+        let chunk = a.chunk.unwrap_or(256);
         let t = Instant::now();
-        let mut sink = 0.0f32;
-        for &id in &prompt {
-            match engine.forward_token(id, &mut st) {
-                Ok(l) => sink += l[0],
-                Err(e) => {
-                    eprintln!("gpu-bench: prefill: {e}");
-                    return 1;
-                }
+        let sink = match engine.prefill_chunked(&prompt, &mut st, chunk) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("gpu-bench: prefill: {e}");
+                return 1;
             }
-        }
+        };
         let s = t.elapsed().as_secs_f64();
         println!(
-            "prefill: {n} tokens in {:.2}s ({:.2} tok/s, {:.2} ms/token) [sink {sink:.3}]",
+            "prefill: {n} tokens in {:.2}s ({:.2} tok/s, {:.2} ms/token) [chunk {chunk}, {:.1} MiB scratch, last id {sink}]",
             s,
             n as f64 / s,
-            s * 1e3 / n as f64
+            s * 1e3 / n as f64,
+            engine.chunk_bytes(chunk) as f64 / (1024.0 * 1024.0)
         );
         return 0;
     }
 
-    if a.kv == KvMode::F32 {
+    if kv == KvMode::F32 {
         eprintln!("gpu-bench: --depth needs a quantized cache (--kv q8 or q4)");
         return 2;
     }
@@ -384,10 +427,10 @@ pub fn bench(args: &[String]) -> i32 {
     }
     let mut st = engine.state_at(a.depth);
     // Warm: two tokens, so clocks and caches settle before the measured loop.
-    let mut logits = Vec::new();
+    let mut last = 0u32;
     for _ in 0..2 {
-        match engine.forward_token(1, &mut st) {
-            Ok(l) => logits = l,
+        match engine.forward_token_id(1, &mut st) {
+            Ok(l) => last = l,
             Err(e) => {
                 eprintln!("gpu-bench: warm: {e}");
                 return 1;
@@ -397,8 +440,8 @@ pub fn bench(args: &[String]) -> i32 {
     let n = a.tokens.max(2);
     let t = Instant::now();
     for _ in 0..n {
-        match engine.forward_token(1, &mut st) {
-            Ok(l) => logits = l,
+        match engine.forward_token_id(1, &mut st) {
+            Ok(l) => last = l,
             Err(e) => {
                 eprintln!("gpu-bench: decode: {e}");
                 return 1;
@@ -413,7 +456,7 @@ pub fn bench(args: &[String]) -> i32 {
         s,
         s * 1e3 / n as f64,
         n as f64 / s,
-        argmax_f32(&logits)
+        last
     );
     0
 }

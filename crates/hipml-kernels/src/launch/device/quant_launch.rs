@@ -111,6 +111,81 @@ impl Launcher {
             kernel.launch(cfg, &self.stream, &mut params)
         }
 
+        /// `gemm_f32` with the weight already resident: the multi-row f32
+        /// fallback for the prefill chunk (the two Q5_K `ffn_down` tensors).
+        pub fn run_gemm_resident(
+            &self,
+            w: &Buffer,
+            x: &Buffer,
+            y: &Buffer,
+            r: usize,
+            m: usize,
+            k: usize,
+        ) -> Result<(), String> {
+            self.run_gemm_ptr(w.as_ptr(), x.as_ptr(), y.as_ptr(), r, m, k)
+        }
+
+        /// Same with raw pointers, for an f32 payload that lives in a
+        /// `ByteBuffer` (the loader keeps F32 tensors as raw little-endian f32).
+        pub fn run_gemm_ptr(
+            &self,
+            w: *mut c_void,
+            x: *mut c_void,
+            y: *mut c_void,
+            r: usize,
+            m: usize,
+            k: usize,
+        ) -> Result<(), String> {
+            let kernel = self.module.kernel("gemm_f32")?;
+            let mut p_w = w;
+            let mut p_x = x;
+            let mut p_y = y;
+            let mut v_r = r as i32;
+            let mut v_m = m as i32;
+            let mut v_k = k as i32;
+            let mut params: [*mut c_void; 6] = [
+                &mut p_w as *mut _ as *mut c_void,
+                &mut p_x as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut v_r as *mut _ as *mut c_void,
+                &mut v_m as *mut _ as *mut c_void,
+                &mut v_k as *mut _ as *mut c_void,
+            ];
+            kernel.launch(LaunchConfig::per_row(m, 256), &self.stream, &mut params)
+        }
+
+        /// `run_quant_resident` with raw x/y pointers (the chunk's last row).
+        pub fn run_quant_resident_ptr(
+            &self,
+            name: &str,
+            w: &ByteBuffer,
+            x: *mut c_void,
+            y: *mut c_void,
+            m: usize,
+            k: usize,
+        ) -> Result<(), String> {
+            let spec = crate::spec(name).ok_or_else(|| format!("{name} is not in the manifest"))?;
+            let kernel = self.module.kernel(name)?;
+            let mut p_w = w.as_ptr();
+            let mut p_x = x;
+            let mut p_y = y;
+            let mut v_m = m as i32;
+            let mut v_k = k as i32;
+            let mut params: [*mut c_void; 5] = [
+                &mut p_w as *mut _ as *mut c_void,
+                &mut p_x as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut v_m as *mut _ as *mut c_void,
+                &mut v_k as *mut _ as *mut c_void,
+            ];
+            let cfg = match spec.kind {
+                crate::KernelKind::RowTile { rows, block } => LaunchConfig::row_tile(m, rows, block),
+                crate::KernelKind::PerRow { block } => LaunchConfig::per_row(m, block),
+                _ => return Err(format!("{name}: unsupported quantized grid")),
+            };
+            kernel.launch(cfg, &self.stream, &mut params)
+        }
+
         /// `gemv_f32` with the weight already resident (the Q5_K fallback, which
         /// the loader dequantises once at graph build).
         pub fn run_f32_resident(

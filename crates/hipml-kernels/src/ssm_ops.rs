@@ -3,6 +3,11 @@
 //! Every launch writes its arguments out explicitly, matching the existing
 //! launchers: `hipModuleLaunchKernel` takes pointers to the arguments, so each
 //! value needs a stable home in a local.
+//!
+//! The `*_at` forms take raw pointers so the prefill chunk path
+//! (`ssm_chunk.rs`) can run the same kernels on row `t` of a chunk buffer. The
+//! single-token `step` chain is these same launches over the layer's own
+//! scratch.
 
 use crate::ssm::{SsmGpuLayer, SsmWeight};
 use hipml_hip::{Buffer, LaunchConfig};
@@ -111,13 +116,29 @@ impl<'a> SsmGpuLayer<'a> {
     }
 
     fn gates(&self) -> Result<(), String> {
+        self.gates_at(
+            self.alpha_raw.as_ptr(),
+            self.beta_raw.as_ptr(),
+            self.g.as_ptr(),
+            self.beta_sig.as_ptr(),
+        )
+    }
+
+    /// `g = softplus(alpha + dt_bias) * a`, `beta_sig = sigmoid(beta)`.
+    pub(crate) fn gates_at(
+        &self,
+        alpha: *mut c_void,
+        beta: *mut c_void,
+        g: *mut c_void,
+        beta_sig: *mut c_void,
+    ) -> Result<(), String> {
         let d = &self.dims;
-        let mut p_alpha = self.alpha_raw.as_ptr();
-        let mut p_beta = self.beta_raw.as_ptr();
+        let mut p_alpha = alpha;
+        let mut p_beta = beta;
         let mut p_dt = self.dt_bias.as_ptr();
         let mut p_a = self.a.as_ptr();
-        let mut p_g = self.g.as_ptr();
-        let mut p_out = self.beta_sig.as_ptr();
+        let mut p_g = g;
+        let mut p_out = beta_sig;
         let mut v_n = d.n_v as i32;
         let mut params: [*mut c_void; 7] = [
             &mut p_alpha as *mut _ as *mut c_void,
@@ -133,13 +154,17 @@ impl<'a> SsmGpuLayer<'a> {
     }
 
     fn conv(&self) -> Result<(), String> {
+        self.conv_at(self.qkv.as_ptr(), self.conv_out.as_ptr())
+    }
+
+    /// `conv_out = silu(conv1d(qkv, state))` in two launches, mirroring the
+    /// reference's conv-then-activate pair.
+    pub(crate) fn conv_at(&self, qkv: *mut c_void, conv_out: *mut c_void) -> Result<(), String> {
         let d = &self.dims;
-        // conv writes raw output then silu overwrites it, mirroring the
-        // reference's conv-then-activate pair.
-        let mut p_x = self.qkv.as_ptr();
+        let mut p_x = qkv;
         let mut p_w = self.conv_w.as_ptr();
         let mut p_state = self.conv_state.as_ptr();
-        let mut p_y = self.conv_out.as_ptr();
+        let mut p_y = conv_out;
         let mut v_c = d.conv_ch as i32;
         let mut v_k = d.d_conv as i32;
         let mut params: [*mut c_void; 6] = [
@@ -155,8 +180,12 @@ impl<'a> SsmGpuLayer<'a> {
             self.stream,
             &mut params,
         )?;
+        self.silu_at(conv_out)
+    }
 
-        let mut p_x = self.conv_out.as_ptr();
+    pub(crate) fn silu_at(&self, x: *mut c_void) -> Result<(), String> {
+        let d = &self.dims;
+        let mut p_x = x;
         let mut v_n = d.conv_ch as i32;
         let mut params: [*mut c_void; 2] = [
             &mut p_x as *mut _ as *mut c_void,
@@ -168,13 +197,20 @@ impl<'a> SsmGpuLayer<'a> {
 
     fn l2norms(&self) -> Result<(), String> {
         let d = &self.dims;
-        // In place: the kernel drops __restrict__ on its two pointers.
-        self.l2norm_at(0, d.n_k, d.head_k)?;
-        self.l2norm_at(d.key_dim(), d.n_k, d.head_k)
+        let base = self.conv_out.as_ptr();
+        self.l2norm_at_ptr(base, 0, d.n_k, d.head_k)?;
+        self.l2norm_at_ptr(base, d.key_dim(), d.n_k, d.head_k)
     }
 
-    fn l2norm_at(&self, off: usize, heads: usize, dim: usize) -> Result<(), String> {
-        let mut p_x = offset(self.conv_out.as_ptr(), off);
+    /// In place: the kernel drops `__restrict__` on its two pointers.
+    pub(crate) fn l2norm_at_ptr(
+        &self,
+        base: *mut c_void,
+        off: usize,
+        heads: usize,
+        dim: usize,
+    ) -> Result<(), String> {
+        let mut p_x = offset(base, off);
         let mut p_y = p_x;
         let mut v_h = heads as i32;
         let mut v_d = dim as i32;
@@ -195,14 +231,30 @@ impl<'a> SsmGpuLayer<'a> {
     }
 
     fn recurrence(&self) -> Result<(), String> {
+        self.gdn_at(
+            self.conv_out.as_ptr(),
+            self.g.as_ptr(),
+            self.beta_sig.as_ptr(),
+            self.o.as_ptr(),
+        )
+    }
+
+    /// One gated-delta-net step over the q|k|v rows of `conv_out`.
+    pub(crate) fn gdn_at(
+        &self,
+        conv_out: *mut c_void,
+        g: *mut c_void,
+        beta: *mut c_void,
+        o: *mut c_void,
+    ) -> Result<(), String> {
         let d = &self.dims;
         let mut p_s = self.s_state.as_ptr();
-        let mut p_q = self.conv_out.as_ptr();
-        let mut p_k = offset(self.conv_out.as_ptr(), d.key_dim());
-        let mut p_v = offset(self.conv_out.as_ptr(), 2 * d.key_dim());
-        let mut p_g = self.g.as_ptr();
-        let mut p_beta = self.beta_sig.as_ptr();
-        let mut p_out = self.o.as_ptr();
+        let mut p_q = conv_out;
+        let mut p_k = offset(conv_out, d.key_dim());
+        let mut p_v = offset(conv_out, 2 * d.key_dim());
+        let mut p_g = g;
+        let mut p_beta = beta;
+        let mut p_out = o;
         let mut v_nv = d.n_v as i32;
         let mut v_nk = d.n_k as i32;
         let mut v_sd = d.head_v as i32;
@@ -227,11 +279,25 @@ impl<'a> SsmGpuLayer<'a> {
     }
 
     fn gate_norm(&self) -> Result<(), String> {
+        self.gate_norm_at(
+            self.o.as_ptr(),
+            self.z.as_ptr(),
+            self.gated.as_ptr(),
+        )
+    }
+
+    /// `gated = rmsnorm(o, norm) * silu(z)`.
+    pub(crate) fn gate_norm_at(
+        &self,
+        o: *mut c_void,
+        z: *mut c_void,
+        gated: *mut c_void,
+    ) -> Result<(), String> {
         let d = &self.dims;
-        let mut p_o = self.o.as_ptr();
+        let mut p_o = o;
         let mut p_norm = self.norm.as_ptr();
-        let mut p_z = self.z.as_ptr();
-        let mut p_y = self.gated.as_ptr();
+        let mut p_z = z;
+        let mut p_y = gated;
         let mut v_h = d.n_v as i32;
         let mut v_d = d.head_v as i32;
         let mut v_eps = d.eps;

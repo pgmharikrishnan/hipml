@@ -18,10 +18,14 @@ pub mod ssm;
 pub mod ssm_launch;
 #[cfg(feature = "hip")]
 mod ssm_ops;
+#[cfg(feature = "hip")]
+mod ssm_chunk;
 
 pub use attn_gpu::AttnLayer;
 #[cfg(feature = "hip")]
 pub mod launch_kv;
+#[cfg(feature = "hip")]
+pub use launch::prefill_resident;
 pub use launch::Launcher;
 
 /// How a kernel is gridded.
@@ -243,6 +247,28 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "kv_append_f32",
         entry: "kv_append_f32",
         kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "kv_encode_q8",
+        entry: "kv_encode_q8",
+        kind: KernelKind::PerRow { block: 256 },
+    },
+    KernelSpec {
+        name: "kv_encode_q4",
+        entry: "kv_encode_q4",
+        kind: KernelKind::PerRow { block: 256 },
+    },
+    // One row per case: the op is the pair (partial pass, final fold), and the
+    // parity case compares the single index it produces.
+    KernelSpec {
+        name: "argmax_f32",
+        entry: "argmax_part_f32",
+        kind: KernelKind::PerRow { block: 256 },
+    },
+    KernelSpec {
+        name: "argmax_final_f32",
+        entry: "argmax_final_f32",
+        kind: KernelKind::PerRow { block: 32 },
     },
     KernelSpec {
         name: "sample_top_p_f32",

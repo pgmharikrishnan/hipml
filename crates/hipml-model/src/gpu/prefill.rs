@@ -1,0 +1,240 @@
+//! Chunked prefill: a prompt tile as batched GEMMs instead of N decode steps.
+//!
+//! The decode graph is one token at a time, so a 512-token prompt streams the
+//! whole 15.89 GiB of weights 512 times. Here a chunk of `T` tokens streams them
+//! once: every projection becomes a tiled GEMM over the chunk, and only the work
+//! that is genuinely sequential in time — the gated-delta-net recurrence, the
+//! conv window, rope, the KV append and causal attention — stays per token.
+//!
+//! ```text
+//! xc  = embed(tokens)                         T launches (one row each)
+//! per layer:
+//!   tc   = rmsnorm_rows(xc, attn_norm)
+//!   block = chunk projections + per-token recurrence/attention
+//!   x1c  = xc + block;  tc = rmsnorm_rows(x1c, post_attention_norm)
+//!   act  = silu(gemm(gate, tc)) * gemm(up, tc)
+//!   xc   = x1c + gemm(down, act)
+//! logits = lm_head(rmsnorm(last row))
+//! ```
+//!
+//! Numerics: the projections use the tiled prefill GEMM, which accumulates a
+//! 32-value k-tile at a time rather than the GEMV's 2,048-value shared tile, so
+//! a chunk can differ from the token loop in the last bits. Everything else is
+//! the same kernel chain, and the decode path is unchanged: `--prefill-chunk`
+//! opts in, the token loop remains the default and the parity reference.
+
+use super::*;
+use hipml_hip::Buffer;
+use hipml_kernels::ssm::SsmChunk;
+
+use crate::gpu_weights::gemv_entry;
+use crate::OUTPUT;
+
+/// Chunk scratch, one set shared by every layer (layers run in sequence).
+pub(crate) struct Chunk {
+    /// Residual stream and its two normalised copies, `[T][n_embd]`.
+    pub x: Buffer,
+    pub x1: Buffer,
+    pub t: Buffer,
+    /// FFN activations, `[T][n_ff]`.
+    pub gate: Buffer,
+    pub up: Buffer,
+    pub act: Buffer,
+    pub down: Buffer,
+    /// Gated-delta-net chunk.
+    pub ssm: SsmChunk,
+    /// Attention chunk: q|gate rows, q, k, v, out, and the layer output.
+    pub qg: Buffer,
+    pub q: Buffer,
+    pub aq_gate: Buffer,
+    pub k: Buffer,
+    pub v: Buffer,
+    pub aout: Buffer,
+    pub y: Buffer,
+}
+
+impl Chunk {
+    fn new(cfg: &hipml_core::config::Config, tokens: usize) -> Result<Chunk, String> {
+        let n = cfg.n_embd;
+        let ff = cfg.n_ff;
+        let qd = cfg.n_head * cfg.head_dim;
+        let w = cfg.n_head_kv * cfg.head_dim;
+        let zeros = |len: usize| Buffer::alloc(len);
+        Ok(Chunk {
+            x: zeros(tokens * n)?,
+            x1: zeros(tokens * n)?,
+            t: zeros(tokens * n)?,
+            gate: zeros(tokens * ff)?,
+            up: zeros(tokens * ff)?,
+            act: zeros(tokens * ff)?,
+            down: zeros(tokens * n)?,
+            ssm: SsmChunk::new(&hipml_kernels::ssm::SsmDims::from_config(cfg), tokens)?,
+            qg: zeros(tokens * 2 * qd)?,
+            q: zeros(tokens * qd)?,
+            aq_gate: zeros(tokens * qd)?,
+            k: zeros(tokens * w)?,
+            v: zeros(tokens * w)?,
+            aout: zeros(tokens * qd)?,
+            y: zeros(tokens * n)?,
+        })
+    }
+
+    fn bytes(&self) -> usize {
+        (self.x.len()
+            + self.x1.len()
+            + self.t.len()
+            + self.gate.len()
+            + self.up.len()
+            + self.act.len()
+            + self.down.len()
+            + self.qg.len()
+            + self.q.len()
+            + self.aq_gate.len()
+            + self.k.len()
+            + self.v.len()
+            + self.aout.len()
+            + self.y.len()) * 4
+            + self.ssm.bytes()
+    }
+}
+
+impl<'a> GpuEngine<'a> {
+    /// Prefill `tokens` in tiles of `chunk` tokens; returns the id for the last
+    /// token, i.e. the first sampled token of the reply.
+    pub fn prefill_chunked(
+        &mut self,
+        tokens: &[u32],
+        st: &mut GpuState,
+        chunk: usize,
+    ) -> Result<u32, String> {
+        if self.kv_mode != KvMode::F32 {
+            return Err("chunked prefill needs --kv f32 (the chunk path appends to the f32 cache)".to_string());
+        }
+        let chunk = chunk.max(1);
+        self.ensure_chunk(chunk)?;
+        let mut last = 0u32;
+        for tile in tokens.chunks(chunk) {
+            last = self.forward_chunk(tile, st)?;
+        }
+        Ok(last)
+    }
+
+    /// One chunk through the whole graph. `st.pos` advances by the chunk length.
+    fn forward_chunk(&mut self, tokens: &[u32], st: &mut GpuState) -> Result<u32, String> {
+        let n_tok = tokens.len();
+        let pos0 = st.pos;
+        if n_tok == 0 {
+            return Err("empty chunk".to_string());
+        }
+        let cfg = self.cfg.clone();
+        let n = cfg.n_embd;
+        let l = self.model.launcher();
+
+        // Scratch is allocated once per engine and reused by every tile: a
+        // 150 MiB scratch is ~20 hipMalloc calls, which is most of a short
+        // prompt's wall time if it is rebuilt per chunk.
+        let (cap, c) = self
+            .chunk
+            .as_ref()
+            .ok_or_else(|| "chunk scratch not allocated".to_string())?;
+        if *cap < n_tok {
+            return Err(format!("chunk of {n_tok} tokens exceeds scratch {cap}"));
+        }
+        // The embedding table and the lm head are the model's, not the engine's.
+        let embed = self.embed;
+        for (t, &id) in tokens.iter().enumerate() {
+            l.embed_row_q4_k_at(embed.0, id as usize, embed.1, &c.x, t * n, n)?;
+        }
+
+        for i in 0..self.layers.len() {
+            let block = &self.layers[i];
+            l.rmsnorm_rows(&c.x, &block.attn_norm, &c.t, n, cfg.eps, n_tok)?;
+            let block_out: &Buffer = match &block.kind {
+                BlockKind::Ssm(s) => {
+                    s.project_chunk(l, &c.t, &c.ssm, n_tok)?;
+                    for t in 0..n_tok {
+                        s.step_chunk_row(&c.ssm, t)?;
+                    }
+                    s.out_chunk(l, &c.ssm, n_tok)?;
+                    &c.ssm.out
+                }
+                BlockKind::Full { attn, deep: None } => {
+                    attn.project_chunk(l, &c.t, &c.qg, &c.k, &c.v, n_tok)?;
+                    for t in 0..n_tok {
+                        attn.step_chunk_row(
+                            l,
+                            &c.qg,
+                            &c.k,
+                            &c.v,
+                            &c.q,
+                            &c.aq_gate,
+                            &c.aout,
+                            t,
+                            pos0 + t,
+                        )?;
+                    }
+                    attn.apply_output_chunk(l, &c.aout, &c.aq_gate, &c.y, n_tok)?;
+                    &c.y
+                }
+                BlockKind::Full { deep: Some(_), .. } => {
+                    return Err("chunked prefill does not cover the quantized KV cache".to_string())
+                }
+            };
+            l.residual_buf(&c.x, block_out, &c.x1, n_tok * n)?;
+            l.rmsnorm_rows(&c.x1, &block.post_norm, &c.t, n, cfg.eps, n_tok)?;
+
+            block.gate.gemm(l, &c.t, &c.gate, n_tok)?;
+            block.up.gemm(l, &c.t, &c.up, n_tok)?;
+            l.silu_mul_buf(&c.gate, &c.up, &c.act, n_tok * cfg.n_ff)?;
+            block.down.gemm(l, &c.act, &c.down, n_tok)?;
+            l.residual_buf(&c.down, &c.x1, &c.x, n_tok * n)?;
+        }
+
+        // The chunk's last row is the only one that needs logits.
+        let last_row = unsafe {
+            (c.x.as_ptr() as *mut u8).add((n_tok - 1) * n * 4) as *mut std::ffi::c_void
+        };
+        l.rmsnorm_ptr(last_row, &self.output_norm, self.final_h.as_ptr(), n, cfg.eps, 1)?;
+        let out = self
+            .model
+            .tensor(OUTPUT)
+            .ok_or_else(|| "model has no output.weight".to_string())?;
+        l.run_quant_resident_ptr(
+            gemv_entry(out.ty())?,
+            out.buffer(),
+            self.final_h.as_ptr(),
+            self.logits.as_ptr(),
+            cfg.n_vocab,
+            n,
+        )?;
+        l.argmax_buf(
+            &self.logits,
+            &self.arg_v,
+            &self.arg_i,
+            &self.arg_out,
+            cfg.n_vocab,
+            ARGMAX_PARTS,
+        )?;
+        l.synchronize()?;
+        let bytes = self.arg_out.download_bytes(0, 4)?;
+        st.pos += n_tok;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    /// Allocate (or grow) the chunk scratch. Called by `prefill_chunked`.
+    fn ensure_chunk(&mut self, tokens: usize) -> Result<(), String> {
+        let have = matches!(&self.chunk, Some((cap, _)) if *cap >= tokens);
+        if !have {
+            self.chunk = Some((tokens, Chunk::new(&self.cfg, tokens)?));
+        }
+        Ok(())
+    }
+
+    /// Bytes the chunk scratch holds after `prefill_chunked(tokens, ..)`.
+    pub fn chunk_bytes(&mut self, tokens: usize) -> usize {
+        match self.ensure_chunk(tokens) {
+            Ok(()) => self.chunk.as_ref().map(|(_, c)| c.bytes()).unwrap_or(0),
+            Err(_) => 0,
+        }
+    }
+}

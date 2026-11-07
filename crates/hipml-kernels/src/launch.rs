@@ -18,6 +18,8 @@ pub(crate) mod device {
     mod graph_launch;
     #[path = "prefill_launch.rs"]
     mod prefill_launch;
+
+    pub use prefill_launch::prefill_resident;
     #[path = "quant_launch.rs"]
     mod quant_launch;
 
@@ -77,6 +79,8 @@ pub(crate) mod device {
                 | "kv_append_f32" | "attn_decode_split_f32" => {
                     self.run_attn_case(case, inputs, reps)
                 }
+                "kv_encode_q8" | "kv_encode_q4" => self.kv_encode_case(case, inputs, reps),
+                "argmax_f32" => self.argmax_case(case, inputs, reps),
                 "ssm_conv1d_f32" => {
                     crate::ssm_launch::conv(self.module(), self.stream(), case, inputs, reps)
                 }
@@ -358,6 +362,71 @@ pub(crate) mod device {
             crate::launch_kv::run(&self.module, &self.stream, case, inputs, reps)
         }
 
+        /// Encode one token's K/V rows, then decode the bytes that landed in the
+        /// cache row so the comparison is against `kv::quantize`'s output.
+        fn kv_encode_case(
+            &self,
+            case: &OpCase,
+            inputs: &[Tensor],
+            reps: usize,
+        ) -> Result<Vec<f32>, String> {
+            let n_kv = case.scalar("n_kv") as usize;
+            let head_dim = case.scalar("head_dim") as usize;
+            let seq = case.scalar("seq") as usize;
+            let pos = case.scalar("pos") as usize;
+            let dtype = case.scalar("dtype") as usize;
+            let kv_dtype = if dtype == 0 {
+                hipml_core::kv::KvDtype::Q8
+            } else {
+                hipml_core::kv::KvDtype::Q4
+            };
+            let k = Buffer::from_host(inputs[0].data())?;
+            let v = Buffer::from_host(inputs[1].data())?;
+            let row = kv_dtype.row_bytes(head_dim);
+            let nbytes = n_kv * seq * row;
+            let kc = Buffer::alloc(nbytes.div_ceil(4))?;
+            let vc = Buffer::alloc(nbytes.div_ceil(4))?;
+            for _ in 0..reps {
+                self.kv_encode(dtype, &k, &v, &kc, &vc, n_kv, head_dim, seq, pos)?;
+            }
+            self.stream.synchronize()?;
+            let kb = kc.download_bytes(0, nbytes)?;
+            let vb = vc.download_bytes(0, nbytes)?;
+            let mut out = Vec::with_capacity(2 * n_kv * head_dim);
+            for bytes in [&kb, &vb] {
+                for h in 0..n_kv {
+                    let at = (h * seq + pos) * row;
+                    out.extend_from_slice(&hipml_core::kv::dequantize(
+                        kv_dtype,
+                        &bytes[at..at + row],
+                    ));
+                }
+            }
+            Ok(out)
+        }
+
+        /// Device argmax against the host's, one index.
+        fn argmax_case(
+            &self,
+            case: &OpCase,
+            inputs: &[Tensor],
+            reps: usize,
+        ) -> Result<Vec<f32>, String> {
+            let n = case.scalar("n") as usize;
+            let x = Buffer::from_host(inputs[0].data())?;
+            let parts = 8usize;
+            let best_v = Buffer::alloc(parts)?;
+            let best_i = Buffer::alloc(parts)?;
+            let out = Buffer::alloc(1)?;
+            for _ in 0..reps {
+                self.argmax_buf(&x, &best_v, &best_i, &out, n, parts)?;
+            }
+            self.stream.synchronize()?;
+            let bytes = out.download_bytes(0, 4)?;
+            let id = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            Ok(vec![id as f32])
+        }
+
         fn softmax(
             &self,
             case: &OpCase,
@@ -386,6 +455,8 @@ pub(crate) mod device {
     }
 }
 
+#[cfg(feature = "hip")]
+pub use device::prefill_resident;
 #[cfg(feature = "hip")]
 pub use device::Launcher;
 

@@ -115,6 +115,47 @@ impl SsmDims {
     }
 }
 
+/// Chunk-sized scratch for the prefill path: one row per prompt token, so the
+/// projections run as one tiled GEMM over the whole chunk and only the
+/// recurrence stays per token.
+pub struct SsmChunk {
+    pub qkv: Buffer,
+    pub z: Buffer,
+    pub alpha: Buffer,
+    pub beta: Buffer,
+    pub conv: Buffer,
+    pub o: Buffer,
+    pub gated: Buffer,
+    pub out: Buffer,
+    pub tokens: usize,
+}
+
+impl SsmChunk {
+    pub fn new(d: &SsmDims, tokens: usize) -> Result<SsmChunk, String> {
+        let zeros = |n: usize| Buffer::alloc(n);
+        Ok(SsmChunk {
+            qkv: zeros(tokens * d.conv_ch)?,
+            z: zeros(tokens * d.inner())?,
+            alpha: zeros(tokens * d.n_v)?,
+            beta: zeros(tokens * d.n_v)?,
+            conv: zeros(tokens * d.conv_ch)?,
+            o: zeros(tokens * d.inner())?,
+            gated: zeros(tokens * d.inner())?,
+            out: zeros(tokens * d.n_embd)?,
+            tokens,
+        })
+    }
+
+    /// Bytes the chunk scratch holds.
+    pub fn bytes(&self) -> usize {
+        (self.qkv.len() + self.z.len() + self.alpha.len() + self.beta.len() + self.conv.len()
+            + self.o.len()
+            + self.gated.len()
+            + self.out.len())
+            * 4
+    }
+}
+
 /// Borrowed host-side f32 weights, in `SsmW` order.
 pub struct SsmLayerRefs<'a> {
     pub wqkv: &'a [f32],

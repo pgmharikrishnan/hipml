@@ -86,6 +86,13 @@ fn hip_sources() -> Vec<PathBuf> {
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().map(|x| x == "hip").unwrap_or(false))
+        // Archive tools on macOS add AppleDouble `._name` siblings; they are
+        // metadata, not source.
+        .filter(|p| {
+            !p.file_name()
+                .map(|n| n.to_string_lossy().starts_with("._"))
+                .unwrap_or(false)
+        })
         .collect();
     out.sort();
     assert!(!out.is_empty(), "no .hip sources under {}", dir.display());

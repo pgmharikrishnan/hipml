@@ -32,6 +32,11 @@ use hipml_kernels::{AttnLayer, Launcher};
 use crate::gpu_weights::{gemv_entry, mat_kind, Proj};
 use crate::Model;
 
+/// Chunked prefill (a prompt tile as batched GEMMs). A child module so it can
+/// reach the engine's private scratch and layer list.
+#[path = "gpu/prefill.rs"]
+mod prefill;
+
 struct Block<'a> {
     attn_norm: Buffer,
     post_norm: Buffer,
@@ -90,6 +95,11 @@ pub struct DeepKv {
 }
 
 /// Same bound as `attn_gpu`; the partial buffers are sized once.
+///
+/// The split count sets the grid: `n_kv * splits` blocks. At 100K a 64-split
+/// grid is 256 blocks, four waves on this card, and each block walks 1,562
+/// rows. Doubling and quadrupling that (measured) is slower: the partials grow
+/// faster than the parallelism helps.
 const MAX_SPLITS: usize = 64;
 
 impl DeepKv {
@@ -133,6 +143,10 @@ impl DeepKv {
     }
 
     /// Quantize one token's K/V rows and append them at `pos`.
+    ///
+    /// Kept as the host definition of the format for tests and for the parity
+    /// harness; the graph itself appends with `kv_encode` on the device.
+    #[allow(dead_code)]
     fn append(&self, k: &[f32], v: &[f32], pos: usize) -> Result<(), String> {
         let hd = self.head_dim;
         let row = self.row();
@@ -175,7 +189,20 @@ pub struct GpuEngine<'a> {
     down: Buffer,
     final_h: Buffer,
     logits: Buffer,
+    /// The embedding tensor's resident payload plus its row stride, so a token
+    /// id becomes a device row lookup instead of a host round-trip.
+    embed: (&'a ByteBuffer, usize),
+    /// Argmax scratch: `parts` partial values, `parts` partial indices, one out.
+    arg_v: Buffer,
+    arg_i: Buffer,
+    arg_out: Buffer,
+    /// Chunked-prefill scratch, allocated on first use and reused after.
+    chunk: Option<(usize, prefill::Chunk)>,
 }
+
+/// Blocks the device argmax reduces over before the one-block fold. 64 blocks
+/// is one wave on this card and turns the 993 KB logit pass into a single sweep.
+const ARGMAX_PARTS: usize = 64;
 
 impl<'a> GpuEngine<'a> {
     /// Build every resident layer, borrowing the loader's weight payloads.
@@ -190,6 +217,17 @@ impl<'a> GpuEngine<'a> {
         };
         let l = model.launcher();
         let n = cfg.n_embd;
+        let embed = model
+            .tensor(crate::TOKEN_EMBD)
+            .ok_or_else(|| "model has no token_embd.weight".to_string())?;
+        if embed.ty() != hipml_core::quant::TensorType::Q4K {
+            return Err(format!(
+                "{}: expected Q4_K, found {}",
+                crate::TOKEN_EMBD,
+                embed.ty().name()
+            ));
+        }
+        let embed = (embed.buffer(), (embed.nbytes() / embed.rows()) as usize);
 
         let mut layers = Vec::with_capacity(cfg.n_layer);
         for i in 0..cfg.n_layer {
@@ -239,6 +277,11 @@ impl<'a> GpuEngine<'a> {
             down: zeros(n)?,
             final_h: zeros(n)?,
             logits: zeros(cfg.n_vocab)?,
+            embed,
+            arg_v: zeros(ARGMAX_PARTS)?,
+            arg_i: zeros(ARGMAX_PARTS)?,
+            arg_out: zeros(1)?,
+            chunk: None,
         })
     }
 
@@ -261,12 +304,37 @@ impl<'a> GpuEngine<'a> {
 
     /// One token through the whole graph; returns the `n_vocab` logits.
     pub fn forward_token(&mut self, token: u32, st: &mut GpuState) -> Result<Vec<f32>, String> {
+        self.run_token(token, st)?;
+        self.model.launcher().synchronize()?;
+        self.logits.to_host()
+    }
+
+    /// One token, greedy: the argmax runs on the device and only the id comes
+    /// back. This is the decode loop; `forward_token` stays for the oracle
+    /// comparison, which needs the whole logit vector.
+    pub fn forward_token_id(&mut self, token: u32, st: &mut GpuState) -> Result<u32, String> {
+        self.run_token(token, st)?;
+        let l = self.model.launcher();
+        l.argmax_buf(
+            &self.logits,
+            &self.arg_v,
+            &self.arg_i,
+            &self.arg_out,
+            self.cfg.n_vocab,
+            ARGMAX_PARTS,
+        )?;
+        l.synchronize()?;
+        let bytes = self.arg_out.download_bytes(0, 4)?;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    /// Everything up to and including `lm_head`; no synchronize.
+    fn run_token(&mut self, token: u32, st: &mut GpuState) -> Result<(), String> {
         let l = self.model.launcher();
         let cfg = &self.cfg;
         let pos = st.pos;
 
-        let embed = self.model.embedding_row(token)?;
-        self.x.write(&embed)?;
+        l.embed_row_q4_k(self.embed.0, token as usize, self.embed.1, &self.x)?;
 
         for i in 0..self.layers.len() {
             let block = &self.layers[i];
@@ -284,9 +352,19 @@ impl<'a> GpuEngine<'a> {
                 BlockKind::Full { attn, deep: Some(dk) } => {
                     l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
                     attn.prepare_qkv(l, &self.t, pos)?;
-                    let kh = attn.k_buf().to_host()?;
-                    let vh = attn.v_buf().to_host()?;
-                    dk.append(&kh, &vh, pos)?;
+                    // Quantize and append the new K/V row on the device: one
+                    // launch instead of a readback and eight uploads.
+                    l.kv_encode(
+                        dk.dtype.id(),
+                        attn.k_buf(),
+                        attn.v_buf(),
+                        &dk.k,
+                        &dk.v,
+                        cfg.n_head_kv,
+                        cfg.head_dim,
+                        dk.seq,
+                        pos,
+                    )?;
                     deep_attention(l, cfg, attn, dk, pos)?;
                     attn.apply_output(l)?;
                     attn.output()
@@ -315,9 +393,7 @@ impl<'a> GpuEngine<'a> {
             &self.logits,
             cfg.n_vocab,
             cfg.n_embd,
-        )?;
-        l.synchronize()?;
-        self.logits.to_host()
+        )
     }
 
     pub fn model(&self) -> &Model {

@@ -152,6 +152,37 @@ impl Buffer {
         Err("built without the `hip` feature".to_string())
     }
 
+    /// Copy `len` bytes at byte `offset` back to host memory (the one-word
+    /// readback the device argmax needs).
+    #[cfg(feature = "hip")]
+    pub fn download_bytes(&self, offset: usize, len: usize) -> Result<Vec<u8>, String> {
+        if offset + len > self.len * 4 {
+            return Err(format!(
+                "download of {len} bytes at {offset} exceeds {} bytes",
+                self.len * 4
+            ));
+        }
+        let mut out = vec![0u8; len];
+        unsafe {
+            let src = (self.ptr as *const u8).add(offset) as *const std::ffi::c_void;
+            check(
+                ffi::hipMemcpy(
+                    out.as_mut_ptr() as *mut std::ffi::c_void,
+                    src,
+                    len,
+                    ffi::HIP_MEMCPY_DEVICE_TO_HOST,
+                ),
+                "hipMemcpy device->host (bytes)",
+            )?;
+        }
+        Ok(out)
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn download_bytes(&self, _offset: usize, _len: usize) -> Result<Vec<u8>, String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
     /// Device pointer as a kernel argument.
     #[cfg(feature = "hip")]
     pub fn as_ptr(&self) -> *mut std::ffi::c_void {

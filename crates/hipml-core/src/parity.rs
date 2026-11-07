@@ -341,6 +341,52 @@ pub fn cases() -> Vec<OpCase> {
                 (vec![Tensor::new(vec![n], probs)], vec![idx as f32])
             },
         },
+        // Device argmax: the result is an index, so the case is exact and the
+        // input carries a deliberate tie at two indices.
+        OpCase {
+            name: "argmax_f32",
+            tol: Tol::EXACT,
+            seed: 0xDDDD_EEEE_FFFF_0002,
+            scalars: &[("n", 1000.0)],
+            build: |rng| {
+                let n = 1000usize;
+                let mut v: Vec<f32> = (0..n).map(|_| rng.normal_scaled(2.0)).collect();
+                let top = v.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                v[100] = top;
+                v[900] = top;
+                let idx = crate::gen::argmax_f32(&v);
+                (vec![Tensor::new(vec![n], v)], vec![idx as f32])
+            },
+        },
+        // Device KV encode: compared by decoding the bytes the kernel wrote and
+        // the bytes `kv::quantize` writes, so a one-step difference in a quant
+        // byte or in the f16 scale fails.
+        OpCase {
+            name: "kv_encode_q8",
+            tol: Tol::EXACT,
+            seed: 0xDDDD_EEEE_FFFF_0003,
+            scalars: &[
+                ("n_kv", 4.0),
+                ("head_dim", 64.0),
+                ("seq", 8.0),
+                ("pos", 3.0),
+                ("dtype", 0.0),
+            ],
+            build: |rng| kv_encode_reference(rng, crate::kv::KvDtype::Q8, 4, 64, 8, 3),
+        },
+        OpCase {
+            name: "kv_encode_q4",
+            tol: Tol::EXACT,
+            seed: 0xDDDD_EEEE_FFFF_0004,
+            scalars: &[
+                ("n_kv", 4.0),
+                ("head_dim", 64.0),
+                ("seq", 8.0),
+                ("pos", 5.0),
+                ("dtype", 1.0),
+            ],
+            build: |rng| kv_encode_reference(rng, crate::kv::KvDtype::Q4, 4, 64, 8, 5),
+        },
     ];
     out.extend(crate::attn_parity::cases());
     out.extend(crate::parity_kv::kv_cases());
@@ -595,4 +641,30 @@ fn gemm_bench_inputs(rng: &mut Rng, r: usize) -> (Vec<Tensor>, Vec<f32>) {
     let w = Tensor::from_fn(vec![m, k], |_| (rng.uniform() - 0.5) * 0.04);
     let x = Tensor::from_fn(vec![r, k], |_| rng.uniform() - 0.5);
     (vec![w, x], Vec::new())
+}
+
+/// Reference side of `kv_encode_{q8,q4}`: encode each head's row at `pos` with
+/// the host format definition, then decode it. A device result matches only if
+/// it wrote the same bytes.
+fn kv_encode_reference(
+    rng: &mut Rng,
+    dtype: crate::kv::KvDtype,
+    n_kv: usize,
+    head_dim: usize,
+    seq: usize,
+    pos: usize,
+) -> (Vec<Tensor>, Vec<f32>) {
+    let width = n_kv * head_dim;
+    let k = Tensor::from_fn(vec![width], |_| rng.normal_scaled(1.5));
+    let v = Tensor::from_fn(vec![width], |_| rng.normal_scaled(1.5));
+    let row = dtype.row_bytes(head_dim);
+    let _ = (seq, pos, row);
+    let mut expected = Vec::with_capacity(2 * width);
+    for src in [k.data(), v.data()] {
+        for h in 0..n_kv {
+            let bytes = crate::kv::quantize(dtype, &src[h * head_dim..(h + 1) * head_dim]);
+            expected.extend_from_slice(&crate::kv::dequantize(dtype, &bytes));
+        }
+    }
+    (vec![k, v], expected)
 }

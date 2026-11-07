@@ -172,6 +172,12 @@ impl Drop for Stream {
 pub struct Module {
     #[cfg(feature = "hip")]
     handle: ffi::HipModule,
+    /// Entry points already looked up. `hipModuleGetFunction` measured 2.3 us
+    /// per call on this driver, and the decode graph asks for the same names
+    /// 1299 times a token, so the lookup is cached here rather than at each
+    /// call site.
+    #[cfg(feature = "hip")]
+    functions: std::cell::RefCell<std::collections::HashMap<String, ffi::HipFunction>>,
 }
 
 impl Module {
@@ -185,7 +191,10 @@ impl Module {
                 ffi::hipModuleLoad(&mut handle, c_path.as_ptr()),
                 "hipModuleLoad",
             )?;
-            Ok(Module { handle })
+            Ok(Module {
+                handle,
+                functions: std::cell::RefCell::new(std::collections::HashMap::new()),
+            })
         }
     }
 
@@ -197,6 +206,9 @@ impl Module {
     /// Look up a kernel by name. The returned handle borrows the module.
     #[cfg(feature = "hip")]
     pub fn kernel(&self, name: &str) -> Result<Kernel<'_>, String> {
+        if let Some(&function) = self.functions.borrow().get(name) {
+            return Ok(Kernel::from_function(function));
+        }
         let c_name = std::ffi::CString::new(name).map_err(|e| format!("bad kernel name: {e}"))?;
         unsafe {
             let mut function: ffi::HipFunction = std::ptr::null_mut();
@@ -204,16 +216,27 @@ impl Module {
                 ffi::hipModuleGetFunction(&mut function, self.handle, c_name.as_ptr()),
                 "hipModuleGetFunction",
             )?;
-            Ok(Kernel {
-                function,
-                _module: PhantomData,
-            })
+            self.functions
+                .borrow_mut()
+                .insert(name.to_string(), function);
+            Ok(Kernel::from_function(function))
         }
+    }
+
+    /// How many entry points have been resolved (the cache's size).
+    #[cfg(feature = "hip")]
+    pub fn resolved(&self) -> usize {
+        self.functions.borrow().len()
     }
 
     #[cfg(not(feature = "hip"))]
     pub fn kernel(&self, _name: &str) -> Result<Kernel<'_>, String> {
         Err("built without the `hip` feature".to_string())
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn resolved(&self) -> usize {
+        0
     }
 }
 
@@ -232,6 +255,17 @@ pub struct Kernel<'a> {
     #[cfg(feature = "hip")]
     function: ffi::HipFunction,
     _module: PhantomData<&'a Module>,
+}
+
+impl Kernel<'_> {
+    /// Wrap an already-resolved entry point (see `Module::kernel`'s cache).
+    #[cfg(feature = "hip")]
+    fn from_function(function: ffi::HipFunction) -> Kernel<'static> {
+        Kernel {
+            function,
+            _module: PhantomData,
+        }
+    }
 }
 
 /// Grid and block geometry.

@@ -23,6 +23,17 @@ pub fn gemv_entry(ty: TensorType) -> Result<&'static str, String> {
     })
 }
 
+/// The tiled GEMM entry for a quantized GEMV entry; the two families share the
+/// block format.
+fn prefill_entry(gemv: &str) -> Result<&'static str, String> {
+    Ok(match gemv {
+        "gemv_q4_k" => "prefill_q4_k",
+        "gemv_q6_k" => "prefill_q6_k",
+        "gemv_q8_0" => "prefill_q8_0",
+        other => return Err(format!("{other}: no tiled prefill kernel")),
+    })
+}
+
 pub(crate) fn mat_kind(ty: TensorType) -> Result<Kind, String> {
     Ok(match ty {
         TensorType::F32 => Kind::F32,
@@ -70,6 +81,29 @@ impl<'a> Proj<'a> {
                 l.run_quant_resident(entry, w, x, y, self.rows, self.cols)
             }
             ProjData::F32(w) => l.run_f32_resident(w, x, y, self.rows, self.cols),
+        }
+    }
+
+    /// The same projection over `tokens` rows of `x` (`[tokens][cols]`), one
+    /// tiled GEMM instead of `tokens` GEMVs. The prefill chunk's projection.
+    pub(crate) fn gemm(
+        &self,
+        l: &Launcher,
+        x: &Buffer,
+        y: &Buffer,
+        tokens: usize,
+    ) -> Result<(), String> {
+        match &self.data {
+            ProjData::Resident(w, entry) if *entry == "gemv_f32" => {
+                // The loader keeps an F32 tensor as raw little-endian f32, so
+                // the byte payload is the f32 matrix.
+                l.run_gemm_ptr(w.as_ptr(), x.as_ptr(), y.as_ptr(), tokens, self.rows, self.cols)
+            }
+            ProjData::Resident(w, entry) => {
+                let e = prefill_entry(entry)?;
+                l.run_prefill_resident(e, w, x, y, self.rows, self.cols, tokens)
+            }
+            ProjData::F32(w) => l.run_gemm_resident(w, x, y, tokens, self.rows, self.cols),
         }
     }
 

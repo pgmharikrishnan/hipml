@@ -23,6 +23,11 @@ mod imp {
     /// Must match SPLIT_TILE in attn_decode_split_f32.hip.
     const SPLIT_TILE: usize = 8;
 
+    /// The prefill-chunk launches (child so they see the layer's private
+    /// scratch and weight handles).
+    #[path = "attn_chunk.rs"]
+    mod chunk;
+
     /// A weight payload that is either owned (the standalone parity path) or
     /// borrowed from the resident loader, so the graph never uploads the same
     /// bytes twice.
@@ -43,6 +48,13 @@ mod imp {
             match self {
                 WeightBuf::Owned(b) => b.len(),
                 WeightBuf::Borrowed(b) => b.len(),
+            }
+        }
+
+        fn bytes(&self) -> &ByteBuffer {
+            match self {
+                WeightBuf::Owned(b) => b,
+                WeightBuf::Borrowed(b) => b,
             }
         }
     }
@@ -81,6 +93,24 @@ mod imp {
                 Kind::Q6K => "gemv_q6_k",
                 Kind::Q8_0 => "gemv_q8_0",
                 Kind::Q5K => return Err("attention weight is Q5_K: no GEMV kernel".to_string()),
+            })
+        }
+
+        fn data_bytes(&self) -> &ByteBuffer {
+            self.data.bytes()
+        }
+
+        /// The tiled prefill GEMM for the same payload (`tokens` rows of x).
+        fn prefill_entry(&self) -> Result<&'static str, String> {
+            Ok(match self.kind {
+                Kind::Q4K => "prefill_q4_k",
+                Kind::Q6K => "prefill_q6_k",
+                Kind::Q8_0 => "prefill_q8_0",
+                other => {
+                    return Err(format!(
+                        "attention weight {other:?}: no tiled prefill kernel"
+                    ))
+                }
             })
         }
     }
@@ -290,15 +320,27 @@ mod imp {
         }
 
         fn norm_and_rope(&self, l: &Launcher, pos: usize) -> Result<(), String> {
+            self.norm_rope_at(l, self.q.as_ptr(), self.k.as_ptr(), pos)
+        }
+
+        /// Head RMS norm and M-RoPE on explicit q/k pointers, so the prefill
+        /// path can run the same kernels on row `t` of a chunk buffer.
+        fn norm_rope_at(
+            &self,
+            l: &Launcher,
+            q: *mut c_void,
+            k: *mut c_void,
+            pos: usize,
+        ) -> Result<(), String> {
             let d = self.dims;
             let norm = self.module_kernel(l, "head_rmsnorm_f32")?;
             let mut hd = d.head_dim as i32;
             let mut eps = d.eps;
 
             // q heads
-            let mut p_x = self.q.as_ptr();
+            let mut p_x = q;
             let mut p_w = self.q_norm.as_ptr();
-            let mut p_y = self.q.as_ptr();
+            let mut p_y = q;
             let mut nh = d.n_head as i32;
             let mut params: [*mut c_void; 6] = [
                 &mut p_x as *mut _ as *mut c_void,
@@ -311,9 +353,9 @@ mod imp {
             norm.launch(LaunchConfig::per_row(d.n_head, 256), &l.stream, &mut params)?;
 
             // k heads
-            let mut p_x = self.k.as_ptr();
+            let mut p_x = k;
             let mut p_w = self.k_norm.as_ptr();
-            let mut p_y = self.k.as_ptr();
+            let mut p_y = k;
             let mut nkv = d.n_kv as i32;
             let mut params: [*mut c_void; 6] = [
                 &mut p_x as *mut _ as *mut c_void,
@@ -325,8 +367,8 @@ mod imp {
             ];
             norm.launch(LaunchConfig::per_row(d.n_kv, 256), &l.stream, &mut params)?;
 
-            self.rope_launch(l, self.q.as_ptr(), d.n_head, pos)?;
-            self.rope_launch(l, self.k.as_ptr(), d.n_kv, pos)
+            self.rope_launch(l, q, d.n_head, pos)?;
+            self.rope_launch(l, k, d.n_kv, pos)
         }
 
         fn rope_launch(
@@ -484,8 +526,19 @@ mod imp {
         /// Causal attention for this token. Uses the split-K kernel when the
         /// head shape allows it, otherwise the one-block-per-head kernel.
         fn attention(&self, l: &Launcher, pos: usize) -> Result<(), String> {
+            self.attention_at(l, self.q.as_ptr(), self.out.as_ptr(), pos + 1)
+        }
+
+        /// Same launch over explicit q/out rows and a given sequence length, so
+        /// a prefill chunk can attend from row `t` at `seq = pos + 1`.
+        fn attention_at(
+            &self,
+            l: &Launcher,
+            q: *mut c_void,
+            out: *mut c_void,
+            seq: usize,
+        ) -> Result<(), String> {
             let d = self.dims;
-            let seq = pos + 1;
             let group = d.n_head / d.n_kv;
             let dpl = d.head_dim / 32;
             let shared = 2 * SPLIT_TILE * d.head_dim * 4;
@@ -496,7 +549,7 @@ mod imp {
 
             if split_ok {
                 let splits = (seq / 128).clamp(1, MAX_SPLITS);
-                let mut p_q = self.q.as_ptr();
+                let mut p_q = q;
                 let mut p_k = self.kv_k.as_ptr();
                 let mut p_v = self.kv_v.as_ptr();
                 let mut p_acc = self.part_acc.as_ptr();
@@ -533,7 +586,7 @@ mod imp {
                 let reduce = self.module_kernel(l, "attn_reduce_f32")?;
                 let mut p_acc = self.part_acc.as_ptr();
                 let mut p_ml = self.part_ml.as_ptr();
-                let mut p_out = self.out.as_ptr();
+                let mut p_out = out;
                 let mut params: [*mut c_void; 5] = [
                     &mut p_acc as *mut _ as *mut c_void,
                     &mut p_ml as *mut _ as *mut c_void,
@@ -550,10 +603,10 @@ mod imp {
             }
 
             let attn = self.module_kernel(l, "attn_decode_f32")?;
-            let mut p_q = self.q.as_ptr();
+            let mut p_q = q;
             let mut p_k = self.kv_k.as_ptr();
             let mut p_v = self.kv_v.as_ptr();
-            let mut p_out = self.out.as_ptr();
+            let mut p_out = out;
             let mut n_heads = d.n_head as i32;
             let mut n_kv = d.n_kv as i32;
             let mut hd = d.head_dim as i32;
