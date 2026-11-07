@@ -81,20 +81,21 @@ pub const KERNELS: &[KernelSpec] = &[
     KernelSpec {
         name: "prefill_q4_k",
         entry: "prefill_q4_k",
-        // 128 tokens x 64 rows per block, 256 threads; the weight tile is
-        // dequantised once into shared and reused for all 128 tokens.
+        // 256 tokens x 64 rows per block, 256 threads, 8x8 microtile; the
+        // weight tile is dequantised once into shared for all 256 tokens.
         kind: KernelKind::Prefill {
             rows: 64,
-            tokens: 128,
+            tokens: 256,
             block: 256,
         },
     },
     KernelSpec {
         name: "prefill_q6_k",
         entry: "prefill_q6_k",
+        // Same 256-token tile as Q4_K: 8x8 microtile, 32-value k-tiles.
         kind: KernelKind::Prefill {
             rows: 64,
-            tokens: 128,
+            tokens: 256,
             block: 256,
         },
     },
@@ -103,7 +104,7 @@ pub const KERNELS: &[KernelSpec] = &[
         entry: "prefill_q8_0",
         kind: KernelKind::Prefill {
             rows: 64,
-            tokens: 128,
+            tokens: 256,
             block: 256,
         },
     },

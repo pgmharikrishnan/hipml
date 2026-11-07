@@ -1,37 +1,39 @@
 // Tiled prefill GEMM over Q8_0 weights. Structure identical to prefill_q4_k:
-// one block owns 128 tokens x 64 output rows, the weight tile is dequantised
+// one block owns 256 tokens x 64 output rows, the weight tile is dequantised
 // once into shared and reused for every token, f32 accumulators in registers.
 //
-// Q8_0 block (34 bytes, 32 values): d(2) qs(32 signed bytes). A thread's 16
-// contiguous values are half a block, so one scale covers them.
+// Q8_0 block (34 bytes, 32 values): d(2) qs(32 signed bytes). A 32-value k-tile
+// is exactly one Q8_0 block; a thread's 8 contiguous values are a quarter of it,
+// so one scale covers them.
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
 #define PF8_BLOCK_BYTES 34
-#define PF8_TPB 128
+#define PF8_TPB 256
 #define PF8_RPB 64
-#define PF8_KT 64
-#define PF8_TT 4
+#define PF8_KT 32
+#define PF8_TT 8
 #define PF8_RR 8
 #define PF8_TG (PF8_TPB / PF8_TT)
 #define PF8_RG (PF8_RPB / PF8_RR)
 #define PF8_THREADS (PF8_TG * PF8_RG)
 #define PF8_XSTRIDE (PF8_KT + 1)
 #define PF8_WSTRIDE (PF8_KT + 1)
+#define PF8_HALF_TOKENS (PF8_TPB / 2)
 
-// Dequantise 16 contiguous values of one row, starting at value index `v`
-// (a multiple of 16), into `out`.
-static __device__ __forceinline__ void pf8_dequant16(const unsigned char* __restrict__ rp,
-                                                     int v, float* out)
+// Dequantise 8 contiguous values of one row, starting at value index `v`
+// (a multiple of 8) into `out`.
+static __device__ __forceinline__ void pf8_dequant8(const unsigned char* __restrict__ rp,
+                                                    int v, float* out)
 {
     const int blk = v >> 5;
-    const int part = (v & 31) >> 4;
+    const int part = (v & 31) >> 3;
     const unsigned char* b = rp + (size_t)blk * PF8_BLOCK_BYTES;
     const float d = __half2float(*reinterpret_cast<const __half*>(b));
-    const signed char* qs = reinterpret_cast<const signed char*>(b + 2 + part * 16);
+    const signed char* qs = reinterpret_cast<const signed char*>(b + 2 + part * 8);
 #pragma unroll
-    for (int i = 0; i < 16; ++i) out[i] = d * (float)qs[i];
+    for (int i = 0; i < 8; ++i) out[i] = d * (float)qs[i];
 }
 
 extern "C" __global__ void prefill_q8_0(
@@ -71,18 +73,18 @@ extern "C" __global__ void prefill_q8_0(
             if (r < m) {
                 const unsigned char* rp =
                     w + (size_t)r * (size_t)nblocks * PF8_BLOCK_BYTES;
-                float v[16];
-                pf8_dequant16(rp, base + d_q * 16, v);
-                float* dst = pf8_w + d_row * PF8_WSTRIDE + d_q * 16;
+                float v[8];
+                pf8_dequant8(rp, base + d_q * 8, v);
+                float* dst = pf8_w + d_row * PF8_WSTRIDE + d_q * 8;
 #pragma unroll
-                for (int i = 0; i < 16; ++i) dst[i] = v[i];
+                for (int i = 0; i < 8; ++i) dst[i] = v[i];
             }
         }
 
         for (int s = 0; s < xq; ++s) {
             const int i = tid + s * PF8_THREADS;
-            const int tl = i >> 4;
-            const int c4 = (i & 15) * 4;
+            const int tl = i >> 3;
+            const int c4 = (i & 7) * 4;
             const int gt = tok_base + tl;
             float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
             if (gt < tokens) {
@@ -117,21 +119,23 @@ extern "C" __global__ void prefill_q8_0(
         }
     }
 
-    __syncthreads();
-
     float* sbuf = pf8_x;
 #pragma unroll
-    for (int tt = 0; tt < PF8_TT; ++tt)
+    for (int half = 0; half < 2; ++half) {
+        __syncthreads();
 #pragma unroll
-        for (int rr = 0; rr < PF8_RR; ++rr)
-            sbuf[(tg + PF8_TG * tt) * PF8_RPB + (rg * PF8_RR + rr)] = acc[tt][rr];
-    __syncthreads();
-
-    for (int i = tid; i < PF8_TPB * PF8_RPB; i += PF8_THREADS) {
-        const int tl = i / PF8_RPB;
-        const int rl = i - tl * PF8_RPB;
-        const int gt = tok_base + tl;
-        const int gr = row_base + rl;
-        if (gt < tokens && gr < m) y[(size_t)gt * m + gr] = sbuf[i];
+        for (int u = 0; u < PF8_TT / 2; ++u)
+#pragma unroll
+            for (int rr = 0; rr < PF8_RR; ++rr)
+                sbuf[(tg + PF8_TG * u) * PF8_RPB + (rg * PF8_RR + rr)] =
+                    acc[half * (PF8_TT / 2) + u][rr];
+        __syncthreads();
+        for (int i = tid; i < PF8_HALF_TOKENS * PF8_RPB; i += PF8_THREADS) {
+            const int tl = i / PF8_RPB;
+            const int rl = i - tl * PF8_RPB;
+            const int gt = tok_base + half * PF8_HALF_TOKENS + tl;
+            const int gr = row_base + rl;
+            if (gt < tokens && gr < m) y[(size_t)gt * m + gr] = sbuf[i];
+        }
     }
 }

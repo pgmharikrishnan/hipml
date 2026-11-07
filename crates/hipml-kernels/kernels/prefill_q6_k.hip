@@ -1,34 +1,38 @@
 // Tiled prefill GEMM over Q6_K weights. Structure identical to prefill_q4_k:
-// one block owns 128 tokens x 64 output rows, the weight tile is dequantised
+// one block owns 256 tokens x 64 output rows, the weight tile is dequantised
 // once into shared and reused for every token, and the f32 accumulators stay in
-// registers (4 tokens x 8 rows per thread, 256 threads).
+// registers (8 tokens x 8 rows per thread, 256 threads, 32-value k-tiles).
 //
 // Q6_K super-block (210 bytes, 256 values): ql(128) qh(64) scales(16) d(2).
-// A thread's 16 contiguous values are exactly one 16-value sub-block, so it
-// needs one int8 scale plus 16 ql bytes and 16 qh bytes.
+// A thread's 8 contiguous values are half of one 16-value sub-block, so one
+// int8 scale covers them: 8 ql bytes and 8 qh bytes.
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
 #define PF6_BLOCK_BYTES 210
-#define PF6_TPB 128
+#define PF6_TPB 256
 #define PF6_RPB 64
-#define PF6_KT 64
-#define PF6_TT 4
+#define PF6_KT 32
+#define PF6_TT 8
 #define PF6_RR 8
 #define PF6_TG (PF6_TPB / PF6_TT)
 #define PF6_RG (PF6_RPB / PF6_RR)
 #define PF6_THREADS (PF6_TG * PF6_RG)
 #define PF6_XSTRIDE (PF6_KT + 1)
 #define PF6_WSTRIDE (PF6_KT + 1)
+#define PF6_HALF_TOKENS (PF6_TPB / 2)
 
-// Dequantise 16 contiguous values of one row, starting at value index `v`
-// (a multiple of 16), into `out`.
-static __device__ __forceinline__ void pf6_dequant16(const unsigned char* __restrict__ rp,
-                                                     int v, float* out)
+// Dequantise 8 contiguous values of one row, starting at value index `v`
+// (a multiple of 8) into `out`.
+static __device__ __forceinline__ void pf6_dequant8(const unsigned char* __restrict__ rp,
+                                                    int v, float* out)
 {
     const int blk = v >> 8;
-    const int j = (v & 255) >> 4; // 16-value sub-block, and the scale index
+    const int within = v & 255;
+    const int j = within >> 4; // 16-value sub-block, and the scale index
+    const int l0 = within & 15; // 8-value half of that sub-block
+
     const unsigned char* b = rp + (size_t)blk * PF6_BLOCK_BYTES;
     const float d = __half2float(*reinterpret_cast<const __half*>(b + 208));
     const float scale =
@@ -38,13 +42,13 @@ static __device__ __forceinline__ void pf6_dequant16(const unsigned char* __rest
     const int s = j & 7;
     const int group = s >> 1;
     const int is = s & 1;
-    const int ql_off = half * 64 + (group & 1) * 32 + is * 16;
-    const int qh_off = 128 + half * 32 + is * 16;
+    const int ql_off = half * 64 + (group & 1) * 32 + is * 16 + l0;
+    const int qh_off = 128 + half * 32 + is * 16 + l0;
     const int shift = 2 * group;
     const bool high = group >= 2;
 
 #pragma unroll
-    for (int i = 0; i < 16; ++i) {
+    for (int i = 0; i < 8; ++i) {
         const int qb = b[ql_off + i];
         const int hb = (b[qh_off + i] >> shift) & 3;
         const int nib = high ? (qb >> 4) : (qb & 0xF);
@@ -89,18 +93,18 @@ extern "C" __global__ void prefill_q6_k(
             if (r < m) {
                 const unsigned char* rp =
                     w + (size_t)r * (size_t)nblocks * PF6_BLOCK_BYTES;
-                float v[16];
-                pf6_dequant16(rp, base + d_q * 16, v);
-                float* dst = pf6_w + d_row * PF6_WSTRIDE + d_q * 16;
+                float v[8];
+                pf6_dequant8(rp, base + d_q * 8, v);
+                float* dst = pf6_w + d_row * PF6_WSTRIDE + d_q * 8;
 #pragma unroll
-                for (int i = 0; i < 16; ++i) dst[i] = v[i];
+                for (int i = 0; i < 8; ++i) dst[i] = v[i];
             }
         }
 
         for (int s = 0; s < xq; ++s) {
             const int i = tid + s * PF6_THREADS;
-            const int tl = i >> 4;
-            const int c4 = (i & 15) * 4;
+            const int tl = i >> 3;
+            const int c4 = (i & 7) * 4;
             const int gt = tok_base + tl;
             float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
             if (gt < tokens) {
@@ -135,21 +139,25 @@ extern "C" __global__ void prefill_q6_k(
         }
     }
 
-    __syncthreads();
-
+    // Two 128-token halves so the x buffer can hold the transposed output and
+    // the global stores stay coalesced along `row`.
     float* sbuf = pf6_x;
 #pragma unroll
-    for (int tt = 0; tt < PF6_TT; ++tt)
+    for (int half = 0; half < 2; ++half) {
+        __syncthreads();
 #pragma unroll
-        for (int rr = 0; rr < PF6_RR; ++rr)
-            sbuf[(tg + PF6_TG * tt) * PF6_RPB + (rg * PF6_RR + rr)] = acc[tt][rr];
-    __syncthreads();
-
-    for (int i = tid; i < PF6_TPB * PF6_RPB; i += PF6_THREADS) {
-        const int tl = i / PF6_RPB;
-        const int rl = i - tl * PF6_RPB;
-        const int gt = tok_base + tl;
-        const int gr = row_base + rl;
-        if (gt < tokens && gr < m) y[(size_t)gt * m + gr] = sbuf[i];
+        for (int u = 0; u < PF6_TT / 2; ++u)
+#pragma unroll
+            for (int rr = 0; rr < PF6_RR; ++rr)
+                sbuf[(tg + PF6_TG * u) * PF6_RPB + (rg * PF6_RR + rr)] =
+                    acc[half * (PF6_TT / 2) + u][rr];
+        __syncthreads();
+        for (int i = tid; i < PF6_HALF_TOKENS * PF6_RPB; i += PF6_THREADS) {
+            const int tl = i / PF6_RPB;
+            const int rl = i - tl * PF6_RPB;
+            const int gt = tok_base + half * PF6_HALF_TOKENS + tl;
+            const int gr = row_base + rl;
+            if (gt < tokens && gr < m) y[(size_t)gt * m + gr] = sbuf[i];
+        }
     }
 }
