@@ -38,6 +38,7 @@ extern "C" {
 
     pub fn hipMalloc(ptr: *mut *mut c_void, size: usize) -> HipError;
     pub fn hipFree(ptr: *mut c_void) -> HipError;
+    pub fn hipMemset(dst: *mut c_void, value: c_int, size: usize) -> HipError;
     pub fn hipMemGetInfo(free: *mut usize, total: *mut usize) -> HipError;
     pub fn hipMemcpy(dst: *mut c_void, src: *const c_void, size: usize, kind: c_int) -> HipError;
     pub fn hipDeviceSynchronize() -> HipError;

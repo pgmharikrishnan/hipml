@@ -7,6 +7,7 @@ use hipml_core::parity::{bench_cases, cases, compare, prefill_cases, quant_cases
 use hipml_core::tensor::Tensor;
 use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
 
+mod attn_cmd;
 mod gen_cmd;
 mod load_cmd;
 mod prefill_cmd;
@@ -40,6 +41,8 @@ fn main() {
         "prefill-model" => std::process::exit(prefill_cmd::model(&args[1..])),
         #[cfg(feature = "hip")]
         "ssm" => std::process::exit(ssm_cmd::ssm(&args[1..])),
+        "attn-parity" => std::process::exit(attn_cmd::parity(&args[1..])),
+        "attn-bench" => std::process::exit(attn_cmd::bench(&args[1..])),
         "parity" => {
             let filter = args.iter().skip(1).find(|a| !a.starts_with('-')).cloned();
             std::process::exit(parity(filter.as_deref()));
@@ -72,6 +75,8 @@ fn help() {
          \x20 prefill-bench time the tiled prefill GEMM at Qwen3.8-27B shapes, M=512/2048\n\
          \x20 prefill-model prefill the whole model cold, then warm from a KV prefix\n\
          \x20 ssm       gated-delta-net parity (small + real layer) and layer timing\n\
+         \x20 attn-parity --gguf PATH   GPU full-attention block vs CPU reference\n\
+         \x20 attn-bench  --gguf PATH   per-layer time at depths 0/8192/100000\n\
          \n\
          build with `--features hip` on a machine with the ROCm/HIP runtime.",
         version = env!("CARGO_PKG_VERSION")
@@ -122,6 +127,7 @@ fn kernels() {
             KernelKind::PerHeadOnDim => "per-head, one thread per dim".to_string(),
             KernelKind::Linear { block } => format!("linear, {block} threads"),
             KernelKind::Composite => "composite (several launches)".to_string(),
+            KernelKind::SplitK => "split-K grid, launcher-sized".to_string(),
             KernelKind::HostOnly(why) => format!("host-only: {why}"),
         };
         println!("{:<20} {:<18} {}", k.name, k.entry, geometry);

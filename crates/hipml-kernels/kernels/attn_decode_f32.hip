@@ -6,6 +6,13 @@
 // the cache streamed exactly once.
 //
 // GQA is a pointer offset: n_heads / n_kv query heads share one KV head.
+//
+// The cache may be stored kv-major ([n_kv][seq][head_dim]) or position-major
+// ([seq][n_kv][head_dim], the CPU reference's KvState). `head_stride` is the
+// distance between KV heads and `row_stride` the distance between positions:
+//   kv-major:       head_stride = seq * head_dim, row_stride = head_dim
+//   position-major: head_stride = head_dim,       row_stride = n_kv * head_dim
+// The old kernel hard-coded the first pair; the loop body is unchanged.
 
 #include <hip/hip_runtime.h>
 
@@ -20,7 +27,9 @@ extern "C" __global__ void attn_decode_f32(
     int n_kv,
     int head_dim,
     int seq,
-    float scale)
+    float scale,
+    int head_stride,
+    int row_stride)
 {
     const int h = blockIdx.x;
     const int t = threadIdx.x;
@@ -38,13 +47,13 @@ extern "C" __global__ void attn_decode_f32(
     }
     __syncthreads();
 
-    const float* kb = k + (size_t)kvh * seq * head_dim;
-    const float* vb = v + (size_t)kvh * seq * head_dim;
+    const float* kb = k + (size_t)kvh * head_stride;
+    const float* vb = v + (size_t)kvh * head_stride;
 
     float acc = 0.0f;
 
     for (int row = 0; row < seq; ++row) {
-        const float* kp = kb + (size_t)row * head_dim;
+        const float* kp = kb + (size_t)row * row_stride;
         red[t] = qv * kp[t];
         __syncthreads();
         for (int off = blockDim.x >> 1; off > 0; off >>= 1) {
@@ -64,7 +73,7 @@ extern "C" __global__ void attn_decode_f32(
             run_max = m_new;
             run_sum = run_sum * corr + p;
         }
-        const float* vp = vb + (size_t)row * head_dim;
+        const float* vp = vb + (size_t)row * row_stride;
         acc = acc * corr + p * vp[t];
         __syncthreads();
     }

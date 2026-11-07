@@ -7,6 +7,8 @@
 
 use std::path::PathBuf;
 
+pub mod attn_gpu;
+pub mod attn_ops;
 pub mod launch;
 #[cfg(feature = "hip")]
 mod quant_launch;
@@ -18,6 +20,7 @@ pub mod ssm_launch;
 #[cfg(feature = "hip")]
 mod ssm_ops;
 
+pub use attn_gpu::AttnLayer;
 pub use launch::Launcher;
 
 /// How a kernel is gridded.
@@ -44,6 +47,8 @@ pub enum KernelKind {
     Linear { block: u32 },
     /// Several launches end to end (one whole SSM layer).
     Composite,
+    /// Split-K grid sized by the launcher (sequence slices x KV heads).
+    SplitK,
     /// No device kernel: this op stays on the host by design.
     HostOnly(&'static str),
 }
@@ -194,6 +199,46 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "ssm_layer_f32",
         entry: "ssm_layer_f32",
         kind: KernelKind::Composite,
+    },
+    KernelSpec {
+        name: "attn_decode_pm_f32",
+        entry: "attn_decode_f32",
+        kind: KernelKind::PerHeadOnDim,
+    },
+    KernelSpec {
+        name: "attn_decode_split_f32",
+        entry: "attn_decode_split_f32",
+        kind: KernelKind::SplitK,
+    },
+    KernelSpec {
+        name: "attn_reduce_f32",
+        entry: "attn_reduce_f32",
+        kind: KernelKind::SplitK,
+    },
+    KernelSpec {
+        name: "qg_split_f32",
+        entry: "qg_split_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
+    KernelSpec {
+        name: "head_rmsnorm_f32",
+        entry: "head_rmsnorm_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
+    KernelSpec {
+        name: "mrope_f32",
+        entry: "mrope_f32",
+        kind: KernelKind::PerHead { block: 32 },
+    },
+    KernelSpec {
+        name: "q_gate_f32",
+        entry: "q_gate_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "kv_append_f32",
+        entry: "kv_append_f32",
+        kind: KernelKind::Linear { block: 256 },
     },
     KernelSpec {
         name: "sample_top_p_f32",

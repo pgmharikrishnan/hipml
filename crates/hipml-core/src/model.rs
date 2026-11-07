@@ -225,6 +225,21 @@ impl Model {
     }
 }
 
+/// Load one full-attention layer's tensors without touching the other 63
+/// blocks. The GPU attention work (WP12) uses this so parity and timing do not
+/// need the 17 GB model resident.
+pub fn load_attn_layer<R: Read + Seek>(g: &mut Gguf<R>, i: usize) -> io::Result<FullAttnW> {
+    let w = FullAttnW {
+        wq: Mat::load(g, &format!("blk.{i}.attn_q.weight"))?,
+        wk: Mat::load(g, &format!("blk.{i}.attn_k.weight"))?,
+        wv: Mat::load(g, &format!("blk.{i}.attn_v.weight"))?,
+        wo: Mat::load(g, &format!("blk.{i}.attn_output.weight"))?,
+        q_norm: read_f32_vec(g, &format!("blk.{i}.attn_q_norm.weight"))?,
+        k_norm: read_f32_vec(g, &format!("blk.{i}.attn_k_norm.weight"))?,
+    };
+    Ok(w)
+}
+
 fn read_f32_vec<R: Read + Seek>(g: &mut Gguf<R>, name: &str) -> io::Result<Vec<f32>> {
     let info = g
         .tensor(name)

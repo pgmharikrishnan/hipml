@@ -6,6 +6,7 @@
 //! device result can be compared against it directly.
 
 pub mod attention;
+pub mod attn_parity;
 pub mod cache;
 pub mod config;
 pub mod delta;
