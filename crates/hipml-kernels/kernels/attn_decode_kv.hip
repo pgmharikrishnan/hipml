@@ -19,6 +19,12 @@
 // reads 32 consecutive payload bytes per block: fully coalesced, dequantized in
 // registers, no shared-memory staging and no __syncthreads in the KV loop.
 //
+// The KV loop is tiled 4 rows deep and K *and* V are both loaded before any
+// arithmetic. At one row per iteration the V loads could not be issued until
+// after the score reduction, which made the loop two dependent memory latencies
+// long and left it at 85 GB/s on gfx1201; batching 4 rows (32 loads in flight)
+// is what makes it bandwidth-bound.
+//
 // Layout and the format itself: crates/hipml-core/src/kv.rs. Per-lane value:
 //   q8: d * qs[lane]                     block = f16 d | 32 i8
 //   q4: d * (nibble - 8)                 block = f16 d | 16 B, low = j, high = j+16
@@ -27,12 +33,13 @@
 // with (running max, running sum). The reduce recomputes the merge weights from
 // the per-split maxima, so the merge is exact regardless of split order.
 //
-// gfx1201 is wave32; the reduction walks warpSize/2 so it is correct either way.
+// gfx1201 is wave32; the reduction walks warpSize so it is correct either way.
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
 #define KV_MAX_CHUNKS 8
+#define KV_TILE 4
 
 // One block: f16 scale followed by 32 signed bytes.
 struct KvQ8 {
@@ -56,12 +63,13 @@ struct KvQ4 {
     }
 };
 
-// Sum across a warp, then broadcast so every lane sees the whole score.
-__device__ __forceinline__ float warp_sum_all(float v) {
-    for (int off = warpSize >> 1; off > 0; off >>= 1) {
-        v += __shfl_down_sync(0xffffffffffffffffull, v, off);
+// Butterfly sum: every lane ends with the total, so no broadcast is needed and
+// four scores can be reduced concurrently.
+__device__ __forceinline__ float warp_sum(float v) {
+    for (int off = 1; off < warpSize; off <<= 1) {
+        v += __shfl_xor_sync(0xffffffffffffffffull, v, off);
     }
-    return __shfl_sync(0xffffffffffffffffull, v, 0);
+    return v;
 }
 
 template <typename Loader>
@@ -100,34 +108,85 @@ __device__ __forceinline__ void kv_decode_body(
         acc[c] = 0.0f;
     }
 
-    const char* kbase = (const char*)k;
-    const char* vbase = (const char*)v;
-    const size_t krow = (size_t)kvh * seq * nb;
-    const size_t vrow = krow;
+    const size_t row_bytes = (size_t)nb * Loader::BLOCK_BYTES;
+    const char* kbase = (const char*)k + (size_t)kvh * seq * row_bytes;
+    const char* vbase = (const char*)v + (size_t)kvh * seq * row_bytes;
 
     float m = -INFINITY;
     float l = 0.0f;
 
-    for (int pos = start; pos < end; ++pos) {
-        const void* kr = kbase + (krow + (size_t)pos * nb) * Loader::BLOCK_BYTES;
-        float dot = 0.0f;
+    int pos = start;
+    for (; pos + KV_TILE <= end; pos += KV_TILE) {
+        const char* krow = kbase + (size_t)pos * row_bytes;
+        const char* vrow = vbase + (size_t)pos * row_bytes;
+
+        // All 32 loads issue before the first use: the tile is the unit of
+        // memory-level parallelism, not the row.
+        float kk[KV_TILE][KV_MAX_CHUNKS];
+        float vv[KV_TILE][KV_MAX_CHUNKS];
+        #pragma unroll
+        for (int t = 0; t < KV_TILE; ++t) {
+            #pragma unroll
+            for (int c = 0; c < KV_MAX_CHUNKS; ++c) {
+                kk[t][c] = (c < nb) ? Loader::at(krow + t * row_bytes, c, lane) : 0.0f;
+                vv[t][c] = (c < nb) ? Loader::at(vrow + t * row_bytes, c, lane) : 0.0f;
+            }
+        }
+
+        float s[KV_TILE];
+        #pragma unroll
+        for (int t = 0; t < KV_TILE; ++t) {
+            float dot = 0.0f;
+            #pragma unroll
+            for (int c = 0; c < KV_MAX_CHUNKS; ++c) dot += qv[c] * kk[t][c];
+            s[t] = warp_sum(dot) * scale;
+        }
+
+        float m_new = m;
+        #pragma unroll
+        for (int t = 0; t < KV_TILE; ++t) m_new = fmaxf(m_new, s[t]);
+        const float corr = expf(m - m_new);
+        float p[KV_TILE];
+        float lsum = 0.0f;
+        #pragma unroll
+        for (int t = 0; t < KV_TILE; ++t) {
+            p[t] = expf(s[t] - m_new);
+            lsum += p[t];
+        }
+        l = l * corr + lsum;
+        m = m_new;
+
         #pragma unroll
         for (int c = 0; c < KV_MAX_CHUNKS; ++c) {
-            if (c < nb) dot += qv[c] * Loader::at(kr, c, lane);
+            float a = acc[c] * corr;
+            #pragma unroll
+            for (int t = 0; t < KV_TILE; ++t) a += p[t] * vv[t][c];
+            acc[c] = a;
         }
-        const float s = warp_sum_all(dot) * scale;
+    }
 
+    // Tail: at most KV_TILE-1 rows, one at a time.
+    for (; pos < end; ++pos) {
+        const char* kr = kbase + (size_t)pos * row_bytes;
+        const char* vr = vbase + (size_t)pos * row_bytes;
+        float kk[KV_MAX_CHUNKS];
+        float vv[KV_MAX_CHUNKS];
+        #pragma unroll
+        for (int c = 0; c < KV_MAX_CHUNKS; ++c) {
+            kk[c] = (c < nb) ? Loader::at(kr, c, lane) : 0.0f;
+            vv[c] = (c < nb) ? Loader::at(vr, c, lane) : 0.0f;
+        }
+        float dot = 0.0f;
+        #pragma unroll
+        for (int c = 0; c < KV_MAX_CHUNKS; ++c) dot += qv[c] * kk[c];
+        const float s = warp_sum(dot) * scale;
         const float m_new = fmaxf(m, s);
         const float corr = expf(m - m_new);
         const float p = expf(s - m_new);
         l = l * corr + p;
         m = m_new;
-
-        const void* vr = vbase + (vrow + (size_t)pos * nb) * Loader::BLOCK_BYTES;
         #pragma unroll
-        for (int c = 0; c < KV_MAX_CHUNKS; ++c) {
-            if (c < nb) acc[c] = acc[c] * corr + p * Loader::at(vr, c, lane);
-        }
+        for (int c = 0; c < KV_MAX_CHUNKS; ++c) acc[c] = acc[c] * corr + p * vv[c];
     }
 
     float* dst = part_acc + ((size_t)h * splits + split) * head_dim;
