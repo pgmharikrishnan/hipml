@@ -107,7 +107,8 @@ impl<R: Read + Seek> Gguf<R> {
             let value_type = read_u32(&mut reader)?;
             if (key == "general.alignment" || key == "alignment") && value_type == VT_UINT32 {
                 alignment = read_u32(&mut reader)? as u64;
-            } else if (key == "general.alignment" || key == "alignment") && value_type == VT_UINT64 {
+            } else if (key == "general.alignment" || key == "alignment") && value_type == VT_UINT64
+            {
                 alignment = read_u64(&mut reader)?;
             } else {
                 skip_value(&mut reader, value_type, 0)?;
@@ -328,7 +329,7 @@ mod tests {
         b.extend_from_slice(&3u32.to_le_bytes());
         b.extend_from_slice(&1u64.to_le_bytes()); // tensor count
         b.extend_from_slice(&0u64.to_le_bytes()); // kv count
-        // tensor info: name, n_dims, dims, type, offset
+                                                  // tensor info: name, n_dims, dims, type, offset
         b.extend_from_slice(&1u64.to_le_bytes());
         b.extend_from_slice(b"w");
         b.extend_from_slice(&2u32.to_le_bytes());

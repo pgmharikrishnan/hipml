@@ -43,6 +43,21 @@ pub const KERNELS: &[KernelSpec] = &[
         kind: KernelKind::PerRow { block: 256 },
     },
     KernelSpec {
+        name: "gemv_q4_k",
+        entry: "gemv_q4_k",
+        kind: KernelKind::PerRow { block: 256 },
+    },
+    KernelSpec {
+        name: "gemv_q6_k",
+        entry: "gemv_q6_k",
+        kind: KernelKind::PerRow { block: 256 },
+    },
+    KernelSpec {
+        name: "gemv_q8_0",
+        entry: "gemv_q8_0",
+        kind: KernelKind::PerRow { block: 256 },
+    },
+    KernelSpec {
         name: "gemm_f32",
         entry: "gemm_f32",
         kind: KernelKind::PerRow { block: 256 },

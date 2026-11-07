@@ -217,6 +217,80 @@ impl Drop for Buffer {
     }
 }
 
+/// A device allocation of raw bytes, for quantized weight blocks.
+///
+/// Separate from `Buffer` because `Buffer` counts f32 elements; a Q4_K payload
+/// is not a multiple of four bytes and must not be rounded.
+pub struct ByteBuffer {
+    #[cfg(feature = "hip")]
+    ptr: *mut std::ffi::c_void,
+    len: usize,
+}
+
+unsafe impl Send for ByteBuffer {}
+
+impl ByteBuffer {
+    #[cfg(feature = "hip")]
+    pub fn alloc(len: usize) -> Result<ByteBuffer, String> {
+        unsafe {
+            let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+            check(ffi::hipMalloc(&mut ptr, len), "hipMalloc")?;
+            Ok(ByteBuffer { ptr, len })
+        }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn alloc(_len: usize) -> Result<ByteBuffer, String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
+    #[cfg(feature = "hip")]
+    pub fn from_host(data: &[u8]) -> Result<ByteBuffer, String> {
+        let buf = ByteBuffer::alloc(data.len())?;
+        if !data.is_empty() {
+            unsafe {
+                check(
+                    ffi::hipMemcpy(
+                        buf.ptr,
+                        data.as_ptr() as *const std::ffi::c_void,
+                        data.len(),
+                        ffi::HIP_MEMCPY_HOST_TO_DEVICE,
+                    ),
+                    "hipMemcpy bytes host->device",
+                )?;
+            }
+        }
+        Ok(buf)
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn from_host(_data: &[u8]) -> Result<ByteBuffer, String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[cfg(feature = "hip")]
+    pub fn as_ptr(&self) -> *mut std::ffi::c_void {
+        self.ptr
+    }
+}
+
+#[cfg(feature = "hip")]
+impl Drop for ByteBuffer {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ffi::hipFree(self.ptr);
+        }
+    }
+}
+
 /// A stream. Kernels on one stream run in order.
 pub struct Stream {
     #[cfg(feature = "hip")]

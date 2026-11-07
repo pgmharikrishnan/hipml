@@ -3,9 +3,11 @@
 //! The parity runner is the gate: a kernel that is not compared against the
 //! reference here is not a kernel hipml can use.
 
-use hipml_core::parity::{bench_cases, cases, compare, OpCase};
+use hipml_core::parity::{bench_cases, cases, compare, quant_cases, OpCase};
 use hipml_core::tensor::Tensor;
 use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
+
+mod quant_cmd;
 
 /// What happened to one case.
 enum Outcome {
@@ -22,6 +24,8 @@ fn main() {
         "probe" => probe(),
         "kernels" => kernels(),
         "bench" => std::process::exit(bench()),
+        "gguf" => std::process::exit(quant_cmd::gguf(&args[1..])),
+        "decode-bench" => std::process::exit(quant_cmd::decode_bench(&args[1..])),
         "parity" => {
             let filter = args.iter().skip(1).find(|a| !a.starts_with('-')).cloned();
             std::process::exit(parity(filter.as_deref()));
@@ -46,6 +50,8 @@ fn help() {
          \x20 kernels   list the kernel manifest\n\
          \x20 parity    run every parity case (reference vs device); optional name filter\n\
          \x20 bench     time each kernel launch and report effective bandwidth\n\
+         \x20 gguf      list the tensors in a GGUF file; `gguf <file> read <tensor>`\n\
+         \x20 decode-bench  stream every Q4_K/Q6_K/Q8_0 tensor through GEMV once\n\
          \n\
          build with `--features hip` on a machine with the ROCm/HIP runtime.",
         version = env!("CARGO_PKG_VERSION")
@@ -136,6 +142,50 @@ fn parity(filter: Option<&str>) -> i32 {
             }
         };
         println!("{:<20} {:<7} {}", case.name, verdict, detail);
+    }
+
+    // Quantized GEMV: build the reference only when a device is present, so a
+    // GPU-less run does not spend seconds generating a 73 MB tensor just to skip.
+    for case in quant_cases() {
+        if let Some(f) = filter {
+            if !case.name.contains(f) && !case.label.contains(f) {
+                continue;
+            }
+        }
+        let outcome = match launcher.as_ref() {
+            Err(e) => Outcome::Skip(e.clone()),
+            Ok(l) => {
+                let (w, x, expected) = case.reference();
+                match l.run_quant(case.name, &w, &x, case.m, case.k) {
+                    Err(e) => Outcome::Fail(format!("launch failed: {e}")),
+                    Ok(actual) => match compare(&expected, &actual, case.tol) {
+                        Ok(stats) => Outcome::Pass(format!(
+                            "max_abs {:.2e}  max_rel {:.2e}",
+                            stats.max_abs, stats.max_rel
+                        )),
+                        Err(stats) => Outcome::Fail(format!(
+                            "max_abs {:.2e} > {:.2e}, max_rel {:.2e} > {:.2e}",
+                            stats.max_abs, case.tol.abs, stats.max_rel, case.tol.rel
+                        )),
+                    },
+                }
+            }
+        };
+        let (verdict, detail) = match outcome {
+            Outcome::Pass(d) => {
+                pass += 1;
+                ("PASS", d)
+            }
+            Outcome::Fail(d) => {
+                fail += 1;
+                ("FAIL", d)
+            }
+            Outcome::Skip(d) => {
+                skip += 1;
+                ("SKIP", d)
+            }
+        };
+        println!("{:<28} {:<7} {}", case.label, verdict, detail);
     }
 
     println!("\n{pass} passed, {fail} failed, {skip} skipped");
@@ -246,6 +296,9 @@ fn bench() -> i32 {
             bytes
         );
     }
+
+    // Quantized production shapes: ffn_up/ffn_down/ffn_gate at Qwen3.8-27B sizes.
+    quant_cmd::bench_quant(&launcher, REPS);
     0
 }
 

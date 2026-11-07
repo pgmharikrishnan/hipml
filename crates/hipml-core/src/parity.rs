@@ -8,6 +8,8 @@ use crate::ops;
 use crate::rng::Rng;
 use crate::tensor::Tensor;
 
+pub use crate::quant_parity::{quant_bench_cases, quant_cases, QuantCase};
+
 /// Absolute and relative tolerance for a case.
 #[derive(Clone, Copy, Debug)]
 pub struct Tol {

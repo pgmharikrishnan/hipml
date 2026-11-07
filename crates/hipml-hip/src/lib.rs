@@ -9,7 +9,7 @@ pub mod device;
 #[cfg(feature = "hip")]
 pub mod ffi;
 
-pub use device::{Buffer, Device, Kernel, LaunchConfig, Module, Stream};
+pub use device::{Buffer, ByteBuffer, Device, Kernel, LaunchConfig, Module, Stream};
 
 /// True when this build can talk to a GPU.
 pub const HAS_HIP: bool = cfg!(feature = "hip");

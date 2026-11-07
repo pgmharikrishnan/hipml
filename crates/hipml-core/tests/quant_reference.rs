@@ -7,8 +7,8 @@
 
 use hipml_core::ops;
 use hipml_core::quant::{
-    dequant_q4_k, dequant_q6_k, dequant_q8_0, f16_to_f32, gemv_q4_k, gemv_q6_k,
-    TensorType, Q4_K_BYTES, Q6_K_BYTES, Q8_0_BYTES, QK_K,
+    dequant_q4_k, dequant_q6_k, dequant_q8_0, f16_to_f32, gemv_q4_k, gemv_q6_k, TensorType,
+    Q4_K_BYTES, Q6_K_BYTES, Q8_0_BYTES, QK_K,
 };
 
 #[test]
@@ -57,9 +57,7 @@ fn q4_k_hand_block() -> ([u8; Q4_K_BYTES], [f32; 8]) {
     let mut b = [0u8; Q4_K_BYTES];
     b[0..2].copy_from_slice(&0x3C00u16.to_le_bytes()); // d = 1.0
     b[2..4].copy_from_slice(&0x3800u16.to_le_bytes()); // dmin = 0.5
-    b[4..16].copy_from_slice(&[
-        65, 130, 3, 196, 5, 70, 135, 8, 41, 58, 75, 92,
-    ]);
+    b[4..16].copy_from_slice(&[65, 130, 3, 196, 5, 70, 135, 8, 41, 58, 75, 92]);
     for (g, byte) in [0x21u8, 0x43, 0x65, 0x87].iter().enumerate() {
         for i in 0..32 {
             b[16 + g * 32 + i] = *byte;
@@ -76,9 +74,11 @@ fn q4_k_hand_computed_vector() {
     for j in 0..8 {
         for l in 0..32 {
             assert_eq!(
-                out[j * 32 + l], expected[j],
+                out[j * 32 + l],
+                expected[j],
                 "sub-block {j} value {l}: got {}, want {}",
-                out[j * 32 + l], expected[j]
+                out[j * 32 + l],
+                expected[j]
             );
         }
     }
@@ -114,8 +114,8 @@ fn q6_k_hand_block() -> ([u8; Q6_K_BYTES], [f32; 16]) {
     (
         b,
         [
-            8.5, 17.0, 1.5, 2.0, -35.0, -42.0, -105.0, -120.0, 76.5, 85.0, 5.5, 6.0,
-            -91.0, -98.0, -225.0, -240.0,
+            8.5, 17.0, 1.5, 2.0, -35.0, -42.0, -105.0, -120.0, 76.5, 85.0, 5.5, 6.0, -91.0, -98.0,
+            -225.0, -240.0,
         ],
     )
 }
@@ -128,9 +128,11 @@ fn q6_k_hand_computed_vector() {
     for j in 0..16 {
         for l in 0..16 {
             assert_eq!(
-                out[j * 16 + l], expected[j],
+                out[j * 16 + l],
+                expected[j],
                 "sub-block {j} value {l}: got {}, want {}",
-                out[j * 16 + l], expected[j]
+                out[j * 16 + l],
+                expected[j]
             );
         }
     }
@@ -157,7 +159,11 @@ fn q4_k_gemv_reduces_the_dequantised_block() {
     let y = gemv_q4_k(&block, &x, 1, QK_K);
     let want: f32 = expected.iter().sum::<f32>() * 32.0;
     assert_eq!(y.len(), 1);
-    assert!((y[0] - want).abs() <= want.abs() * 1e-6, "got {} want {want}", y[0]);
+    assert!(
+        (y[0] - want).abs() <= want.abs() * 1e-6,
+        "got {} want {want}",
+        y[0]
+    );
 
     // A one-hot input selects one column of the dequantised row.
     let mut hot = vec![0.0f32; QK_K];
@@ -171,7 +177,11 @@ fn q6_k_gemv_reduces_the_dequantised_block() {
     let x = vec![1.0f32; QK_K];
     let y = gemv_q6_k(&block, &x, 1, QK_K);
     let want: f32 = expected.iter().sum::<f32>() * 16.0;
-    assert!((y[0] - want).abs() <= want.abs() * 1e-6, "got {} want {want}", y[0]);
+    assert!(
+        (y[0] - want).abs() <= want.abs() * 1e-6,
+        "got {} want {want}",
+        y[0]
+    );
 
     let mut hot = vec![0.0f32; QK_K];
     hot[250] = 1.0; // last sub-block (j=15), offset 250-240=10

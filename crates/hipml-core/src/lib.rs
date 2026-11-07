@@ -9,6 +9,7 @@ pub mod gguf;
 pub mod ops;
 pub mod parity;
 pub mod quant;
+pub mod quant_parity;
 pub mod rng;
 pub mod tensor;
 

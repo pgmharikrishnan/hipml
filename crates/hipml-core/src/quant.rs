@@ -297,10 +297,7 @@ pub fn gemv_q8_0(w: &[u8], x: &[f32], m: usize, k: usize) -> Vec<f32> {
         let row_data = &w[row * row_bytes..(row + 1) * row_bytes];
         let mut acc = 0.0f32;
         for b in 0..blocks_per_row {
-            dequant_q8_0(
-                &row_data[b * Q8_0_BYTES..(b + 1) * Q8_0_BYTES],
-                &mut tmp,
-            );
+            dequant_q8_0(&row_data[b * Q8_0_BYTES..(b + 1) * Q8_0_BYTES], &mut tmp);
             let xb = &x[b * Q8_0_VALUES..(b + 1) * Q8_0_VALUES];
             for l in 0..Q8_0_VALUES {
                 acc += tmp[l] * xb[l];
