@@ -26,8 +26,11 @@
 
 __device__ __forceinline__ float wave_sum(float v)
 {
+    // Butterfly (xor) reduction: every lane ends with the same total. A
+    // down-shuffle would leave it only in lane 0, but every lane needs `dot`
+    // to update its slice of the state row.
     for (int off = GDN_LANES / 2; off > 0; off >>= 1) {
-        v += __shfl_down_sync(0xffffffffffffffffULL, v, off, GDN_LANES);
+        v += __shfl_xor_sync(0xffffffffffffffffULL, v, off, GDN_LANES);
     }
     return v;
 }
