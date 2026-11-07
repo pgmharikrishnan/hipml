@@ -185,3 +185,32 @@ case).
   measurement should be expected to reach 100%.
 - Numbers are `llama-bench` medians of three repetitions, same model file, same
   box, sequentially run.
+
+## Whole-model residency (WP9)
+
+`hipml load --gguf C:\models\Qwen3.8-27B-Q4_K_M.gguf` uploads every tensor once,
+in GGUF order, one `hipMalloc` per tensor, and never moves it. Quantized payloads
+stay in their on-disk block layout; F32 tensors upload as raw little-endian f32.
+
+| dtype | tensors | bytes | resident | note |
+| --- | ---: | ---: | ---: | --- |
+| F32 | 449 | 104,953,856 | 104,953,856 | supported |
+| Q8_0 | 64 | 1,392,640,000 | 1,392,640,000 | supported |
+| Q4_K | 257 | 11,449,958,400 | 11,449,958,400 | supported |
+| Q5_K | 2 | 122,552,320 | 122,552,320 | raw only, no dequant |
+| Q6_K | 79 | 4,122,316,800 | 4,122,316,800 | supported |
+| **total** | **851** | **17,192,421,376** | **17,192,421,376** | 16.01 GiB |
+
+`hipMemGetInfo` free fell by 17,169,842,176 B (15.99 GiB); the remaining 22.6 MB
+is allocator bookkeeping across 851 allocations. Read+upload took 5.28 s
+(3.26 GB/s host-to-device). A 20-tensor readback (`hipMemcpy` D2H, fresh file
+read) matched byte-for-byte and by FNV-1a checksum, 20/20.
+
+Embedding rows for token ids 0, 1, 1234, 100000 and 248319 matched the CPU
+`dequant_q4_k` reference exactly, 5120/5120 values, `max_abs = 0`.
+
+`lm_head` (`output.weight`, 248320x5120 Q6_K) against a fixed 5120-value vector:
+**1.785 ms** steady state, **584.1 GB/s**, 248,320 logits. The first launch after
+the 17 GB upload is cold at 5.839 ms (178.6 GB/s); `--reps 5` removes that. Top-5
+for the fixed probe vector: 12771 (0.098146), 113470 (0.096665), 32625
+(0.095551), 173544 (0.095195), 41011 (0.092445).
