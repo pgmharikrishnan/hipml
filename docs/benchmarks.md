@@ -175,6 +175,137 @@ hand-computed block vectors are exact (`assert_eq!`), so a layout misread cannot
 hide inside that budget. `13 passed, 0 failed, 1 skipped` (the host-only top-p
 case).
 
+## Prefill: tiled GEMM over quantized weights
+
+Prefill is compute-bound. One 26.9 B-parameter token costs 53.8 GFLOP, so the
+two arithmetic ceilings for this card are:
+
+| Compute | Peak | Tokens/s ceiling | % of it that would match llama.cpp |
+| --- | ---: | ---: | ---: |
+| fp32 FMA (dense) | 47.8 TFLOPS | **888 tok/s** | 141% — impossible |
+| fp16 FMA (dense) | 95.7 TFLOPS | **1779 tok/s** | 70.6% |
+
+`llama.cpp` HIP measures pp512 **1256.5 tok/s**, which needs 67.6 TFLOPS. That
+is above the fp32 peak, so an fp32 prefill cannot match it by construction. Every
+number below is against the **fp32** ceiling; the fp16 column is shown for the
+same reason, not as an excuse.
+
+### Kernel
+
+One block owns **256 prompt tokens × 64 output rows**. The weight tile is
+dequantised ONCE into 42 KB of shared memory (Q4_K/Q6_K/Q8_0, 32-value k-tiles)
+and multiplied against all 256 tokens, which is the entire win over 256 GEMVs:
+the dequantisation cost is paid once per 256 tokens instead of once per token.
+Each of 256 threads holds 8 tokens × 8 rows = 64 f32 accumulators; that 8×8
+microtile needs 16 shared dwords per 64 FMAs, which is what a 128-FMA/cycle CU
+can feed. A thread's tokens are strided by 32 (`tg + 32*tt`), so the 32 lanes of
+a warp read 32 banks rather than 8. f32 accumulate throughout; no fp16 anywhere.
+
+The first version used a 4×8 microtile (128 tokens × 64 rows). It measured
+**10.1–11.0 TFLOPS**; the 8×8 tile measures **15.1–16.9**, a 1.5× step from
+cutting shared traffic per FMA from 0.375 to 0.25 dwords and LDS instruction
+count per FMA in half. 130 VGPRs, no spills, 42,240 B LDS per block.
+
+### Qwen3.8-27B ffn shapes
+
+`hipml prefill-bench --reps 5`, 5 launches averaged per row after one warm-up:
+
+| Weight | Shape `[m,k]` | Type | M | us | TFLOPS | tok/s-eq | % fp32 (888) | % fp16 (1779) |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| ffn_up | 17408×5120 | Q6_K | 512 | 5579.4 | 16.36 | 91766.8 | 34.2% | 17.1% |
+| ffn_up | 17408×5120 | Q6_K | 2048 | 21684.3 | 16.84 | 94446.4 | 35.2% | 17.6% |
+| ffn_gate | 5120×17408 | Q4_K | 512 | 6027.1 | 15.14 | 84949.9 | 31.7% | 15.8% |
+| ffn_gate | 5120×17408 | Q4_K | 2048 | 21555.7 | 16.94 | 95009.5 | 35.4% | 17.7% |
+| ffn_down | 17408×5120 | Q6_K | 512 | 5675.9 | 16.08 | 90206.6 | 33.6% | 16.8% |
+| ffn_down | 17408×5120 | Q6_K | 2048 | 21655.2 | 16.86 | 94573.0 | 35.3% | 17.6% |
+
+`tok/s-eq` is M tokens through that one tensor per second; it is not comparable
+to 888/1779, which describe a whole model token. The two percentage columns are
+the comparable numbers: **31.7–35.4% of the fp32 ceiling**, 15.8–17.7% of fp16.
+At M=2048 the per-token cost is already flat, so the tile is compute-bound rather
+than launch-bound.
+
+### Whole model, one M=512 chunk
+
+`hipml prefill-model Qwen3.8-27B-Q4_K_M.gguf --tokens 512` reads every quantized
+tensor once in 64 MiB row-aligned chunks and times only the kernel launches
+(file read and uploads excluded, same method as `decode-bench`). 399 tensors run:
+Q4_K, Q6_K, Q8_0, plus `output.weight`; the token embedding is a lookup and is
+not a GEMM.
+
+| Pass | Tensors | Bytes | ms | TFLOP | TFLOPS | implied tok/s | % fp32 | % fp16 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| cold (all blocks) | 399 | 16.250 GB | 1889.6 | 26.0 | 13.78 | **271.0** | 30.5% | 15.2% |
+| warm (16 attention blocks skipped) | 289 | 12.444 GB | 1367.2 | 20.1 | 14.71 | **374.5** | 42.2% | 21.0% |
+
+The whole-model TFLOPS is below the single-tensor 15–17 because a 64 MiB chunk
+is a few hundred blocks, not a full tensor, so launch and tail effects show up.
+
+**The sum is compute-bound, not weight-read-bound.** 26.0 TFLOP at 13.78 TFLOPS
+takes 1.89 s; reading the same 16.25 GB at the measured 631 GB/s takes 25.8 ms.
+Arithmetic intensity is 1602 FLOP/byte against an fp32 balance point of 76
+FLOP/byte, so the weight stream is 21× from being the limit at M=512; at M=2048
+it is 84×.
+
+Two Q5_K tensors exist — `blk.51.ffn_down.weight` and `blk.55.ffn_down.weight`,
+5120×17408, 61,276,160 B each — and are **not implemented**. They are 0.123 GB,
+0.7% of the quantized bytes and 0.66% of model FLOPs; the cold number above is
+that much optimistic. They are reported, not silently dropped.
+
+### Cached input: cold versus warm TTFT
+
+The reference KV cache (`hipml-core/src/cache.rs`) is `[n_kv, capacity, head_dim]`
+per layer with an append API, and `prefix_match` returns the common prefix of the
+cached tokens and the prompt. The model has **16 full-attention blocks** (blk.3,
+blk.7 … blk.63) and **48 SSM blocks**. Only the attention blocks have a
+positional KV cache. The SSM blocks carry a fixed-size recurrent state that
+cannot be sliced by prefix, so the warm pass re-runs all 48 of them for the whole
+prompt. Nothing else is faked: the warm pass actually launches those GEMMs.
+
+| Scenario | Cached tokens | TTFT | Implied tok/s | Speed-up |
+| --- | ---: | ---: | ---: | ---: |
+| cold, cache empty | 0 | 1889.6 ms | 271.0 | 1.00× |
+| warm, same 512-token prompt | 512 | 1367.2 ms | 374.5 | **1.38×** |
+
+The cache is 67.1 MB at 512 tokens (16 layers × 2 × 4 KV heads × 512 × 256 × 4 B).
+Warm is 12.444 GB / 16.250 GB = 76.6% of the cold weight stream, i.e. the 48 SSM
+blocks dominate and cap the reuse win at 1.38×. A snapshot of each SSM block's
+recurrent state at the prefix boundary would make a repeated prompt nearly free,
+but that is state caching, not KV prefix caching, and is not implemented here.
+Attention numerics are not measured either: the KV contents in this harness are
+placeholders, and the claim is the prefix match plus the skipped GEMM work, not
+attention correctness (there is no Flash Attention path yet).
+
+### Parity
+
+Reference is `ops::gemm_q4_k/q6_k/q8_0` (dequantise a row, dot every token, same
+k order as the kernel). Small cases use `Tol::DEFAULT` (1e-4 abs / 1e-3 rel); the
+17408×5120 case uses 2e-3 abs / 3e-2 rel because a near-zero output from 5120
+terms can legitimately move that far through cancellation.
+
+| Case | max_abs | max_rel |
+| --- | ---: | ---: |
+| `prefill_q4_k` 64×512, t=4 | 3.81e-6 | 3.52e-5 |
+| `prefill_q6_k` 64×512, t=4 | 2.29e-5 | 3.42e-5 |
+| `prefill_q8_0` 64×512, t=4 | 9.54e-7 | 4.01e-5 |
+| `prefill_q6_k` 17408×5120, t=2 | 1.68e-4 | 4.40e-3 |
+
+`hipml parity` → `17 passed, 0 failed, 1 skipped` (the host-only top-p case).
+
+### Commands
+
+On the GPU box, from `C:\hipml-prefill`:
+
+```
+set HIP_PATH=C:\rocm-sdk\_rocm_sdk_core
+set HIPML_ARCH=gfx1201
+set PATH=C:\rocm-sdk\_rocm_sdk_core\bin;%PATH%
+cargo build --release -p hipml-cli --features hip
+target\release\hipml.exe parity
+target\release\hipml.exe prefill-bench
+target\release\hipml.exe prefill-model C:\models\Qwen3.8-27B-Q4_K_M.gguf --tokens 512
+```
+
 ## Method notes
 
 - Bandwidth ceiling uses the measured 633.6 GB/s, not the 640 GB/s spec, so the

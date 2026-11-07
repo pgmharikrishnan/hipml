@@ -274,8 +274,8 @@ pub fn model(args: &[String]) -> i32 {
         total as f64 / 631e9 * 1e3
     );
     println!(
-        "excluded: F32 norm/SSM tensors (0.1 GB), Q5_K blk.51/blk.55 ffn_down (2 x 61.3 MB, \
-         ~1.8% of ffn_down work), token-embedding lookup"
+        "excluded: F32 norm/SSM tensors (0.1 GB), Q5_K blk.51/blk.55 ffn_down (2 x 61.3 MB = \
+         0.7% of quantized bytes, 0.66% of model FLOPs), token-embedding lookup"
     );
     0
 }
