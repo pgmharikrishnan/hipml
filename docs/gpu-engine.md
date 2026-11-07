@@ -146,8 +146,8 @@ device and CPU argmax both 11751.
 | short-context decode, tokens 2..20 | 27.9 tok/s (35.9 ms) | **28.0 tok/s (35.7 ms)** |
 | 512-token prefill | 22.99 s, 22.27 tok/s (token loop) | **5.35 s, 95.8 tok/s** (chunk 256) |
 | 8,192-token prefill | — | **89.1 s, 91.9 tok/s** |
-| decode at depth 20,000, q8 KV | 21.21 tok/s (47.1 ms) | **26.3 tok/s (38.0 ms)** |
-| decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | **20.7 tok/s (48.2 ms)** |
+| decode at depth 20,000, q8 KV | 21.21 tok/s (47.1 ms) | **26.5 tok/s (37.7 ms)** |
+| decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | **21.0 tok/s (47.7 ms)** |
 
 llama.cpp HIP on the same box: 31.4 tok/s short context, 21.86 tok/s at a
 97,387-token prompt.
@@ -177,19 +177,19 @@ At depth the same 35.7 ms base applies, plus the KV stream:
 
 | depth | KV bytes/token | at 632 GB/s | measured attention | total |
 | --- | ---: | ---: | ---: | ---: |
-| 20,000 | 0.696 GB | 1.1 ms | 2.3 ms | 38.0 ms |
-| 100,000 | 3.48 GB | 5.5 ms | 12.5 ms | 48.2 ms |
+| 20,000 | 0.696 GB | 1.1 ms | 2.1 ms | 37.7 ms |
+| 100,000 | 3.48 GB | 5.5 ms | 12.1 ms | 47.7 ms |
 
 So at 100K the quantized-KV attention kernel runs at ~280 GB/s of a 632 GB/s
 roofline; that, not the host, is the remaining depth gap (the 16 host round-trips
-that WP13 paid are gone: 56.9 → 48.2 ms).
+that WP13 paid are gone: 56.9 → 47.7 ms).
 
 ### Prefill
 
 | tokens | chunk | wall | tok/s | ms/token |
 | --- | ---: | ---: | ---: | ---: |
 | 512 | 128 | 6.92 s | 74.0 | 13.5 |
-| 512 | 256 | 5.35 s | **95.8** | 10.4 |
+| 512 | 256 | 5.34 s | **95.9** | 10.4 |
 | 8,192 | 256 | 89.1 s | **91.9** | 10.9 |
 
 The per-token part of a chunk is what dominates now: each token still launches
