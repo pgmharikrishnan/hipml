@@ -450,7 +450,8 @@ pub fn launch_attention_kv(
     let cfg = LaunchConfig {
         grid: ((n_kv * splits) as u32, 1, 1),
         block: ((32 * group) as u32, 1, 1),
-        shared_mem_bytes: 0,
+        // KV_TILE (8) rows of K and of V, dequantized to f32.
+        shared_mem_bytes: (2 * 8 * head_dim * 4) as u32,
     };
     kernel.launch(cfg, stream, &mut params)?;
 

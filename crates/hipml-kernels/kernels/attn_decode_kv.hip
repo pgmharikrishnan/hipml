@@ -9,25 +9,30 @@
 //
 // Block shape is 32 * (n_heads / n_kv) threads: one warp per query head of the
 // KV group, so the six Qwen3.8-27B query heads that share a KV head sit in the same
-// block and read the same cache row. The six reads of the row are the same
-// addresses within a few hundred cycles, so L1/L2 serve five of them and DRAM
-// sees one read. One block per *query* head would stream the cache 6x at 100K,
-// where the cache is far larger than L2.
+// block and work from the same cache row.
 //
-// Each lane owns 8 components of the query and of the accumulator (head_dim
-// 256 / 32 lanes). A cache row is walked one 32-value block at a time, so a warp
-// reads 32 consecutive payload bytes per block: fully coalesced, dequantized in
-// registers, no shared-memory staging and no __syncthreads in the KV loop.
+// ## Why a shared-memory tile
 //
-// The KV loop is tiled 4 rows deep and K *and* V are both loaded before any
-// arithmetic. At one row per iteration the V loads could not be issued until
-// after the score reduction, which made the loop two dependent memory latencies
-// long and left it at 85 GB/s on gfx1201; batching 4 rows (32 loads in flight)
-// is what makes it bandwidth-bound.
+// Reading the cache straight from global in each of the six warps does not
+// share anything: the warps drift apart, the row falls out of L1, and DRAM sees
+// six reads of every byte. Measured on gfx1201 that pinned the kernel at
+// 108 GB/s of *unique* KV traffic while DRAM was already at ~648 GB/s, i.e. the
+// six-fold duplication was the whole cost.
 //
-// Layout and the format itself: crates/hipml-core/src/kv.rs. Per-lane value:
-//   q8: d * qs[lane]                     block = f16 d | 32 i8
+// So the block stages KV_TILE rows into shared memory once, *dequantized to
+// f32*, and the warps then read f32 from shared:
+//
+//   stage:   192 threads dequantize 2 x KV_TILE x head_dim values
+//   compute: each warp does its own q head against the same f32 tile
+//
+// Dequantizing once instead of once per warp is also what makes q4 cheaper than
+// q8 per byte rather than more expensive: at one row per warp per iteration the
+// nibble unpacking ran six times.
+//
+// Layout and the format itself: crates/hipml-core/src/kv.rs. Per value:
+//   q8: d * qs[j]                        block = f16 d | 32 i8
 //   q4: d * (nibble - 8)                 block = f16 d | 16 B, low = j, high = j+16
+// `head_dim` is a multiple of 32 and `head_dim / 32` a power of two.
 //
 // Partials are fp32: part_acc[n_heads][splits][head_dim], part_ml[n_heads][splits][2]
 // with (running max, running sum). The reduce recomputes the merge weights from
@@ -39,32 +44,32 @@
 #include <hip/hip_fp16.h>
 
 #define KV_MAX_CHUNKS 8
-#define KV_TILE 4
+#define KV_TILE 8
 
 // One block: f16 scale followed by 32 signed bytes.
 struct KvQ8 {
     enum { BLOCK_BYTES = 34 };
-    static __device__ __forceinline__ float at(const void* row, int chunk, int lane) {
-        const char* b = (const char*)row + chunk * BLOCK_BYTES;
+    // Value `i` of a row, dequantized. i>>5 is the block, i&31 the element.
+    static __device__ __forceinline__ float at(const void* row, int i) {
+        const char* b = (const char*)row + (i >> 5) * BLOCK_BYTES;
         const float d = __half2float(*(const __half*)b);
-        return d * (float)((const signed char*)b)[2 + lane];
+        return d * (float)((const signed char*)b)[2 + (i & 31)];
     }
 };
 
 // One block: f16 scale followed by 16 bytes, low nibble = value j, high = j+16.
 struct KvQ4 {
     enum { BLOCK_BYTES = 18 };
-    static __device__ __forceinline__ float at(const void* row, int chunk, int lane) {
-        const char* b = (const char*)row + chunk * BLOCK_BYTES;
+    static __device__ __forceinline__ float at(const void* row, int i) {
+        const char* b = (const char*)row + (i >> 5) * BLOCK_BYTES;
         const float d = __half2float(*(const __half*)b);
-        const int byte = (int)((const unsigned char*)b)[2 + (lane & 15)];
-        const int q = (lane < 16) ? (byte & 15) : (byte >> 4);
-        return d * (float)(q - 8);
+        const int e = i & 31;
+        const int byte = (int)((const unsigned char*)b)[2 + (e & 15)];
+        return d * (float)(((e < 16) ? (byte & 15) : (byte >> 4)) - 8);
     }
 };
 
-// Butterfly sum: every lane ends with the total, so no broadcast is needed and
-// four scores can be reduced concurrently.
+// Butterfly sum: every lane ends with the total, so no broadcast is needed.
 __device__ __forceinline__ float warp_sum(float v) {
     for (int off = 1; off < warpSize; off <<= 1) {
         v += __shfl_xor_sync(0xffffffffffffffffull, v, off);
@@ -72,20 +77,29 @@ __device__ __forceinline__ float warp_sum(float v) {
     return v;
 }
 
-// Load all `nb` chunks of one row, unconditionally.
-//
-// The obvious `if (c < nb) dst[c] = at(row, c, lane)` compiles to a branch
-// around each block, and with it a `s_wait_loadcnt 0` per block: eight separate
-// memory round trips per row. Reusing chunk 0 for the chunks that do not exist
-// keeps every load in one basic block, so the scheduler issues the whole tile
-// and waits once. head_dim 256 (nb = 8) never takes the substitute path.
+// Dequantize KV_TILE rows of `k` and `v` into shared f32. Every thread walks the
+// row with stride blockDim, so a warp reads 32 consecutive payload bytes.
 template <typename Loader>
-__device__ __forceinline__ void load_chunks(float* dst, const void* row, int nb, int lane) {
-    #pragma unroll
-    for (int c = 0; c < KV_MAX_CHUNKS; ++c) {
-        const int cc = (c < nb) ? c : 0;
-        const float x = Loader::at(row, cc, lane);
-        dst[c] = (c < nb) ? x : 0.0f;
+__device__ __forceinline__ void stage_tile(
+    float* ks,
+    float* vs,
+    const char* krow,
+    const char* vrow,
+    int rows,
+    int row_bytes,
+    int head_dim)
+{
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+    for (int r = 0; r < rows; ++r) {
+        const char* kr = krow + (size_t)r * row_bytes;
+        const char* vr = vrow + (size_t)r * row_bytes;
+        float* kd = ks + r * head_dim;
+        float* vd = vs + r * head_dim;
+        for (int i = tid; i < head_dim; i += nthreads) {
+            kd[i] = Loader::at(kr, i);
+            vd[i] = Loader::at(vr, i);
+        }
     }
 }
 
@@ -103,6 +117,7 @@ __device__ __forceinline__ void kv_decode_body(
     float scale,
     int splits)
 {
+    extern __shared__ float sh[];
     const int group = n_heads / n_kv;
     const int kvh = blockIdx.x / splits;
     const int split = blockIdx.x - kvh * splits;
@@ -111,7 +126,7 @@ __device__ __forceinline__ void kv_decode_body(
     if (warp >= group) return;
 
     const int h = kvh * group + warp;
-    const int nb = head_dim >> 5;       // 32-value blocks per row
+    const int nb = head_dim >> 5;
     const int per = (seq + splits - 1) / splits;
     const int start = split * per;
     const int end = (start + per < seq) ? start + per : seq;
@@ -121,83 +136,54 @@ __device__ __forceinline__ void kv_decode_body(
     float acc[KV_MAX_CHUNKS];
     #pragma unroll
     for (int c = 0; c < KV_MAX_CHUNKS; ++c) {
-        qv[c] = (c < nb) ? q[h * head_dim + c * 32 + lane] : 0.0f;
+        const int cc = (c < nb) ? c : 0;
+        const float x = q[h * head_dim + cc * 32 + lane];
+        qv[c] = (c < nb) ? x : 0.0f;
         acc[c] = 0.0f;
     }
 
-    const size_t row_bytes = (size_t)nb * Loader::BLOCK_BYTES;
+    float* ks = sh;
+    float* vs = sh + KV_TILE * head_dim;
+    const int row_bytes = nb * Loader::BLOCK_BYTES;
     const char* kbase = (const char*)k + (size_t)kvh * seq * row_bytes;
     const char* vbase = (const char*)v + (size_t)kvh * seq * row_bytes;
 
     float m = -INFINITY;
     float l = 0.0f;
 
-    int pos = start;
-    for (; pos + KV_TILE <= end; pos += KV_TILE) {
+    for (int pos = start; pos < end; pos += KV_TILE) {
+        const int rows = (pos + KV_TILE <= end) ? KV_TILE : (end - pos);
         const char* krow = kbase + (size_t)pos * row_bytes;
         const char* vrow = vbase + (size_t)pos * row_bytes;
 
-        // All 32 loads issue before the first use: the tile is the unit of
-        // memory-level parallelism, not the row.
-        float kk[KV_TILE][KV_MAX_CHUNKS];
-        float vv[KV_TILE][KV_MAX_CHUNKS];
-        #pragma unroll
-        for (int t = 0; t < KV_TILE; ++t) {
-            load_chunks<Loader>(kk[t], krow + t * row_bytes, nb, lane);
-            load_chunks<Loader>(vv[t], vrow + t * row_bytes, nb, lane);
-        }
+        // Wait for the previous tile's readers before overwriting the buffer.
+        __syncthreads();
+        stage_tile<Loader>(ks, vs, krow, vrow, rows, row_bytes, head_dim);
+        __syncthreads();
 
-        float s[KV_TILE];
-        #pragma unroll
-        for (int t = 0; t < KV_TILE; ++t) {
+        for (int r = 0; r < rows; ++r) {
+            const float* kr = ks + r * head_dim;
+            const float* vr = vs + r * head_dim;
+            float kk[KV_MAX_CHUNKS];
+            float vv[KV_MAX_CHUNKS];
+            #pragma unroll
+            for (int c = 0; c < KV_MAX_CHUNKS; ++c) {
+                kk[c] = (c < nb) ? kr[c * 32 + lane] : 0.0f;
+                vv[c] = (c < nb) ? vr[c * 32 + lane] : 0.0f;
+            }
             float dot = 0.0f;
             #pragma unroll
-            for (int c = 0; c < KV_MAX_CHUNKS; ++c) dot += qv[c] * kk[t][c];
-            s[t] = warp_sum(dot) * scale;
-        }
+            for (int c = 0; c < KV_MAX_CHUNKS; ++c) dot += qv[c] * kk[c];
+            const float s = warp_sum(dot) * scale;
 
-        float m_new = m;
-        #pragma unroll
-        for (int t = 0; t < KV_TILE; ++t) m_new = fmaxf(m_new, s[t]);
-        const float corr = expf(m - m_new);
-        float p[KV_TILE];
-        float lsum = 0.0f;
-        #pragma unroll
-        for (int t = 0; t < KV_TILE; ++t) {
-            p[t] = expf(s[t] - m_new);
-            lsum += p[t];
-        }
-        l = l * corr + lsum;
-        m = m_new;
-
-        #pragma unroll
-        for (int c = 0; c < KV_MAX_CHUNKS; ++c) {
-            float a = acc[c] * corr;
+            const float m_new = fmaxf(m, s);
+            const float corr = expf(m - m_new);
+            const float p = expf(s - m_new);
+            l = l * corr + p;
+            m = m_new;
             #pragma unroll
-            for (int t = 0; t < KV_TILE; ++t) a += p[t] * vv[t][c];
-            acc[c] = a;
+            for (int c = 0; c < KV_MAX_CHUNKS; ++c) acc[c] = acc[c] * corr + p * vv[c];
         }
-    }
-
-    // Tail: at most KV_TILE-1 rows, one at a time.
-    for (; pos < end; ++pos) {
-        const char* kr = kbase + (size_t)pos * row_bytes;
-        const char* vr = vbase + (size_t)pos * row_bytes;
-        float kk[KV_MAX_CHUNKS];
-        float vv[KV_MAX_CHUNKS];
-        load_chunks<Loader>(kk, kr, nb, lane);
-        load_chunks<Loader>(vv, vr, nb, lane);
-        float dot = 0.0f;
-        #pragma unroll
-        for (int c = 0; c < KV_MAX_CHUNKS; ++c) dot += qv[c] * kk[c];
-        const float s = warp_sum(dot) * scale;
-        const float m_new = fmaxf(m, s);
-        const float corr = expf(m - m_new);
-        const float p = expf(s - m_new);
-        l = l * corr + p;
-        m = m_new;
-        #pragma unroll
-        for (int c = 0; c < KV_MAX_CHUNKS; ++c) acc[c] = acc[c] * corr + p * vv[c];
     }
 
     float* dst = part_acc + ((size_t)h * splits + split) * head_dim;
