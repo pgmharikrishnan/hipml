@@ -139,3 +139,73 @@ pub fn sample_top_p_f32(probs: &[f32], top_p: f32, u: f32) -> usize {
     }
     order[keep - 1]
 }
+
+/// Decode-time causal attention for one query position against the whole cache.
+///
+/// `q` is `[n_heads, head_dim]`, `k` and `v` are `[n_kv, seq, head_dim]`, and
+/// GQA is handled by pointing `n_heads / n_kv` query heads at one KV head. This
+/// is the shape a dense model runs per generated token, and the one llama.cpp
+/// cannot do on the GPU for an architecture without a Flash Attention path.
+///
+/// Kernel: `attn_decode_f32`, one block per query head, online softmax so the
+/// whole cache is never materialised.
+#[allow(clippy::too_many_arguments)]
+pub fn attn_decode_f32(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    n_heads: usize,
+    n_kv: usize,
+    head_dim: usize,
+    seq: usize,
+    scale: f32,
+) -> Vec<f32> {
+    assert_eq!(q.len(), n_heads * head_dim, "q must be n_heads*head_dim");
+    assert_eq!(
+        k.len(),
+        n_kv * seq * head_dim,
+        "k must be n_kv*seq*head_dim"
+    );
+    assert_eq!(v.len(), k.len(), "v must match k");
+    assert!(n_heads % n_kv == 0, "n_heads must be a multiple of n_kv");
+    let group = n_heads / n_kv;
+
+    let mut out = vec![0.0f32; n_heads * head_dim];
+    for h in 0..n_heads {
+        let kvh = h / group;
+        let qh = &q[h * head_dim..(h + 1) * head_dim];
+        let kbase = kvh * seq * head_dim;
+        let obase = h * head_dim;
+
+        // Pass 1: scores with the max folded in, so exp cannot overflow.
+        let mut scores = vec![0.0f32; seq];
+        let mut max = f32::NEG_INFINITY;
+        for row in 0..seq {
+            let kr = &k[kbase + row * head_dim..kbase + (row + 1) * head_dim];
+            let mut dot = 0.0f32;
+            for d in 0..head_dim {
+                dot += qh[d] * kr[d];
+            }
+            let s = dot * scale;
+            scores[row] = s;
+            max = max.max(s);
+        }
+
+        // Pass 2: softmax weights and the weighted sum of V.
+        let mut sum = 0.0f32;
+        for row in 0..seq {
+            let w = (scores[row] - max).exp();
+            scores[row] = w;
+            sum += w;
+        }
+        let inv = 1.0 / sum;
+        for row in 0..seq {
+            let w = scores[row] * inv;
+            let vr = &v[kbase + row * head_dim..kbase + (row + 1) * head_dim];
+            for d in 0..head_dim {
+                out[obase + d] += w * vr[d];
+            }
+        }
+    }
+    out
+}

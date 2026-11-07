@@ -168,3 +168,86 @@ fn compare_reports_distance_beyond_tolerance() {
     let err = compare(&[1.0, 2.0], &[1.0, 3.0], tol).expect_err("outside tolerance");
     assert!(err.max_abs > 0.9);
 }
+
+#[test]
+fn attention_matches_a_hand_computed_case() {
+    // One head, one KV head, head_dim 2, seq 2, no scale.
+    let q = vec![1.0, 0.0];
+    let k = vec![1.0, 0.0, 0.0, 1.0];
+    let v = vec![10.0, 0.0, 0.0, 100.0];
+    let out = ops::attn_decode_f32(&q, &k, &v, 1, 1, 2, 2, 1.0);
+    // scores 1.0 and 0.0 -> softmax [0.731, 0.269] -> weighted V.
+    let e = std::f32::consts::E;
+    let (p0, p1) = (e / (e + 1.0), 1.0 / (e + 1.0));
+    assert!((out[0] - p0 * 10.0).abs() < 1e-5, "got {}", out[0]);
+    assert!((out[1] - p1 * 100.0).abs() < 1e-5, "got {}", out[1]);
+}
+
+#[test]
+fn attention_of_uniform_scores_is_the_mean_of_values() {
+    let (heads, kv, dim, seq) = (4usize, 1usize, 8usize, 16usize);
+    let q = vec![0.0f32; heads * dim];
+    let k = vec![1.0f32; kv * seq * dim];
+    let mut rng = Rng::new(29);
+    let v: Vec<f32> = (0..kv * seq * dim).map(|_| rng.normal()).collect();
+    let out = ops::attn_decode_f32(&q, &k, &v, heads, kv, dim, seq, 0.1);
+
+    for h in 0..heads {
+        for d in 0..dim {
+            let mean: f32 = (0..seq).map(|s| v[s * dim + d]).sum::<f32>() / seq as f32;
+            assert!(
+                (out[h * dim + d] - mean).abs() < 1e-5,
+                "head {h} dim {d}: {} vs {mean}",
+                out[h * dim + d]
+            );
+        }
+    }
+}
+
+#[test]
+fn attention_routes_each_query_head_to_its_kv_head() {
+    // Two KV heads with disjoint value patterns; GQA 2:1 must not mix them.
+    let (heads, kv, dim, seq) = (4usize, 2usize, 4usize, 3usize);
+    let q = vec![1.0f32; heads * dim];
+    let k = vec![1.0f32; kv * seq * dim];
+    let mut v = vec![0.0f32; kv * seq * dim];
+    for s in 0..seq {
+        for d in 0..dim {
+            v[s * dim + d] = 1.0; // kv head 0 -> all ones
+            v[seq * dim + s * dim + d] = 7.0; // kv head 1 -> all sevens
+        }
+    }
+    let out = ops::attn_decode_f32(&q, &k, &v, heads, kv, dim, seq, 0.1);
+    for h in 0..heads {
+        let want = if h < 2 { 1.0 } else { 7.0 };
+        for d in 0..dim {
+            assert!((out[h * dim + d] - want).abs() < 1e-5, "head {h} dim {d}");
+        }
+    }
+}
+
+#[test]
+fn attention_output_is_a_convex_combination() {
+    // Every output element must sit inside the range of the values it attended.
+    let (heads, kv, dim, seq) = (2usize, 1usize, 6usize, 32usize);
+    let mut rng = Rng::new(31);
+    let q: Vec<f32> = (0..heads * dim).map(|_| rng.normal()).collect();
+    let k: Vec<f32> = (0..kv * seq * dim).map(|_| rng.normal()).collect();
+    let v: Vec<f32> = (0..kv * seq * dim).map(|_| rng.normal()).collect();
+    let out = ops::attn_decode_f32(&q, &k, &v, heads, kv, dim, seq, 0.125);
+    for d in 0..dim {
+        let lo = (0..seq)
+            .map(|s| v[s * dim + d])
+            .fold(f32::INFINITY, f32::min);
+        let hi = (0..seq)
+            .map(|s| v[s * dim + d])
+            .fold(f32::NEG_INFINITY, f32::max);
+        for h in 0..heads {
+            let x = out[h * dim + d];
+            assert!(
+                x >= lo - 1e-5 && x <= hi + 1e-5,
+                "head {h} dim {d}: {x} outside [{lo},{hi}]"
+            );
+        }
+    }
+}
