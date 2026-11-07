@@ -3,12 +3,15 @@
 //! The parity runner is the gate: a kernel that is not compared against the
 //! reference here is not a kernel hipml can use.
 
-use hipml_core::parity::{bench_cases, cases, compare, prefill_cases, quant_cases, OpCase};
+use hipml_core::parity::{
+    bench_cases, cases, compare, deep_cases, prefill_cases, quant_cases, OpCase,
+};
 use hipml_core::tensor::Tensor;
 use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
 
 mod attn_cmd;
 mod gen_cmd;
+mod kv_cmds;
 mod load_cmd;
 mod prefill_cmd;
 mod quant_cmd;
@@ -29,6 +32,7 @@ fn main() {
     match cmd {
         "probe" => probe(),
         "kernels" => kernels(),
+        "vram" => kv_cmds::vram(&args[1..]),
         "bench" => std::process::exit(bench()),
         "gguf" => std::process::exit(quant_cmd::gguf(&args[1..])),
         "load" => std::process::exit(load_cmd::load(&args[1..])),
@@ -43,9 +47,15 @@ fn main() {
         "ssm" => std::process::exit(ssm_cmd::ssm(&args[1..])),
         "attn-parity" => std::process::exit(attn_cmd::parity(&args[1..])),
         "attn-bench" => std::process::exit(attn_cmd::bench(&args[1..])),
+        "bench-kv" => std::process::exit(kv_cmds::bench_kv(&args[1..])),
         "parity" => {
-            let filter = args.iter().skip(1).find(|a| !a.starts_with('-')).cloned();
-            std::process::exit(parity(filter.as_deref()));
+            let filter = args
+                .iter()
+                .skip(1)
+                .find(|a| !a.starts_with('-'))
+                .cloned();
+            let deep = args.iter().any(|a| a == "--deep");
+            std::process::exit(parity(filter.as_deref(), deep));
         }
         "help" | "--help" | "-h" => help(),
         other => {
@@ -65,7 +75,9 @@ fn help() {
          commands:\n\
          \x20 probe     show the HIP device and how this binary was built\n\
          \x20 kernels   list the kernel manifest\n\
+         \x20 vram      hipMemGetInfo now; --need BYTES also reports whether a cache fits\n\
          \x20 parity    run every parity case (reference vs device); optional name filter\n\
+         \x20           --deep adds the 100K-context cases (slow host reference)\n\
          \x20 bench     time each kernel launch and report effective bandwidth\n\
          \x20 gguf      list the tensors in a GGUF file; `gguf <file> read <tensor>`\n\
          \x20 decode-bench  stream every Q4_K/Q6_K/Q8_0 tensor through GEMV once\n\
@@ -77,6 +89,8 @@ fn help() {
          \x20 ssm       gated-delta-net parity (small + real layer) and layer timing\n\
          \x20 attn-parity --gguf PATH   GPU full-attention block vs CPU reference\n\
          \x20 attn-bench  --gguf PATH   per-layer time at depths 0/8192/100000\n\
+         \x20 bench-kv  quantized-KV decode attention: depth x q8/q4 x 1 head / 16 layers\n\
+         \x20           --depths 1024,8192,32768,100000 --reps 3\n\
          \n\
          build with `--features hip` on a machine with the ROCm/HIP runtime.",
         version = env!("CARGO_PKG_VERSION")
@@ -125,6 +139,7 @@ fn kernels() {
             } => format!("prefill {rows} rows x {tokens} tokens, {block} threads"),
             KernelKind::PerHead { block } => format!("per-head, {block} threads"),
             KernelKind::PerHeadOnDim => "per-head, one thread per dim".to_string(),
+            KernelKind::KvSplit => "per (kv head, split), 32*gqa-group threads".to_string(),
             KernelKind::Linear { block } => format!("linear, {block} threads"),
             KernelKind::Composite => "composite (several launches)".to_string(),
             KernelKind::SplitK => "split-K grid, launcher-sized".to_string(),
@@ -136,11 +151,16 @@ fn kernels() {
 
 /// Run every case. Exit 0 only when nothing failed; skips are reported but do
 /// not fail the run, so the suite stays meaningful on a machine without a GPU.
-fn parity(filter: Option<&str>) -> i32 {
+fn parity(filter: Option<&str>, deep: bool) -> i32 {
     let launcher = hipml_kernels::Launcher::new();
     match &launcher {
         Ok(l) => println!("device: {}", l.device_name),
         Err(e) => println!("device: none ({e})"),
+    }
+
+    let mut all = cases();
+    if deep {
+        all.extend(deep_cases());
     }
 
     let mut pass = 0usize;
@@ -148,7 +168,7 @@ fn parity(filter: Option<&str>) -> i32 {
     let mut skip = 0usize;
     println!("\n{:<20} {:<7} {}", "case", "result", "detail");
 
-    for case in cases() {
+    for case in all {
         if let Some(f) = filter {
             if !case.name.contains(f) {
                 continue;
@@ -329,6 +349,11 @@ fn bench() -> i32 {
 
     let all: Vec<OpCase> = cases().into_iter().chain(bench_cases()).collect();
     for case in all {
+        // The quantized-KV cases are timed by `bench-kv`, with depths and layer
+        // counts that a single parity-shaped launch cannot show.
+        if case.name.starts_with("attn_decode_kv") {
+            continue;
+        }
         let Some(spec) = hipml_kernels::spec(case.name) else {
             continue;
         };

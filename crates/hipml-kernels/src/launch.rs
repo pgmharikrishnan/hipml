@@ -11,12 +11,12 @@ use hipml_core::tensor::Tensor;
 #[cfg(feature = "hip")]
 pub(crate) mod device {
     use super::*;
-    use hipml_hip::{Buffer, Device, LaunchConfig, Module, Stream};
+    use hipml_hip::{Buffer, ByteBuffer, Device, LaunchConfig, Module, Stream};
     use std::ffi::c_void;
 
-    #[path = "../../prefill_launch.rs"]
+    #[path = "prefill_launch.rs"]
     mod prefill_launch;
-    #[path = "../../quant_launch.rs"]
+    #[path = "quant_launch.rs"]
     mod quant_launch;
 
     pub struct Launcher {
@@ -70,6 +70,7 @@ pub(crate) mod device {
                 "residual_add_f32" => self.linear2(case, inputs, reps),
                 "softmax_f32" => self.softmax(case, inputs, reps),
                 "attn_decode_f32" | "attn_decode_pm_f32" => self.attention(case, inputs, reps),
+                n if n.starts_with("attn_decode_kv") => self.attention_kv(case, inputs, reps),
                 "qg_split_f32" | "head_rmsnorm_f32" | "mrope_f32" | "q_gate_f32"
                 | "kv_append_f32" | "attn_decode_split_f32" => {
                     self.run_attn_case(case, inputs, reps)
@@ -342,6 +343,17 @@ pub(crate) mod device {
             self.stream.synchronize()?;
 
             out.to_host()
+        }
+
+        /// Quantized-KV decode attention: the split pass and the reduce, so the
+        /// timing covers both.
+        fn attention_kv(
+            &self,
+            case: &OpCase,
+            inputs: &[Tensor],
+            reps: usize,
+        ) -> Result<Vec<f32>, String> {
+            crate::launch_kv::run(&self.module, &self.stream, case, inputs, reps)
         }
 
         fn softmax(

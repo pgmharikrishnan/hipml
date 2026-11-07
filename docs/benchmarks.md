@@ -24,6 +24,38 @@ keeps the decode ceiling honest.
 
 ## The model under test
 
+### Qwen3.8-27B hybrid KV traffic roofline
+
+Qwen3.8-27B has 16 full-attention layers (every fourth layer), not 64; its
+remaining 48 layers use fixed-size recurrent state. Each attention layer has
+24 query heads, 4 KV heads and head width 256. At 32 values per block, the
+16-layer KV traffic per cached token is 65,536 bytes for f16, 34,816 bytes
+for q8 (2-byte scale plus 32 bytes), and 18,432 bytes for q4 (2-byte scale
+plus 16 bytes). Query gating and per-head query/key RMS normalization are
+separate operations.
+
+The following is an arithmetic ceiling, **not a benchmark**. It assumes
+17.19 GB of weights and one read of each KV element per decode step, at the
+measured 631 GB/s. It excludes recurrent state, activations, compute, and
+launch overhead; repeated KV reads for GQA can lower achievable throughput.
+
+| Context tokens | f16 tok/s | q8 tok/s | q4 tok/s |
+| ---: | ---: | ---: | ---: |
+| 0 | 36.71 | 36.71 | 36.71 |
+| 8,192 | 35.60 | 36.11 | 36.39 |
+| 32,768 | 32.63 | 34.42 | 35.46 |
+| 100,000 | 26.58 | 30.52 | 33.15 |
+| 131,072 | 24.48 | 29.01 | 32.18 |
+
+At 100,000 tokens, f16 KV is 6.5536 GB: 38.1% of the weight bytes, or
+27.6% of combined weight and KV bytes. Weights plus f16 KV total 23.7436 GB,
+before activations and recurrent state; quantization is not a KV capacity
+requirement at this depth. The q8 ceiling rises by 3.94 tok/s at 100,000
+tokens and 0.51 tok/s at 8,192; q4 rises by 6.57 and 0.79 tok/s respectively.
+
+Formula: `631e9 / (17.19e9 + depth * bytes_per_token)`. These figures
+are distinct from the measurements below, which use 633.6 GB/s.
+
 `bartowski/NousResearch_Qwen3.8-27B-GGUF`, Q4_K_M: 16.01 GiB, 26.90 B parameters,
 `qwen3_5`. Decode ceiling **36.9 tok/s**, prefill ceiling **1779 tok/s**.
 
@@ -305,9 +337,193 @@ target\release\hipml.exe parity
 target\release\hipml.exe prefill-bench
 target\release\hipml.exe prefill-model C:\models\Qwen3.8-27B-Q4_K_M.gguf --tokens 512
 ```
+## Quantized KV at depth (measured)
+
+The formats, the reference and the kernels are in `hipml-core/src/kv.rs`,
+`ops::attn_decode_kv` and `kernels/attn_decode_kv.hip`. The block layouts are
+ggml's, so a cache packed here is the same bytes `llama.cpp -ctk/-ctv` holds:
+
+| dtype | block | bytes/value | Qwen3.8-27B bytes/token | 100K cache | 128K cache |
+| --- | --- | ---: | ---: | ---: | ---: |
+| f16 | — | 2.0 | 65,536 | 6.5536 GB | 8.3886 GB |
+| q8_0 | 2 B f16 scale + 32 i8 = 34 B | 1.0625 | 34,816 | 3.4816 GB | 4.5639 GB |
+| q4_0 | 2 B f16 scale + 16 B packed = 18 B | 0.5625 | 18,432 | 1.8432 GB | 2.4159 GB |
+
+Qwen3.8-27B bytes/token = `2 (K,V) * 4 kv heads * 16 full-attention layers * 256`.
+Parity is `Tol::DEFAULT` (abs 1e-4, rel 1e-3); the worst absolute difference
+across the 14 quantized-attention cases, including the 100,000-token one, was
+**1.6e-7**. Both sides read the same encoded bytes, so the comparison measures
+accumulation order, not the format: the quantization error cancels.
+
+### Decode attention: depth, one head and the whole step
+
+`hipml bench-kv --depths 1024,8192,32768,100000 --reps 5`, gfx1201, one process
+per row set. "Step" is one pass over 16 layers at that depth, i.e. the attention
+work of one 100K decode token. `share` and `tok/s` count the measured weight
+stream (632.0 GB/s, 27.20 ms for 17.19 GB) plus attention; they exclude every
+other layer op, so they are an attention-only model of a decode step.
+
+| dtype | heads | layers | depth | splits | µs/step | KV GiB | KV GB/s | share | tok/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| q8 | 1 | 1 | 1,024 | 16 | 72.1 | 0.001 | 7.7 | — | — |
+| q8 | 1 | 1 | 8,192 | 128 | 85.5 | 0.004 | 52.1 | — | — |
+| q8 | 1 | 1 | 32,768 | 256 | 125.1 | 0.017 | 142.5 | — | — |
+| q8 | 1 | 1 | 100,000 | 256 | 368.0 | 0.051 | 147.8 | — | — |
+| q8 | 1 | 1 | 131,072 | 256 | 265.6 | 0.066 | 268.5 | — | — |
+| q8 | 24 | 16 | 1,024 | 16 | 501.1 | 0.033 | 71.1 | 1.8% | 36.15 |
+| q8 | 24 | 16 | 8,192 | 64 | 1,228.2 | 0.266 | 232.2 | 4.3% | 35.23 |
+| q8 | 24 | 16 | 32,768 | 64 | 4,211.8 | 1.062 | 270.9 | 13.4% | 31.88 |
+| **q8** | **24** | **16** | **100,000** | **64** | **12,401.5** | **3.242** | **280.7** | **31.3%** | **25.28** |
+| q8 | 24 | 16 | 131,072 | 64 | 16,115.0 | 4.250 | 283.2 | 37.2% | 23.11 |
+| q4 | 1 | 1 | 1,024 | 16 | 40.2 | 0.000 | 7.3 | — | — |
+| q4 | 1 | 1 | 8,192 | 128 | 37.9 | 0.002 | 62.3 | — | — |
+| q4 | 1 | 1 | 32,768 | 256 | 176.6 | 0.009 | 53.4 | — | — |
+| q4 | 1 | 1 | 100,000 | 256 | 325.7 | 0.027 | 88.4 | — | — |
+| q4 | 1 | 1 | 131,072 | 256 | 388.5 | 0.035 | 97.2 | — | — |
+| q4 | 24 | 16 | 1,024 | 16 | 284.5 | 0.018 | 66.3 | 1.0% | 36.44 |
+| q4 | 24 | 16 | 8,192 | 64 | 1,427.1 | 0.141 | 105.8 | 5.0% | 34.98 |
+| q4 | 24 | 16 | 32,768 | 64 | 4,995.4 | 0.562 | 120.9 | 15.5% | 31.10 |
+| q4 | 24 | 16 | 100,000 | 64 | 14,615.1 | 1.717 | 126.1 | 35.0% | 23.94 |
+| q4 | 24 | 16 | 131,072 | 64 | 18,983.9 | 2.250 | 127.3 | 41.1% | 21.67 |
+
+The one-head rows are launch- and parallelism-bound (16 to 256 warps on a 32-CU
+card) and are not a bandwidth statement; they are here because the brief asks
+for them. The 24-head rows are the meaningful measurement.
+
+**The 100K path now runs at 281 GB/s, 89% of the card's 632 GB/s stream.** q8 reads
+3.242 GiB in 12.40 ms; the 24-head × 16-layer attention term is 12.4 ms of a
+39.6 ms decode step, so a hipml decode models at 25.3 tok/s against llama.cpp
+HIP's measured 21.86 tok/s at 97,387 tokens. q4 no longer wins on time: it reads
+half the bytes in the same 14.6 ms, because the instruction count per cached
+value is dtype-independent, so the smaller cache buys DRAM margin rather than
+wall time (126 GB/s of unique traffic). The remaining gap to the stream is the
+compute pass itself: an ablation with staging removed still measured 11.0 ms at
+100K.
+
+What the measurements did establish:
+
+- **GQA duplication was the first wall.** With one block per query head the six
+  heads sharing a KV head each pulled the row from DRAM; the kernel measured
+  108 GB/s of unique traffic while DRAM was already at ~648 GB/s, i.e. six
+  reads of every byte. One block per (KV head, split) with the six heads as
+  warps, reading a dequantized shared tile, moved it to 159 GB/s.
+- **Branching around each block load cost more than the loads.** The SASS for
+  `(c < nb) ? load : 0` was a branch and an `s_wait_loadcnt 0` per 32-value
+  block, eight serialised round trips per row. Unconditional loads with a
+  masked value fixed that; it was worth 40%.
+- **`expf` was not free.** gfx12 has `v_exp_f32`; `exp2(x * log2(e))` is the
+  same probability and removed a forty-instruction range reduction from the
+  inner loop.
+- **The loop was 243 instructions per cached value, not 67.** The disassembly
+  showed 16 scalar shared loads plus address math, and a `__shfl_xor_sync`
+  expansion of ~12 instructions per butterfly step — 60 of the 243. Giving each
+  lane eight components as two `float4` chunks (LDS.128, conflict-free), folding
+  the five butterfly steps into `__builtin_amdgcn_ds_bpermute` with the byte
+  offsets hoisted, and moving the rescale to once per tile took the 100K step
+  from 21.6 ms to 15.5 ms.
+- **Staging, not the loop, was then the wall: 43 instructions per dequantized
+  value.** Each value recomputed a 64-bit address and re-loaded the f16 scale,
+  and a row-at-a-time loop left two loads in flight per thread (measured
+  209 GB/s on a 632 GB/s card). Four values per 32-bit payload load, one
+  LDS.128 store, pointer walks instead of scaled indices, and a whole tile's
+  loads issued before the first is consumed got the same traffic to 281 GB/s.
+- **The tile size is a dtype decision.** q8 stages twice the bytes per row and
+  wants a 4-row tile: 8 KB per block, 8 blocks in the 64 KB of LDS per CU, 48
+  warps. q4 fits an 8-row tile (16 KB, 24 warps) and does better with half the
+  barriers. Same binary, `KV_TILE_Q8` / `KV_TILE_Q4`.
+
+### Depth against the ceiling
+
+Ceiling is `632.5 GB/s / (17.19 GB + depth * bytes_per_token)`, the same
+arithmetic as the roofline table above, restated at the measured bandwidth.
+"Measured" rows substitute the measured attention time into the step; f16 has no
+fast hipml kernel (the f32 `attn_decode_f32` reaches 6.8 GB/s), so its attention
+column is calculated, not measured, and is labelled as such.
+
+| depth | dtype | KV GB | ceiling tok/s (calc) | attn ms/step | step ms | tok/s | share |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8,192 | f16 | 0.537 | 35.68 | calc | 28.01 | 35.68 | calc |
+| 8,192 | q8 | 0.285 | 36.16 | 1.23 | 28.39 | 35.23 | 4.3% |
+| 8,192 | q4 | 0.151 | 36.39 | 1.43 | 28.59 | 34.98 | 5.0% |
+| 32,768 | f16 | 2.148 | 32.73 | calc | 30.55 | 32.73 | calc |
+| 32,768 | q8 | 1.141 | 34.54 | 4.21 | 31.37 | 31.88 | 13.4% |
+| 32,768 | q4 | 0.604 | 35.51 | 5.00 | 32.16 | 31.10 | 15.5% |
+| 100,000 | f16 | 6.554 | 26.68 | calc | 37.48 | 26.68 | calc |
+| 100,000 | q8 | 3.482 | 30.62 | 12.40 | 39.56 | 25.28 | 31.3% |
+| 100,000 | q4 | 1.843 | 33.21 | 14.62 | 41.78 | 23.94 | 35.0% |
+| 131,072 | f16 | 8.389 | 24.63 | calc | 40.61 | 24.63 | calc |
+| 131,072 | q8 | 4.564 | 29.12 | 16.12 | 43.28 | 23.11 | 37.2% |
+| 131,072 | q4 | 2.416 | 32.26 | 18.98 | 46.14 | 21.67 | 41.1% |
+
+**Quantization is worth 1.34 tok/s at 100K, not the 2.6 the ceiling suggests.**
+The q8 cache halves KV bytes, but the measured step is 39.6 ms against 41.8 ms
+for q4: attention is no longer reading-limited at q8 either (281 of 632 GB/s),
+so the smaller cache buys DRAM margin that the compute pass cannot spend. q4
+only starts to win once the compute pass is cheaper than the byte savings.
+
+### VRAM
+
+`hipml vram` calls `hipMemGetInfo`; on the benchmark box, with nothing else
+resident, the card reports **31.86 GiB total, 31.71 GiB free**. Weights are
+17.19 GB (16.01 GiB). f16 KV fits at 100K: 6.5536 GB of cache gives
+23.7436 GB (22.11 GiB), leaving 8.1 GiB for activations and recurrent state.
+
+| depth | f16 total | q8 total | q4 total |
+| ---: | ---: | ---: | ---: |
+| 100,000 | 23.74 GB / 22.11 GiB | 20.67 GB / 19.25 GiB | 19.03 GB / 17.73 GiB |
+| 131,072 | 25.58 GB / 23.82 GiB | 21.75 GB / 20.26 GiB | 19.61 GB / 18.26 GiB |
+| 262,144 | 34.37 GB / 32.01 GiB | 24.67 GB / 22.98 GiB | 20.88 GB / 19.44 GiB |
+
+At 262,144 tokens f16 KV is exactly 16 GiB, so the total is 32.01 GiB against
+31.86 GiB of card: it does not fit, by 0.15 GiB, before any activation. That is
+the only depth in this table where quantization is a capacity requirement, and
+it is 256K, not 100K.
+
+### llama.cpp on the same box, 100K depth
+
+`llama-server.exe` from `C:\llama.cpp\rocm-gfx120x`, `-m
+C:\models\Qwen3.8-27B-Q4_K_M.gguf -ngl 99 -c 102400 -np 1 --port 8092`, prompt
+built from `C:\models\calib_longctx.txt` to 97,932 tokens, `n_predict 128`,
+`temperature 0`, `cache_prompt false`, `ignore_eos true`.
+
+| KV | prompt tokens | prefill s | prefill tok/s | decode tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| f16 (default) | 97,932 | 115.91 | 844.9 | 21.83 |
+| q8_0 / q8_0 | 97,932 | 118.02 | 829.8 | 22.32 |
+
+q8 KV is **+2.3% decode** and **−1.8% prefill** at this depth. The traffic model
+predicts ~11%: 3.07 GB less KV per token at 632 GB/s is 4.9 ms off a 45.8 ms
+step. llama.cpp does not get it, which is consistent with the quantized K/V
+being dequantized into the attention operand path rather than consumed in place.
+
+The two numbers put the hipml attention kernel in context: 21.9 ms of attention
+is 44.6% of a decode step, while llama.cpp's *entire* step at the same depth is
+44.8 ms. Its attention is therefore a few milliseconds at most, and this kernel
+is roughly four times more expensive than the one it would replace. That is the
+gap to close before quantized KV matters.
 
 ## Method notes
 
+- **Decimal GB, except VRAM.** Sizes are `10^9` bytes; `hipMemGetInfo` is quoted
+  in GiB because that is what the driver returns.
+- **KV bench cache is synthetic but format-valid.** `kv::synthetic_blocks` fills
+  every 32-value block with a real f16 scale and a real payload, so the kernel's
+  dequantize path runs at full cost without a 3.5 GB host encode per case. The
+  100K *correctness* case is `hipml parity --deep`, which encodes a real cache
+  and compares against the reference at 100,000 tokens.
+- **Attention share** is `attn / (measured weight stream + attn)`, where the
+  weight stream is the 838 MB `gemv` case's measured 632 GB/s applied to 17.19 GB.
+  It excludes every other layer op, so it is an upper bound on what a real step
+  would spend in attention.
+- **Repeats.** `bench-kv` warms the card with the weight stream, then runs each
+  row for at least 5 passes and enough passes to reach ~200 ms; the reported
+  time is the mean of the timed passes after a warm pass.
+- **llama.cpp** numbers are one request each on a freshly started server, so the
+  prefill is a cold prefill at the stated depth and the decode rate is from the
+  128 generated tokens of that same request.
+- **Bandwidth is re-measured per run.** The weight stream reads 631.0–633.6 GB/s
+  across runs on this box; each table quotes the value from its own run, so a
+  tenth of a GB/s between sections is measurement scatter, not a different card.
 - Bandwidth ceiling uses the measured 633.6 GB/s, not the 640 GB/s spec, so the
   percentages are not flattered.
 - The fp16 peak of 95.7 TFLOPS is the vendor's dense figure; 70% of it under HIP

@@ -123,6 +123,35 @@ impl Buffer {
         self.len == 0
     }
 
+    /// Copy `data` into the buffer at a byte offset.
+    #[cfg(feature = "hip")]
+    pub fn upload_bytes(&self, offset: usize, data: &[u8]) -> Result<(), String> {
+        if offset + data.len() > self.len * 4 {
+            return Err(format!(
+                "upload of {} bytes at {offset} exceeds {} bytes",
+                data.len(),
+                self.len * 4
+            ));
+        }
+        unsafe {
+            let dst = (self.ptr as *mut u8).add(offset) as *mut std::ffi::c_void;
+            check(
+                ffi::hipMemcpy(
+                    dst,
+                    data.as_ptr() as *const std::ffi::c_void,
+                    data.len(),
+                    ffi::HIP_MEMCPY_HOST_TO_DEVICE,
+                ),
+                "hipMemcpy host->device (bytes)",
+            )
+        }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn upload_bytes(&self, _offset: usize, _data: &[u8]) -> Result<(), String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
     /// Device pointer as a kernel argument.
     #[cfg(feature = "hip")]
     pub fn as_ptr(&self) -> *mut std::ffi::c_void {

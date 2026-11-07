@@ -74,3 +74,34 @@ impl Tensor {
         &self.data[i * k..(i + 1) * k]
     }
 }
+
+/// Bytes carried through the parity harness as f32 words.
+///
+/// Device buffers are `f32`-typed, but a quantized cache is bytes. Two views of
+/// the same allocation: four little-endian bytes per element, zero-padded at the
+/// end. The length rounds up, which is harmless because no kernel reads past the
+/// last whole block.
+impl Tensor {
+    pub fn from_bytes_le(bytes: &[u8]) -> Tensor {
+        let n = bytes.len().div_ceil(4);
+        let mut data = Vec::with_capacity(n);
+        for chunk in bytes.chunks(4) {
+            let mut word = [0u8; 4];
+            word[..chunk.len()].copy_from_slice(chunk);
+            data.push(f32::from_le_bytes(word));
+        }
+        Tensor {
+            shape: vec![n],
+            data,
+        }
+    }
+
+    /// The original byte stream, minus the padding `from_bytes_le` added.
+    pub fn to_bytes_le(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.data.len() * 4);
+        for v in &self.data {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+}

@@ -34,7 +34,7 @@ mod imp {
     impl ResidentMat {
         fn upload(m: &Mat) -> Result<ResidentMat, String> {
             Ok(ResidentMat {
-                data: ByteBuffer::from_host(&m.data)?,
+                data: ByteBuffer::from_host(m.data.as_slice())?,
                 rows: m.rows,
                 cols: m.cols,
                 kind: m.kind,

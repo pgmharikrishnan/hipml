@@ -11,8 +11,7 @@ pub mod attn_gpu;
 pub mod attn_ops;
 pub mod launch;
 #[cfg(feature = "hip")]
-mod quant_launch;
-
+pub mod kvbench;
 #[cfg(feature = "hip")]
 pub mod ssm;
 #[cfg(feature = "hip")]
@@ -21,6 +20,8 @@ pub mod ssm_launch;
 mod ssm_ops;
 
 pub use attn_gpu::AttnLayer;
+#[cfg(feature = "hip")]
+pub mod launch_kv;
 pub use launch::Launcher;
 
 /// How a kernel is gridded.
@@ -43,6 +44,9 @@ pub enum KernelKind {
     PerHead { block: u32 },
     /// One block per head, sized to `head_dim` at launch.
     PerHeadOnDim,
+    /// One block per (KV head, contiguous split of positions), 32 * GQA-group
+    /// threads. Paired with a reduce kernel, launched from the same arm.
+    KvSplit,
     /// 1-D coverage of `n` elements.
     Linear { block: u32 },
     /// Several launches end to end (one whole SSM layer).
@@ -247,7 +251,35 @@ pub const KERNELS: &[KernelSpec] = &[
             "nucleus walk is one token per step; the sort lands on device at M2",
         ),
     },
+    // Quantized-KV decode attention. One row per parity case so the CLI table
+    // names the shape that was actually compared; every row launches the same
+    // two-kernel pair (decode over splits, then reduce).
+    kv_case("attn_decode_kv_q8_hd256_s1", "attn_decode_kv_q8"),
+    kv_case("attn_decode_kv_q8_hd256_s37", "attn_decode_kv_q8"),
+    kv_case("attn_decode_kv_q8_hd256_s1000", "attn_decode_kv_q8"),
+    kv_case("attn_decode_kv_q8_hd256_s4096", "attn_decode_kv_q8"),
+    kv_case("attn_decode_kv_q4_hd256_s1", "attn_decode_kv_q4"),
+    kv_case("attn_decode_kv_q4_hd256_s37", "attn_decode_kv_q4"),
+    kv_case("attn_decode_kv_q4_hd256_s1000", "attn_decode_kv_q4"),
+    kv_case("attn_decode_kv_q4_hd256_s4096", "attn_decode_kv_q4"),
+    kv_case("attn_decode_kv_q8_hd64_s37", "attn_decode_kv_q8"),
+    kv_case("attn_decode_kv_q8_hd64_s1000", "attn_decode_kv_q8"),
+    kv_case("attn_decode_kv_q4_hd64_s37", "attn_decode_kv_q4"),
+    kv_case("attn_decode_kv_q4_hd64_s1000", "attn_decode_kv_q4"),
+    // 100K depth, one head: the code path that the bench uses, compared
+    // against the reference. Kept out of `cases()` because the host reference is
+    // a second of work; `hipml parity --deep` runs it.
+    kv_case("attn_decode_kv_q8_hd256_s100000", "attn_decode_kv_q8"),
+    kv_case("attn_decode_kv_q4_hd256_s100000", "attn_decode_kv_q4"),
 ];
+
+const fn kv_case(name: &'static str, entry: &'static str) -> KernelSpec {
+    KernelSpec {
+        name,
+        entry,
+        kind: KernelKind::KvSplit,
+    }
+}
 
 pub fn spec(name: &str) -> Option<&'static KernelSpec> {
     KERNELS.iter().find(|k| k.name == name)
