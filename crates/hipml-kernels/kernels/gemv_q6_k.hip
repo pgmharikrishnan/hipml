@@ -1,16 +1,19 @@
 // y[row] = dequant_q6_k(W[row,:]) . x
 //
-// One block per output row, 256 threads. A thread owns a whole 32-value chunk
-// (two adjacent 16-value scale sub-blocks): it reads 32 ql bytes, 32 qh bytes
-// and the two int8 scales, then produces 32 dot-product terms.
+// One block per output row, 256 threads, one thread per column. Thread t owns
+// column t of every 256-value super-block, so x is coalesced and each warp is
+// exactly one 32-value group: the ql and qh byte indices increment with the
+// lane, giving 32-consecutive-byte reads.
 //
 // Q6_K super-block (210 bytes, 256 values):
 //   ql(128) qh(64) scales(16) d(2)
-// A 32-value chunk at group g (0..3) of half h (0..1) starts at position
-// h*128 + g*32. Groups 0/1 use the low ql nibble, 2/3 the high nibble, and the
-// qh plane is selected by 2*g. Its two scales are scales[h*8 + 2g + {0,1}].
+// A thread at position t:
+//   half  = t/128, group = (t%128)/32, l = t%32
+//   sub   = group*2 + l/16              -> scale[half*8 + sub]
+//   ql ix = half*64 + (group&1)*32 + l  (low nibble for group 0/1, high for 2/3)
+//   qh ix = 128 + half*32 + l           (2-bit plane 2*group)
 //
-// No shared staging of the weights: only the 8-float cross-warp reduction.
+// Only the 8-float cross-warp reduction touches shared memory.
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -28,59 +31,47 @@ extern "C" __global__ void gemv_q6_k(
     const int row = blockIdx.x;
     if (row >= m) return;
 
+    const int t = threadIdx.x;
+    const int half = t >> 7;
+    const int in_half = t & 127;
+    const int group = in_half >> 5;
+    const int l = in_half & 31;
+    const int sub = group * 2 + (l >> 4);
+    const int scale_ix = half * 8 + sub;
+    const bool high_nibble = group >= 2;
+    const int qh_shift = 2 * group;
+    const int ql_ix = half * 64 + ((group & 1) ? 32 : 0) + l;
+    const int qh_ix = 128 + half * 32 + l;
+
     const int nblocks = k / Q6K_VALUES;
-    const int nchunks = nblocks * 8; // 32 values per chunk
     const unsigned char* r =
         w + (size_t)row * (size_t)nblocks * Q6K_BLOCK_BYTES;
 
     float acc = 0.0f;
-    for (int c = threadIdx.x; c < nchunks; c += blockDim.x) {
-        const int blk = c >> 3;
-        const int in_block = c & 7;
-        const int half = in_block >> 2; // first or second 128-value half
-        const int group = in_block & 3; // 0..3
+    for (int blk = 0; blk < nblocks; ++blk) {
         const unsigned char* b = r + (size_t)blk * Q6K_BLOCK_BYTES;
-
         const float d = __half2float(*reinterpret_cast<const __half*>(b + 208));
-        const signed char* scales = reinterpret_cast<const signed char*>(b + 192);
-        const int sbase = half * 8 + group * 2;
-        const float scale0 = d * (float)scales[sbase];
-        const float scale1 = d * (float)scales[sbase + 1];
+        const float scale =
+            d * (float)reinterpret_cast<const signed char*>(b + 192)[scale_ix];
 
-        const unsigned char* ql =
-            b + half * 64 + ((group & 1) ? 32 : 0);
-        const unsigned char* qh = b + 128 + half * 32;
-        const bool high_nibble = group >= 2;
-        const int qh_shift = 2 * group;
+        const unsigned int qb = b[ql_ix];
+        const unsigned int nib = high_nibble ? (qb >> 4) : (qb & 0xF);
+        const unsigned int hi = (b[qh_ix] >> qh_shift) & 3;
+        const int q = (int)(nib | (hi << 4)) - 32;
 
-        const float* xr = x + (size_t)half * 128 + (size_t)group * 32;
-        float a0 = 0.0f;
-        float a1 = 0.0f;
-#pragma unroll
-        for (int l = 0; l < 32; ++l) {
-            const unsigned int qb = ql[l];
-            const unsigned int nib = high_nibble ? (qb >> 4) : (qb & 0xF);
-            const unsigned int hi = (qh[l] >> qh_shift) & 3;
-            const int q = (int)(nib | (hi << 4)) - 32;
-            if (l < 16)
-                a0 += (scale0 * (float)q) * xr[l];
-            else
-                a1 += (scale1 * (float)q) * xr[l];
-        }
-        acc += a0 + a1;
+        acc += scale * (float)q * x[(size_t)blk * Q6K_VALUES + t];
     }
 
     __shared__ float q6k_s[8];
-    const int lane = threadIdx.x & 31;
-    const int warp = threadIdx.x >> 5;
+    const int warp = t >> 5;
 #pragma unroll
     for (int off = 16; off > 0; off >>= 1) acc += __shfl_down(acc, off);
-    if (lane == 0) q6k_s[warp] = acc;
+    if (l == 0) q6k_s[warp] = acc;
     __syncthreads();
     if (warp == 0) {
-        float v = (threadIdx.x < 8) ? q6k_s[threadIdx.x] : 0.0f;
+        float v = (t < 8) ? q6k_s[t] : 0.0f;
 #pragma unroll
         for (int off = 4; off > 0; off >>= 1) v += __shfl_down(v, off);
-        if (threadIdx.x == 0) y[row] = v;
+        if (t == 0) y[row] = v;
     }
 }
