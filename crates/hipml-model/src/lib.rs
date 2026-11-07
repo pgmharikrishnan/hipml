@@ -14,6 +14,8 @@
 //! is marked `supported() == false` rather than failing the load.
 
 pub mod verify;
+#[cfg(feature = "hip")]
+pub mod gpu;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -71,6 +73,11 @@ impl DeviceTensor {
         self.buffer.device_ptr()
     }
 
+    /// The resident payload, for a launcher's frozen-weight entry points.
+    pub fn buffer(&self) -> &ByteBuffer {
+        &self.buffer
+    }
+
     pub fn ne0(&self) -> u64 {
         self.dims.first().copied().unwrap_or(0)
     }
@@ -126,6 +133,7 @@ pub struct Model {
     tensors: Vec<DeviceTensor>,
     index: HashMap<String, usize>,
     total_bytes: u64,
+    path: std::path::PathBuf,
 }
 
 fn supported(ty: TensorType) -> bool {
@@ -238,6 +246,7 @@ impl Model {
                 tensors,
                 index,
                 total_bytes,
+                path: path.to_path_buf(),
             },
             report,
         ))
@@ -265,6 +274,29 @@ impl Model {
 
     pub fn device_name(&self) -> &str {
         &self.launcher.device_name
+    }
+
+    /// The GGUF this model was loaded from (config metadata is re-read lazily).
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// The launcher that owns the code object and stream these tensors live on.
+    pub fn launcher(&self) -> &Launcher {
+        &self.launcher
+    }
+
+    /// Read an F32 tensor back as a host vector (norms, conv taps, biases).
+    pub fn f32_vec(&self, name: &str) -> Result<Vec<f32>, String> {
+        let t = self.tensor(name).ok_or_else(|| format!("model has no tensor {name}"))?;
+        if t.ty() != TensorType::F32 {
+            return Err(format!("{name}: expected F32, found {}", t.ty().name()));
+        }
+        let raw = t.read_back()?;
+        Ok(raw
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect())
     }
 
     pub fn device_mem_info(&self) -> Result<(usize, usize), String> {

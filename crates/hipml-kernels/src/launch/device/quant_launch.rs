@@ -74,6 +74,43 @@ impl Launcher {
             Ok((y.to_host()?, secs))
         }
 
+        /// Frozen-weight GEMV with both ends already on the device.
+        ///
+        /// This is the graph's inner loop: no host copy and no synchronize, so
+        /// the caller can chain hundreds of launches before one sync.
+        pub fn run_quant_resident(
+            &self,
+            name: &str,
+            w: &ByteBuffer,
+            x: &Buffer,
+            y: &Buffer,
+            m: usize,
+            k: usize,
+        ) -> Result<(), String> {
+            assert_eq!(x.len(), k, "x must be k");
+            assert_eq!(y.len(), m, "y must be m");
+            let spec = crate::spec(name).ok_or_else(|| format!("{name} is not in the manifest"))?;
+            let kernel = self.module.kernel(name)?;
+            let mut p_w = w.as_ptr();
+            let mut p_x = x.as_ptr();
+            let mut p_y = y.as_ptr();
+            let mut v_m = m as i32;
+            let mut v_k = k as i32;
+            let mut params: [*mut c_void; 5] = [
+                &mut p_w as *mut _ as *mut c_void,
+                &mut p_x as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut v_m as *mut _ as *mut c_void,
+                &mut v_k as *mut _ as *mut c_void,
+            ];
+            let cfg = match spec.kind {
+                crate::KernelKind::RowTile { rows, block } => LaunchConfig::row_tile(m, rows, block),
+                crate::KernelKind::PerRow { block } => LaunchConfig::per_row(m, block),
+                _ => return Err(format!("{name}: unsupported quantized grid")),
+            };
+            kernel.launch(cfg, &self.stream, &mut params)
+        }
+
         /// Frozen-weight variant of `run_quant_reps`: `w` is already resident in
         /// VRAM, so only x is copied. This is the per-token vocabulary cost.
         pub fn run_quant_resident_reps(

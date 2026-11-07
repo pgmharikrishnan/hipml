@@ -14,6 +14,8 @@ pub(crate) mod device {
     use hipml_hip::{Buffer, ByteBuffer, Device, LaunchConfig, Module, Stream};
     use std::ffi::c_void;
 
+    #[path = "graph_launch.rs"]
+    mod graph_launch;
     #[path = "prefill_launch.rs"]
     mod prefill_launch;
     #[path = "quant_launch.rs"]

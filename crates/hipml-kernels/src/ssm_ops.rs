@@ -4,7 +4,7 @@
 //! launchers: `hipModuleLaunchKernel` takes pointers to the arguments, so each
 //! value needs a stable home in a local.
 
-use crate::ssm::SsmGpuLayer;
+use crate::ssm::{SsmGpuLayer, SsmWeight};
 use hipml_hip::{Buffer, LaunchConfig};
 use std::ffi::c_void;
 use std::time::Instant;
@@ -59,8 +59,20 @@ impl<'a> SsmGpuLayer<'a> {
         Ok(start.elapsed().as_secs_f64() / reps as f64)
     }
 
-    fn gemv(&self, w: &Buffer, x: &Buffer, y: &Buffer, m: usize, k: usize) -> Result<(), String> {
-        let mut p_w = w.as_ptr();
+    fn gemv(
+        &self,
+        w: &SsmWeight<'_>,
+        x: &Buffer,
+        y: &Buffer,
+        m: usize,
+        k: usize,
+    ) -> Result<(), String> {
+        // The argument array is the ABI and is the same for both paths; only the
+        // weight pointer and the grid differ.
+        let (mut p_w, entry) = match w {
+            SsmWeight::F32(b) => (b.as_ptr(), None),
+            SsmWeight::Quant(b, e) => (b.as_ptr(), Some(*e)),
+        };
         let mut p_x = x.as_ptr();
         let mut p_y = y.as_ptr();
         let mut v_m = m as i32;
@@ -72,8 +84,25 @@ impl<'a> SsmGpuLayer<'a> {
             &mut v_m as *mut _ as *mut c_void,
             &mut v_k as *mut _ as *mut c_void,
         ];
-        self.k_gemv
-            .launch(LaunchConfig::per_row(m, 256), self.stream, &mut params)
+        match entry {
+            None => self
+                .k_gemv
+                .launch(LaunchConfig::per_row(m, 256), self.stream, &mut params),
+            Some(entry) => {
+                let spec = crate::spec(entry)
+                    .ok_or_else(|| format!("{entry} is not in the manifest"))?;
+                let cfg = match spec.kind {
+                    crate::KernelKind::RowTile { rows, block } => {
+                        LaunchConfig::row_tile(m, rows, block)
+                    }
+                    crate::KernelKind::PerRow { block } => LaunchConfig::per_row(m, block),
+                    _ => return Err(format!("{entry}: unsupported grid")),
+                };
+                self.module
+                    .kernel(entry)?
+                    .launch(cfg, self.stream, &mut params)
+            }
+        }
     }
 
     pub(crate) fn output_gemv(&self) -> Result<(), String> {

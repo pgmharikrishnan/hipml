@@ -10,6 +10,8 @@ use hipml_core::tensor::Tensor;
 use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
 
 mod attn_cmd;
+#[cfg(feature = "hip")]
+mod device_cmd;
 mod gen_cmd;
 mod kv_cmds;
 mod load_cmd;

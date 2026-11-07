@@ -80,6 +80,15 @@ fn parse(args: &[String]) -> Result<Args, String> {
 }
 
 pub fn generate(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--device") && !args.iter().any(|a| a == "--cpu") {
+        #[cfg(feature = "hip")]
+        return crate::device_cmd::generate(args);
+        #[cfg(not(feature = "hip"))]
+        {
+            eprintln!("generate: --device needs a build with `--features hip`");
+            return 2;
+        }
+    }
     let a = match parse(args) {
         Ok(a) => a,
         Err(e) => {

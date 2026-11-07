@@ -23,22 +23,55 @@ mod imp {
     /// Must match SPLIT_TILE in attn_decode_split_f32.hip.
     const SPLIT_TILE: usize = 8;
 
+    /// A weight payload that is either owned (the standalone parity path) or
+    /// borrowed from the resident loader, so the graph never uploads the same
+    /// bytes twice.
+    enum WeightBuf<'a> {
+        Owned(ByteBuffer),
+        Borrowed(&'a ByteBuffer),
+    }
+
+    impl WeightBuf<'_> {
+        fn as_ptr(&self) -> *mut c_void {
+            match self {
+                WeightBuf::Owned(b) => b.as_ptr(),
+                WeightBuf::Borrowed(b) => b.as_ptr(),
+            }
+        }
+
+        fn len(&self) -> usize {
+            match self {
+                WeightBuf::Owned(b) => b.len(),
+                WeightBuf::Borrowed(b) => b.len(),
+            }
+        }
+    }
+
     /// One weight tensor resident in VRAM, in its GGUF block form.
-    struct ResidentMat {
-        data: ByteBuffer,
+    struct ResidentMat<'a> {
+        data: WeightBuf<'a>,
         rows: usize,
         cols: usize,
         kind: Kind,
     }
 
-    impl ResidentMat {
-        fn upload(m: &Mat) -> Result<ResidentMat, String> {
+    impl ResidentMat<'_> {
+        fn upload(m: &Mat) -> Result<ResidentMat<'static>, String> {
             Ok(ResidentMat {
-                data: ByteBuffer::from_host(m.data.as_slice())?,
+                data: WeightBuf::Owned(ByteBuffer::from_host(m.data.as_slice())?),
                 rows: m.rows,
                 cols: m.cols,
                 kind: m.kind,
             })
+        }
+
+        fn borrow(data: &ByteBuffer, rows: usize, cols: usize, kind: Kind) -> ResidentMat<'_> {
+            ResidentMat {
+                data: WeightBuf::Borrowed(data),
+                rows,
+                cols,
+                kind,
+            }
         }
 
         fn entry(&self) -> Result<&'static str, String> {
@@ -68,11 +101,11 @@ mod imp {
     }
 
     /// One attention layer whose weights and KV cache stay on the device.
-    pub struct AttnLayer {
-        wq: ResidentMat,
-        wk: ResidentMat,
-        wv: ResidentMat,
-        wo: ResidentMat,
+    pub struct AttnLayer<'a> {
+        wq: ResidentMat<'a>,
+        wk: ResidentMat<'a>,
+        wv: ResidentMat<'a>,
+        wo: ResidentMat<'a>,
         q_norm: Buffer,
         k_norm: Buffer,
         qg: Buffer,
@@ -89,13 +122,13 @@ mod imp {
         pub dims: LayerDims,
     }
 
-    impl AttnLayer {
+    impl<'a> AttnLayer<'a> {
         pub fn new(
             l: &Launcher,
             w: &FullAttnW,
             cfg: &Config,
             n_ctx: usize,
-        ) -> Result<AttnLayer, String> {
+        ) -> Result<AttnLayer<'static>, String> {
             let (n_head, n_kv, hd) = (cfg.n_head, cfg.n_head_kv, cfg.head_dim);
             let width = n_kv * hd;
             if w.wq.rows != n_head * hd * 2 || w.wq.cols != cfg.n_embd {
@@ -152,6 +185,79 @@ mod imp {
                 part_ml: Buffer::alloc(n_head * MAX_SPLITS * 2)?,
                 dims,
             })
+        }
+
+        /// A layer whose four projections are already resident in the loader.
+        #[allow(clippy::too_many_arguments)]
+        pub fn new_resident(
+            l: &Launcher,
+            wq: (&'a ByteBuffer, usize, usize, Kind),
+            wk: (&'a ByteBuffer, usize, usize, Kind),
+            wv: (&'a ByteBuffer, usize, usize, Kind),
+            wo: (&'a ByteBuffer, usize, usize, Kind),
+            q_norm: &[f32],
+            k_norm: &[f32],
+            cfg: &Config,
+            n_ctx: usize,
+        ) -> Result<AttnLayer<'a>, String> {
+            let (n_head, n_kv, hd) = (cfg.n_head, cfg.n_head_kv, cfg.head_dim);
+            let width = n_kv * hd;
+            if wq.1 != n_head * hd * 2 || wq.2 != cfg.n_embd {
+                return Err(format!(
+                    "attn_q is {}x{}, expected {}x{}",
+                    wq.1,
+                    wq.2,
+                    n_head * hd * 2,
+                    cfg.n_embd
+                ));
+            }
+            for (name, m, rows, cols) in [
+                ("attn_k", wk, n_kv * hd, cfg.n_embd),
+                ("attn_v", wv, n_kv * hd, cfg.n_embd),
+                ("attn_output", wo, cfg.n_embd, n_head * hd),
+            ] {
+                if m.1 != rows || m.2 != cols {
+                    return Err(format!("{name} is {}x{}, expected {rows}x{cols}", m.1, m.2));
+                }
+            }
+            let dims = LayerDims {
+                n_head,
+                n_kv,
+                head_dim: hd,
+                n_rot: cfg.n_rot,
+                sections: cfg.rope_sections,
+                eps: cfg.eps,
+                rope_base: cfg.rope_base,
+                width,
+                n_ctx,
+                n_embd: cfg.n_embd,
+            };
+            let _ = l;
+            Ok(AttnLayer {
+                wq: ResidentMat::borrow(wq.0, wq.1, wq.2, wq.3),
+                wk: ResidentMat::borrow(wk.0, wk.1, wk.2, wk.3),
+                wv: ResidentMat::borrow(wv.0, wv.1, wv.2, wv.3),
+                wo: ResidentMat::borrow(wo.0, wo.1, wo.2, wo.3),
+                q_norm: Buffer::from_host(q_norm)?,
+                k_norm: Buffer::from_host(k_norm)?,
+                qg: Buffer::alloc(2 * n_head * hd)?,
+                q: Buffer::alloc(n_head * hd)?,
+                gate: Buffer::alloc(n_head * hd)?,
+                k: Buffer::alloc(width)?,
+                v: Buffer::alloc(width)?,
+                out: Buffer::alloc(n_head * hd)?,
+                y: Buffer::alloc(cfg.n_embd)?,
+                kv_k: Buffer::alloc(n_ctx * width)?,
+                kv_v: Buffer::alloc(n_ctx * width)?,
+                part_acc: Buffer::alloc(n_head * MAX_SPLITS * hd)?,
+                part_ml: Buffer::alloc(n_head * MAX_SPLITS * 2)?,
+                dims,
+            })
+        }
+
+        /// The layer output buffer (`attn_output` + residual is the caller's).
+        pub fn output(&self) -> &Buffer {
+            &self.y
         }
 
         /// Bytes the KV cache occupies in VRAM.
@@ -451,11 +557,11 @@ mod imp {
             attn.launch(cfg, &l.stream, &mut params)
         }
 
-        fn module_kernel<'a>(
+        fn module_kernel<'b>(
             &self,
-            l: &'a Launcher,
+            l: &'b Launcher,
             name: &str,
-        ) -> Result<hipml_hip::Kernel<'a>, String> {
+        ) -> Result<hipml_hip::Kernel<'b>, String> {
             l.module.kernel(name)
         }
 
