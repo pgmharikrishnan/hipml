@@ -72,6 +72,23 @@ __device__ __forceinline__ float warp_sum(float v) {
     return v;
 }
 
+// Load all `nb` chunks of one row, unconditionally.
+//
+// The obvious `if (c < nb) dst[c] = at(row, c, lane)` compiles to a branch
+// around each block, and with it a `s_wait_loadcnt 0` per block: eight separate
+// memory round trips per row. Reusing chunk 0 for the chunks that do not exist
+// keeps every load in one basic block, so the scheduler issues the whole tile
+// and waits once. head_dim 256 (nb = 8) never takes the substitute path.
+template <typename Loader>
+__device__ __forceinline__ void load_chunks(float* dst, const void* row, int nb, int lane) {
+    #pragma unroll
+    for (int c = 0; c < KV_MAX_CHUNKS; ++c) {
+        const int cc = (c < nb) ? c : 0;
+        const float x = Loader::at(row, cc, lane);
+        dst[c] = (c < nb) ? x : 0.0f;
+    }
+}
+
 template <typename Loader>
 __device__ __forceinline__ void kv_decode_body(
     const float* __restrict__ q,
@@ -126,11 +143,8 @@ __device__ __forceinline__ void kv_decode_body(
         float vv[KV_TILE][KV_MAX_CHUNKS];
         #pragma unroll
         for (int t = 0; t < KV_TILE; ++t) {
-            #pragma unroll
-            for (int c = 0; c < KV_MAX_CHUNKS; ++c) {
-                kk[t][c] = (c < nb) ? Loader::at(krow + t * row_bytes, c, lane) : 0.0f;
-                vv[t][c] = (c < nb) ? Loader::at(vrow + t * row_bytes, c, lane) : 0.0f;
-            }
+            load_chunks<Loader>(kk[t], krow + t * row_bytes, nb, lane);
+            load_chunks<Loader>(vv[t], vrow + t * row_bytes, nb, lane);
         }
 
         float s[KV_TILE];
@@ -171,11 +185,8 @@ __device__ __forceinline__ void kv_decode_body(
         const char* vr = vbase + (size_t)pos * row_bytes;
         float kk[KV_MAX_CHUNKS];
         float vv[KV_MAX_CHUNKS];
-        #pragma unroll
-        for (int c = 0; c < KV_MAX_CHUNKS; ++c) {
-            kk[c] = (c < nb) ? Loader::at(kr, c, lane) : 0.0f;
-            vv[c] = (c < nb) ? Loader::at(vr, c, lane) : 0.0f;
-        }
+        load_chunks<Loader>(kk, kr, nb, lane);
+        load_chunks<Loader>(vv, vr, nb, lane);
         float dot = 0.0f;
         #pragma unroll
         for (int c = 0; c < KV_MAX_CHUNKS; ++c) dot += qv[c] * kk[c];
