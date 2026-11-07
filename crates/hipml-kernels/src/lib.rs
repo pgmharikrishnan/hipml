@@ -18,6 +18,8 @@ pub enum KernelKind {
     PerRow { block: u32 },
     /// One warp (or one block) per head.
     PerHead { block: u32 },
+    /// One block per head, sized to `head_dim` at launch.
+    PerHeadOnDim,
     /// 1-D coverage of `n` elements.
     Linear { block: u32 },
     /// No device kernel: this op stays on the host by design.
@@ -64,6 +66,11 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "residual_add_f32",
         entry: "residual_add_f32",
         kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "attn_decode_f32",
+        entry: "attn_decode_f32",
+        kind: KernelKind::PerHeadOnDim,
     },
     KernelSpec {
         name: "sample_top_p_f32",
