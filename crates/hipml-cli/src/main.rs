@@ -50,6 +50,15 @@ fn main() {
         "attn-parity" => std::process::exit(attn_cmd::parity(&args[1..])),
         "attn-bench" => std::process::exit(attn_cmd::bench(&args[1..])),
         "bench-kv" => std::process::exit(kv_cmds::bench_kv(&args[1..])),
+        "gpu-bench" => {
+            #[cfg(feature = "hip")]
+            std::process::exit(device_cmd::bench(&args[1..]));
+            #[cfg(not(feature = "hip"))]
+            {
+                eprintln!("gpu-bench needs a build with `--features hip`");
+                std::process::exit(2);
+            }
+        }
         "parity" => {
             let filter = args
                 .iter()
@@ -91,6 +100,7 @@ fn help() {
          \x20 ssm       gated-delta-net parity (small + real layer) and layer timing\n\
          \x20 attn-parity --gguf PATH   GPU full-attention block vs CPU reference\n\
          \x20 attn-bench  --gguf PATH   per-layer time at depths 0/8192/100000\n\
+         \x20 gpu-bench --gguf PATH [--prefill N] [--depth D --kv q8]\n\
          \x20 bench-kv  quantized-KV decode attention: depth x q8/q4 x 1 head / 16 layers\n\
          \x20           --depths 1024,8192,32768,100000 --reps 3\n\
          \n\

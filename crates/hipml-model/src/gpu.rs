@@ -22,9 +22,11 @@
 
 use hipml_core::config::Config;
 use hipml_core::gguf::Gguf;
+use hipml_core::kv::{self, KvDtype};
 use hipml_core::mat::Kind;
 use hipml_core::quant::TensorType;
 use hipml_hip::{Buffer, ByteBuffer};
+use hipml_kernels::launch_kv;
 use hipml_kernels::ssm::{SsmDims, SsmGpuLayer, SsmResidentRefs};
 use hipml_kernels::{AttnLayer, Launcher};
 
@@ -134,8 +136,117 @@ struct Block<'a> {
     kind: BlockKind<'a>,
 }
 
+/// Attention-cache choice. `F32` is the short-depth oracle path; `Q8`/`Q4` use
+/// the quantized-KV decode pair from `feat/kv-100k`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum KvMode {
+    F32,
+    Q8,
+    Q4,
+}
+
+impl KvMode {
+    pub fn parse(s: &str) -> Result<KvMode, String> {
+        match s {
+            "f32" => Ok(KvMode::F32),
+            "q8" => Ok(KvMode::Q8),
+            "q4" => Ok(KvMode::Q4),
+            other => Err(format!("unknown --kv {other} (use f32, q8 or q4)")),
+        }
+    }
+
+    fn dtype(self) -> Option<KvDtype> {
+        match self {
+            KvMode::F32 => None,
+            KvMode::Q8 => Some(KvDtype::Q8),
+            KvMode::Q4 => Some(KvDtype::Q4),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            KvMode::F32 => "f32",
+            KvMode::Q8 => "q8",
+            KvMode::Q4 => "q4",
+        }
+    }
+}
+
+/// One layer's quantized K/V cache plus the split-K scratch.
+pub struct DeepKv {
+    pub dtype: KvDtype,
+    pub seq: usize,
+    n_kv: usize,
+    head_dim: usize,
+    k: Buffer,
+    v: Buffer,
+    part_acc: Buffer,
+    part_ml: Buffer,
+}
+
+/// Same bound as `attn_gpu`; the partial buffers are sized once.
+const MAX_SPLITS: usize = 64;
+
+impl DeepKv {
+    fn new(cfg: &Config, seq: usize, dtype: KvDtype) -> Result<DeepKv, String> {
+        let row = dtype.row_bytes(cfg.head_dim);
+        let bytes = cfg.n_head_kv * seq * row;
+        let f32s = bytes.div_ceil(4);
+        Ok(DeepKv {
+            dtype,
+            seq,
+            n_kv: cfg.n_head_kv,
+            head_dim: cfg.head_dim,
+            k: Buffer::alloc(f32s)?,
+            v: Buffer::alloc(f32s)?,
+            part_acc: Buffer::alloc(cfg.n_head * MAX_SPLITS * cfg.head_dim)?,
+            part_ml: Buffer::alloc(cfg.n_head * MAX_SPLITS * 2)?,
+        })
+    }
+
+    fn row(&self) -> usize {
+        self.dtype.row_bytes(self.head_dim)
+    }
+
+    /// `2 * n_kv * seq * row_bytes`.
+    pub fn bytes(&self) -> usize {
+        2 * self.n_kv * self.seq * self.row()
+    }
+
+    /// Fill the first `depth` positions of every head with format-valid blocks
+    /// so a 100K decode can be measured without a 100K token prefill.
+    fn fill_synthetic(&self, depth: usize, seed: u64) -> Result<(), String> {
+        let blocks_per_row = self.head_dim / kv::BLOCK;
+        let pattern = kv::synthetic_blocks(self.dtype, depth * blocks_per_row, seed);
+        let row = self.row();
+        for h in 0..self.n_kv {
+            let off = h * self.seq * row;
+            self.k.upload_bytes(off, &pattern)?;
+            self.v.upload_bytes(off, &pattern)?;
+        }
+        Ok(())
+    }
+
+    /// Quantize one token's K/V rows and append them at `pos`.
+    fn append(&self, k: &[f32], v: &[f32], pos: usize) -> Result<(), String> {
+        let hd = self.head_dim;
+        let row = self.row();
+        for h in 0..self.n_kv {
+            let kb = kv::quantize(self.dtype, &k[h * hd..(h + 1) * hd]);
+            let vb = kv::quantize(self.dtype, &v[h * hd..(h + 1) * hd]);
+            let off = (h * self.seq + pos) * row;
+            self.k.upload_bytes(off, &kb)?;
+            self.v.upload_bytes(off, &vb)?;
+        }
+        Ok(())
+    }
+}
+
 enum BlockKind<'a> {
-    Full(AttnLayer<'a>),
+    Full {
+        attn: AttnLayer<'a>,
+        deep: Option<DeepKv>,
+    },
     Ssm(SsmGpuLayer<'a>),
 }
 
@@ -147,6 +258,7 @@ pub struct GpuState {
 pub struct GpuEngine<'a> {
     model: &'a Model,
     pub cfg: Config,
+    pub kv_mode: KvMode,
     layers: Vec<Block<'a>>,
     output_norm: Buffer,
     x: Buffer,
@@ -162,7 +274,11 @@ pub struct GpuEngine<'a> {
 
 impl<'a> GpuEngine<'a> {
     /// Build every resident layer, borrowing the loader's weight payloads.
-    pub fn new(model: &'a Model, n_ctx: usize) -> Result<GpuEngine<'a>, String> {
+    pub fn new(
+        model: &'a Model,
+        n_ctx: usize,
+        kv_mode: KvMode,
+    ) -> Result<GpuEngine<'a>, String> {
         let cfg = {
             let mut g = Gguf::open(model.path()).map_err(|e| format!("{e}"))?;
             Config::from_gguf(&mut g).map_err(|e| format!("config: {e}"))?
@@ -180,8 +296,16 @@ impl<'a> GpuEngine<'a> {
 
             let kind = if cfg.is_recr[i] {
                 BlockKind::Ssm(build_ssm(model, l, &cfg, i)?)
+            } else if let Some(dtype) = kv_mode.dtype() {
+                BlockKind::Full {
+                    attn: build_attn(model, l, &cfg, i, 1)?,
+                    deep: Some(DeepKv::new(&cfg, n_ctx, dtype)?),
+                }
             } else {
-                BlockKind::Full(build_attn(model, l, &cfg, i, n_ctx)?)
+                BlockKind::Full {
+                    attn: build_attn(model, l, &cfg, i, n_ctx)?,
+                    deep: None,
+                }
             };
             layers.push(Block {
                 attn_norm,
@@ -198,6 +322,7 @@ impl<'a> GpuEngine<'a> {
         Ok(GpuEngine {
             model,
             cfg: cfg.clone(),
+            kv_mode,
             layers,
             output_norm,
             x: zeros(n)?,
@@ -222,7 +347,7 @@ impl<'a> GpuEngine<'a> {
         for l in &self.layers {
             b += l.gate.bytes() + l.up.bytes() + l.down.bytes();
             b += match &l.kind {
-                BlockKind::Full(a) => a.weight_bytes(),
+                BlockKind::Full { attn, .. } => attn.weight_bytes(),
                 BlockKind::Ssm(s) => s.weight_bytes(),
             };
         }
@@ -246,10 +371,20 @@ impl<'a> GpuEngine<'a> {
                     s.step()?;
                     s.output()
                 }
-                BlockKind::Full(a) => {
+                BlockKind::Full { attn, deep: None } => {
                     l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
-                    a.forward_buf(l, &self.t, pos)?;
-                    a.output()
+                    attn.forward_buf(l, &self.t, pos)?;
+                    attn.output()
+                }
+                BlockKind::Full { attn, deep: Some(dk) } => {
+                    l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
+                    attn.prepare_qkv(l, &self.t, pos)?;
+                    let kh = attn.k_buf().to_host()?;
+                    let vh = attn.v_buf().to_host()?;
+                    dk.append(&kh, &vh, pos)?;
+                    deep_attention(l, cfg, attn, dk, pos)?;
+                    attn.apply_output(l)?;
+                    attn.output()
                 }
             };
             l.residual_buf(&self.x, block_out, &self.x1, cfg.n_embd)?;
@@ -284,16 +419,72 @@ impl<'a> GpuEngine<'a> {
         self.model
     }
 
-    /// Deep-attention bytes at `depth` (the f32 KV path the short graph uses).
+    /// Resident attention-cache bytes at the configured depth.
     pub fn kv_bytes(&self, depth: usize) -> usize {
         self.layers
             .iter()
             .map(|b| match &b.kind {
-                BlockKind::Full(a) => 2 * depth * a.dims.width * 4,
+                BlockKind::Full { attn, deep: None } => 2 * depth * attn.dims.width * 4,
+                BlockKind::Full { deep: Some(d), .. } => d.bytes(),
                 BlockKind::Ssm(_) => 0,
             })
             .sum()
     }
+
+    /// Pre-fill the quantized caches to `depth` positions with valid blocks.
+    /// The SSM state stays zero: its step cost does not depend on the values.
+    pub fn fill_synthetic(&self, depth: usize) -> Result<(), String> {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        for b in &self.layers {
+            if let BlockKind::Full { deep: Some(d), .. } = &b.kind {
+                d.fill_synthetic(depth, seed)?;
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            }
+        }
+        Ok(())
+    }
+
+    /// A state starting at `pos` (used with `fill_synthetic`).
+    pub fn state_at(&self, pos: usize) -> GpuState {
+        GpuState { pos }
+    }
+}
+
+/// Quantized-KV decode attention for one layer at `pos`.
+fn deep_attention(
+    l: &Launcher,
+    cfg: &Config,
+    attn: &AttnLayer<'_>,
+    dk: &DeepKv,
+    pos: usize,
+) -> Result<(), String> {
+    if dk.dtype == KvDtype::Q4 && cfg.head_dim > 256 {
+        return Err("q4 KV: head_dim above 256 is not covered".to_string());
+    }
+    let seq = pos + 1;
+    if seq > dk.seq {
+        return Err(format!("position {pos} beyond quantized cache {}", dk.seq));
+    }
+    let splits = (seq / 64).clamp(1, MAX_SPLITS);
+    launch_kv::launch(
+        l.module(),
+        l.stream(),
+        dk.dtype.id(),
+        attn.q_buf(),
+        &dk.k,
+        &dk.v,
+        &dk.part_acc,
+        &dk.part_ml,
+        attn.attn_out(),
+        cfg.n_head,
+        cfg.n_head_kv,
+        cfg.head_dim,
+        seq,
+        1.0f32 / (cfg.head_dim as f32).sqrt(),
+        splits,
+        0,
+        0,
+    )
 }
 
 fn build_attn<'a>(

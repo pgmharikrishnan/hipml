@@ -381,12 +381,11 @@ mod imp {
             self.y.to_host()
         }
 
-        /// Same, with `x` resident on the device. Does not synchronize.
-        pub fn forward_buf(&self, l: &Launcher, x: &Buffer, pos: usize) -> Result<(), String> {
+        /// Q/K/V projections, q-gate split, head norm and rope. Leaves `q` and
+        /// the K/V rows in their buffers; attention and the cache append are the
+        /// caller's choice.
+        pub fn prepare_qkv(&self, l: &Launcher, x: &Buffer, pos: usize) -> Result<(), String> {
             let d = self.dims;
-            if pos >= d.n_ctx {
-                return Err(format!("position {pos} beyond KV cache {}", d.n_ctx));
-            }
             self.gemv(l, &self.wq, x, &self.qg, 2 * d.n_head * d.head_dim)?;
             self.gemv(l, &self.wk, x, &self.k, d.width)?;
             self.gemv(l, &self.wv, x, &self.v, d.width)?;
@@ -410,8 +409,52 @@ mod imp {
                 shared_mem_bytes: 0,
             };
             split.launch(cfg, &l.stream, &mut params)?;
+            self.norm_and_rope(l, pos)
+        }
 
-            self.norm_and_rope(l, pos)?;
+        /// `out = W_o (attn_out * gate)` — the tail shared by both KV paths.
+        pub fn apply_output(&self, l: &Launcher) -> Result<(), String> {
+            let d = self.dims;
+            let gate = self.module_kernel(l, "q_gate_f32")?;
+            let mut p_out = self.out.as_ptr();
+            let mut p_gate = self.gate.as_ptr();
+            let mut p_y = self.out.as_ptr();
+            let mut n = (d.n_head * d.head_dim) as i32;
+            let mut params: [*mut c_void; 4] = [
+                &mut p_out as *mut _ as *mut c_void,
+                &mut p_gate as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut n as *mut _ as *mut c_void,
+            ];
+            gate.launch(
+                LaunchConfig::linear(d.n_head * d.head_dim, 256),
+                &l.stream,
+                &mut params,
+            )?;
+            self.gemv(l, &self.wo, &self.out, &self.y, d.n_embd)
+        }
+
+        /// No-attention accessors for the quantized-KV path.
+        pub fn q_buf(&self) -> &Buffer {
+            &self.q
+        }
+        pub fn k_buf(&self) -> &Buffer {
+            &self.k
+        }
+        pub fn v_buf(&self) -> &Buffer {
+            &self.v
+        }
+        pub fn attn_out(&self) -> &Buffer {
+            &self.out
+        }
+
+        /// Same, with `x` resident on the device. Does not synchronize.
+        pub fn forward_buf(&self, l: &Launcher, x: &Buffer, pos: usize) -> Result<(), String> {
+            let d = self.dims;
+            if pos >= d.n_ctx {
+                return Err(format!("position {pos} beyond KV cache {}", d.n_ctx));
+            }
+            self.prepare_qkv(l, x, pos)?;
 
             let append = self.module_kernel(l, "kv_append_f32")?;
             let mut p_kc = self.kv_k.as_ptr();
@@ -435,25 +478,7 @@ mod imp {
             )?;
 
             self.attention(l, pos)?;
-
-            let gate = self.module_kernel(l, "q_gate_f32")?;
-            let mut p_out = self.out.as_ptr();
-            let mut p_gate = self.gate.as_ptr();
-            let mut p_y = self.out.as_ptr();
-            let mut n = (d.n_head * d.head_dim) as i32;
-            let mut params: [*mut c_void; 4] = [
-                &mut p_out as *mut _ as *mut c_void,
-                &mut p_gate as *mut _ as *mut c_void,
-                &mut p_y as *mut _ as *mut c_void,
-                &mut n as *mut _ as *mut c_void,
-            ];
-            gate.launch(
-                LaunchConfig::linear(d.n_head * d.head_dim, 256),
-                &l.stream,
-                &mut params,
-            )?;
-
-            self.gemv(l, &self.wo, &self.out, &self.y, d.n_embd)
+            self.apply_output(l)
         }
 
         /// Causal attention for this token. Uses the split-K kernel when the
@@ -644,6 +669,35 @@ impl AttnLayer {
         _pos: usize,
     ) -> Result<(Vec<f32>, Vec<f32>), String> {
         Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    pub fn prepare_qkv(
+        &self,
+        _l: &crate::Launcher,
+        _x: &hipml_hip::Buffer,
+        _pos: usize,
+    ) -> Result<(), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    pub fn apply_output(&self, _l: &crate::Launcher) -> Result<(), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    pub fn q_buf(&self) -> &hipml_hip::Buffer {
+        unreachable!()
+    }
+
+    pub fn k_buf(&self) -> &hipml_hip::Buffer {
+        unreachable!()
+    }
+
+    pub fn v_buf(&self) -> &hipml_hip::Buffer {
+        unreachable!()
+    }
+
+    pub fn attn_out(&self) -> &hipml_hip::Buffer {
+        unreachable!()
     }
 
     pub fn zero_kv(&self) -> Result<(), String> {
