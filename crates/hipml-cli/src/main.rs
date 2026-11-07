@@ -3,10 +3,11 @@
 //! The parity runner is the gate: a kernel that is not compared against the
 //! reference here is not a kernel hipml can use.
 
-use hipml_core::parity::{bench_cases, cases, compare, quant_cases, OpCase};
+use hipml_core::parity::{bench_cases, cases, compare, prefill_cases, quant_cases, OpCase};
 use hipml_core::tensor::Tensor;
 use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
 
+mod prefill_cmd;
 mod quant_cmd;
 
 /// What happened to one case.
@@ -26,6 +27,8 @@ fn main() {
         "bench" => std::process::exit(bench()),
         "gguf" => std::process::exit(quant_cmd::gguf(&args[1..])),
         "decode-bench" => std::process::exit(quant_cmd::decode_bench(&args[1..])),
+        "prefill-bench" => std::process::exit(prefill_cmd::bench(&args[1..])),
+        "prefill-model" => std::process::exit(prefill_cmd::model(&args[1..])),
         "parity" => {
             let filter = args.iter().skip(1).find(|a| !a.starts_with('-')).cloned();
             std::process::exit(parity(filter.as_deref()));
@@ -52,6 +55,8 @@ fn help() {
          \x20 bench     time each kernel launch and report effective bandwidth\n\
          \x20 gguf      list the tensors in a GGUF file; `gguf <file> read <tensor>`\n\
          \x20 decode-bench  stream every Q4_K/Q6_K/Q8_0 tensor through GEMV once\n\
+         \x20 prefill-bench time the tiled prefill GEMM at Qwen3.8-27B shapes, M=512/2048\n\
+         \x20 prefill-model prefill the whole model cold, then warm from a KV prefix\n\
          \n\
          build with `--features hip` on a machine with the ROCm/HIP runtime.",
         version = env!("CARGO_PKG_VERSION")
@@ -93,6 +98,11 @@ fn kernels() {
             KernelKind::RowTile { rows, block } => {
                 format!("row-tile {rows} rows, {block} threads")
             }
+            KernelKind::Prefill {
+                rows,
+                tokens,
+                block,
+            } => format!("prefill {rows} rows x {tokens} tokens, {block} threads"),
             KernelKind::PerHead { block } => format!("per-head, {block} threads"),
             KernelKind::PerHeadOnDim => "per-head, one thread per dim".to_string(),
             KernelKind::Linear { block } => format!("linear, {block} threads"),
@@ -162,6 +172,49 @@ fn parity(filter: Option<&str>) -> i32 {
                 match l.run_quant(case.name, &w, &x, case.m, case.k) {
                     Err(e) => Outcome::Fail(format!("launch failed: {e}")),
                     Ok(actual) => match compare(&expected, &actual, case.tol) {
+                        Ok(stats) => Outcome::Pass(format!(
+                            "max_abs {:.2e}  max_rel {:.2e}",
+                            stats.max_abs, stats.max_rel
+                        )),
+                        Err(stats) => Outcome::Fail(format!(
+                            "max_abs {:.2e} > {:.2e}, max_rel {:.2e} > {:.2e}",
+                            stats.max_abs, case.tol.abs, stats.max_rel, case.tol.rel
+                        )),
+                    },
+                }
+            }
+        };
+        let (verdict, detail) = match outcome {
+            Outcome::Pass(d) => {
+                pass += 1;
+                ("PASS", d)
+            }
+            Outcome::Fail(d) => {
+                fail += 1;
+                ("FAIL", d)
+            }
+            Outcome::Skip(d) => {
+                skip += 1;
+                ("SKIP", d)
+            }
+        };
+        println!("{:<28} {:<7} {}", case.label, verdict, detail);
+    }
+
+    // Tiled prefill GEMM: same contract, multi-token output.
+    for case in prefill_cases() {
+        if let Some(f) = filter {
+            if !case.name.contains(f) && !case.label.contains(f) {
+                continue;
+            }
+        }
+        let outcome = match launcher.as_ref() {
+            Err(e) => Outcome::Skip(e.clone()),
+            Ok(l) => {
+                let (w, x, expected) = case.reference();
+                match l.run_prefill_reps(case.name, &w, &x, case.m, case.k, case.tokens, 1) {
+                    Err(e) => Outcome::Fail(format!("launch failed: {e}")),
+                    Ok((actual, _)) => match compare(&expected, &actual, case.tol) {
                         Ok(stats) => Outcome::Pass(format!(
                             "max_abs {:.2e}  max_rel {:.2e}",
                             stats.max_abs, stats.max_rel
