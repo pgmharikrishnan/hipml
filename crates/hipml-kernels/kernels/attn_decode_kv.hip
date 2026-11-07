@@ -69,6 +69,12 @@ struct KvQ4 {
     }
 };
 
+// exp(x) as exp2(x*log2(e)): gfx12 has a hardware v_exp_f32 for exp2f, while
+// expf expands to a range-reduction sequence roughly forty instructions long.
+// Softmax only needs the ratio, and both sides of every ratio use this.
+#define KV_LOG2E 1.4426950408889634f
+__device__ __forceinline__ float kv_exp(float x) { return exp2f(x * KV_LOG2E); }
+
 // Butterfly sum: every lane ends with the total, so no broadcast is needed.
 __device__ __forceinline__ float warp_sum(float v) {
     for (int off = 1; off < warpSize; off <<= 1) {
@@ -184,8 +190,8 @@ __device__ __forceinline__ void kv_decode_body(
             }
             const float s = (t < rows) ? warp_sum(dot) * scale : -INFINITY;
             const float m_new = fmaxf(m, s);
-            const float corr = expf(m - m_new);
-            const float p = expf(s - m_new);
+            const float corr = kv_exp(m - m_new);
+            const float p = kv_exp(s - m_new);
             l = l * corr + p;
             m = m_new;
             #pragma unroll
@@ -248,7 +254,7 @@ extern "C" __global__ void attn_decode_kv_reduce(
     float acc = 0.0f;
     float l = 0.0f;
     for (int s = 0; s < splits; ++s) {
-        const float w = expf(ml[s * 2] - m);
+        const float w = kv_exp(ml[s * 2] - m);
         l += ml[s * 2 + 1] * w;
         acc += part_acc[((size_t)h * splits + s) * head_dim + t] * w;
     }
