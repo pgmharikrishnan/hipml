@@ -107,7 +107,7 @@ extern "C" __global__ void attn_decode_split_f32(
             }
             #pragma unroll
             for (int off = 16; off > 0; off >>= 1) {
-                dot += __shfl_xor_sync(0xffffffffu, dot, off);
+                dot += __shfl_xor_sync(0xffffffffffffffffULL, dot, off);
             }
             s[t] = (t < rows) ? dot * scale : -3.402823466e+38f;
         }
