@@ -17,7 +17,7 @@ use hipml_core::parity::bench_cases;
 use hipml_core::rng::Rng;
 use hipml_hip::{Buffer, Device, Module, Stream};
 
-use crate::launch::launch_attention_kv;
+use crate::launch_kv::launch;
 
 /// Qwen3.8-27B Q4_K_M weight bytes: the other term in a decode step.
 pub const WEIGHTS_BYTES: f64 = 17.19e9;
@@ -89,7 +89,7 @@ pub fn run(depths: &[usize], reps_min: usize) -> Result<Report, String> {
                     let t0 = Instant::now();
                     for _ in 0..n {
                         for l in 0..layers {
-                            launch_attention_kv(
+                            launch(
                                 &module,
                                 &stream,
                                 dtype.id(),

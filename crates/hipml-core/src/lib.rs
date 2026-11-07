@@ -8,6 +8,7 @@
 pub mod kv;
 pub mod ops;
 pub mod parity;
+pub mod parity_kv;
 pub mod rng;
 pub mod tensor;
 

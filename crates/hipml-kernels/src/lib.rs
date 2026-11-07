@@ -12,6 +12,9 @@ pub mod launch;
 #[cfg(feature = "hip")]
 pub mod kvbench;
 
+#[cfg(feature = "hip")]
+pub mod launch_kv;
+
 pub use launch::Launcher;
 
 /// How a kernel is gridded.
