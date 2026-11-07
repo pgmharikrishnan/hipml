@@ -99,6 +99,8 @@ pub fn launch(
         1 => "attn_decode_kv_q4",
         other => return Err(format!("unknown KV dtype {other}")),
     };
+    // Same constants as KV_TILE_Q8 / KV_TILE_Q4 in attn_decode_kv.hip.
+    let tile = if dtype == 0 { 4 } else { 8 };
 
     let kernel = module.kernel(entry)?;
     let mut p_q = q.as_ptr();
@@ -128,8 +130,11 @@ pub fn launch(
     let cfg = LaunchConfig {
         grid: ((n_kv * splits) as u32, 1, 1),
         block: ((32 * group) as u32, 1, 1),
-        // KV_TILE (8) rows of K and of V, dequantized to f32.
-        shared_mem_bytes: (2 * 8 * head_dim * 4) as u32,
+        // KV_TILE rows of K and of V, dequantized to f32. q8 stages twice the
+        // bytes per row, so it runs a 4-row tile (8 KB per block, 8 blocks in
+        // the 64 KB of LDS per CU); q4 runs an 8-row tile (16 KB, 4 blocks) for
+        // half the barriers. Must match KV_TILE_Q8 / KV_TILE_Q4 in the kernel.
+        shared_mem_bytes: (2 * tile * head_dim * 4) as u32,
     };
     kernel.launch(cfg, stream, &mut params)?;
 

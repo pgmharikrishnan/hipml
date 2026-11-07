@@ -118,7 +118,7 @@ ggml's, so a cache packed here is the same bytes `llama.cpp -ctk/-ctv` holds:
 Qwen3.8-27B bytes/token = `2 (K,V) * 4 kv heads * 16 full-attention layers * 256`.
 Parity is `Tol::DEFAULT` (abs 1e-4, rel 1e-3); the worst absolute difference
 across the 14 quantized-attention cases, including the 100,000-token one, was
-**2.4e-7**. Both sides read the same encoded bytes, so the comparison measures
+**1.6e-7**. Both sides read the same encoded bytes, so the comparison measures
 accumulation order, not the format: the quantization error cancels.
 
 ### Decode attention: depth, one head and the whole step
@@ -131,37 +131,40 @@ other layer op, so they are an attention-only model of a decode step.
 
 | dtype | heads | layers | depth | splits | µs/step | KV GiB | KV GB/s | share | tok/s |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| q8 | 1 | 1 | 1,024 | 16 | 200.2 | 0.001 | 2.8 | — | — |
-| q8 | 1 | 1 | 8,192 | 128 | 238.7 | 0.004 | 18.7 | — | — |
-| q8 | 1 | 1 | 32,768 | 256 | 473.5 | 0.017 | 37.6 | — | — |
-| q8 | 1 | 1 | 100,000 | 256 | 545.3 | 0.051 | 99.8 | — | — |
-| q8 | 24 | 16 | 1,024 | 16 | 634.3 | 0.033 | 56.2 | 2.3% | 35.93 |
-| q8 | 24 | 16 | 8,192 | 64 | 2,005.5 | 0.266 | 142.2 | 6.9% | 34.24 |
-| q8 | 24 | 16 | 32,768 | 64 | 7,425.6 | 1.062 | 153.6 | 21.4% | 28.88 |
-| **q8** | **24** | **16** | **100,000** | **64** | **21,869.0** | **3.242** | **159.2** | **44.6%** | **20.38** |
-| q8 | 24 | 16 | 131,072 | 64 | 28,284.8 | 4.250 | 161.3 | 51.0% | 18.03 |
-| q4 | 1 | 1 | 1,024 | 16 | 103.3 | 0.000 | 2.9 | — | — |
-| q4 | 1 | 1 | 8,192 | 128 | 115.9 | 0.002 | 20.4 | — | — |
-| q4 | 1 | 1 | 32,768 | 256 | 433.5 | 0.009 | 21.8 | — | — |
-| q4 | 1 | 1 | 100,000 | 256 | 838.1 | 0.027 | 34.4 | — | — |
-| q4 | 24 | 16 | 1,024 | 16 | 650.7 | 0.018 | 29.0 | 2.3% | 35.91 |
-| q4 | 24 | 16 | 8,192 | 64 | 2,063.1 | 0.141 | 73.2 | 7.1% | 34.18 |
-| q4 | 24 | 16 | 32,768 | 64 | 7,522.6 | 0.562 | 80.3 | 21.7% | 28.80 |
-| q4 | 24 | 16 | 100,000 | 64 | 22,248.2 | 1.717 | 82.8 | 45.0% | 20.22 |
-| q4 | 24 | 16 | 131,072 | 64 | 28,745.2 | 2.250 | 84.0 | 51.4% | 17.89 |
+| q8 | 1 | 1 | 1,024 | 16 | 72.1 | 0.001 | 7.7 | — | — |
+| q8 | 1 | 1 | 8,192 | 128 | 85.5 | 0.004 | 52.1 | — | — |
+| q8 | 1 | 1 | 32,768 | 256 | 125.1 | 0.017 | 142.5 | — | — |
+| q8 | 1 | 1 | 100,000 | 256 | 368.0 | 0.051 | 147.8 | — | — |
+| q8 | 1 | 1 | 131,072 | 256 | 265.6 | 0.066 | 268.5 | — | — |
+| q8 | 24 | 16 | 1,024 | 16 | 501.1 | 0.033 | 71.1 | 1.8% | 36.15 |
+| q8 | 24 | 16 | 8,192 | 64 | 1,228.2 | 0.266 | 232.2 | 4.3% | 35.23 |
+| q8 | 24 | 16 | 32,768 | 64 | 4,211.8 | 1.062 | 270.9 | 13.4% | 31.88 |
+| **q8** | **24** | **16** | **100,000** | **64** | **12,401.5** | **3.242** | **280.7** | **31.3%** | **25.28** |
+| q8 | 24 | 16 | 131,072 | 64 | 16,115.0 | 4.250 | 283.2 | 37.2% | 23.11 |
+| q4 | 1 | 1 | 1,024 | 16 | 40.2 | 0.000 | 7.3 | — | — |
+| q4 | 1 | 1 | 8,192 | 128 | 37.9 | 0.002 | 62.3 | — | — |
+| q4 | 1 | 1 | 32,768 | 256 | 176.6 | 0.009 | 53.4 | — | — |
+| q4 | 1 | 1 | 100,000 | 256 | 325.7 | 0.027 | 88.4 | — | — |
+| q4 | 1 | 1 | 131,072 | 256 | 388.5 | 0.035 | 97.2 | — | — |
+| q4 | 24 | 16 | 1,024 | 16 | 284.5 | 0.018 | 66.3 | 1.0% | 36.44 |
+| q4 | 24 | 16 | 8,192 | 64 | 1,427.1 | 0.141 | 105.8 | 5.0% | 34.98 |
+| q4 | 24 | 16 | 32,768 | 64 | 4,995.4 | 0.562 | 120.9 | 15.5% | 31.10 |
+| q4 | 24 | 16 | 100,000 | 64 | 14,615.1 | 1.717 | 126.1 | 35.0% | 23.94 |
+| q4 | 24 | 16 | 131,072 | 64 | 18,983.9 | 2.250 | 127.3 | 41.1% | 21.67 |
 
-The one-head rows are launch- and parallelism-bound (16 to 256 warps on a 64-CU
+The one-head rows are launch- and parallelism-bound (16 to 256 warps on a 32-CU
 card) and are not a bandwidth statement; they are here because the brief asks
 for them. The 24-head rows are the meaningful measurement.
 
-**The kernel does not reach the 300 GB/s acceptance target.** The best deep
-number is 159–162 GB/s of unique KV traffic (q8, 100K and 128K; the range is
-repeated runs of the same binary), 25% of the card's 632 GB/s. q4 is limited by
-the same thing at half the bytes: 83–84 GB/s at 100K because it takes the same
-22 ms as q8 on half the data, so the loop is bounded by work per cached value,
-not by DRAM. Getting to 300 needs fewer instructions per value —
-wider shared reads (`float2`/`float4` per lane), or an MMA path for the score —
-not more parallelism.
+**The 100K path now runs at 281 GB/s, 89% of the card's 632 GB/s stream.** q8 reads
+3.242 GiB in 12.40 ms; the 24-head × 16-layer attention term is 12.4 ms of a
+39.6 ms decode step, so a hipml decode models at 25.3 tok/s against llama.cpp
+HIP's measured 21.86 tok/s at 97,387 tokens. q4 no longer wins on time: it reads
+half the bytes in the same 14.6 ms, because the instruction count per cached
+value is dtype-independent, so the smaller cache buys DRAM margin rather than
+wall time (126 GB/s of unique traffic). The remaining gap to the stream is the
+compute pass itself: an ablation with staging removed still measured 11.0 ms at
+100K.
 
 What the measurements did establish:
 
@@ -177,6 +180,23 @@ What the measurements did establish:
 - **`expf` was not free.** gfx12 has `v_exp_f32`; `exp2(x * log2(e))` is the
   same probability and removed a forty-instruction range reduction from the
   inner loop.
+- **The loop was 243 instructions per cached value, not 67.** The disassembly
+  showed 16 scalar shared loads plus address math, and a `__shfl_xor_sync`
+  expansion of ~12 instructions per butterfly step — 60 of the 243. Giving each
+  lane eight components as two `float4` chunks (LDS.128, conflict-free), folding
+  the five butterfly steps into `__builtin_amdgcn_ds_bpermute` with the byte
+  offsets hoisted, and moving the rescale to once per tile took the 100K step
+  from 21.6 ms to 15.5 ms.
+- **Staging, not the loop, was then the wall: 43 instructions per dequantized
+  value.** Each value recomputed a 64-bit address and re-loaded the f16 scale,
+  and a row-at-a-time loop left two loads in flight per thread (measured
+  209 GB/s on a 632 GB/s card). Four values per 32-bit payload load, one
+  LDS.128 store, pointer walks instead of scaled indices, and a whole tile's
+  loads issued before the first is consumed got the same traffic to 281 GB/s.
+- **The tile size is a dtype decision.** q8 stages twice the bytes per row and
+  wants a 4-row tile: 8 KB per block, 8 blocks in the 64 KB of LDS per CU, 48
+  warps. q4 fits an 8-row tile (16 KB, 24 warps) and does better with half the
+  barriers. Same binary, `KV_TILE_Q8` / `KV_TILE_Q4`.
 
 ### Depth against the ceiling
 
@@ -189,23 +209,23 @@ column is calculated, not measured, and is labelled as such.
 | depth | dtype | KV GB | ceiling tok/s (calc) | attn ms/step | step ms | tok/s | share |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | 8,192 | f16 | 0.537 | 35.68 | calc | 28.01 | 35.68 | calc |
-| 8,192 | q8 | 0.285 | 36.16 | 2.01 | 29.21 | 34.24 | 6.9% |
-| 8,192 | q4 | 0.151 | 36.39 | 2.06 | 29.26 | 34.18 | 7.1% |
+| 8,192 | q8 | 0.285 | 36.16 | 1.23 | 28.39 | 35.23 | 4.3% |
+| 8,192 | q4 | 0.151 | 36.39 | 1.43 | 28.59 | 34.98 | 5.0% |
 | 32,768 | f16 | 2.148 | 32.73 | calc | 30.55 | 32.73 | calc |
-| 32,768 | q8 | 1.141 | 34.54 | 7.43 | 34.63 | 28.88 | 21.4% |
-| 32,768 | q4 | 0.604 | 35.51 | 7.52 | 34.72 | 28.80 | 21.7% |
+| 32,768 | q8 | 1.141 | 34.54 | 4.21 | 31.37 | 31.88 | 13.4% |
+| 32,768 | q4 | 0.604 | 35.51 | 5.00 | 32.16 | 31.10 | 15.5% |
 | 100,000 | f16 | 6.554 | 26.68 | calc | 37.48 | 26.68 | calc |
-| 100,000 | q8 | 3.482 | 30.62 | 21.87 | 49.07 | 20.38 | 44.6% |
-| 100,000 | q4 | 1.843 | 33.21 | 22.25 | 49.45 | 20.22 | 45.0% |
+| 100,000 | q8 | 3.482 | 30.62 | 12.40 | 39.56 | 25.28 | 31.3% |
+| 100,000 | q4 | 1.843 | 33.21 | 14.62 | 41.78 | 23.94 | 35.0% |
 | 131,072 | f16 | 8.389 | 24.63 | calc | 40.61 | 24.63 | calc |
-| 131,072 | q8 | 4.564 | 29.06 | 28.28 | 55.48 | 18.03 | 51.0% |
-| 131,072 | q4 | 2.416 | 32.34 | 28.75 | 55.95 | 17.89 | 51.4% |
+| 131,072 | q8 | 4.564 | 29.12 | 16.12 | 43.28 | 23.11 | 37.2% |
+| 131,072 | q4 | 2.416 | 32.26 | 18.98 | 46.14 | 21.67 | 41.1% |
 
-**Quantization buys nothing until attention is fast enough to notice.** At 100K
-the q8 cache halves KV bytes and the ceiling rises 3.94 tok/s, but the measured
-step is 49.1 ms against 49.5 ms for q4 — the two formats are within 1% of each
-other because the kernel is not reading-limited. The lever is only a lever once
-the kernel is.
+**Quantization is worth 1.34 tok/s at 100K, not the 2.6 the ceiling suggests.**
+The q8 cache halves KV bytes, but the measured step is 39.6 ms against 41.8 ms
+for q4: attention is no longer reading-limited at q8 either (281 of 632 GB/s),
+so the smaller cache buys DRAM margin that the compute pass cannot spend. q4
+only starts to win once the compute pass is cheaper than the byte savings.
 
 ### VRAM
 
