@@ -9,6 +9,8 @@ use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
 
 mod gen_cmd;
 mod quant_cmd;
+#[cfg(feature = "hip")]
+mod ssm_cmd;
 
 /// What happened to one case.
 enum Outcome {
@@ -30,6 +32,8 @@ fn main() {
         "generate" => std::process::exit(gen_cmd::generate(&args[1..])),
         "tokenize" => std::process::exit(gen_cmd::tokenize(&args[1..])),
         "matbench" => std::process::exit(gen_cmd::matbench(&args[1..])),
+        #[cfg(feature = "hip")]
+        "ssm" => std::process::exit(ssm_cmd::ssm(&args[1..])),
         "parity" => {
             let filter = args.iter().skip(1).find(|a| !a.starts_with('-')).cloned();
             std::process::exit(parity(filter.as_deref()));
@@ -57,6 +61,7 @@ fn help() {
          \x20 gguf      list the tensors in a GGUF file; `gguf <file> read <tensor>`\n\
          \x20 decode-bench  stream every Q4_K/Q6_K/Q8_0 tensor through GEMV once\n\
          \x20 generate  --gguf PATH --text \"prompt\" --tokens 20   greedy decode\n\
+         \x20 ssm       gated-delta-net parity (small + real layer) and layer timing\n\
          \n\
          build with `--features hip` on a machine with the ROCm/HIP runtime.",
         version = env!("CARGO_PKG_VERSION")
@@ -101,6 +106,7 @@ fn kernels() {
             KernelKind::PerHead { block } => format!("per-head, {block} threads"),
             KernelKind::PerHeadOnDim => "per-head, one thread per dim".to_string(),
             KernelKind::Linear { block } => format!("linear, {block} threads"),
+            KernelKind::Composite => "composite (several launches)".to_string(),
             KernelKind::HostOnly(why) => format!("host-only: {why}"),
         };
         println!("{:<20} {:<18} {}", k.name, k.entry, geometry);
@@ -324,6 +330,13 @@ fn bytes_moved(case: &OpCase, inputs: &[Tensor]) -> usize {
         "gemm_f32" => case.scalar("r") as usize * case.scalar("m") as usize * 4,
         "attn_decode_f32" => case.scalar("n_heads") as usize * case.scalar("head_dim") as usize * 4,
         "rmsnorm_f32" | "softmax_f32" => case.scalar("n") as usize * 4,
+        "gdn_ar_f32" => {
+            (case.scalar("n_v") * case.scalar("sd")) as usize * 4
+        }
+        "ssm_gate_norm_f32" => {
+            (case.scalar("n_v") * case.scalar("head_v")) as usize * 4
+        }
+        "ssm_layer_f32" => case.scalar("n_embd") as usize * 4,
         _ => inputs[0].numel() * 4,
     };
     read + written

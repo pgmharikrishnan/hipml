@@ -34,6 +34,14 @@ mod device {
             })
         }
 
+        pub fn module(&self) -> &Module {
+            &self.module
+        }
+
+        pub fn stream(&self) -> &Stream {
+            &self.stream
+        }
+
         pub fn run(&self, case: &OpCase, inputs: &[Tensor]) -> Result<Vec<f32>, String> {
             self.run_reps(case, inputs, 1)
         }
@@ -57,6 +65,21 @@ mod device {
                 "residual_add_f32" => self.linear2(case, inputs, reps),
                 "softmax_f32" => self.softmax(case, inputs, reps),
                 "attn_decode_f32" => self.attention(case, inputs, reps),
+                "ssm_conv1d_f32" => {
+                    crate::ssm_launch::conv(self.module(), self.stream(), case, inputs, reps)
+                }
+                "gdn_ar_f32" => {
+                    crate::ssm_launch::gdn(self.module(), self.stream(), case, inputs, reps)
+                }
+                "ssm_l2norm_f32" => {
+                    crate::ssm_launch::l2norm(self.module(), self.stream(), case, inputs, reps)
+                }
+                "ssm_gate_norm_f32" => {
+                    crate::ssm_launch::gate_norm(self.module(), self.stream(), case, inputs, reps)
+                }
+                "ssm_layer_f32" => {
+                    crate::ssm_launch::layer(self.module(), self.stream(), case, inputs, reps)
+                }
                 other => Err(format!("{other} has no device launcher")),
             }
         }
