@@ -105,15 +105,15 @@ chunks, uploads each chunk, and launches the matching kernel. It never holds the
 
 | Pass | Bytes | GB/s | implied tok/s |
 | --- | ---: | ---: | ---: |
-| single pass, one launch + sync per chunk (`reps=1`) | 16,964,915,200 | 222.5 | 13.12 |
-| kernel-only, 11 launches per chunk (`reps=11`) | 16,964,915,200 | 395.5 | 23.32 |
+| single pass, one launch + sync per chunk (`reps=1`) | 16,964,915,200 | 217.8 | 12.84 |
+| kernel-only, 11 launches per chunk (`--reps 11`) | 16,964,915,200 | 393.6 | 23.20 |
 
 The second row amortises launch/sync latency (the first is a hard lower bound for
 this harness, not for a real engine, which enqueues all tensors and syncs once).
-Some small tensors become cache-resident across the 11 reps, so 23.3 tok/s is an
+Some small tensors become cache-resident across the 11 reps, so 23.2 tok/s is an
 optimistic kernel-side estimate. `llama.cpp` HIP measures **31.4 tok/s** on the
 same 17.19 GB. Including the 227 MB of F32 tensors at the same bandwidth gives
-23.01 tok/s, so the miss is the kernel, not the accounting.
+22.89 tok/s, so the miss is the kernel, not the accounting.
 
 ### Why not 95% of bandwidth
 
@@ -138,6 +138,7 @@ cargo build --release -p hipml-cli --features hip
 target\release\hipml.exe parity
 target\release\hipml.exe bench
 target\release\hipml.exe decode-bench C:\models\Qwen3.8-27B-Q4_K_M.gguf -v
+target\release\hipml.exe decode-bench C:\models\Qwen3.8-27B-Q4_K_M.gguf -v --reps 11
 target\release\hipml.exe gguf C:\models\Qwen3.8-27B-Q4_K_M.gguf
 ```
 
