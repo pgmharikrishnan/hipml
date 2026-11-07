@@ -6,7 +6,7 @@ license.workspace = true
 description = "hipml command line: device probe, kernel manifest and the parity runner"
 
 [features]
-hip = ["hipml-hip/hip", "hipml-kernels/hip"]
+hip = ["hipml-hip/hip", "hipml-kernels/hip", "hipml-model/hip"]
 
 [[bin]]
 name = "hipml"
@@ -16,3 +16,4 @@ path = "src/main.rs"
 hipml-core.workspace = true
 hipml-hip.workspace = true
 hipml-kernels.workspace = true
+hipml-model.workspace = true

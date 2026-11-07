@@ -9,6 +9,7 @@ dependencies = [
  "hipml-core",
  "hipml-hip",
  "hipml-kernels",
+ "hipml-model",
 ]
 
 [[package]]
@@ -25,4 +26,13 @@ version = "0.1.0"
 dependencies = [
  "hipml-core",
  "hipml-hip",
+]
+
+[[package]]
+name = "hipml-model"
+version = "0.1.0"
+dependencies = [
+ "hipml-core",
+ "hipml-hip",
+ "hipml-kernels",
 ]

@@ -8,6 +8,8 @@
 use std::path::PathBuf;
 
 pub mod launch;
+#[cfg(feature = "hip")]
+mod quant_launch;
 
 pub use launch::Launcher;
 
@@ -69,6 +71,12 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "gemv_q8_0",
         entry: "gemv_q8_0",
         kind: KernelKind::PerRow { block: 256 },
+    },
+    KernelSpec {
+        name: "dequant_q4_k_f32",
+        entry: "dequant_q4_k_f32",
+        // One 256-thread block per Q4_K super-block, one output value per thread.
+        kind: KernelKind::Linear { block: 256 },
     },
     KernelSpec {
         name: "gemm_f32",

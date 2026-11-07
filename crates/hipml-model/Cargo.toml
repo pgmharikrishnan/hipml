@@ -1,0 +1,14 @@
+[package]
+name = "hipml-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GGUF model residency for hipml: load every tensor into VRAM once, expose it, verify it"
+
+[features]
+hip = ["hipml-hip/hip", "hipml-kernels/hip"]
+
+[dependencies]
+hipml-core.workspace = true
+hipml-hip.workspace = true
+hipml-kernels.workspace = true

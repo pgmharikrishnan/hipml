@@ -8,6 +8,7 @@ use hipml_core::tensor::Tensor;
 use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
 
 mod gen_cmd;
+mod load_cmd;
 mod quant_cmd;
 
 /// What happened to one case.
@@ -26,6 +27,8 @@ fn main() {
         "kernels" => kernels(),
         "bench" => std::process::exit(bench()),
         "gguf" => std::process::exit(quant_cmd::gguf(&args[1..])),
+        "load" => std::process::exit(load_cmd::load(&args[1..])),
+        "logits" => std::process::exit(load_cmd::logits(&args[1..])),
         "decode-bench" => std::process::exit(quant_cmd::decode_bench(&args[1..])),
         "generate" => std::process::exit(gen_cmd::generate(&args[1..])),
         "tokenize" => std::process::exit(gen_cmd::tokenize(&args[1..])),
@@ -57,6 +60,8 @@ fn help() {
          \x20 gguf      list the tensors in a GGUF file; `gguf <file> read <tensor>`\n\
          \x20 decode-bench  stream every Q4_K/Q6_K/Q8_0 tensor through GEMV once\n\
          \x20 generate  --gguf PATH --text \"prompt\" --tokens 20   greedy decode\n\
+         \x20 load      load every tensor into VRAM and verify residency\n\
+         \x20 logits    run lm_head on a 5120-value f32 vector file\n\
          \n\
          build with `--features hip` on a machine with the ROCm/HIP runtime.",
         version = env!("CARGO_PKG_VERSION")
