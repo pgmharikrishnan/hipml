@@ -16,6 +16,8 @@
 pub mod verify;
 #[cfg(feature = "hip")]
 pub mod gpu;
+#[cfg(feature = "hip")]
+pub mod gpu_weights;
 
 use std::collections::HashMap;
 use std::path::Path;

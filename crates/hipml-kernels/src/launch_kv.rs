@@ -8,7 +8,6 @@ use hipml_core::parity::OpCase;
 use hipml_core::tensor::Tensor;
 use hipml_hip::{Buffer, LaunchConfig, Module, Stream};
 
-use std::ffi::c_void;
 
 pub fn run(
     module: &Module,

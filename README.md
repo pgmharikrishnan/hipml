@@ -102,8 +102,11 @@ cargo run --release -p hipml-cli -- generate \
 cargo run --release -p hipml-cli -- tokenize --gguf ... --text "..."
 ```
 
-See `docs/forward.md` for the op map to llama.cpp and `docs/forward-parity.md`
-for the token-for-token comparison against `llama-server`.
+The same GGUF runs on the GPU with the resident-weight graph: `--device` prints
+the same greedy ids as the CPU oracle, and `gpu-bench` reports decode tok/s at
+depth. See `docs/gpu-engine.md`, `docs/forward.md` for the op map to llama.cpp
+and `docs/forward-parity.md` for the token-for-token comparison against
+`llama-server`.
 
 ## Layout
 
