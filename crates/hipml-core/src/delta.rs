@@ -174,8 +174,8 @@ pub fn ssm_layer_f32(
 
     // Split q | k | v and L2-normalise each head (build_gdn_l2_norm:
     // rms_norm with eps/n, then scale by 1/sqrt(n)).
-    let q = l2norm_heads(&qkv[..key_dim], n_k, head_k, cfg.eps);
-    let k = l2norm_heads(&qkv[key_dim..2 * key_dim], n_k, head_k, cfg.eps);
+    let q = l2norm_f32(&qkv[..key_dim], n_k, head_k, cfg.eps);
+    let k = l2norm_f32(&qkv[key_dim..2 * key_dim], n_k, head_k, cfg.eps);
     let v = &qkv[2 * key_dim..];
 
     let o = gdn_ar_f32(&mut st.s, &q, &k, v, &g, &beta, n_v, n_k, head_v);
@@ -198,7 +198,7 @@ pub fn ssm_layer_f32(
 ///
 /// `ggml_rms_norm(x, eps/n) * 1/sqrt(n)` is exactly `x / sqrt(sum(x^2)+eps)`.
 /// Kernel: `l2norm_f32`.
-fn l2norm_heads(x: &[f32], n_heads: usize, head_dim: usize, eps: f32) -> Vec<f32> {
+pub fn l2norm_f32(x: &[f32], n_heads: usize, head_dim: usize, eps: f32) -> Vec<f32> {
     let mut out = vec![0.0f32; x.len()];
     for h in 0..n_heads {
         let src = &x[h * head_dim..(h + 1) * head_dim];

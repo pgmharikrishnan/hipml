@@ -11,6 +11,13 @@ pub mod launch;
 #[cfg(feature = "hip")]
 mod quant_launch;
 
+#[cfg(feature = "hip")]
+pub mod ssm;
+#[cfg(feature = "hip")]
+pub mod ssm_launch;
+#[cfg(feature = "hip")]
+mod ssm_ops;
+
 pub use launch::Launcher;
 
 /// How a kernel is gridded.
@@ -35,6 +42,8 @@ pub enum KernelKind {
     PerHeadOnDim,
     /// 1-D coverage of `n` elements.
     Linear { block: u32 },
+    /// Several launches end to end (one whole SSM layer).
+    Composite,
     /// No device kernel: this op stays on the host by design.
     HostOnly(&'static str),
 }
@@ -150,6 +159,41 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "attn_decode_f32",
         entry: "attn_decode_f32",
         kind: KernelKind::PerHeadOnDim,
+    },
+    KernelSpec {
+        name: "ssm_conv1d_f32",
+        entry: "ssm_conv1d_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "ssm_silu_inplace_f32",
+        entry: "ssm_silu_inplace_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "ssm_l2norm_f32",
+        entry: "l2norm_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
+    KernelSpec {
+        name: "gdn_ar_f32",
+        entry: "gdn_ar_f32",
+        kind: KernelKind::PerHead { block: 128 },
+    },
+    KernelSpec {
+        name: "ssm_gate_norm_f32",
+        entry: "ssm_gate_norm_f32",
+        kind: KernelKind::PerHead { block: 128 },
+    },
+    KernelSpec {
+        name: "ssm_gates_f32",
+        entry: "ssm_gates_f32",
+        kind: KernelKind::Linear { block: 64 },
+    },
+    KernelSpec {
+        name: "ssm_layer_f32",
+        entry: "ssm_layer_f32",
+        kind: KernelKind::Composite,
     },
     KernelSpec {
         name: "sample_top_p_f32",
