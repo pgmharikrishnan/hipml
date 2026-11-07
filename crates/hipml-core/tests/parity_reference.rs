@@ -21,6 +21,29 @@ fn gemv_matches_hand_computed_values() {
 }
 
 #[test]
+fn gemm_matches_gemv_and_hand_computed_values() {
+    let w = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let x = vec![1.0, 1.0, 1.0, 0.0, 1.0, 0.0];
+    assert_eq!(ops::gemm_f32(&w, &x, 2, 2, 3), vec![6.0, 15.0, 2.0, 5.0]);
+    assert_eq!(
+        ops::gemm_f32(&w, &x[..3], 1, 2, 3),
+        ops::gemv_f32(&w, &x[..3], 2, 3)
+    );
+
+    let mut rng = Rng::new(41);
+    let (r, m, k) = (4, 13, 17);
+    let w: Vec<f32> = (0..m * k).map(|_| rng.normal()).collect();
+    let x: Vec<f32> = (0..r * k).map(|_| rng.normal()).collect();
+    let y = ops::gemm_f32(&w, &x, r, m, k);
+    for row in 0..r {
+        assert_eq!(
+            &y[row * m..(row + 1) * m],
+            ops::gemv_f32(&w, &x[row * k..(row + 1) * k], m, k)
+        );
+    }
+}
+
+#[test]
 fn rmsnorm_output_has_unit_rms_before_the_gain() {
     let mut rng = Rng::new(7);
     let n = 513; // not a power of two on purpose

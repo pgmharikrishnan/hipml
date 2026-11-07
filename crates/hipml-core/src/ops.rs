@@ -25,6 +25,25 @@ pub fn gemv_f32(w: &[f32], x: &[f32], m: usize, k: usize) -> Vec<f32> {
     y
 }
 
+/// `y[r,m] = W[m,k] · x[r,k]`, with all tensors row-major.
+///
+/// Kernel: `gemm_f32`, one block per output column, reusing W across rows.
+pub fn gemm_f32(w: &[f32], x: &[f32], r: usize, m: usize, k: usize) -> Vec<f32> {
+    assert_eq!(w.len(), m * k, "W must be m*k");
+    assert_eq!(x.len(), r * k, "x must be r*k");
+    let mut y = vec![0.0f32; r * m];
+    for batch in 0..r {
+        for row in 0..m {
+            let mut acc = 0.0f32;
+            for j in 0..k {
+                acc += w[row * k + j] * x[batch * k + j];
+            }
+            y[batch * m + row] = acc;
+        }
+    }
+    y
+}
+
 /// `y[n] = x[n] / sqrt(mean(x²) + eps) * w[n]`
 ///
 /// Kernel: `rmsnorm_f32`, one block per row, block-wide reduction for the mean.
