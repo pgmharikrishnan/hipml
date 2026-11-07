@@ -5,13 +5,21 @@
 //! implementation here with the same signature and the same memory layout, so a
 //! device result can be compared against it directly.
 
+pub mod attention;
+pub mod config;
+pub mod delta;
+pub mod gen;
 pub mod gguf;
+pub mod gguf_value;
+pub mod mat;
+pub mod model;
 pub mod ops;
 pub mod parity;
 pub mod quant;
 pub mod quant_parity;
 pub mod rng;
 pub mod tensor;
+pub mod tokenizer;
 
 pub use parity::{compare, OpCase, Stats, Tol};
 pub use rng::Rng;

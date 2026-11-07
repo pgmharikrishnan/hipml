@@ -44,6 +44,25 @@ pub fn gemm_f32(w: &[f32], x: &[f32], r: usize, m: usize, k: usize) -> Vec<f32> 
     y
 }
 
+/// `out[i] = sigmoid(x[i]) = 1 / (1 + exp(-x[i]))`
+///
+/// Kernel: `sigmoid_f32`, elementwise.
+pub fn sigmoid_f32(x: &[f32]) -> Vec<f32> {
+    x.iter().map(|v| 1.0 / (1.0 + (-v).exp())).collect()
+}
+
+/// `log(1 + exp(x))`, with the `x > 20` shortcut from
+/// `ggml_compute_softplus_f32` so the exponential cannot overflow.
+///
+/// Kernel: `softplus_f32`, one value (the GDN time-step gate).
+pub fn softplus_f32(x: f32) -> f32 {
+    if x > 20.0 {
+        x
+    } else {
+        (1.0 + x.exp()).ln()
+    }
+}
+
 /// `y[n] = x[n] / sqrt(mean(x²) + eps) * w[n]`
 ///
 /// Kernel: `rmsnorm_f32`, one block per row, block-wide reduction for the mean.
@@ -112,6 +131,66 @@ pub fn softmax_f32(x: &[f32]) -> Vec<f32> {
     let exps: Vec<f32> = x.iter().map(|v| (v - max).exp()).collect();
     let sum: f32 = exps.iter().sum();
     exps.iter().map(|v| v / sum).collect()
+}
+
+/// M-RoPE (Qwen3.5) applied to every head at one position.
+///
+/// Port of `ggml_compute_forward_rope_flt` (mode `GGML_ROPE_TYPE_MROPE`,
+/// `ggml-mrope-cache-init`): only the first `n_rot` channels rotate, NeoX
+/// pair `i` against `i + n_rot/2`, and the frequency of pair `k` is
+/// `theta_base^(-2k/n_rot)`. `sections` chooses which of the four position ids
+/// feeds pair `k`; for text all four ids are the token position, so this
+/// degenerates to plain NeoX rope over `n_rot` channels.
+///
+/// `pos` is `[temporal, height, width, extra]`; pass the same value four times
+/// for text. Kernel: `rope_multi_f32`, one warp per head.
+#[allow(clippy::too_many_arguments)]
+pub fn rope_multi_f32(
+    x: &[f32],
+    n_heads: usize,
+    head_dim: usize,
+    n_rot: usize,
+    sections: [usize; 4],
+    pos: [usize; 4],
+    theta_base: f32,
+) -> Vec<f32> {
+    assert_eq!(x.len(), n_heads * head_dim, "x must be n_heads*head_dim");
+    assert!(n_rot <= head_dim && n_rot % 2 == 0, "n_rot must be even and <= head_dim");
+    let half = n_rot / 2;
+    let sect: usize = sections.iter().sum();
+    let mut y = x.to_vec();
+    for h in 0..n_heads {
+        let base = h * head_dim;
+        for k in 0..half {
+            // Which position id: sections[0] temporal, [1] height, [2] width,
+            // [3] extra, matching ggml_mrope_cache_init's sector walk.
+            let p = if sect == 0 {
+                pos[0]
+            } else {
+                let s = k % sect;
+                if s < sections[0] {
+                    pos[0]
+                } else if s < sections[0] + sections[1] {
+                    pos[1]
+                } else if s < sections[0] + sections[1] + sections[2] {
+                    pos[2]
+                } else {
+                    pos[3]
+                }
+            };
+            // f64 for the angle: at position 37 the angle reaches ~37 rad and
+            // an f32 powf differs from the reference libm by ~7e-5.
+            let freq = (theta_base as f64).powf(-2.0 * k as f64 / n_rot as f64);
+            let ang = p as f64 * freq;
+            let (sin, cos) = ang.sin_cos();
+            let (sin, cos) = (sin as f32, cos as f32);
+            let x1 = x[base + k];
+            let x2 = x[base + half + k];
+            y[base + k] = x1 * cos - x2 * sin;
+            y[base + half + k] = x1 * sin + x2 * cos;
+        }
+    }
+    y
 }
 
 /// `c[i] = a[i] + b[i]` — the residual add.

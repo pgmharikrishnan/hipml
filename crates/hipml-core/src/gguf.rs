@@ -13,6 +13,7 @@
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 
+use crate::gguf_value::{read_string, read_u32, read_u64, read_value, Value};
 use crate::quant::TensorType;
 
 /// GGUF magic as a little-endian u32: the bytes are `G G U F`.
@@ -71,6 +72,8 @@ pub struct Gguf<R: Read + Seek> {
     pub alignment: u64,
     pub data_offset: u64,
     pub tensors: Vec<TensorInfo>,
+    /// Metadata key/value pairs, in file order.
+    pub kv: Vec<(String, Value)>,
 }
 
 impl Gguf<File> {
@@ -102,17 +105,17 @@ impl<R: Read + Seek> Gguf<R> {
         let kv_count = read_u64(&mut reader)?;
 
         let mut alignment = 32u64;
+        let mut kv = Vec::with_capacity(kv_count.min(1 << 20) as usize);
         for _ in 0..kv_count {
             let key = read_string(&mut reader)?;
             let value_type = read_u32(&mut reader)?;
-            if (key == "general.alignment" || key == "alignment") && value_type == VT_UINT32 {
-                alignment = read_u32(&mut reader)? as u64;
-            } else if (key == "general.alignment" || key == "alignment") && value_type == VT_UINT64
-            {
-                alignment = read_u64(&mut reader)?;
-            } else {
-                skip_value(&mut reader, value_type, 0)?;
+            let value = read_value(&mut reader, value_type)?;
+            if key == "general.alignment" || key == "alignment" {
+                if let Some(a) = value.as_u32() {
+                    alignment = a as u64;
+                }
             }
+            kv.push((key, value));
         }
         if alignment == 0 || !alignment.is_power_of_two() {
             return Err(io::Error::new(
@@ -168,6 +171,23 @@ impl<R: Read + Seek> Gguf<R> {
             alignment,
             data_offset,
             tensors,
+            kv,
+        })
+    }
+
+    /// One metadata value by key.
+    pub fn meta(&self, key: &str) -> Option<&Value> {
+        self.kv.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    /// Required metadata value: a typo in a key is a hard error, never a
+    /// silently wrong default.
+    pub fn meta_req(&self, key: &str) -> io::Result<&Value> {
+        self.meta(key).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("GGUF metadata key {key} is missing"),
+            )
         })
     }
 
@@ -226,95 +246,6 @@ impl<R: Read + Seek> Gguf<R> {
 /// Round `v` up to the next multiple of `align` (a power of two).
 pub fn align_up(v: u64, align: u64) -> u64 {
     (v + align - 1) & !(align - 1)
-}
-
-// GGUF metadata value types.
-const VT_UINT8: u32 = 0;
-const VT_INT8: u32 = 1;
-const VT_UINT16: u32 = 2;
-const VT_INT16: u32 = 3;
-const VT_UINT32: u32 = 4;
-const VT_INT32: u32 = 5;
-const VT_FLOAT32: u32 = 6;
-const VT_BOOL: u32 = 7;
-const VT_STRING: u32 = 8;
-const VT_ARRAY: u32 = 9;
-const VT_UINT64: u32 = 10;
-const VT_INT64: u32 = 11;
-const VT_FLOAT64: u32 = 12;
-
-fn read_exact<const N: usize, R: Read>(r: &mut R) -> io::Result<[u8; N]> {
-    let mut buf = [0u8; N];
-    r.read_exact(&mut buf)?;
-    Ok(buf)
-}
-
-fn read_u32<R: Read>(r: &mut R) -> io::Result<u32> {
-    Ok(u32::from_le_bytes(read_exact::<4, _>(r)?))
-}
-
-fn read_u64<R: Read>(r: &mut R) -> io::Result<u64> {
-    Ok(u64::from_le_bytes(read_exact::<8, _>(r)?))
-}
-
-/// A GGUF string: u64 length followed by that many UTF-8 bytes (v2/v3).
-fn read_string<R: Read>(r: &mut R) -> io::Result<String> {
-    let len = read_u64(r)?;
-    // A metadata key or tensor name is never gigabytes; reject corruption early.
-    if len > 1 << 20 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("string length {len} is implausible"),
-        ));
-    }
-    let mut buf = vec![0u8; len as usize];
-    r.read_exact(&mut buf)?;
-    String::from_utf8(buf)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("invalid UTF-8: {e}")))
-}
-
-/// Skip one metadata value of `ty`, including arrays (recursively, with a depth
-/// bound so a corrupt file cannot recurse forever).
-fn skip_value<R: Read + Seek>(r: &mut R, ty: u32, depth: u32) -> io::Result<()> {
-    if depth > 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "metadata arrays nested too deeply",
-        ));
-    }
-    match ty {
-        VT_UINT8 | VT_INT8 | VT_BOOL => skip_bytes(r, 1),
-        VT_UINT16 | VT_INT16 => skip_bytes(r, 2),
-        VT_UINT32 | VT_INT32 | VT_FLOAT32 => skip_bytes(r, 4),
-        VT_UINT64 | VT_INT64 | VT_FLOAT64 => skip_bytes(r, 8),
-        VT_STRING => {
-            let len = read_u64(r)?;
-            skip_bytes(r, len as i64)
-        }
-        VT_ARRAY => {
-            let elem = read_u32(r)?;
-            let count = read_u64(r)?;
-            for _ in 0..count {
-                skip_value(r, elem, depth + 1)?;
-            }
-            Ok(())
-        }
-        other => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unknown GGUF metadata value type {other}"),
-        )),
-    }
-}
-
-fn skip_bytes<R: Seek>(r: &mut R, n: i64) -> io::Result<()> {
-    if n < 0 || n > 1 << 40 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("implausible metadata length {n}"),
-        ));
-    }
-    r.seek(SeekFrom::Current(n))?;
-    Ok(())
 }
 
 #[cfg(test)]

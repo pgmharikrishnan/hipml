@@ -187,6 +187,48 @@ fn q4_k_scale_min(j: usize, q: &[u8]) -> (u8, u8) {
     }
 }
 
+/// Dequantise one Q5_K super-block (176 bytes -> 256 values).
+///
+/// Port of `dequantize_row_q5_K` (ggml-quants.c:1741). Not in the original
+/// scope — Qwen3.8-27B Q4_K_M stores exactly two Q5_K tensors
+/// (`blk.51.ffn_down.weight`, `blk.55.ffn_down.weight`) and the forward pass
+/// cannot run without them.
+///
+/// `y = d*scale[j]*(q + 16*qh_bit) - dmin*min[j]` where `q` is the 4-bit
+/// `qs` nibble and `qh` supplies the fifth bit, two bits per 64-value group.
+pub fn dequant_q5_k(block: &[u8], out: &mut [f32]) {
+    assert_eq!(block.len(), Q5_K_BYTES, "Q5_K block must be 176 bytes");
+    assert_eq!(out.len(), QK_K, "Q5_K block must produce 256 values");
+
+    let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    let dmin = f16_to_f32(u16::from_le_bytes([block[2], block[3]]));
+    let scales = &block[4..16];
+    let qh = &block[16..48];
+    let qs = &block[48..176];
+
+    let mut is = 0usize;
+    let mut u1: u8 = 1;
+    let mut u2: u8 = 2;
+    for j in (0..QK_K).step_by(64) {
+        let (sc, mn) = q4_k_scale_min(is, scales);
+        let (d1, m1) = (d * sc as f32, dmin * mn as f32);
+        let (sc, mn) = q4_k_scale_min(is + 1, scales);
+        let (d2, m2) = (d * sc as f32, dmin * mn as f32);
+        let ql = &qs[(j / 64) * 32..(j / 64) * 32 + 32];
+        for l in 0..32 {
+            let hi = if qh[l] & u1 != 0 { 16.0 } else { 0.0 };
+            out[j + l] = d1 * ((ql[l] & 0xF) as f32 + hi) - m1;
+        }
+        for l in 0..32 {
+            let hi = if qh[l] & u2 != 0 { 16.0 } else { 0.0 };
+            out[j + 32 + l] = d2 * ((ql[l] >> 4) as f32 + hi) - m2;
+        }
+        is += 2;
+        u1 <<= 2;
+        u2 <<= 2;
+    }
+}
+
 /// Dequantise one Q6_K super-block (210 bytes -> 256 values).
 ///
 /// `q = (ql nibble) | ((qh 2-bit plane) << 4)`, then `y = d * scale[j] * (q-32)`.

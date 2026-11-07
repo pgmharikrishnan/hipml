@@ -7,6 +7,7 @@ use hipml_core::parity::{bench_cases, cases, compare, quant_cases, OpCase};
 use hipml_core::tensor::Tensor;
 use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
 
+mod gen_cmd;
 mod quant_cmd;
 
 /// What happened to one case.
@@ -26,6 +27,9 @@ fn main() {
         "bench" => std::process::exit(bench()),
         "gguf" => std::process::exit(quant_cmd::gguf(&args[1..])),
         "decode-bench" => std::process::exit(quant_cmd::decode_bench(&args[1..])),
+        "generate" => std::process::exit(gen_cmd::generate(&args[1..])),
+        "tokenize" => std::process::exit(gen_cmd::tokenize(&args[1..])),
+        "matbench" => std::process::exit(gen_cmd::matbench(&args[1..])),
         "parity" => {
             let filter = args.iter().skip(1).find(|a| !a.starts_with('-')).cloned();
             std::process::exit(parity(filter.as_deref()));
@@ -52,6 +56,7 @@ fn help() {
          \x20 bench     time each kernel launch and report effective bandwidth\n\
          \x20 gguf      list the tensors in a GGUF file; `gguf <file> read <tensor>`\n\
          \x20 decode-bench  stream every Q4_K/Q6_K/Q8_0 tensor through GEMV once\n\
+         \x20 generate  --gguf PATH --text \"prompt\" --tokens 20   greedy decode\n\
          \n\
          build with `--features hip` on a machine with the ROCm/HIP runtime.",
         version = env!("CARGO_PKG_VERSION")
