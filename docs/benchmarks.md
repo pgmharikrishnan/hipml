@@ -99,10 +99,11 @@ k-tile, one warp shuffle reduction per row, no reordering of the maths.
 | ffn_down | 5120x17408 | Q6_K | 73,113,600 | 117.27 | 623.5 | 98.8% |
 | ffn_down | 17408x5120 | Q4_K | 50,135,040 | 70.61 | 710.1 | 112.5% |
 
-The same run's fp32 `gemv_f32` was **634.2 GB/s** (839 MB), so the reference
-ceiling stays 631 GB/s. The >100% rows are the 50-73 MB tensors fitting partly in
-the 64 MB Infinity Cache across the 51 benchmark reps; the decode stream below
-is the conservative number.
+The same run's fp32 `gemv_f32` was **634.2-648.0 GB/s** (839 MB), so the reference
+ceiling stays 631 GB/s. Repeat runs are within ~1% except Q6_K ffn_down, which
+ranged 596-624 GB/s across three runs. The >100% rows are the 50-73 MB tensors
+fitting partly in the 64 MB Infinity Cache across the 51 benchmark reps; the
+decode stream below is the conservative number.
 
 ### Tile tuning
 
@@ -135,13 +136,14 @@ chunks, uploads each chunk, and launches the matching kernel. It never holds the
 | Pass | Bytes | GB/s | implied tok/s |
 | --- | ---: | ---: | ---: |
 | single pass, one launch + sync per chunk (`reps=1`) | 16,964,915,200 | 259.7 | 15.31 |
-| kernel-only, 11 launches per chunk (`--reps 11`) | 16,964,915,200 | 604.3 | 35.62 |
+| kernel-only, 11 launches per chunk (`--reps 11`) | 16,964,915,200 | 605.2 | 35.68 |
 
-Per type at `--reps 11`: Q4_K **612.1**, Q6_K **557.0**, Q8_0 **708.5**. The
+Per type at `--reps 11`: Q4_K **613.3**, Q6_K **557.7**, Q8_0 **707.6** (repeat
+runs: 604.3-605.2 GB/s total). The
 first row is a hard lower bound for this harness (it syncs per 64 MiB chunk, not
 per token); the second amortises launch/sync latency and is the comparable
 number. Including all 17.192 GB of tensor bytes at the same bandwidth gives
-**35.15 tok/s**; `llama.cpp` HIP measures **31.4 tok/s** on the same file.
+**35.20 tok/s**; `llama.cpp` HIP measures **31.4 tok/s** on the same file.
 
 ### Commands
 
