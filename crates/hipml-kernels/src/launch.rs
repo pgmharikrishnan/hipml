@@ -55,6 +55,7 @@ mod device {
                 "silu_mul_f32" => self.linear2(case, inputs, reps),
                 "residual_add_f32" => self.linear2(case, inputs, reps),
                 "softmax_f32" => self.softmax(case, inputs, reps),
+                "attn_decode_f32" => self.attention(case, inputs, reps),
                 other => Err(format!("{other} has no device launcher")),
             }
         }
@@ -180,6 +181,86 @@ mod device {
                 kernel.launch(LaunchConfig::linear(n, 256), &self.stream, &mut params)?;
             }
             self.stream.synchronize()?;
+            out.to_host()
+        }
+
+        fn attention(
+            &self,
+
+            case: &OpCase,
+
+            inputs: &[Tensor],
+
+            reps: usize,
+        ) -> Result<Vec<f32>, String> {
+            let n_heads = case.scalar("n_heads") as usize;
+
+            let n_kv = case.scalar("n_kv") as usize;
+
+            let head_dim = case.scalar("head_dim") as usize;
+
+            let seq = case.scalar("seq") as usize;
+
+            let scale = case.scalar("scale");
+
+            let q = Buffer::from_host(inputs[0].data())?;
+
+            let k = Buffer::from_host(inputs[1].data())?;
+
+            let v = Buffer::from_host(inputs[2].data())?;
+
+            let out = Buffer::alloc(n_heads * head_dim)?;
+
+            let kernel = self.module.kernel("attn_decode_f32")?;
+
+            let mut p_q = q.as_ptr();
+
+            let mut p_k = k.as_ptr();
+
+            let mut p_v = v.as_ptr();
+
+            let mut p_out = out.as_ptr();
+
+            let mut v_heads = n_heads as i32;
+
+            let mut v_kv = n_kv as i32;
+
+            let mut v_dim = head_dim as i32;
+
+            let mut v_seq = seq as i32;
+
+            let mut v_scale = scale;
+
+            let mut params: [*mut c_void; 9] = [
+                &mut p_q as *mut _ as *mut c_void,
+                &mut p_k as *mut _ as *mut c_void,
+                &mut p_v as *mut _ as *mut c_void,
+                &mut p_out as *mut _ as *mut c_void,
+                &mut v_heads as *mut _ as *mut c_void,
+                &mut v_kv as *mut _ as *mut c_void,
+                &mut v_dim as *mut _ as *mut c_void,
+                &mut v_seq as *mut _ as *mut c_void,
+                &mut v_scale as *mut _ as *mut c_void,
+            ];
+
+            // One block per head; the block must be exactly head_dim wide because each
+
+            // thread owns one component of the query and of the accumulator.
+
+            let cfg = LaunchConfig {
+                grid: (n_heads as u32, 1, 1),
+
+                block: (head_dim as u32, 1, 1),
+
+                shared_mem_bytes: 0,
+            };
+
+            for _ in 0..reps {
+                kernel.launch(cfg, &self.stream, &mut params)?;
+            }
+
+            self.stream.synchronize()?;
+
             out.to_host()
         }
 
