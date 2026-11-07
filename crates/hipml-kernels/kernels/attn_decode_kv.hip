@@ -59,9 +59,9 @@ struct KvQ4 {
 // Sum across a warp, then broadcast so every lane sees the whole score.
 __device__ __forceinline__ float warp_sum_all(float v) {
     for (int off = warpSize >> 1; off > 0; off >>= 1) {
-        v += __shfl_down_sync(0xffffffffu, v, off);
+        v += __shfl_down_sync(0xffffffffffffffffull, v, off);
     }
-    return __shfl_sync(0xffffffffu, v, 0);
+    return __shfl_sync(0xffffffffffffffffull, v, 0);
 }
 
 template <typename Loader>
