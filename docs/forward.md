@@ -11,8 +11,10 @@ hipml tokenize --gguf ... --text "..."                              # diff again
 ```
 
 Weights stay in their GGUF quantized form (17 GB); each GEMV dequantises one
-row at a time and accumulates in f32. A full model pass reads all 17 GB, so the
-first token costs seconds, and everything is parallelised over output rows with
+row at a time and accumulates in f32. The file is memory-mapped read-only
+(`mmap.rs`), so the weights are file-backed pages the kernel can evict instead
+of anonymous memory that gets swapped. A full model pass reads all 17 GB, so
+the first token costs seconds, and work is parallelised over output rows with
 `HIPML_THREADS` (default: available cores).
 
 ## What the model is

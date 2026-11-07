@@ -12,6 +12,7 @@
 //! Nothing is mutated through the map; `Map` is `Send + Sync` because the
 //! mapping is read-only for its whole lifetime.
 
+#[cfg(unix)]
 use std::fs::File;
 use std::io;
 use std::path::Path;

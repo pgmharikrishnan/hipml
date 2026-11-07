@@ -92,6 +92,19 @@ cargo run --release -p hipml-cli --features hip -- bench
 developer loop. A case that cannot run is reported as `SKIP` with the reason —
 never as a pass.
 
+The CPU reference forward pass needs no GPU and no build features. It maps the
+GGUF read-only, so the 17 GB model does not have to fit in RAM alongside the
+page cache:
+
+```bash
+cargo run --release -p hipml-cli -- generate \
+  --gguf /path/Qwen3.8-27B-Q4_K_M.gguf --text "The capital of France is" --tokens 20
+cargo run --release -p hipml-cli -- tokenize --gguf ... --text "..."
+```
+
+See `docs/forward.md` for the op map to llama.cpp and `docs/forward-parity.md`
+for the token-for-token comparison against `llama-server`.
+
 ## Layout
 
 ```

@@ -1,0 +1,91 @@
+# Greedy parity against llama-server
+
+Oracle: `llama-server` on the RTX host, `C:\models\Qwen3.8-27B-Q4_K_M.gguf`,
+`-c 4096 -ngl 99`, request `temperature 0, top_k 1, ignore_eos true,
+n_predict 24`, token ids read from `completion_probabilities`. The prompt token
+ids come from `/tokenize` and are identical to `hipml tokenize` for all three
+prompts.
+
+The installed server reports `build 11820 (commit d7725699)`, not the `b12126`
+tag the reference sources were taken from. `qwen35.cpp` is byte-identical
+between the two; `delta-net-base.cpp` differs only in the disabled
+`n_rs_seq > 0` rollback path, so the graph the port follows is the same.
+
+Run: `hipml generate --gguf ... --ids <prompt> --tokens 20` (the Windows host
+keeps the weights resident, 1.8 s/token; the Mac build maps them, 51 s/token on
+a loaded machine).
+
+## Results
+
+| prompt | text | prompt ids | first divergence in 20 | verdict |
+|---|---|---|---|---|
+| (a) English | `The capital of France is` | 760, 6511, 314, 9338, 369 | **none** | exact |
+| (b) code | `def fibonacci(n):\n    if n < 2:\n        return n\n    return` | 727, 73111, 1393, 1590, 198, 262, 413, 307, 361, 220, 17, 25, 198, 285, 460, 307, 198, 262, 460 | **none** | exact |
+| (c) repeated | `the the the the the the the the` | 1719, 279, 279, 279, 279, 279, 279, 279 | **none** | exact |
+
+### (a) The capital of France is
+
+```
+llama: 11751 13 198 760 6511 314 14898 369 21047 13 198 760 6511 314 17163 369 23327 13 198 760
+hipml: 11751 13 198 760 6511 314 14898 369 21047 13 198 760 6511 314 17163 369 23327 13 198 760
+text:  " Paris.\nThe capital of Italy is Rome.\nThe capital of Spain is Madrid.\nThe"
+```
+
+### (b) Fibonacci
+
+```
+llama: 73111 1393 12 16 8 478 73111 1393 12 17 8 271 727 73111 697 6515 1393 11 20781 65787
+hipml: 73111 1393 12 16 8 478 73111 1393 12 17 8 271 727 73111 697 6515 1393 11 20781 65787
+text:  " fibonacci(n-1) + fibonacci(n-2)\n\ndef fibonacci_memo(n, memo={}"
+```
+
+### (c) Repeated token
+
+```
+llama: 279 × 20
+hipml: 279 × 20
+```
+
+## Numerics: log-probabilities, not just argmax
+
+Same prompt (a), the log-probability of each chosen token as reported by
+`llama-server` and by `hipml generate --logprobs`:
+
+| step | token | llama | hipml | Δ |
+|---:|---:|---:|---:|---:|
+| 0 | 11751 | -0.315485 | -0.312977 | +0.0025 |
+| 1 | 13 | -0.375134 | -0.371650 | +0.0035 |
+| 2 | 198 | -1.698934 | -1.721977 | -0.0230 |
+| 3 | 760 | -0.895761 | -0.906570 | -0.0108 |
+| 4 | 6511 | -0.371336 | -0.366320 | +0.0050 |
+| 5 | 314 | -0.014403 | -0.014293 | +0.0001 |
+| 6 | 14898 | -1.403715 | -1.397785 | +0.0059 |
+| 7 | 369 | -0.004061 | -0.004057 | +0.0000 |
+| 8 | 21047 | -0.012195 | -0.012141 | +0.0001 |
+| 9 | 13 | -0.012015 | -0.012166 | -0.0002 |
+| 10 | 198 | -0.077616 | -0.076771 | +0.0008 |
+| 11 | 760 | -0.070425 | -0.070628 | -0.0002 |
+| 12 | 6511 | -0.010748 | -0.011536 | -0.0008 |
+| 13 | 314 | -0.000748 | -0.000820 | -0.0001 |
+| 14 | 17163 | -0.521246 | -0.527008 | -0.0058 |
+| 15 | 369 | -0.001381 | -0.001447 | -0.0001 |
+| 16 | 23327 | -0.004219 | -0.004031 | +0.0002 |
+| 17 | 13 | -0.005560 | -0.005746 | -0.0002 |
+| 18 | 198 | -0.120522 | -0.126074 | -0.0056 |
+| 19 | 760 | -0.047398 | -0.050294 | -0.0029 |
+
+Max |Δ| = 0.023 nats, and the logits gap to the runner-up at step 0 was
+`-3.42` vs `-0.31`, so every pick is far from a tie.
+
+Sources of the residual difference, in likely order of size:
+
+1. The prompt is prefilled token by token here; llama.cpp flashes it through
+   the chunked delta-net formulation, a different f32 summation order through
+   the 48 recurrent layers. Step 2 (right after prefill) is the largest gap.
+2. Q4_K/Q6_K block dot products: llama.cpp's kernels accumulate four 8-value
+   lanes with fp16 scales; this reference dequantises a 256-value tile and
+   reduces in a single f32 chain.
+3. RMS-norm reduction order (f32 here, `ggml_float`/f64 in ggml's CPU path).
+4. RoPE angles built in f64 here, f32 in llama.cpp.
+
+None of these change a ranking in 60 tokens across the three prompts.

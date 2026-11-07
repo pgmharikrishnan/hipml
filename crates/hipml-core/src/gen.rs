@@ -56,10 +56,20 @@ pub fn greedy_with<F: FnMut(usize, u32, &[f32])>(
     }
 }
 
+/// `log softmax(logits)[id]`, i.e. the log-probability llama-server reports
+/// in `completion_probabilities`.
+///
+/// Kernel: `logprob_f32`; max-shifted so the exponent cannot overflow.
+pub fn logprob_of(logits: &[f32], id: usize) -> f32 {
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let sum: f64 = logits.iter().map(|v| ((v - max) as f64).exp()).sum();
+    let log_z = max as f64 + sum.ln();
+    (logits[id] as f64 - log_z) as f32
+}
+
 /// The `k` largest logits as `(index, log-probability)`, descending.
 ///
-/// Kernel: `top_logprobs_f32`; the softmax normaliser is a max-shifted
-/// log-sum-exp so it stays finite on an untrained head.
+/// Kernel: `top_logprobs_f32`.
 pub fn top_logprobs(logits: &[f32], k: usize) -> Vec<(usize, f32)> {
     let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let sum: f64 = logits.iter().map(|v| ((v - max) as f64).exp()).sum();

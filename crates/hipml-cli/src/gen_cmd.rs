@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use hipml_core::gen::{greedy_with, top_logprobs};
+use hipml_core::gen::{greedy_with, logprob_of, top_logprobs};
 use std::io::Write;
 use hipml_core::gguf::Gguf;
 use hipml_core::model::Model;
@@ -15,6 +15,7 @@ struct Args {
     tokens: usize,
     ctx: Option<usize>,
     topk: usize,
+    logprobs: bool,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -24,6 +25,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
     let mut tokens = 20usize;
     let mut ctx = None;
     let mut topk = 0usize;
+    let mut logprobs = false;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&str, String> {
@@ -59,6 +61,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 topk = need(i)?.parse().map_err(|e| format!("bad --topk: {e}"))?;
                 i += 2;
             }
+            "--logprobs" => {
+                logprobs = true;
+                i += 1;
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -69,6 +75,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         tokens,
         ctx,
         topk,
+        logprobs,
     })
 }
 
@@ -134,7 +141,11 @@ pub fn generate(args: &[String]) -> i32 {
     let mut steps_done = 0usize;
     let out = greedy_with(&model, &tok, &prompt_ids, a.tokens, n_ctx, |i, id, logits| {
         steps_done = i + 1;
-        println!("  [{i}] {id}");
+        if a.logprobs {
+            println!("  [{i}] {id} logprob {:.6}", logprob_of(logits, id as usize));
+        } else {
+            println!("  [{i}] {id}");
+        }
         if a.topk > 0 && i == 0 {
             for (idx, lp) in top_logprobs(logits, a.topk) {
                 println!("        {idx:6} logprob {lp:.6}");
