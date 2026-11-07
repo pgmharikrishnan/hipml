@@ -59,6 +59,11 @@ pub fn run(depths: &[usize], reps_min: usize) -> Result<Report, String> {
     let stream = Stream::new()?;
     let (free0, total) = device.mem_info()?;
 
+    // Measure the weight stream first: a second of 838 MB gemv also brings the
+    // card to its sustained clock, so the short 1-head cases that follow are not
+    // measured at a ramping clock (it showed as 8K reading slower than 32K).
+    let (weights_gbs, weights_us) = gemv_bandwidth(&module, &stream)?;
+
     let mut rows = Vec::new();
     for dtype in [KvDtype::Q8, KvDtype::Q4] {
         let row_bytes = dtype.row_bytes(head_dim);
@@ -128,7 +133,6 @@ pub fn run(depths: &[usize], reps_min: usize) -> Result<Report, String> {
         }
     }
 
-    let (weights_gbs, weights_us) = gemv_bandwidth(&module, &stream)?;
     let (free1, _) = device.mem_info()?;
     Ok(Report {
         device: device.name().to_string(),
