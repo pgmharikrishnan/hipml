@@ -14,6 +14,9 @@ use hipml_kernels::Launcher;
 
 /// Bytes streamed per chunk in `decode-bench`.
 const CHUNK_BYTES: u64 = 64 * 1024 * 1024;
+/// Kernel repetitions per chunk. The copy is outside the timer, so this only
+/// amortises launch + stream-sync latency; it does not re-read the file.
+const DECODE_REPS: usize = 11;
 
 fn shape_string(dims: &[u64]) -> String {
     dims.iter()
@@ -178,10 +181,11 @@ impl Acc {
 /// GB/s, and the tok/s that would follow if a decode step streamed exactly one
 /// model's worth of quantized weights.
 pub fn decode_bench(args: &[String]) -> i32 {
-    let Some(path) = args.first() else {
-        eprintln!("usage: hipml decode-bench <model.gguf>");
+    let Some(path) = args.first().filter(|a| !a.starts_with('-')) else {
+        eprintln!("usage: hipml decode-bench <model.gguf> [-v]");
         return 2;
     };
+    let verbose = args.iter().any(|a| a == "-v");
     let mut g = match Gguf::open(path) {
         Ok(g) => g,
         Err(e) => {
@@ -197,6 +201,11 @@ pub fn decode_bench(args: &[String]) -> i32 {
         }
     };
     println!("device: {}", launcher.device_name);
+    println!(
+        "chunk {} MiB, {} kernel reps per chunk (file read once; copies outside the timer)",
+        CHUNK_BYTES / (1024 * 1024),
+        DECODE_REPS
+    );
 
     let tensors: Vec<_> = g
         .tensors
@@ -247,8 +256,8 @@ pub fn decode_bench(args: &[String]) -> i32 {
                 eprintln!("{}: {e}", t.name);
                 break;
             }
-            match launcher.run_quant_reps(op, &buf, &x, rows, k, 1) {
-                Ok((_, secs)) => t_secs += secs,
+            match launcher.run_quant_reps(op, &buf, &x, rows, k, DECODE_REPS) {
+                Ok((_, secs)) => t_secs += secs / DECODE_REPS as f64,
                 Err(e) => {
                     eprintln!("{}: launch failed: {e}", t.name);
                     break;
@@ -260,6 +269,23 @@ pub fn decode_bench(args: &[String]) -> i32 {
         }
         acc.add(t_bytes, t_secs);
         total.add(t_bytes, t_secs);
+        if verbose {
+            let us = t_secs * 1e6;
+            let gbs = if t_secs > 0.0 {
+                t_bytes as f64 / t_secs / 1e9
+            } else {
+                0.0
+            };
+            println!(
+                "{:<44} {:>6}x{:<6} {:>9.2} MB {:>9.1} us {:>7.1} GB/s",
+                t.name,
+                m,
+                k,
+                t_bytes as f64 / 1e6,
+                us,
+                gbs
+            );
+        }
     }
 
     println!(

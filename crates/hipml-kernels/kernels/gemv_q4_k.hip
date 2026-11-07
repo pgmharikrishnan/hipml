@@ -1,15 +1,16 @@
 // y[row] = dequant_q4_k(W[row,:]) . x
 //
-// One block per output row, 256 threads. Each thread owns whole 32-value
-// sub-blocks, so it loads one 6-bit pair of scale/min per sub-block, unpacks the
-// four-bit quants straight from global memory and FMAs into a register. The
-// weights are never staged in shared memory; the only shared bytes are the
-// eight per-warp sums used for the final reduction.
+// One block per output row, 256 threads. A thread owns a whole 64-value group
+// (two adjacent 32-value sub-blocks) and loads its 32 bytes of quants once as
+// two uint4s. Both nibbles of every byte belong to that thread, so there is no
+// duplicate weight read — the even sub-block is the low nibble, the odd one the
+// high nibble, each with its own 6-bit scale/min.
 //
 // Q4_K super-block (144 bytes, 256 values):
 //   d(2) dmin(2) scales(12) qs(128)
-// Sub-block j uses scale[j]/min[j] from the packed 6-bit header and reads the
-// low nibble of qs[(j/2)*32 ..] when j is even, the high nibble when j is odd.
+//
+// Weights are never staged in shared memory; the only shared bytes are the
+// eight per-warp sums used for the final reduction.
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -40,36 +41,46 @@ extern "C" __global__ void gemv_q4_k(
     if (row >= m) return;
 
     const int nblocks = k / Q4K_VALUES;
-    const int nsub = nblocks * 8;
+    const int ngroups = nblocks * 4; // 64 values per group
     const unsigned char* r =
         w + (size_t)row * (size_t)nblocks * Q4K_BLOCK_BYTES;
 
     float acc = 0.0f;
-    for (int sb = threadIdx.x; sb < nsub; sb += blockDim.x) {
-        const int blk = sb >> 3;
-        const int j = sb & 7;
+    for (int g = threadIdx.x; g < ngroups; g += blockDim.x) {
+        const int blk = g >> 2;
+        const int grp = g & 3;
         const unsigned char* b = r + (size_t)blk * Q4K_BLOCK_BYTES;
 
         const float d = __half2float(*reinterpret_cast<const __half*>(b));
         const float dmin = __half2float(*reinterpret_cast<const __half*>(b + 2));
-        int sc, mn;
-        q4k_scale_min(j, b + 4, &sc, &mn);
-        const float scale = d * (float)sc;
-        const float minv = dmin * (float)mn;
 
-        const unsigned char* g = b + 16 + (j >> 1) * 32;
-        const float* xr = x + (size_t)sb * 32;
-        float a = 0.0f;
-        if ((j & 1) == 0) {
+        const int j0 = grp * 2;
+        int sc0, mn0, sc1, mn1;
+        q4k_scale_min(j0, b + 4, &sc0, &mn0);
+        q4k_scale_min(j0 + 1, b + 4, &sc1, &mn1);
+        const float s0 = d * (float)sc0;
+        const float m0 = dmin * (float)mn0;
+        const float s1 = d * (float)sc1;
+        const float m1 = dmin * (float)mn1;
+
+        // 32 bytes = 8 words; byte i has the even value in its low nibble and
+        // the odd value in its high nibble.
+        const unsigned int* qw = reinterpret_cast<const unsigned int*>(b + 16 + grp * 32);
+        const float* xr = x + (size_t)g * 64;
+        float a0 = 0.0f;
+        float a1 = 0.0f;
 #pragma unroll
-            for (int l = 0; l < 32; ++l)
-                a += (scale * (float)(g[l] & 0xF) - minv) * xr[l];
-        } else {
+        for (int i = 0; i < 8; ++i) {
+            const unsigned int v = qw[i];
 #pragma unroll
-            for (int l = 0; l < 32; ++l)
-                a += (scale * (float)(g[l] >> 4) - minv) * xr[l];
+            for (int t = 0; t < 4; ++t) {
+                const unsigned int byte = (v >> (8 * t)) & 0xFFu;
+                const int idx = i * 4 + t;
+                a0 += (s0 * (float)(byte & 0xF) - m0) * xr[idx];
+                a1 += (s1 * (float)(byte >> 4) - m1) * xr[32 + idx];
+            }
         }
-        acc += a;
+        acc += a0 + a1;
     }
 
     __shared__ float q4k_s[8];
