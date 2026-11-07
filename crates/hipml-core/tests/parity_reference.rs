@@ -44,6 +44,23 @@ fn gemm_matches_gemv_and_hand_computed_values() {
 }
 
 #[test]
+fn gemm_parity_case_matches_each_gemv_exactly() {
+    let case = cases()
+        .into_iter()
+        .find(|case| case.name == "gemm_f32")
+        .unwrap();
+    let (inputs, y) = case.reference();
+    let (r, m, k) = (4, 64, 512);
+    for row in 0..r {
+        let x = &inputs[1].data()[row * k..(row + 1) * k];
+        assert_eq!(
+            &y[row * m..(row + 1) * m],
+            ops::gemv_f32(inputs[0].data(), x, m, k)
+        );
+    }
+}
+
+#[test]
 fn rmsnorm_output_has_unit_rms_before_the_gain() {
     let mut rng = Rng::new(7);
     let n = 513; // not a power of two on purpose

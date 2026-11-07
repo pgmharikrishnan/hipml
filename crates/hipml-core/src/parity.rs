@@ -117,6 +117,19 @@ pub fn cases() -> Vec<OpCase> {
             },
         },
         OpCase {
+            name: "gemm_f32",
+            tol: Tol::DEFAULT,
+            seed: 0x9E37_79B9_7F4A_7C15,
+            scalars: &[("r", 4.0), ("m", 64.0), ("k", 512.0)],
+            build: |rng| {
+                let (r, m, k) = (4usize, 64usize, 512usize);
+                let w = Tensor::from_fn(vec![m, k], |_| rng.normal_scaled(0.02));
+                let x = Tensor::from_fn(vec![r, k], |_| rng.normal());
+                let expected = ops::gemm_f32(w.data(), x.data(), r, m, k);
+                (vec![w, x], expected)
+            },
+        },
+        OpCase {
             name: "rmsnorm_f32",
             tol: Tol::DEFAULT,
             seed: 0x0123_4567_89AB_CDEF,
@@ -277,6 +290,33 @@ pub fn bench_cases() -> Vec<OpCase> {
                 (vec![w, x], expected)
             },
         },
+        gemm_bench_case(4),
+        gemm_bench_case(1),
         attention,
     ]
+}
+
+fn gemm_bench_case(r: usize) -> OpCase {
+    let (scalars, build): (&'static [(&'static str, f32)], _) = match r {
+        4 => (&[("r", 4.0), ("m", 40960.0), ("k", 5120.0)], 4),
+        1 => (&[("r", 1.0), ("m", 40960.0), ("k", 5120.0)], 1),
+        _ => unreachable!(),
+    };
+    OpCase {
+        name: "gemm_f32",
+        tol: Tol::DEFAULT,
+        seed: 0xBEEF_1234_5678_9ABC,
+        scalars,
+        build: match build {
+            4 => |rng| gemm_bench_inputs(rng, 4),
+            _ => |rng| gemm_bench_inputs(rng, 1),
+        },
+    }
+}
+
+fn gemm_bench_inputs(rng: &mut Rng, r: usize) -> (Vec<Tensor>, Vec<f32>) {
+    let (m, k) = (40960usize, 5120usize);
+    let w = Tensor::from_fn(vec![m, k], |_| (rng.uniform() - 0.5) * 0.04);
+    let x = Tensor::from_fn(vec![r, k], |_| rng.uniform() - 0.5);
+    (vec![w, x], Vec::new())
 }

@@ -230,12 +230,17 @@ fn bench() -> i32 {
             }
         };
 
+        let label = if case.name == "gemm_f32" {
+            format!("{} R={}", case.name, case.scalar("r") as usize)
+        } else {
+            case.name.to_string()
+        };
         let launch_s = (tn - t1) / (REPS - 1) as f64;
         let bytes = bytes_moved(&case, &inputs);
         let gbs = bytes as f64 / launch_s / 1e9;
         println!(
             "{:<20} {:>10.2} {:>10.1} {:>12}",
-            case.name,
+            label,
             launch_s * 1e6,
             gbs,
             bytes
@@ -255,6 +260,7 @@ fn bytes_moved(case: &OpCase, inputs: &[Tensor]) -> usize {
     let read: usize = inputs.iter().map(|t| t.numel() * 4).sum();
     let written = match case.name {
         "gemv_f32" => case.scalar("m") as usize * 4,
+        "gemm_f32" => case.scalar("r") as usize * case.scalar("m") as usize * 4,
         "attn_decode_f32" => case.scalar("n_heads") as usize * case.scalar("head_dim") as usize * 4,
         "rmsnorm_f32" | "softmax_f32" => case.scalar("n") as usize * 4,
         _ => inputs[0].numel() * 4,
