@@ -288,8 +288,16 @@ fn parity(filter: Option<&str>, deep: bool) -> i32 {
             (true, "prefill_q8_0") => "prefill_q8_0_h",
             _ => case.name,
         };
+        // fp16 operands cost ~1e-3 relative. At 64x512 that is a few 1e-2
+        // absolute; at 17408x5120 a near-zero output from 5120 products can
+        // move by ~0.1, which is still 1e-3 of the output scale. Both budgets
+        // are far below a layout bug (O(1) on O(100) values).
         let tol = if half {
-            hipml_core::parity::Tol::new(2e-2, 5e-2)
+            if case.m > 4096 {
+                hipml_core::parity::Tol::new(2.5e-1, 5e-2)
+            } else {
+                hipml_core::parity::Tol::new(2e-2, 5e-2)
+            }
         } else {
             case.tol
         };
