@@ -66,10 +66,13 @@ extern "C" __global__ void gemv_q4_k(
         const float minv = dmin * (float)mn;
 
         union Q4Bytes {
-            uint2 v;
+            unsigned int w[2];
             unsigned char b[8];
         } q;
-        q.v = __ldcs(reinterpret_cast<const uint2*>(b + 16 + (sub >> 1) * 32 + part * 8));
+        const unsigned int* qp =
+            reinterpret_cast<const unsigned int*>(b + 16 + (sub >> 1) * 32 + part * 8);
+        q.w[0] = __builtin_nontemporal_load(qp);
+        q.w[1] = __builtin_nontemporal_load(qp + 1);
 
         const float* xp = x + (size_t)blk * Q4K_VALUES + (size_t)sub * 32 + part * 8;
         const float4 xa = *reinterpret_cast<const float4*>(xp);

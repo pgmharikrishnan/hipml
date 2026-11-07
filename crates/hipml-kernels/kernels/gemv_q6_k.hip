@@ -61,13 +61,16 @@ extern "C" __global__ void gemv_q6_k(
         const int qh_shift = 2 * group;
         const bool high_nibble = group >= 2;
 
-        // 8 bytes each, 2-byte aligned -> four uint16 loads.
+        // 8 bytes each, 2-byte aligned -> four uint16 loads. Non-temporal so the
+        // 20-68 KB x vector is not evicted from L1 by the weight stream.
         unsigned short qlw[4];
         unsigned short qhw[4];
 #pragma unroll
         for (int w = 0; w < 4; ++w) {
-            qlw[w] = __ldcs(reinterpret_cast<const unsigned short*>(ql + 2 * w));
-            qhw[w] = __ldcs(reinterpret_cast<const unsigned short*>(qh + 2 * w));
+            qlw[w] = __builtin_nontemporal_load(
+                reinterpret_cast<const unsigned short*>(ql + 2 * w));
+            qhw[w] = __builtin_nontemporal_load(
+                reinterpret_cast<const unsigned short*>(qh + 2 * w));
         }
 
         const float* xp = x + (size_t)blk * Q6K_VALUES + (size_t)sub * 16 + part * 8;
