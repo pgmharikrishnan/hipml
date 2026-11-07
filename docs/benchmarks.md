@@ -24,6 +24,38 @@ keeps the decode ceiling honest.
 
 ## The model under test
 
+### Qwen3.8-27B hybrid KV traffic roofline
+
+Qwen3.8-27B has 16 full-attention layers (every fourth layer), not 64; its
+remaining 48 layers use fixed-size recurrent state. Each attention layer has
+24 query heads, 4 KV heads and head width 256. At 32 values per block, the
+16-layer KV traffic per cached token is 65,536 bytes for f16, 34,816 bytes
+for q8 (2-byte scale plus 32 bytes), and 18,432 bytes for q4 (2-byte scale
+plus 16 bytes). Query gating and per-head query/key RMS normalization are
+separate operations.
+
+The following is an arithmetic ceiling, **not a benchmark**. It assumes
+17.19 GB of weights and one read of each KV element per decode step, at the
+measured 631 GB/s. It excludes recurrent state, activations, compute, and
+launch overhead; repeated KV reads for GQA can lower achievable throughput.
+
+| Context tokens | f16 tok/s | q8 tok/s | q4 tok/s |
+| ---: | ---: | ---: | ---: |
+| 0 | 36.71 | 36.71 | 36.71 |
+| 8,192 | 35.60 | 36.11 | 36.39 |
+| 32,768 | 32.63 | 34.42 | 35.46 |
+| 100,000 | 26.58 | 30.52 | 33.15 |
+| 131,072 | 24.48 | 29.01 | 32.18 |
+
+At 100,000 tokens, f16 KV is 6.5536 GB: 38.1% of the weight bytes, or
+27.6% of combined weight and KV bytes. Weights plus f16 KV total 23.7436 GB,
+before activations and recurrent state; quantization is not a KV capacity
+requirement at this depth. The q8 ceiling rises by 3.94 tok/s at 100,000
+tokens and 0.51 tok/s at 8,192; q4 rises by 6.57 and 0.79 tok/s respectively.
+
+Formula: `631e9 / (17.19e9 + depth * bytes_per_token)`. These figures
+are distinct from the measurements below, which use 633.6 GB/s.
+
 `bartowski/NousResearch_Qwen3.8-27B-GGUF`, Q4_K_M: 16.01 GiB, 26.90 B parameters,
 `qwen3_5`. Decode ceiling **36.9 tok/s**, prefill ceiling **1779 tok/s**.
 
