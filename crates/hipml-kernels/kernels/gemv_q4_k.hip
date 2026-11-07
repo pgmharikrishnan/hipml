@@ -69,7 +69,7 @@ extern "C" __global__ void gemv_q4_k(
             uint2 v;
             unsigned char b[8];
         } q;
-        q.v = *reinterpret_cast<const uint2*>(b + 16 + (sub >> 1) * 32 + part * 8);
+        q.v = __ldcs(reinterpret_cast<const uint2*>(b + 16 + (sub >> 1) * 32 + part * 8));
 
         const float* xp = x + (size_t)blk * Q4K_VALUES + (size_t)sub * 32 + part * 8;
         const float4 xa = *reinterpret_cast<const float4*>(xp);

@@ -66,8 +66,8 @@ extern "C" __global__ void gemv_q6_k(
         unsigned short qhw[4];
 #pragma unroll
         for (int w = 0; w < 4; ++w) {
-            qlw[w] = *reinterpret_cast<const unsigned short*>(ql + 2 * w);
-            qhw[w] = *reinterpret_cast<const unsigned short*>(qh + 2 * w);
+            qlw[w] = __ldcs(reinterpret_cast<const unsigned short*>(ql + 2 * w));
+            qhw[w] = __ldcs(reinterpret_cast<const unsigned short*>(qh + 2 * w));
         }
 
         const float* xp = x + (size_t)blk * Q6K_VALUES + (size_t)sub * 16 + part * 8;
