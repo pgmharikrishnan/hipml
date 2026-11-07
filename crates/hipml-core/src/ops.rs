@@ -7,6 +7,10 @@
 //! Conventions: everything is row-major f32, `eps` guards normalisation, and
 //! `rope` is the NeoX (half-split) variant used by Llama/Qwen-style models.
 
+use crate::quant::{
+    dequant_q4_k, dequant_q6_k, dequant_q8_0, Q4_K_BYTES, Q6_K_BYTES, Q8_0_BYTES, Q8_0_VALUES, QK_K,
+};
+
 /// `y[m] = W[m,k] · x[k]`
 ///
 /// Kernel: `gemv_f32`, one block per output row, `k` reduced across the block.
@@ -61,6 +65,74 @@ pub fn softplus_f32(x: f32) -> f32 {
     } else {
         (1.0 + x.exp()).ln()
     }
+}
+
+/// `y[t,m] = W[m,k] · x[t,k]` with `W` stored as Q4_K blocks, row-major.
+///
+/// This is the prefill (multi-token) twin of `quant::gemv_q4_k`. The GPU kernel
+/// dequantises a weight tile once into shared memory and reuses it for every
+/// token; this reference dequantises one whole row and then dots it against
+/// every token, which is the same arithmetic in the same k order.
+pub fn gemm_q4_k(w: &[u8], x: &[f32], tokens: usize, m: usize, k: usize) -> Vec<f32> {
+    gemm_quant_blocks(w, x, tokens, m, k, QK_K, Q4_K_BYTES, dequant_q4_k)
+}
+
+/// `y[t,m] = W[m,k] · x[t,k]` with `W` stored as Q6_K blocks, row-major.
+pub fn gemm_q6_k(w: &[u8], x: &[f32], tokens: usize, m: usize, k: usize) -> Vec<f32> {
+    gemm_quant_blocks(w, x, tokens, m, k, QK_K, Q6_K_BYTES, dequant_q6_k)
+}
+
+/// `y[t,m] = W[m,k] · x[t,k]` with `W` stored as Q8_0 blocks, row-major.
+pub fn gemm_q8_0(w: &[u8], x: &[f32], tokens: usize, m: usize, k: usize) -> Vec<f32> {
+    gemm_quant_blocks(
+        w,
+        x,
+        tokens,
+        m,
+        k,
+        Q8_0_VALUES,
+        Q8_0_BYTES,
+        dequant_q8_0,
+    )
+}
+
+/// One dequantise-a-row-then-dot implementation for every block format.
+fn gemm_quant_blocks(
+    w: &[u8],
+    x: &[f32],
+    tokens: usize,
+    m: usize,
+    k: usize,
+    block_values: usize,
+    block_bytes: usize,
+    dequant: fn(&[u8], &mut [f32]),
+) -> Vec<f32> {
+    assert_eq!(k % block_values, 0, "k must be a whole number of blocks");
+    let blocks_per_row = k / block_values;
+    let row_bytes = blocks_per_row * block_bytes;
+    assert_eq!(w.len(), m * row_bytes, "W must be m rows of quantized blocks");
+    assert_eq!(x.len(), tokens * k, "x must be tokens*k");
+
+    let mut y = vec![0.0f32; tokens * m];
+    let mut row = vec![0.0f32; k];
+    for r in 0..m {
+        let data = &w[r * row_bytes..(r + 1) * row_bytes];
+        for b in 0..blocks_per_row {
+            dequant(
+                &data[b * block_bytes..(b + 1) * block_bytes],
+                &mut row[b * block_values..(b + 1) * block_values],
+            );
+        }
+        for t in 0..tokens {
+            let xr = &x[t * k..(t + 1) * k];
+            let mut acc = 0.0f32;
+            for j in 0..k {
+                acc += row[j] * xr[j];
+            }
+            y[t * m + r] = acc;
+        }
+    }
+    y
 }
 
 /// `y[n] = x[n] / sqrt(mean(x²) + eps) * w[n]`

@@ -6,6 +6,7 @@
 //! device result can be compared against it directly.
 
 pub mod attention;
+pub mod cache;
 pub mod config;
 pub mod delta;
 pub mod gen;
@@ -16,6 +17,7 @@ pub mod mmap;
 pub mod model;
 pub mod ops;
 pub mod parity;
+pub mod prefill_parity;
 pub mod quant;
 pub mod quant_parity;
 pub mod rng;

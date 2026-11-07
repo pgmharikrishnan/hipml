@@ -14,6 +14,11 @@ mod device {
     use hipml_hip::{Buffer, Device, LaunchConfig, Module, Stream};
     use std::ffi::c_void;
 
+    #[path = "../../prefill_launch.rs"]
+    mod prefill_launch;
+    #[path = "../../quant_launch.rs"]
+    mod quant_launch;
+
     pub struct Launcher {
         pub(crate) module: Module,
         pub(crate) stream: Stream,
@@ -388,12 +393,40 @@ impl Launcher {
         Err("hipml was built without the `hip` feature".to_string())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_prefill_reps(
+        &self,
+        _name: &str,
+        _w: &[u8],
+        _x: &[f32],
+        _m: usize,
+        _k: usize,
+        _tokens: usize,
+        _reps: usize,
+    ) -> Result<(Vec<f32>, f64), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
     pub fn dequant_q4_k(
         &self,
         _w: &hipml_hip::ByteBuffer,
         _byte_offset: u64,
         _nblocks: usize,
     ) -> Result<Vec<f32>, String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_prefill_time(
+        &self,
+        _name: &str,
+        _w: &[u8],
+        _x: &[f32],
+        _m: usize,
+        _k: usize,
+        _tokens: usize,
+        _reps: usize,
+    ) -> Result<f64, String> {
         Err("hipml was built without the `hip` feature".to_string())
     }
 }

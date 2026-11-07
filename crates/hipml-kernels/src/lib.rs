@@ -21,6 +21,14 @@ pub enum KernelKind {
     /// One block per `rows` output rows, with the x k-tile staged in shared
     /// memory. The kernel's `ROW_TILE`/`BLOCK` defines must match.
     RowTile { rows: u32, block: u32 },
+    /// One block per `rows` output rows x `tokens` prompt tokens, dequantising
+    /// the weight tile once into shared. The kernel's geometry defines must
+    /// match.
+    Prefill {
+        rows: u32,
+        tokens: u32,
+        block: u32,
+    },
     /// One warp (or one block) per head.
     PerHead { block: u32 },
     /// One block per head, sized to `head_dim` at launch.
@@ -77,6 +85,36 @@ pub const KERNELS: &[KernelSpec] = &[
         entry: "dequant_q4_k_f32",
         // One 256-thread block per Q4_K super-block, one output value per thread.
         kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "prefill_q4_k",
+        entry: "prefill_q4_k",
+        // 256 tokens x 64 rows per block, 256 threads, 8x8 microtile; the
+        // weight tile is dequantised once into shared for all 256 tokens.
+        kind: KernelKind::Prefill {
+            rows: 64,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_q6_k",
+        entry: "prefill_q6_k",
+        // Same 256-token tile as Q4_K: 8x8 microtile, 32-value k-tiles.
+        kind: KernelKind::Prefill {
+            rows: 64,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_q8_0",
+        entry: "prefill_q8_0",
+        kind: KernelKind::Prefill {
+            rows: 64,
+            tokens: 256,
+            block: 256,
+        },
     },
     KernelSpec {
         name: "gemm_f32",
