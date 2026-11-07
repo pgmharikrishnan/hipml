@@ -14,10 +14,10 @@ use hipml_kernels::Launcher;
 
 /// Bytes streamed per chunk in `decode-bench`.
 const CHUNK_BYTES: u64 = 64 * 1024 * 1024;
-/// Kernel repetitions per chunk: one, so the figure is a true single pass over
-/// the model (one launch and one stream sync per chunk). Set this higher to see
-/// the kernel-only bandwidth, but small tensors then hit cache and flatter the
-/// number.
+/// Default kernel repetitions per chunk: one, so the figure is a true single
+/// pass over the model (one launch and one stream sync per chunk). `--reps N`
+/// amortises launch/sync latency, but small tensors then hit cache and flatter
+/// the number.
 const DECODE_REPS: usize = 1;
 
 fn shape_string(dims: &[u64]) -> String {
@@ -184,10 +184,17 @@ impl Acc {
 /// model's worth of quantized weights.
 pub fn decode_bench(args: &[String]) -> i32 {
     let Some(path) = args.first().filter(|a| !a.starts_with('-')) else {
-        eprintln!("usage: hipml decode-bench <model.gguf> [-v]");
+        eprintln!("usage: hipml decode-bench <model.gguf> [-v] [--reps N]");
         return 2;
     };
     let verbose = args.iter().any(|a| a == "-v");
+    let reps = args
+        .iter()
+        .position(|a| a == "--reps")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DECODE_REPS)
+        .max(1);
     let mut g = match Gguf::open(path) {
         Ok(g) => g,
         Err(e) => {
@@ -206,7 +213,7 @@ pub fn decode_bench(args: &[String]) -> i32 {
     println!(
         "chunk {} MiB, {} kernel reps per chunk (file read once; copies outside the timer)",
         CHUNK_BYTES / (1024 * 1024),
-        DECODE_REPS
+        reps
     );
 
     let tensors: Vec<_> = g
@@ -258,8 +265,8 @@ pub fn decode_bench(args: &[String]) -> i32 {
                 eprintln!("{}: {e}", t.name);
                 break;
             }
-            match launcher.run_quant_reps(op, &buf, &x, rows, k, DECODE_REPS) {
-                Ok((_, secs)) => t_secs += secs / DECODE_REPS as f64,
+            match launcher.run_quant_reps(op, &buf, &x, rows, k, reps) {
+                Ok((_, secs)) => t_secs += secs / reps as f64,
                 Err(e) => {
                     eprintln!("{}: launch failed: {e}", t.name);
                     break;

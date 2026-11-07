@@ -71,6 +71,89 @@ sit at 87–88%. That 17-point gap is the entire case for a custom engine on thi
 card: 16 → ~19.5 tok/s, not a doubling. It exists because `ricursive` has no
 Flash Attention path, and it disappears as soon as llama.cpp gains one.
 
+## Quantized GEMV: Q4_K and Q6_K
+
+The fp32 GEMV above measures the card, not the model. Qwen3.8-27B is Q4_K_M, so a
+decode step streams **Q4_K, Q6_K, Q8_0 and Q5_K** blocks. These kernels dequantise
+in registers and never materialise the fp32 matrix.
+
+`gemv_q4_k` and `gemv_q6_k` use one block per output row and 256 threads. A thread
+owns 8 consecutive columns, so x is read as two `float4`s, the 8 quant bytes are
+one 64-bit (Q4_K) or eight 16-bit (Q6_K) loads, and one scale/min pair covers the
+chunk. Q4_K's 6-bit header and Q6_K's four 2-bit `qh` planes are unpacked exactly
+as in the hand-computed vectors in `crates/hipml-core/tests/quant_reference.rs`.
+
+### Single tensor, Qwen3.8-27B shapes
+
+`hipml bench` (the quant rows are the tail of the table):
+
+| Weight | Shape `[m,k]` | Type | Bytes | us | GB/s | % of 631 |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| ffn_up | 17408x5120 | Q6_K | 73,113,600 | 160.59 | 455.3 | 72.2% |
+| ffn_gate | 5120x17408 | Q4_K | 50,135,040 | 112.32 | 446.4 | 70.7% |
+| ffn_down | 5120x17408 | Q6_K | 73,113,600 | 152.05 | 480.8 | 76.2% |
+| ffn_down | 17408x5120 | Q4_K | 50,135,040 | 133.37 | 375.9 | 59.6% |
+
+The same run's fp32 `gemv_f32` was **618.8 GB/s** (839 MB), so 631 GB/s remains
+the reference ceiling.
+
+### Decode step: stream the model once
+
+`hipml decode-bench` reads every Q4_K/Q6_K/Q8_0 tensor in 64 MiB row-aligned
+chunks, uploads each chunk, and launches the matching kernel. It never holds the
+17 GB model in VRAM (or host RAM).
+
+| Pass | Bytes | GB/s | implied tok/s |
+| --- | ---: | ---: | ---: |
+| single pass, one launch + sync per chunk (`reps=1`) | 16,964,915,200 | 222.5 | 13.12 |
+| kernel-only, 11 launches per chunk (`reps=11`) | 16,964,915,200 | 395.5 | 23.32 |
+
+The second row amortises launch/sync latency (the first is a hard lower bound for
+this harness, not for a real engine, which enqueues all tensors and syncs once).
+Some small tensors become cache-resident across the 11 reps, so 23.3 tok/s is an
+optimistic kernel-side estimate. `llama.cpp` HIP measures **31.4 tok/s** on the
+same 17.19 GB. Including the 227 MB of F32 tensors at the same bandwidth gives
+23.01 tok/s, so the miss is the kernel, not the accounting.
+
+### Why not 95% of bandwidth
+
+All four Qwen3.8-27B-shaped cases move the same activation volume: `m*k*4 = 356 MB` of
+x re-reads per tensor, against only 50–73 MB of weights. With one block per row
+and no shared-memory staging, those reads are served from L2/Infinity Cache. The
+measured total (x + weights) is 406–429 MB in 112–161 us, i.e. **~2.7–3.6 TB/s of
+L2 traffic**; the weight stream alone would take 80–116 us at 631 GB/s. The fp32
+GEMV does not hit this because its x:weight ratio is 1:1; the quantized ratio is
+5–8:1. Reaching 95% needs multiple rows per block reusing x from registers or
+shared memory, which the one-block-per-row specification excludes.
+
+### Commands
+
+On the GPU box, from `C:\hipml-q4k`:
+
+```
+set HIP_PATH=C:\rocm-sdk\_rocm_sdk_core
+set HIPML_ARCH=gfx1201
+set PATH=C:\rocm-sdk\_rocm_sdk_core\bin;%PATH%
+cargo build --release -p hipml-cli --features hip
+target\release\hipml.exe parity
+target\release\hipml.exe bench
+target\release\hipml.exe decode-bench C:\models\Qwen3.8-27B-Q4_K_M.gguf -v
+target\release\hipml.exe gguf C:\models\Qwen3.8-27B-Q4_K_M.gguf
+```
+
+Parity for the two formats (reference vs device, `max_abs` / `max_rel`):
+
+| Case | 64x512 | 17408x5120 |
+| --- | --- | --- |
+| `gemv_q4_k` | 6.68e-6 / 5.21e-5 | 1.41e-4 / 8.21e-3 |
+| `gemv_q6_k` | 3.43e-5 / 6.46e-6 | 1.13e-3 / 2.26e-2 |
+
+The 5k-term rows are compared against a sequential f32 reference: an output near
+zero from 5120 terms can legitimately move by ~1e-3 through cancellation. The
+hand-computed block vectors are exact (`assert_eq!`), so a layout misread cannot
+hide inside that budget. `12 passed, 0 failed, 1 skipped` (the host-only top-p
+case).
+
 ## Method notes
 
 - Bandwidth ceiling uses the measured 633.6 GB/s, not the 640 GB/s spec, so the
