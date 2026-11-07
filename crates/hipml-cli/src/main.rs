@@ -90,6 +90,9 @@ fn kernels() {
     for k in KERNELS {
         let geometry = match k.kind {
             KernelKind::PerRow { block } => format!("per-row, {block} threads"),
+            KernelKind::RowTile { rows, block } => {
+                format!("row-tile {rows} rows, {block} threads")
+            }
             KernelKind::PerHead { block } => format!("per-head, {block} threads"),
             KernelKind::PerHeadOnDim => "per-head, one thread per dim".to_string(),
             KernelKind::Linear { block } => format!("linear, {block} threads"),

@@ -114,6 +114,7 @@ mod device {
             reps: usize,
         ) -> Result<(Vec<f32>, f64), String> {
             assert!(reps > 0, "reps must be positive");
+            let spec = crate::spec(name).ok_or_else(|| format!("{name} is not in the manifest"))?;
             let wb = ByteBuffer::from_host(w)?;
             let xb = Buffer::from_host(x)?;
             let y = Buffer::alloc(m)?;
@@ -131,7 +132,13 @@ mod device {
                 &mut v_m as *mut _ as *mut c_void,
                 &mut v_k as *mut _ as *mut c_void,
             ];
-            let cfg = LaunchConfig::per_row(m, 256);
+            let cfg = match spec.kind {
+                crate::KernelKind::RowTile { rows, block } => {
+                    LaunchConfig::row_tile(m, rows, block)
+                }
+                crate::KernelKind::PerRow { block } => LaunchConfig::per_row(m, block),
+                _ => return Err(format!("{name}: unsupported quantized grid")),
+            };
             let start = std::time::Instant::now();
             for _ in 0..reps {
                 kernel.launch(cfg, &self.stream, &mut params)?;

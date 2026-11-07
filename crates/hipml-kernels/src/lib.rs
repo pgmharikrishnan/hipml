@@ -16,6 +16,9 @@ pub use launch::Launcher;
 pub enum KernelKind {
     /// One block per row of the first dimension.
     PerRow { block: u32 },
+    /// One block per `rows` output rows, with the x k-tile staged in shared
+    /// memory. The kernel's `ROW_TILE`/`BLOCK` defines must match.
+    RowTile { rows: u32, block: u32 },
     /// One warp (or one block) per head.
     PerHead { block: u32 },
     /// One block per head, sized to `head_dim` at launch.
@@ -45,12 +48,19 @@ pub const KERNELS: &[KernelSpec] = &[
     KernelSpec {
         name: "gemv_q4_k",
         entry: "gemv_q4_k",
-        kind: KernelKind::PerRow { block: 256 },
+        // One warp per row, 8 rows per block, K_TILE 512 floats in shared.
+        kind: KernelKind::RowTile {
+            rows: 8,
+            block: 256,
+        },
     },
     KernelSpec {
         name: "gemv_q6_k",
         entry: "gemv_q6_k",
-        kind: KernelKind::PerRow { block: 256 },
+        kind: KernelKind::RowTile {
+            rows: 8,
+            block: 256,
+        },
     },
     KernelSpec {
         name: "gemv_q8_0",

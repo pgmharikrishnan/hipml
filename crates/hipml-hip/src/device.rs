@@ -425,6 +425,18 @@ impl LaunchConfig {
         }
     }
 
+    /// One block per `rows_per_block` output rows; the kernel stages its x tile
+    /// in statically sized shared memory, so `shared_mem_bytes` stays zero.
+    pub fn row_tile(rows: usize, rows_per_block: u32, block: u32) -> Self {
+        let rpb = rows_per_block.max(1) as usize;
+        let blocks = ((rows + rpb - 1) / rpb).max(1);
+        Self {
+            grid: (blocks as u32, 1, 1),
+            block: (block, 1, 1),
+            shared_mem_bytes: 0,
+        }
+    }
+
     /// 1-D grid covering `n` elements.
     pub fn linear(n: usize, block: u32) -> Self {
         let blocks = ((n + block as usize - 1) / block as usize).max(1);
