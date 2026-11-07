@@ -70,9 +70,15 @@ pub fn bench_kv(args: &[String]) -> i32 {
         .unwrap_or(3)
         .max(1);
 
+    let splits = args
+        .iter()
+        .position(|a| a == "--splits")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse::<usize>().ok());
+
     #[cfg(feature = "hip")]
     {
-        let report = match hipml_kernels::kvbench::run(&depths, reps) {
+        let report = match hipml_kernels::kvbench::run(&depths, reps, splits) {
             Ok(r) => r,
             Err(e) => {
                 println!("bench-kv failed: {e}");
@@ -125,7 +131,7 @@ pub fn bench_kv(args: &[String]) -> i32 {
     }
     #[cfg(not(feature = "hip"))]
     {
-        let _ = (depths, reps);
+        let _ = (depths, reps, splits);
         println!("built without the `hip` feature");
         1
     }

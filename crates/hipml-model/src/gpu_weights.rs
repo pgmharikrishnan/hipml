@@ -1,9 +1,8 @@
 //! Resident weight views for the GPU graph.
 //!
 //! A `Proj` points at a loader `ByteBuffer` in its GGUF block form and carries
-//! the GEMV entry that reads it. The one exception is Q5_K: the loader has the
-//! bytes but no GEMV kernel, so those two Qwen3.8-27B tensors are dequantized once at
-//! build time into an f32 buffer and served by `gemv_f32`.
+//! the GEMV entry that reads it. Every format the model uses has a kernel that
+//! reads its blocks directly: Q4_K, Q6_K, Q8_0 and Q5_K.
 
 use hipml_core::mat::Kind;
 use hipml_core::quant::TensorType;
@@ -19,6 +18,7 @@ pub fn gemv_entry(ty: TensorType) -> Result<&'static str, String> {
         TensorType::Q4K => "gemv_q4_k",
         TensorType::Q6K => "gemv_q6_k",
         TensorType::Q8_0 => "gemv_q8_0",
+        TensorType::Q5K => "gemv_q5_k",
         other => return Err(format!("{} has no GEMV kernel", other.name())),
     })
 }
@@ -44,16 +44,11 @@ pub(crate) fn mat_kind(ty: TensorType) -> Result<Kind, String> {
     })
 }
 
-enum ProjData<'a> {
-    /// A GGUF block payload streamed by the quantized GEMV.
-    Resident(&'a ByteBuffer, &'static str),
-    /// An f32 matrix dequantized once at build time (Q5_K has no GEMV kernel).
-    F32(Buffer),
-}
-
-/// A projection that a launcher can stream straight from VRAM.
+/// A projection that a launcher can stream straight from VRAM: the loader's
+/// block payload plus the GEMV entry that reads it.
 pub struct Proj<'a> {
-    data: ProjData<'a>,
+    w: &'a ByteBuffer,
+    entry: &'static str,
     pub rows: usize,
     pub cols: usize,
 }
@@ -68,20 +63,36 @@ impl<'a> Proj<'a> {
             return Err(format!("{name}: expected a matrix, got {shape:?}"));
         }
         let (rows, cols) = (shape[0] as usize, shape[1] as usize);
-        let data = match t.ty() {
-            TensorType::Q5K => ProjData::F32(Buffer::from_host(&dequant_q5_k(t, rows, cols)?)?),
-            ty => ProjData::Resident(t.buffer(), gemv_entry(ty)?),
-        };
-        Ok(Proj { data, rows, cols })
+        Ok(Proj {
+            w: t.buffer(),
+            entry: gemv_entry(t.ty())?,
+            rows,
+            cols,
+        })
     }
 
     pub(crate) fn gemv(&self, l: &Launcher, x: &Buffer, y: &Buffer) -> Result<(), String> {
-        match &self.data {
-            ProjData::Resident(w, entry) => {
-                l.run_quant_resident(entry, w, x, y, self.rows, self.cols)
-            }
-            ProjData::F32(w) => l.run_f32_resident(w, x, y, self.rows, self.cols),
-        }
+        self.gemv_on(l, "stream", x, y)
+    }
+
+    /// The same matvec on a chosen stream ("stream" or "side"), so two
+    /// independent projections can share the machine.
+    pub(crate) fn gemv_on(
+        &self,
+        l: &Launcher,
+        which: &str,
+        x: &Buffer,
+        y: &Buffer,
+    ) -> Result<(), String> {
+        l.run_quant_resident_on(
+            which,
+            hipml_kernels::stream_entry(self.entry),
+            self.w,
+            x,
+            y,
+            self.rows,
+            self.cols,
+        )
     }
 
     /// The same projection over `tokens` rows of `x` (`[tokens][cols]`), one
@@ -93,51 +104,29 @@ impl<'a> Proj<'a> {
         y: &Buffer,
         tokens: usize,
     ) -> Result<(), String> {
-        match &self.data {
-            ProjData::Resident(w, entry) if *entry == "gemv_f32" => {
-                // The loader keeps an F32 tensor as raw little-endian f32, so
-                // the byte payload is the f32 matrix.
-                l.run_gemm_ptr(w.as_ptr(), x.as_ptr(), y.as_ptr(), tokens, self.rows, self.cols)
+        // Q5_K has no tiled prefill GEMM; it is two tensors and prefill is not
+        // the acceptance path, so run the exact GEMV per row instead of
+        // introducing a second accumulation order for them.
+        if self.entry == "gemv_q5_k" {
+            let x0 = x.as_ptr() as usize;
+            let y0 = y.as_ptr() as usize;
+            for t in 0..tokens {
+                l.run_quant_resident_ptr(
+                    self.entry,
+                    self.w,
+                    (x0 + t * self.cols * 4) as *mut _,
+                    (y0 + t * self.rows * 4) as *mut _,
+                    self.rows,
+                    self.cols,
+                )?;
             }
-            ProjData::Resident(w, entry) => {
-                let e = prefill_entry(entry)?;
-                l.run_prefill_resident(e, w, x, y, self.rows, self.cols, tokens)
-            }
-            ProjData::F32(w) => l.run_gemm_resident(w, x, y, tokens, self.rows, self.cols),
+            return Ok(());
         }
+        let e = prefill_entry(self.entry)?;
+        l.run_prefill_resident(e, self.w, x, y, self.rows, self.cols, tokens)
     }
 
     pub(crate) fn bytes(&self) -> usize {
-        match &self.data {
-            ProjData::Resident(w, _) => w.len(),
-            ProjData::F32(w) => w.len() * 4,
-        }
+        self.w.len()
     }
 }
-
-/// Dequantize a resident Q5_K matrix once. Qwen3.8-27B stores exactly two of these
-/// (`blk.51/55.ffn_down`), and the loader keeps their bytes resident.
-fn dequant_q5_k(t: &DeviceTensor, rows: usize, cols: usize) -> Result<Vec<f32>, String> {
-    use hipml_core::quant::{dequant_q5_k, Q5_K_BYTES, QK_K};
-    let raw = t.read_back()?;
-    let blocks = cols / QK_K;
-    let row_bytes = blocks * Q5_K_BYTES;
-    if raw.len() != rows * row_bytes {
-        return Err(format!(
-            "{}: {} bytes, expected {} rows x {} bytes",
-            t.name(),
-            raw.len(),
-            rows,
-            row_bytes
-        ));
-    }
-    let mut out = vec![0.0f32; rows * cols];
-    for r in 0..rows {
-        for b in 0..blocks {
-            let src = &raw[r * row_bytes + b * Q5_K_BYTES..r * row_bytes + (b + 1) * Q5_K_BYTES];
-            dequant_q5_k(src, &mut out[r * cols + b * QK_K..r * cols + (b + 1) * QK_K]);
-        }
-    }
-    Ok(out)
-}
-

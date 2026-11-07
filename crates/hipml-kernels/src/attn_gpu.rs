@@ -87,13 +87,13 @@ mod imp {
         }
 
         fn entry(&self) -> Result<&'static str, String> {
-            Ok(match self.kind {
+            Ok(crate::stream_entry(match self.kind {
                 Kind::F32 => "gemv_f32",
                 Kind::Q4K => "gemv_q4_k",
                 Kind::Q6K => "gemv_q6_k",
                 Kind::Q8_0 => "gemv_q8_0",
                 Kind::Q5K => return Err("attention weight is Q5_K: no GEMV kernel".to_string()),
-            })
+            }))
         }
 
         fn data_bytes(&self) -> &ByteBuffer {

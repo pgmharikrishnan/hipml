@@ -11,7 +11,7 @@ use hipml_core::tensor::Tensor;
 #[cfg(feature = "hip")]
 pub(crate) mod device {
     use super::*;
-    use hipml_hip::{Buffer, ByteBuffer, Device, LaunchConfig, Module, Stream};
+    use hipml_hip::{Buffer, ByteBuffer, Device, Event, LaunchConfig, Module, Stream};
     use std::ffi::c_void;
 
     #[path = "graph_launch.rs"]
@@ -22,10 +22,21 @@ pub(crate) mod device {
     pub use prefill_launch::prefill_resident;
     #[path = "quant_launch.rs"]
     mod quant_launch;
+    #[path = "stream_launch.rs"]
+    mod stream_launch;
+    pub use stream_launch::ReadJob;
 
     pub struct Launcher {
         pub(crate) module: Module,
+        /// The graph's main stream: every op that has no declared partner.
         pub(crate) stream: Stream,
+        /// The side stream. Independent projections run here so their blocks
+        /// fill the main stream's waves instead of waiting for its tail.
+        pub(crate) side: Stream,
+        /// Reusable ordering events. `ev_in` gates the side stream on the main
+        /// one, `ev_out` gates the main stream on the side one.
+        pub(crate) ev_in: Event,
+        pub(crate) ev_out: Event,
         pub device_name: String,
     }
 
@@ -36,9 +47,15 @@ pub(crate) mod device {
             let device = Device::first()?;
             let module = Module::load(&dir.join("hipml.co"))?;
             let stream = Stream::new()?;
+            let side = Stream::new()?;
+            let ev_in = Event::new()?;
+            let ev_out = Event::new()?;
             Ok(Launcher {
                 module,
                 stream,
+                side,
+                ev_in,
+                ev_out,
                 device_name: device.name().to_string(),
             })
         }
@@ -49,6 +66,29 @@ pub(crate) mod device {
 
         pub fn stream(&self) -> &Stream {
             &self.stream
+        }
+
+        pub fn stream2(&self) -> &Stream {
+            &self.side
+        }
+
+        /// Start a parallel section: the side stream may run once everything
+        /// already on the main stream has completed.
+        pub fn fork(&self) -> Result<(), String> {
+            self.ev_in.record(&self.stream)?;
+            self.side.wait(&self.ev_in)
+        }
+
+        /// End it: the main stream continues only after the side stream does.
+        pub fn join(&self) -> Result<(), String> {
+            self.ev_out.record(&self.side)?;
+            self.stream.wait(&self.ev_out)
+        }
+
+        /// Wait for both streams (a token boundary, or a timing readback).
+        pub fn synchronize(&self) -> Result<(), String> {
+            self.side.synchronize()?;
+            self.stream.synchronize()
         }
 
         pub fn run(&self, case: &OpCase, inputs: &[Tensor]) -> Result<Vec<f32>, String> {
@@ -458,7 +498,7 @@ pub(crate) mod device {
 #[cfg(feature = "hip")]
 pub use device::prefill_resident;
 #[cfg(feature = "hip")]
-pub use device::Launcher;
+pub use device::{Launcher, ReadJob};
 
 /// Without the `hip` feature the launcher exists but refuses to run, so callers
 /// need no conditional compilation of their own.

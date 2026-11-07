@@ -105,27 +105,32 @@ static __device__ __forceinline__ void q4k_acc(const unsigned char* __restrict__
     *acc = a;
 }
 
-extern "C" __global__ void gemv_q4_k(
+// One row/warp when RPW is 1, two when it is Q4K_ROWS_PER_WARP. The lane owns
+// the same columns either way, so the per-row accumulation order and the warp
+// reduction tree are unchanged: the two entries are bit-identical, and the
+// 1-row grid is twice as long, which is what a 5120-row tensor needs.
+template <int RPW>
+static __device__ __forceinline__ void q4k_tile(
     const unsigned char* __restrict__ w,
     const float* __restrict__ x,
     float* __restrict__ y,
     int m,
-    int k)
+    int k,
+    float* __restrict__ sx)
 {
-    __shared__ __align__(16) float sx[Q4K_K_TILE];
-
     const int tid = threadIdx.x;
     const int lane = tid & 31;
     const int warp = tid >> 5;
     const int nblocks = k / Q4K_VALUES;
+    const int row_tile = Q4K_WARPS * RPW;
 
-    int row[Q4K_ROWS_PER_WARP];
-    int r[Q4K_ROWS_PER_WARP];
-    const unsigned char* rp[Q4K_ROWS_PER_WARP];
-    float acc[Q4K_ROWS_PER_WARP];
+    int row[RPW];
+    int r[RPW];
+    const unsigned char* rp[RPW];
+    float acc[RPW];
 #pragma unroll
-    for (int rr = 0; rr < Q4K_ROWS_PER_WARP; ++rr) {
-        row[rr] = blockIdx.x * Q4K_ROW_TILE + warp * Q4K_ROWS_PER_WARP + rr;
+    for (int rr = 0; rr < RPW; ++rr) {
+        row[rr] = blockIdx.x * row_tile + warp * RPW + rr;
         r[rr] = min(row[rr], m - 1);
         rp[rr] = w + (size_t)r[rr] * (size_t)nblocks * Q4K_BLOCK_BYTES;
         acc[rr] = 0.0f;
@@ -145,16 +150,38 @@ extern "C" __global__ void gemv_q4_k(
             for (int comp = 0; comp < Q4K_VPL; ++comp) xv[comp] = sx[s + comp * 32];
             const int p = base + c;
 #pragma unroll
-            for (int rr = 0; rr < Q4K_ROWS_PER_WARP; ++rr) q4k_acc(rp[rr], p, xv, &acc[rr]);
+            for (int rr = 0; rr < RPW; ++rr) q4k_acc(rp[rr], p, xv, &acc[rr]);
         }
         __syncthreads();
     }
 
 #pragma unroll
-    for (int rr = 0; rr < Q4K_ROWS_PER_WARP; ++rr) {
+    for (int rr = 0; rr < RPW; ++rr) {
         float a = acc[rr];
 #pragma unroll
         for (int off = 16; off > 0; off >>= 1) a += __shfl_down(a, off);
         if (lane == 0 && row[rr] < m) y[row[rr]] = a;
     }
+}
+
+extern "C" __global__ void gemv_q4_k(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k)
+{
+    __shared__ __align__(16) float sx[Q4K_K_TILE];
+    q4k_tile<Q4K_ROWS_PER_WARP>(w, x, y, m, k, sx);
+}
+
+extern "C" __global__ void gemv_q4_k_r1(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k)
+{
+    __shared__ __align__(16) float sx[Q4K_K_TILE];
+    q4k_tile<1>(w, x, y, m, k, sx);
 }

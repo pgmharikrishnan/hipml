@@ -424,12 +424,30 @@ extern "C" __global__ void attn_decode_kv_reduce(
     float m = -INFINITY;
     for (int s = 0; s < splits; ++s) m = fmaxf(m, ml[s * 2]);
 
+    // Eight loads in flight, same arithmetic order: with 128 splits a
+    // dependent load per iteration leaves the 24 blocks of this grid with one
+    // 4-byte request per thread outstanding, which is latency, not bandwidth.
     float acc = 0.0f;
     float l = 0.0f;
-    for (int s = 0; s < splits; ++s) {
+    const float* pa = part_acc + (size_t)h * splits * head_dim + t;
+    int s = 0;
+    for (; s + 8 <= splits; s += 8) {
+        float v[8];
+        float w[8];
+#pragma unroll
+        for (int j = 0; j < 8; ++j) v[j] = pa[(size_t)(s + j) * head_dim];
+#pragma unroll
+        for (int j = 0; j < 8; ++j) w[j] = exp2f(ml[(s + j) * 2] - m);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            l += ml[(s + j) * 2 + 1] * w[j];
+            acc += v[j] * w[j];
+        }
+    }
+    for (; s < splits; ++s) {
         const float w = exp2f(ml[s * 2] - m);
         l += ml[s * 2 + 1] * w;
-        acc += part_acc[((size_t)h * splits + s) * head_dim + t] * w;
+        acc += pa[(size_t)s * head_dim] * w;
     }
     out[(size_t)h * head_dim + t] = (l > 0.0f) ? acc / l : 0.0f;
 }

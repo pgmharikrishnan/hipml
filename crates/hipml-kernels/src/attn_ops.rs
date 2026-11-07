@@ -14,11 +14,6 @@ mod imp {
     // ---- single-op parity cases -------------------------------------------
 
     impl Launcher {
-        /// Wait for every launch queued on the launcher's stream.
-        pub fn synchronize(&self) -> Result<(), String> {
-            self.stream.synchronize()
-        }
-
         pub fn run_attn_case(
             &self,
             case: &OpCase,

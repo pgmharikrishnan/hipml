@@ -48,7 +48,7 @@ pub struct Report {
 }
 
 /// `depths` in tokens; `reps` is the minimum number of timed passes.
-pub fn run(depths: &[usize], reps_min: usize) -> Result<Report, String> {
+pub fn run(depths: &[usize], reps_min: usize, max_splits: Option<usize>) -> Result<Report, String> {
     let head_dim = 256usize;
     let scale = 1.0f32 / (head_dim as f32).sqrt();
 
@@ -71,7 +71,8 @@ pub fn run(depths: &[usize], reps_min: usize) -> Result<Report, String> {
             for &seq in depths {
                 // Enough blocks to fill the card, but at least 64 rows per split
                 // so the fp32 partials stay small against the cache read.
-                let splits = (seq / 64).clamp(1, (256 / n_kv).max(1));
+                let cap = max_splits.unwrap_or(256 / n_kv).max(1);
+                let splits = (seq / 64).clamp(1, cap);
                 let layer_bytes = n_kv * seq * row_bytes;
                 let k = Buffer::alloc((layer_bytes * layers).div_ceil(4))?;
                 let v = Buffer::alloc((layer_bytes * layers).div_ceil(4))?;

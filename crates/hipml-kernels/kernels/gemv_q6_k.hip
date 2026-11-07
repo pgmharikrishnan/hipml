@@ -108,27 +108,30 @@ static __device__ __forceinline__ void q6k_acc8(const unsigned char* __restrict_
     *acc = a;
 }
 
-extern "C" __global__ void gemv_q6_k(
+// One row/warp when RPW is 1. Lane ownership and the reduction tree are
+// unchanged, so this is bit-identical to the two-row entry with twice the grid.
+template <int RPW>
+static __device__ __forceinline__ void q6k_tile(
     const unsigned char* __restrict__ w,
     const float* __restrict__ x,
     float* __restrict__ y,
     int m,
-    int k)
+    int k,
+    float* __restrict__ sx)
 {
-    __shared__ __align__(16) float sx[Q6K_K_TILE];
-
     const int tid = threadIdx.x;
     const int lane = tid & 31;
     const int warp = tid >> 5;
     const int nblocks = k / Q6K_VALUES;
+    const int row_tile = Q6K_WARPS * RPW;
 
-    int row[Q6K_ROWS_PER_WARP];
-    int r[Q6K_ROWS_PER_WARP];
-    const unsigned char* rp[Q6K_ROWS_PER_WARP];
-    float acc[Q6K_ROWS_PER_WARP];
+    int row[RPW];
+    int r[RPW];
+    const unsigned char* rp[RPW];
+    float acc[RPW];
 #pragma unroll
-    for (int rr = 0; rr < Q6K_ROWS_PER_WARP; ++rr) {
-        row[rr] = blockIdx.x * Q6K_ROW_TILE + warp * Q6K_ROWS_PER_WARP + rr;
+    for (int rr = 0; rr < RPW; ++rr) {
+        row[rr] = blockIdx.x * row_tile + warp * RPW + rr;
         r[rr] = min(row[rr], m - 1);
         rp[rr] = w + (size_t)r[rr] * (size_t)nblocks * Q6K_BLOCK_BYTES;
         acc[rr] = 0.0f;
@@ -148,16 +151,38 @@ extern "C" __global__ void gemv_q6_k(
             for (int comp = 0; comp < 8; ++comp) xv[comp] = sx[s + comp * 32];
             const int p = base + c;
 #pragma unroll
-            for (int rr = 0; rr < Q6K_ROWS_PER_WARP; ++rr) q6k_acc8(rp[rr], p, xv, &acc[rr]);
+            for (int rr = 0; rr < RPW; ++rr) q6k_acc8(rp[rr], p, xv, &acc[rr]);
         }
         __syncthreads();
     }
 
 #pragma unroll
-    for (int rr = 0; rr < Q6K_ROWS_PER_WARP; ++rr) {
+    for (int rr = 0; rr < RPW; ++rr) {
         float a = acc[rr];
 #pragma unroll
         for (int off = 16; off > 0; off >>= 1) a += __shfl_down(a, off);
         if (lane == 0 && row[rr] < m) y[row[rr]] = a;
     }
+}
+
+extern "C" __global__ void gemv_q6_k(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k)
+{
+    __shared__ __align__(16) float sx[Q6K_K_TILE];
+    q6k_tile<Q6K_ROWS_PER_WARP>(w, x, y, m, k, sx);
+}
+
+extern "C" __global__ void gemv_q6_k_r1(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k)
+{
+    __shared__ __align__(16) float sx[Q6K_K_TILE];
+    q6k_tile<1>(w, x, y, m, k, sx);
 }
