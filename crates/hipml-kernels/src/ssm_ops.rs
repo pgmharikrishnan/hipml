@@ -110,7 +110,7 @@ impl<'a> SsmGpuLayer<'a> {
         }
     }
 
-    pub(crate) fn output_gemv(&self) -> Result<(), String> {
+    pub fn output_gemv(&self) -> Result<(), String> {
         let d = &self.dims;
         self.gemv(&self.wout, &self.gated, &self.out, d.n_embd, d.inner())
     }

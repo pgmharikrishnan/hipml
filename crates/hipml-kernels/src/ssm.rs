@@ -377,6 +377,16 @@ impl<'a> SsmGpuLayer<'a> {
         self.dims.state_floats() * 4
     }
 
+    /// The four input projections, which the decode step launches first.
+    pub fn proj_bytes(&self) -> usize {
+        self.wqkv.bytes() + self.wgate.bytes() + self.alpha_w.bytes() + self.beta_w.bytes()
+    }
+
+    /// The output projection, launched after the recurrence.
+    pub fn step_bytes(&self) -> usize {
+        self.wout.bytes()
+    }
+
     /// Bytes of resident projection weights plus the small f32 vectors.
     pub fn weight_bytes(&self) -> usize {
         let d = &self.dims;

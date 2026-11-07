@@ -153,6 +153,23 @@ impl Stream {
         }
     }
 
+    /// Block this stream until `event` has completed. Ordering only: the work
+    /// is not copied or flushed.
+    #[cfg(feature = "hip")]
+    pub fn wait(&self, event: &Event) -> Result<(), String> {
+        unsafe {
+            check(
+                ffi::hipStreamWaitEvent(self.handle, event.handle, 0),
+                "hipStreamWaitEvent",
+            )
+        }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn wait(&self, _event: &Event) -> Result<(), String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
     #[cfg(not(feature = "hip"))]
     pub fn synchronize(&self) -> Result<(), String> {
         Err("built without the `hip` feature".to_string())
@@ -164,6 +181,66 @@ impl Drop for Stream {
     fn drop(&mut self) {
         unsafe {
             let _ = ffi::hipStreamDestroy(self.handle);
+        }
+    }
+}
+
+/// A timing event. Recorded on a stream and read back after a synchronize, so
+/// a caller can say whether time went inside a kernel or between launches.
+pub struct Event {
+    #[cfg(feature = "hip")]
+    handle: ffi::HipEvent,
+}
+
+impl Event {
+    #[cfg(feature = "hip")]
+    pub fn new() -> Result<Event, String> {
+        unsafe {
+            let mut handle: ffi::HipEvent = std::ptr::null_mut();
+            check(ffi::hipEventCreate(&mut handle), "hipEventCreate")?;
+            Ok(Event { handle })
+        }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn new() -> Result<Event, String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
+    #[cfg(feature = "hip")]
+    pub fn record(&self, stream: &Stream) -> Result<(), String> {
+        unsafe { check(ffi::hipEventRecord(self.handle, stream.handle), "hipEventRecord") }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn record(&self, _stream: &Stream) -> Result<(), String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
+    /// Milliseconds from `self` (recorded earlier) to `stop`, in ms.
+    #[cfg(feature = "hip")]
+    pub fn since(&self, stop: &Event) -> Result<f32, String> {
+        let mut ms = 0.0f32;
+        unsafe {
+            check(
+                ffi::hipEventElapsedTime(&mut ms, self.handle, stop.handle),
+                "hipEventElapsedTime",
+            )?;
+        }
+        Ok(ms)
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn since(&self, _stop: &Event) -> Result<f32, String> {
+        Err("built without the `hip` feature".to_string())
+    }
+}
+
+#[cfg(feature = "hip")]
+impl Drop for Event {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ffi::hipEventDestroy(self.handle);
         }
     }
 }
