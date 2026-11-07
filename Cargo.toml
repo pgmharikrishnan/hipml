@@ -4,6 +4,7 @@ members = [
     "crates/hipml-core",
     "crates/hipml-hip",
     "crates/hipml-kernels",
+    "crates/hipml-model",
     "crates/hipml-cli",
 ]
 
@@ -17,6 +18,7 @@ repository = "https://github.com/pgmharikrishnan/hipml"
 hipml-core = { path = "crates/hipml-core" }
 hipml-hip = { path = "crates/hipml-hip" }
 hipml-kernels = { path = "crates/hipml-kernels" }
+hipml-model = { path = "crates/hipml-model" }
 
 [profile.release]
 lto = "thin"

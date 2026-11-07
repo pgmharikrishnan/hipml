@@ -5,11 +5,13 @@
 //! returns a readable error so the rest of the workspace still builds and tests.
 
 pub mod device;
+pub mod memory;
 
 #[cfg(feature = "hip")]
 pub mod ffi;
 
-pub use device::{Buffer, ByteBuffer, Device, Kernel, LaunchConfig, Module, Stream};
+pub use device::{Device, Kernel, LaunchConfig, Module, Stream};
+pub use memory::{Buffer, ByteBuffer};
 
 /// True when this build can talk to a GPU.
 pub const HAS_HIP: bool = cfg!(feature = "hip");
