@@ -14,9 +14,11 @@ use hipml_kernels::Launcher;
 
 /// Bytes streamed per chunk in `decode-bench`.
 const CHUNK_BYTES: u64 = 64 * 1024 * 1024;
-/// Kernel repetitions per chunk. The copy is outside the timer, so this only
-/// amortises launch + stream-sync latency; it does not re-read the file.
-const DECODE_REPS: usize = 11;
+/// Kernel repetitions per chunk: one, so the figure is a true single pass over
+/// the model (one launch and one stream sync per chunk). Set this higher to see
+/// the kernel-only bandwidth, but small tensors then hit cache and flatter the
+/// number.
+const DECODE_REPS: usize = 1;
 
 fn shape_string(dims: &[u64]) -> String {
     dims.iter()
