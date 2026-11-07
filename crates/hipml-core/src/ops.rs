@@ -7,6 +7,8 @@
 //! Conventions: everything is row-major f32, `eps` guards normalisation, and
 //! `rope` is the NeoX (half-split) variant used by Llama/Qwen-style models.
 
+use crate::kv::{self, KvDtype};
+
 /// `y[m] = W[m,k] · x[k]`
 ///
 /// Kernel: `gemv_f32`, one block per output row, `k` reduced across the block.
@@ -157,6 +159,90 @@ pub fn sample_top_p_f32(probs: &[f32], top_p: f32, u: f32) -> usize {
         }
     }
     order[keep - 1]
+}
+
+/// Decode-time causal attention over a quantized KV cache, one query position.
+///
+/// `q` is `[n_heads, head_dim]`. `k` and `v` are two independent byte arrays of
+/// `[n_kv][seq][head_dim / 32]` blocks (see [`crate::kv`]); K and V are not
+/// interleaved. GQA is the same mapping as `attn_decode_f32`: `n_heads / n_kv`
+/// query heads share one KV head.
+///
+/// Online softmax: a running max `m` and running sum `l` are updated once per
+/// cache row, so no `seq`-length score buffer is ever allocated. That is the
+/// recurrence the kernel runs, so parity compares summation order rather than
+/// two different algorithms.
+///
+/// Kernel: `attn_decode_kv_q8` / `attn_decode_kv_q4` write per-split partials
+/// `(acc, m, l)`; `attn_decode_kv_reduce` merges them. With one split the reduce
+/// is just `acc / l`.
+#[allow(clippy::too_many_arguments)]
+pub fn attn_decode_kv(
+    q: &[f32],
+    k: &[u8],
+    v: &[u8],
+    n_heads: usize,
+    n_kv: usize,
+    head_dim: usize,
+    seq: usize,
+    scale: f32,
+    dtype: KvDtype,
+) -> Vec<f32> {
+    assert_eq!(q.len(), n_heads * head_dim, "q must be n_heads*head_dim");
+    assert!(head_dim % kv::BLOCK == 0, "head_dim must be a multiple of 32");
+    assert!(seq > 0, "attention needs at least one position");
+    assert!(n_heads % n_kv == 0, "n_heads must be a multiple of n_kv");
+    let nb = head_dim / kv::BLOCK;
+    let bb = dtype.block_bytes();
+    let row = nb * bb;
+    assert_eq!(k.len(), n_kv * seq * row, "k must be n_kv*seq*row_bytes");
+    assert_eq!(v.len(), k.len(), "v must match k");
+    let group = n_heads / n_kv;
+
+    let mut out = vec![0.0f32; n_heads * head_dim];
+    let mut acc = vec![0.0f32; head_dim];
+
+    for h in 0..n_heads {
+        let kvh = h / group;
+        let qh = &q[h * head_dim..(h + 1) * head_dim];
+        let kbase = kvh * seq * row;
+        let vbase = kbase;
+        acc.fill(0.0);
+        let mut m = f32::NEG_INFINITY;
+        let mut l = 0.0f32;
+
+        for pos in 0..seq {
+            let at = kbase + pos * row;
+            let mut dot = 0.0f32;
+            for c in 0..nb {
+                let blk = kv::block_f32(dtype, &k[at + c * bb..at + (c + 1) * bb]);
+                let qc = &qh[c * kv::BLOCK..(c + 1) * kv::BLOCK];
+                for j in 0..kv::BLOCK {
+                    dot += qc[j] * blk[j];
+                }
+            }
+            let s = dot * scale;
+            let m_new = m.max(s);
+            let corr = (m - m_new).exp();
+            let p = (s - m_new).exp();
+            l = l * corr + p;
+            m = m_new;
+
+            for c in 0..nb {
+                let blk = kv::block_f32(dtype, &v[vbase + pos * row + c * bb..][..bb]);
+                let a = &mut acc[c * kv::BLOCK..(c + 1) * kv::BLOCK];
+                for j in 0..kv::BLOCK {
+                    a[j] = a[j] * corr + p * blk[j];
+                }
+            }
+        }
+
+        let inv = 1.0 / l;
+        for d in 0..head_dim {
+            out[h * head_dim + d] = acc[d] * inv;
+        }
+    }
+    out
 }
 
 /// Decode-time causal attention for one query position against the whole cache.

@@ -5,11 +5,13 @@
 //! implementation here with the same signature and the same memory layout, so a
 //! device result can be compared against it directly.
 
+pub mod kv;
 pub mod ops;
 pub mod parity;
 pub mod rng;
 pub mod tensor;
 
+pub use kv::KvDtype;
 pub use parity::{compare, OpCase, Stats, Tol};
 pub use rng::Rng;
 pub use tensor::Tensor;

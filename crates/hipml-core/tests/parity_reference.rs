@@ -185,7 +185,15 @@ fn every_parity_case_builds_and_is_internally_consistent() {
         let (inputs2, expected2) = case.reference();
         assert_eq!(expected, expected2, "{} is not deterministic", case.name);
         for (a, b) in inputs.iter().zip(&inputs2) {
-            assert_eq!(a, b, "{} inputs are not deterministic", case.name);
+            // Compare the bytes the device would receive, not f32 values: a
+            // quantized cache carries arbitrary bit patterns, including NaN,
+            // and NaN != NaN would make a deterministic case look random.
+            assert_eq!(
+                a.to_bytes_le(),
+                b.to_bytes_le(),
+                "{} inputs are not deterministic",
+                case.name
+            );
         }
         // And the reference must compare clean against itself.
         compare(&expected, &expected, case.tol).expect("self-comparison failed");
