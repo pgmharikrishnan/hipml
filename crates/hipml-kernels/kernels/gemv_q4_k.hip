@@ -63,22 +63,28 @@ extern "C" __global__ void gemv_q4_k(
         const float s1 = d * (float)sc1;
         const float m1 = dmin * (float)mn1;
 
-        // 32 bytes = 8 words; byte i has the even value in its low nibble and
-        // the odd value in its high nibble.
-        const unsigned int* qw = reinterpret_cast<const unsigned int*>(b + 16 + grp * 32);
+        // 32 bytes = two 16-byte vector loads; byte i has the even value in
+        // its low nibble and the odd value in its high nibble. Q4_K blocks are
+        // 144 bytes and rows are 144*nblocks, so these loads are 16-byte aligned.
+        union Q4Group {
+            struct {
+                uint4 a;
+                uint4 b;
+            } v;
+            unsigned char bytes[32];
+        } q;
+        const unsigned char* qs = b + 16 + grp * 32;
+        q.v.a = *reinterpret_cast<const uint4*>(qs);
+        q.v.b = *reinterpret_cast<const uint4*>(qs + 16);
+
         const float* xr = x + (size_t)g * 64;
         float a0 = 0.0f;
         float a1 = 0.0f;
 #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            const unsigned int v = qw[i];
-#pragma unroll
-            for (int t = 0; t < 4; ++t) {
-                const unsigned int byte = (v >> (8 * t)) & 0xFFu;
-                const int idx = i * 4 + t;
-                a0 += (s0 * (float)(byte & 0xF) - m0) * xr[idx];
-                a1 += (s1 * (float)(byte >> 4) - m1) * xr[32 + idx];
-            }
+        for (int i = 0; i < 32; ++i) {
+            const unsigned int byte = q.bytes[i];
+            a0 += (s0 * (float)(byte & 0xF) - m0) * xr[i];
+            a1 += (s1 * (float)(byte >> 4) - m1) * xr[32 + i];
         }
         acc += a0 + a1;
     }
