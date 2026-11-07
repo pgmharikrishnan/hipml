@@ -47,6 +47,8 @@ mod layers;
 
 use layers::{build_attn, build_ssm};
 
+pub use prefill::PrefillReport;
+
 pub use deep_kv::DeepKv;
 use deep_kv::MAX_SPLITS;
 

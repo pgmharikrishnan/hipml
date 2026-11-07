@@ -26,9 +26,60 @@
 use super::*;
 use hipml_hip::Buffer;
 use hipml_kernels::ssm::SsmChunk;
+use std::time::Instant;
 
 use crate::gpu_weights::gemv_entry;
 use crate::OUTPUT;
+
+/// Where a chunk's wall time went, measured with one stream sync per stage.
+///
+/// Only `gpu-bench --prefill-split` asks for it; the ordinary path passes
+/// `None` and pays nothing but a branch.
+#[derive(Default, Debug)]
+pub struct PrefillReport {
+    pub embed_ms: f64,
+    /// RMS norms, residuals, SwiGLU and the output norm.
+    pub elementwise_ms: f64,
+    /// Attention q/k/v/o projections.
+    pub attn_gemm_ms: f64,
+    /// GDN qkv/gate/out projections (alpha/beta are f32 and tiny).
+    pub ssm_gemm_ms: f64,
+    /// FFN gate/up/down and the SwiGLU between them.
+    pub ffn_gemm_ms: f64,
+    /// Output norm, `lm_head` and argmax.
+    pub final_ms: f64,
+    /// The chunked GDN chain (gates, conv, L2, recurrence, gated RMS).
+    pub ssm_seq_ms: f64,
+    /// Per-token full-attention chain and its output projection.
+    pub attn_seq_ms: f64,
+    last: Option<Instant>,
+}
+
+impl PrefillReport {
+    fn start(&mut self) {
+        self.last = Some(Instant::now());
+    }
+
+    fn lap(&mut self, l: &hipml_kernels::Launcher, slot: fn(&mut PrefillReport) -> &mut f64) {
+        let Some(last) = self.last else { return };
+        if l.synchronize().is_ok() {
+            let now = Instant::now();
+            *slot(self) += now.duration_since(last).as_secs_f64() * 1e3;
+            self.last = Some(now);
+        }
+    }
+
+    pub fn total_ms(&self) -> f64 {
+        self.embed_ms
+            + self.elementwise_ms
+            + self.attn_gemm_ms
+            + self.ssm_gemm_ms
+            + self.ffn_gemm_ms
+            + self.final_ms
+            + self.ssm_seq_ms
+            + self.attn_seq_ms
+    }
+}
 
 /// Chunk scratch, one set shared by every layer (layers run in sequence).
 pub(crate) struct Chunk {
@@ -112,15 +163,42 @@ impl<'a> GpuEngine<'a> {
         }
         let chunk = chunk.max(1);
         self.ensure_chunk(chunk)?;
+        let mut rep: Option<PrefillReport> = None;
         let mut last = 0u32;
         for tile in tokens.chunks(chunk) {
-            last = self.forward_chunk(tile, st)?;
+            last = self.forward_chunk(tile, st, &mut rep)?;
         }
         Ok(last)
     }
 
+    /// Same prefill, with the time per stage measured by synchronizing between
+    /// them. Slower than `prefill_chunked`; this is the breakdown command.
+    pub fn prefill_chunked_report(
+        &mut self,
+        tokens: &[u32],
+        st: &mut GpuState,
+        chunk: usize,
+    ) -> Result<(u32, PrefillReport), String> {
+        if self.kv_mode != KvMode::F32 {
+            return Err("chunked prefill needs --kv f32".to_string());
+        }
+        let chunk = chunk.max(1);
+        self.ensure_chunk(chunk)?;
+        let mut rep = Some(PrefillReport::default());
+        let mut last = 0u32;
+        for tile in tokens.chunks(chunk) {
+            last = self.forward_chunk(tile, st, &mut rep)?;
+        }
+        Ok((last, rep.unwrap_or_default()))
+    }
+
     /// One chunk through the whole graph. `st.pos` advances by the chunk length.
-    fn forward_chunk(&mut self, tokens: &[u32], st: &mut GpuState) -> Result<u32, String> {
+    fn forward_chunk(
+        &mut self,
+        tokens: &[u32],
+        st: &mut GpuState,
+        rep: &mut Option<PrefillReport>,
+    ) -> Result<u32, String> {
         let n_tok = tokens.len();
         let pos0 = st.pos;
         if n_tok == 0 {
@@ -142,26 +220,56 @@ impl<'a> GpuEngine<'a> {
         }
         // The embedding table and the lm head are the model's, not the engine's.
         let embed = self.embed;
+        if let Some(r) = rep.as_mut() {
+            r.start();
+        }
         for (t, &id) in tokens.iter().enumerate() {
             l.embed_row_q4_k_at(embed.0, id as usize, embed.1, &c.x, t * n, n)?;
+        }
+        if let Some(r) = rep.as_mut() {
+            r.lap(l, |r| &mut r.embed_ms);
         }
 
         for i in 0..self.layers.len() {
             let block = &self.layers[i];
             l.rmsnorm_rows(&c.x, &block.attn_norm, &c.t, n, cfg.eps, n_tok)?;
+            if let Some(r) = rep.as_mut() {
+                r.lap(l, |r| &mut r.elementwise_ms);
+            }
             let block_out: &Buffer = match &block.kind {
                 BlockKind::Ssm(s) => {
                     s.project_chunk(l, &c.t, &c.ssm, n_tok)?;
-                    for t in 0..n_tok {
-                        s.step_chunk_row(&c.ssm, t)?;
+                    if let Some(r) = rep.as_mut() {
+                        r.lap(l, |r| &mut r.ssm_gemm_ms);
+                    }
+                    if std::env::var_os("HIPML_TOKEN_STEPS").is_some() {
+                        for t in 0..n_tok {
+                            s.step_chunk_row(&c.ssm, t)?;
+                        }
+                    } else {
+                        s.steps_chunk(&c.ssm, n_tok)?;
                     }
                     s.out_chunk(l, &c.ssm, n_tok)?;
+                    if let Some(r) = rep.as_mut() {
+                        r.lap(l, |r| &mut r.ssm_seq_ms);
+                    }
                     &c.ssm.out
                 }
                 BlockKind::Full { attn, deep: None } => {
                     attn.project_chunk(l, &c.t, &c.qg, &c.k, &c.v, n_tok)?;
-                    for t in 0..n_tok {
-                        attn.step_chunk_row(
+                    if let Some(r) = rep.as_mut() {
+                        r.lap(l, |r| &mut r.attn_gemm_ms);
+                    }
+                    if std::env::var_os("HIPML_TOKEN_STEPS").is_some()
+                        || !attn.chunk_supported()
+                    {
+                        for t in 0..n_tok {
+                            attn.step_chunk_row(
+                                l, &c.qg, &c.k, &c.v, &c.q, &c.aq_gate, &c.aout, t, pos0 + t,
+                            )?;
+                        }
+                    } else {
+                        attn.step_chunk(
                             l,
                             &c.qg,
                             &c.k,
@@ -169,11 +277,14 @@ impl<'a> GpuEngine<'a> {
                             &c.q,
                             &c.aq_gate,
                             &c.aout,
-                            t,
-                            pos0 + t,
+                            pos0,
+                            n_tok,
                         )?;
                     }
                     attn.apply_output_chunk(l, &c.aout, &c.aq_gate, &c.y, n_tok)?;
+                    if let Some(r) = rep.as_mut() {
+                        r.lap(l, |r| &mut r.attn_seq_ms);
+                    }
                     &c.y
                 }
                 BlockKind::Full { deep: Some(_), .. } => {
@@ -182,12 +293,18 @@ impl<'a> GpuEngine<'a> {
             };
             l.residual_buf(&c.x, block_out, &c.x1, n_tok * n)?;
             l.rmsnorm_rows(&c.x1, &block.post_norm, &c.t, n, cfg.eps, n_tok)?;
+            if let Some(r) = rep.as_mut() {
+                r.lap(l, |r| &mut r.elementwise_ms);
+            }
 
             block.gate.gemm(l, &c.t, &c.gate, n_tok)?;
             block.up.gemm(l, &c.t, &c.up, n_tok)?;
             l.silu_mul_buf(&c.gate, &c.up, &c.act, n_tok * cfg.n_ff)?;
             block.down.gemm(l, &c.act, &c.down, n_tok)?;
             l.residual_buf(&c.down, &c.x1, &c.x, n_tok * n)?;
+            if let Some(r) = rep.as_mut() {
+                r.lap(l, |r| &mut r.ffn_gemm_ms);
+            }
         }
 
         // The chunk's last row is the only one that needs logits.
@@ -215,6 +332,9 @@ impl<'a> GpuEngine<'a> {
             cfg.n_vocab,
             ARGMAX_PARTS,
         )?;
+        if let Some(r) = rep.as_mut() {
+            r.lap(l, |r| &mut r.final_ms);
+        }
         l.synchronize()?;
         let bytes = self.arg_out.download_bytes(0, 4)?;
         st.pos += n_tok;

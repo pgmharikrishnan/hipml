@@ -47,8 +47,13 @@ pub(crate) fn mat_kind(ty: TensorType) -> Result<Kind, String> {
 enum ProjData<'a> {
     /// A GGUF block payload streamed by the quantized GEMV.
     Resident(&'a ByteBuffer, &'static str),
-    /// An f32 matrix dequantized once at build time (Q5_K has no GEMV kernel).
-    F32(Buffer),
+    /// Q5_K, dequantized once at build time because it has no unpack kernel:
+    /// f32 for the decode GEMV and half for the prefill GEMM. Two copies,
+    /// 0.5 GB total for Qwen3.8-27B's two tensors, beats a 0.2-TFLOPS f32 GEMM.
+    Q5 {
+        f32: Buffer,
+        half: ByteBuffer,
+    },
 }
 
 /// A projection that a launcher can stream straight from VRAM.
@@ -69,7 +74,17 @@ impl<'a> Proj<'a> {
         }
         let (rows, cols) = (shape[0] as usize, shape[1] as usize);
         let data = match t.ty() {
-            TensorType::Q5K => ProjData::F32(Buffer::from_host(&dequant_q5_k(t, rows, cols)?)?),
+            TensorType::Q5K => {
+                let v = dequant_q5_k(t, rows, cols)?;
+                let mut half = Vec::with_capacity(v.len() * 2);
+                for &x in &v {
+                    half.extend_from_slice(&hipml_core::kv::f32_to_f16(x).to_le_bytes());
+                }
+                ProjData::Q5 {
+                    f32: Buffer::from_host(&v)?,
+                    half: ByteBuffer::from_host(&half)?,
+                }
+            }
             ty => ProjData::Resident(t.buffer(), gemv_entry(ty)?),
         };
         Ok(Proj { data, rows, cols })
@@ -80,7 +95,7 @@ impl<'a> Proj<'a> {
             ProjData::Resident(w, entry) => {
                 l.run_quant_resident(entry, w, x, y, self.rows, self.cols)
             }
-            ProjData::F32(w) => l.run_f32_resident(w, x, y, self.rows, self.cols),
+            ProjData::Q5 { f32, .. } => l.run_f32_resident(f32, x, y, self.rows, self.cols),
         }
     }
 
@@ -103,14 +118,24 @@ impl<'a> Proj<'a> {
                 let e = prefill_entry(entry)?;
                 l.run_prefill_resident(e, w, x, y, self.rows, self.cols, tokens)
             }
-            ProjData::F32(w) => l.run_gemm_resident(w, x, y, tokens, self.rows, self.cols),
+            ProjData::Q5 { half, .. } => hipml_kernels::prefill_resident(
+                l.module(),
+                l.stream(),
+                "prefill_halfw_h",
+                half,
+                x,
+                y,
+                self.rows,
+                self.cols,
+                tokens,
+            ),
         }
     }
 
     pub(crate) fn bytes(&self) -> usize {
         match &self.data {
             ProjData::Resident(w, _) => w.len(),
-            ProjData::F32(w) => w.len() * 4,
+            ProjData::Q5 { f32, half } => f32.len() * 4 + half.len(),
         }
     }
 }
