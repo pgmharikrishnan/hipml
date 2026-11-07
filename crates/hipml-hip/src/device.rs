@@ -446,6 +446,27 @@ impl LaunchConfig {
             shared_mem_bytes: 0,
         }
     }
+
+    /// One block per `rows_per_block` x `tokens_per_block` output tile.
+    pub fn prefill(
+        rows: usize,
+        tokens: usize,
+        rows_per_block: u32,
+        tokens_per_block: u32,
+        block: u32,
+    ) -> Self {
+        let rpb = rows_per_block.max(1) as usize;
+        let tpb = tokens_per_block.max(1) as usize;
+        Self {
+            grid: (
+                ((rows + rpb - 1) / rpb).max(1) as u32,
+                ((tokens + tpb - 1) / tpb).max(1) as u32,
+                1,
+            ),
+            block: (block, 1, 1),
+            shared_mem_bytes: 0,
+        }
+    }
 }
 
 impl<'a> Kernel<'a> {
