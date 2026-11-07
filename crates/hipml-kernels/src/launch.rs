@@ -9,14 +9,14 @@ use hipml_core::parity::OpCase;
 use hipml_core::tensor::Tensor;
 
 #[cfg(feature = "hip")]
-mod device {
+pub(crate) mod device {
     use super::*;
     use hipml_hip::{Buffer, ByteBuffer, Device, LaunchConfig, Module, Stream};
     use std::ffi::c_void;
 
     pub struct Launcher {
-        module: Module,
-        stream: Stream,
+        pub(crate) module: Module,
+        pub(crate) stream: Stream,
         pub device_name: String,
     }
 
@@ -56,7 +56,9 @@ mod device {
                 "silu_mul_f32" => self.linear2(case, inputs, reps),
                 "residual_add_f32" => self.linear2(case, inputs, reps),
                 "softmax_f32" => self.softmax(case, inputs, reps),
-                "attn_decode_f32" => self.attention(case, inputs, reps),
+                "attn_decode_f32" | "attn_decode_pm_f32" => self.attention(case, inputs, reps),
+                "qg_split_f32" | "head_rmsnorm_f32" | "mrope_f32" | "q_gate_f32"
+                | "kv_append_f32" => self.run_attn_case(case, inputs, reps),
                 other => Err(format!("{other} has no device launcher")),
             }
         }
@@ -324,7 +326,21 @@ mod device {
 
             let mut v_scale = scale;
 
-            let mut params: [*mut c_void; 9] = [
+            // The generic case stores the cache kv-major; the position-major
+            // case matches attention::KvState.
+            let pm = case.name == "attn_decode_pm_f32";
+            let mut v_head_stride = if pm {
+                head_dim as i32
+            } else {
+                (seq * head_dim) as i32
+            };
+            let mut v_row_stride = if pm {
+                (n_kv * head_dim) as i32
+            } else {
+                head_dim as i32
+            };
+
+            let mut params: [*mut c_void; 11] = [
                 &mut p_q as *mut _ as *mut c_void,
                 &mut p_k as *mut _ as *mut c_void,
                 &mut p_v as *mut _ as *mut c_void,
@@ -334,6 +350,8 @@ mod device {
                 &mut v_dim as *mut _ as *mut c_void,
                 &mut v_seq as *mut _ as *mut c_void,
                 &mut v_scale as *mut _ as *mut c_void,
+                &mut v_head_stride as *mut _ as *mut c_void,
+                &mut v_row_stride as *mut _ as *mut c_void,
             ];
 
             // One block per head; the block must be exactly head_dim wide because each
@@ -434,6 +452,10 @@ impl Launcher {
         _k: usize,
         _reps: usize,
     ) -> Result<(Vec<f32>, f64), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    pub fn synchronize(&self) -> Result<(), String> {
         Err("hipml was built without the `hip` feature".to_string())
     }
 }

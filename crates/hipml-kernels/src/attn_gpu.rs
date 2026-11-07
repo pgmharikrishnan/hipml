@@ -1,0 +1,473 @@
+//! The full-attention block on the device: resident weights, one layer call,
+//! and the small kernels that sit between the projections and the attention.
+//!
+//! Layout is the CPU reference's (`attention::KvState`): the cache is
+//! position-major, `[n_ctx][n_kv * head_dim]`, appended one row per token. The
+//! decode kernel takes `head_stride`/`row_stride`, so the same entry point
+//! serves that layout and the kv-major parity case.
+
+#[cfg(feature = "hip")]
+pub use imp::AttnLayer;
+
+#[cfg(feature = "hip")]
+mod imp {
+    use crate::launch::device::Launcher;
+    use hipml_core::attention::FullAttnW;
+    use hipml_core::config::Config;
+    use hipml_core::mat::{Kind, Mat};
+    use hipml_hip::{Buffer, ByteBuffer, LaunchConfig};
+    use std::ffi::c_void;
+
+    /// One weight tensor resident in VRAM, in its GGUF block form.
+    struct ResidentMat {
+        data: ByteBuffer,
+        rows: usize,
+        cols: usize,
+        kind: Kind,
+    }
+
+    impl ResidentMat {
+        fn upload(m: &Mat) -> Result<ResidentMat, String> {
+            Ok(ResidentMat {
+                data: ByteBuffer::from_host(&m.data)?,
+                rows: m.rows,
+                cols: m.cols,
+                kind: m.kind,
+            })
+        }
+
+        fn entry(&self) -> Result<&'static str, String> {
+            Ok(match self.kind {
+                Kind::F32 => "gemv_f32",
+                Kind::Q4K => "gemv_q4_k",
+                Kind::Q6K => "gemv_q6_k",
+                Kind::Q8_0 => "gemv_q8_0",
+                Kind::Q5K => return Err("attention weight is Q5_K: no GEMV kernel".to_string()),
+            })
+        }
+    }
+
+    /// Shape and rope parameters one layer needs.
+    #[derive(Clone, Copy, Debug)]
+    pub struct LayerDims {
+        pub n_head: usize,
+        pub n_kv: usize,
+        pub head_dim: usize,
+        pub n_rot: usize,
+        pub sections: [usize; 4],
+        pub eps: f32,
+        pub rope_base: f32,
+        pub width: usize,
+        pub n_ctx: usize,
+        pub n_embd: usize,
+    }
+
+    /// One attention layer whose weights and KV cache stay on the device.
+    pub struct AttnLayer {
+        wq: ResidentMat,
+        wk: ResidentMat,
+        wv: ResidentMat,
+        wo: ResidentMat,
+        q_norm: Buffer,
+        k_norm: Buffer,
+        qg: Buffer,
+        q: Buffer,
+        gate: Buffer,
+        k: Buffer,
+        v: Buffer,
+        out: Buffer,
+        y: Buffer,
+        kv_k: Buffer,
+        kv_v: Buffer,
+        pub dims: LayerDims,
+    }
+
+    impl AttnLayer {
+        pub fn new(
+            l: &Launcher,
+            w: &FullAttnW,
+            cfg: &Config,
+            n_ctx: usize,
+        ) -> Result<AttnLayer, String> {
+            let (n_head, n_kv, hd) = (cfg.n_head, cfg.n_head_kv, cfg.head_dim);
+            let width = n_kv * hd;
+            if w.wq.rows != n_head * hd * 2 || w.wq.cols != cfg.n_embd {
+                return Err(format!(
+                    "attn_q is {}x{}, expected {}x{}",
+                    w.wq.rows,
+                    w.wq.cols,
+                    n_head * hd * 2,
+                    cfg.n_embd
+                ));
+            }
+            for (name, mat, rows, cols) in [
+                ("attn_k", &w.wk, n_kv * hd, cfg.n_embd),
+                ("attn_v", &w.wv, n_kv * hd, cfg.n_embd),
+                ("attn_output", &w.wo, cfg.n_embd, n_head * hd),
+            ] {
+                if mat.rows != rows || mat.cols != cols {
+                    return Err(format!(
+                        "{name} is {}x{}, expected {rows}x{cols}",
+                        mat.rows, mat.cols
+                    ));
+                }
+            }
+            let dims = LayerDims {
+                n_head,
+                n_kv,
+                head_dim: hd,
+                n_rot: cfg.n_rot,
+                sections: cfg.rope_sections,
+                eps: cfg.eps,
+                rope_base: cfg.rope_base,
+                width,
+                n_ctx,
+                n_embd: cfg.n_embd,
+            };
+            let _ = l;
+            Ok(AttnLayer {
+                wq: ResidentMat::upload(&w.wq)?,
+                wk: ResidentMat::upload(&w.wk)?,
+                wv: ResidentMat::upload(&w.wv)?,
+                wo: ResidentMat::upload(&w.wo)?,
+                q_norm: Buffer::from_host(&w.q_norm)?,
+                k_norm: Buffer::from_host(&w.k_norm)?,
+                qg: Buffer::alloc(2 * n_head * hd)?,
+                q: Buffer::alloc(n_head * hd)?,
+                gate: Buffer::alloc(n_head * hd)?,
+                k: Buffer::alloc(width)?,
+                v: Buffer::alloc(width)?,
+                out: Buffer::alloc(n_head * hd)?,
+                y: Buffer::alloc(cfg.n_embd)?,
+                kv_k: Buffer::alloc(n_ctx * width)?,
+                kv_v: Buffer::alloc(n_ctx * width)?,
+                dims,
+            })
+        }
+
+        /// Bytes the KV cache occupies in VRAM.
+        pub fn kv_bytes(&self) -> usize {
+            2 * self.dims.n_ctx * self.dims.width * 4
+        }
+
+        /// Bytes of the four projected weights, as streamed per token.
+        pub fn weight_bytes(&self) -> usize {
+            self.wq.data.len() + self.wk.data.len() + self.wv.data.len() + self.wo.data.len()
+        }
+
+        pub fn zero_kv(&self) -> Result<(), String> {
+            self.kv_k.zero()?;
+            self.kv_v.zero()
+        }
+
+        /// Run q/k RMS norm and M-RoPE alone (the standalone parity target).
+        pub fn norm_rope(
+            &self,
+            l: &Launcher,
+            q_raw: &[f32],
+            k_raw: &[f32],
+            pos: usize,
+        ) -> Result<(Vec<f32>, Vec<f32>), String> {
+            self.q.write(q_raw)?;
+            self.k.write(k_raw)?;
+            self.norm_and_rope(l, pos)?;
+            Ok((self.q.to_host()?, self.k.to_host()?))
+        }
+
+        fn norm_and_rope(&self, l: &Launcher, pos: usize) -> Result<(), String> {
+            let d = self.dims;
+            let norm = self.module_kernel(l, "head_rmsnorm_f32")?;
+            let mut hd = d.head_dim as i32;
+            let mut eps = d.eps;
+
+            // q heads
+            let mut p_x = self.q.as_ptr();
+            let mut p_w = self.q_norm.as_ptr();
+            let mut p_y = self.q.as_ptr();
+            let mut nh = d.n_head as i32;
+            let mut params: [*mut c_void; 6] = [
+                &mut p_x as *mut _ as *mut c_void,
+                &mut p_w as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut nh as *mut _ as *mut c_void,
+                &mut hd as *mut _ as *mut c_void,
+                &mut eps as *mut _ as *mut c_void,
+            ];
+            norm.launch(LaunchConfig::per_row(d.n_head, 256), &l.stream, &mut params)?;
+
+            // k heads
+            let mut p_x = self.k.as_ptr();
+            let mut p_w = self.k_norm.as_ptr();
+            let mut p_y = self.k.as_ptr();
+            let mut nkv = d.n_kv as i32;
+            let mut params: [*mut c_void; 6] = [
+                &mut p_x as *mut _ as *mut c_void,
+                &mut p_w as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut nkv as *mut _ as *mut c_void,
+                &mut hd as *mut _ as *mut c_void,
+                &mut eps as *mut _ as *mut c_void,
+            ];
+            norm.launch(LaunchConfig::per_row(d.n_kv, 256), &l.stream, &mut params)?;
+
+            self.rope_launch(l, self.q.as_ptr(), d.n_head, pos)?;
+            self.rope_launch(l, self.k.as_ptr(), d.n_kv, pos)
+        }
+
+        fn rope_launch(
+            &self,
+            l: &Launcher,
+            x: *mut c_void,
+            n_heads: usize,
+            pos: usize,
+        ) -> Result<(), String> {
+            let d = self.dims;
+            let rope = self.module_kernel(l, "mrope_f32")?;
+            let mut p_in = x;
+            let mut p_out = x;
+            let mut nh = n_heads as i32;
+            let mut hd = d.head_dim as i32;
+            let mut nrot = d.n_rot as i32;
+            let mut s0 = d.sections[0] as i32;
+            let mut s1 = d.sections[1] as i32;
+            let mut s2 = d.sections[2] as i32;
+            let mut s3 = d.sections[3] as i32;
+            let mut p0 = pos as i32;
+            let mut base = d.rope_base;
+            let mut params: [*mut c_void; 14] = [
+                &mut p_in as *mut _ as *mut c_void,
+                &mut p_out as *mut _ as *mut c_void,
+                &mut nh as *mut _ as *mut c_void,
+                &mut hd as *mut _ as *mut c_void,
+                &mut nrot as *mut _ as *mut c_void,
+                &mut s0 as *mut _ as *mut c_void,
+                &mut s1 as *mut _ as *mut c_void,
+                &mut s2 as *mut _ as *mut c_void,
+                &mut s3 as *mut _ as *mut c_void,
+                &mut p0 as *mut _ as *mut c_void,
+                &mut p0 as *mut _ as *mut c_void,
+                &mut p0 as *mut _ as *mut c_void,
+                &mut p0 as *mut _ as *mut c_void,
+                &mut base as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: (n_heads as u32, 1, 1),
+                block: (32, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            rope.launch(cfg, &l.stream, &mut params)
+        }
+
+        /// One layer for one token at `pos`. `x` is already the attention input
+        /// (after `attn_norm`). Downloads the layer output.
+        pub fn forward(&self, l: &Launcher, x: &[f32], pos: usize) -> Result<Vec<f32>, String> {
+            let xb = Buffer::from_host(x)?;
+            self.forward_buf(l, &xb, pos)?;
+            self.y.to_host()
+        }
+
+        /// Same, with `x` resident on the device. Does not synchronize.
+        pub fn forward_buf(&self, l: &Launcher, x: &Buffer, pos: usize) -> Result<(), String> {
+            let d = self.dims;
+            if pos >= d.n_ctx {
+                return Err(format!("position {pos} beyond KV cache {}", d.n_ctx));
+            }
+            self.gemv(l, &self.wq, x, &self.qg, 2 * d.n_head * d.head_dim)?;
+            self.gemv(l, &self.wk, x, &self.k, d.width)?;
+            self.gemv(l, &self.wv, x, &self.v, d.width)?;
+
+            let split = self.module_kernel(l, "qg_split_f32")?;
+            let mut p_qg = self.qg.as_ptr();
+            let mut p_q = self.q.as_ptr();
+            let mut p_gate = self.gate.as_ptr();
+            let mut nh = d.n_head as i32;
+            let mut hd = d.head_dim as i32;
+            let mut params: [*mut c_void; 5] = [
+                &mut p_qg as *mut _ as *mut c_void,
+                &mut p_q as *mut _ as *mut c_void,
+                &mut p_gate as *mut _ as *mut c_void,
+                &mut nh as *mut _ as *mut c_void,
+                &mut hd as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: (d.n_head as u32, 1, 1),
+                block: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            split.launch(cfg, &l.stream, &mut params)?;
+
+            self.norm_and_rope(l, pos)?;
+
+            let append = self.module_kernel(l, "kv_append_f32")?;
+            let mut p_kc = self.kv_k.as_ptr();
+            let mut p_vc = self.kv_v.as_ptr();
+            let mut p_k = self.k.as_ptr();
+            let mut p_v = self.v.as_ptr();
+            let mut off = pos as i32;
+            let mut width = d.width as i32;
+            let mut params: [*mut c_void; 6] = [
+                &mut p_kc as *mut _ as *mut c_void,
+                &mut p_vc as *mut _ as *mut c_void,
+                &mut p_k as *mut _ as *mut c_void,
+                &mut p_v as *mut _ as *mut c_void,
+                &mut off as *mut _ as *mut c_void,
+                &mut width as *mut _ as *mut c_void,
+            ];
+            append.launch(
+                LaunchConfig::linear(2 * d.width, 256),
+                &l.stream,
+                &mut params,
+            )?;
+
+            let attn = self.module_kernel(l, "attn_decode_f32")?;
+            let mut p_q = self.q.as_ptr();
+            let mut p_kc = self.kv_k.as_ptr();
+            let mut p_vc = self.kv_v.as_ptr();
+            let mut p_out = self.out.as_ptr();
+            let mut v_heads = d.n_head as i32;
+            let mut v_kv = d.n_kv as i32;
+            let mut v_seq = (pos + 1) as i32;
+            let mut scale = 1.0f32 / (d.head_dim as f32).sqrt();
+            let mut head_stride = d.head_dim as i32;
+            let mut row_stride = d.width as i32;
+            let mut params: [*mut c_void; 11] = [
+                &mut p_q as *mut _ as *mut c_void,
+                &mut p_kc as *mut _ as *mut c_void,
+                &mut p_vc as *mut _ as *mut c_void,
+                &mut p_out as *mut _ as *mut c_void,
+                &mut v_heads as *mut _ as *mut c_void,
+                &mut v_kv as *mut _ as *mut c_void,
+                &mut hd as *mut _ as *mut c_void,
+                &mut v_seq as *mut _ as *mut c_void,
+                &mut scale as *mut _ as *mut c_void,
+                &mut head_stride as *mut _ as *mut c_void,
+                &mut row_stride as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: (d.n_head as u32, 1, 1),
+                block: (d.head_dim as u32, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            attn.launch(cfg, &l.stream, &mut params)?;
+
+            let gate = self.module_kernel(l, "q_gate_f32")?;
+            let mut p_out = self.out.as_ptr();
+            let mut p_gate = self.gate.as_ptr();
+            let mut p_y = self.out.as_ptr();
+            let mut n = (d.n_head * d.head_dim) as i32;
+            let mut params: [*mut c_void; 4] = [
+                &mut p_out as *mut _ as *mut c_void,
+                &mut p_gate as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut n as *mut _ as *mut c_void,
+            ];
+            gate.launch(
+                LaunchConfig::linear(d.n_head * d.head_dim, 256),
+                &l.stream,
+                &mut params,
+            )?;
+
+            self.gemv(l, &self.wo, &self.out, &self.y, d.n_embd)
+        }
+
+        fn module_kernel<'a>(
+            &self,
+            l: &'a Launcher,
+            name: &str,
+        ) -> Result<hipml_hip::Kernel<'a>, String> {
+            l.module.kernel(name)
+        }
+
+        fn gemv(
+            &self,
+            l: &Launcher,
+            w: &ResidentMat,
+            x: &Buffer,
+            y: &Buffer,
+            m: usize,
+        ) -> Result<(), String> {
+            if w.rows != m {
+                return Err(format!("gemv: {} rows, launch says {m}", w.rows));
+            }
+            let entry = w.entry()?;
+            let spec = crate::spec(entry).ok_or_else(|| format!("{entry} not in manifest"))?;
+            let kernel = l.module.kernel(entry)?;
+            let mut p_w = w.data.as_ptr();
+            let mut p_x = x.as_ptr();
+            let mut p_y = y.as_ptr();
+            let mut v_m = m as i32;
+            let mut v_k = w.cols as i32;
+            let mut params: [*mut c_void; 5] = [
+                &mut p_w as *mut _ as *mut c_void,
+                &mut p_x as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut v_m as *mut _ as *mut c_void,
+                &mut v_k as *mut _ as *mut c_void,
+            ];
+            let cfg = match spec.kind {
+                crate::KernelKind::RowTile { rows, block } => {
+                    LaunchConfig::row_tile(m, rows, block)
+                }
+                crate::KernelKind::PerRow { block } => LaunchConfig::per_row(m, block),
+                _ => return Err(format!("{entry}: unsupported grid")),
+            };
+            kernel.launch(cfg, &l.stream, &mut params)
+        }
+    }
+
+}
+
+#[cfg(not(feature = "hip"))]
+pub struct AttnLayer;
+
+#[cfg(not(feature = "hip"))]
+impl AttnLayer {
+    pub fn new(
+        _l: &crate::Launcher,
+        _w: &hipml_core::attention::FullAttnW,
+        _cfg: &hipml_core::config::Config,
+        _n_ctx: usize,
+    ) -> Result<AttnLayer, String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    pub fn forward(
+        &self,
+        _l: &crate::Launcher,
+        _x: &[f32],
+        _pos: usize,
+    ) -> Result<Vec<f32>, String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    pub fn forward_buf(
+        &self,
+        _l: &crate::Launcher,
+        _x: &hipml_hip::Buffer,
+        _pos: usize,
+    ) -> Result<(), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    pub fn norm_rope(
+        &self,
+        _l: &crate::Launcher,
+        _q: &[f32],
+        _k: &[f32],
+        _pos: usize,
+    ) -> Result<(Vec<f32>, Vec<f32>), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    pub fn zero_kv(&self) -> Result<(), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    pub fn kv_bytes(&self) -> usize {
+        0
+    }
+
+    pub fn weight_bytes(&self) -> usize {
+        0
+    }
+}

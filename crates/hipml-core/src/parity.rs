@@ -104,7 +104,7 @@ impl OpCase {
 /// Every op the engine can run, with shapes chosen to expose tail handling:
 /// sizes are deliberately not all powers of two.
 pub fn cases() -> Vec<OpCase> {
-    vec![
+    let mut out = vec![
         OpCase {
             name: "gemv_f32",
             tol: Tol::DEFAULT,
@@ -242,7 +242,9 @@ pub fn cases() -> Vec<OpCase> {
                 (vec![Tensor::new(vec![n], probs)], vec![idx as f32])
             },
         },
-    ]
+    ];
+    out.extend(crate::attn_parity::cases());
+    out
 }
 
 /// Production-shape cases, for `hipml bench` only.

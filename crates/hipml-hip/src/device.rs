@@ -173,6 +173,39 @@ impl Buffer {
         Err("built without the `hip` feature".to_string())
     }
 
+    /// Copy host data into an existing device buffer.
+    #[cfg(feature = "hip")]
+    pub fn write(&self, data: &[f32]) -> Result<(), String> {
+        assert_eq!(data.len(), self.len, "write length must match the buffer");
+        unsafe {
+            check(
+                ffi::hipMemcpy(
+                    self.ptr,
+                    data.as_ptr() as *const std::ffi::c_void,
+                    data.len() * 4,
+                    ffi::HIP_MEMCPY_HOST_TO_DEVICE,
+                ),
+                "hipMemcpy host->device",
+            )
+        }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn write(&self, _data: &[f32]) -> Result<(), String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
+    /// Zero every element.
+    #[cfg(feature = "hip")]
+    pub fn zero(&self) -> Result<(), String> {
+        unsafe { check(ffi::hipMemset(self.ptr, 0, self.len * 4), "hipMemset") }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn zero(&self) -> Result<(), String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
     /// Download into host memory.
     #[cfg(feature = "hip")]
     pub fn to_host(&self) -> Result<Vec<f32>, String> {

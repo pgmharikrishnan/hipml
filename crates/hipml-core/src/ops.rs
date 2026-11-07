@@ -193,6 +193,79 @@ pub fn rope_multi_f32(
     y
 }
 
+/// Split the joint `attn_q` projection `[n_heads][2*head_dim]` into `q` and
+/// `gate`, both `[n_heads][head_dim]`.
+///
+/// Kernel: `qg_split_f32`, one block per head.
+pub fn qg_split_f32(qg: &[f32], n_heads: usize, head_dim: usize) -> Vec<f32> {
+    assert_eq!(qg.len(), n_heads * 2 * head_dim, "qg must be n_heads*2*head_dim");
+    let mut out = vec![0.0f32; 2 * n_heads * head_dim];
+    for h in 0..n_heads {
+        let src = &qg[h * 2 * head_dim..(h + 1) * 2 * head_dim];
+        out[h * head_dim..(h + 1) * head_dim].copy_from_slice(&src[..head_dim]);
+        out[n_heads * head_dim + h * head_dim..n_heads * head_dim + (h + 1) * head_dim]
+            .copy_from_slice(&src[head_dim..]);
+    }
+    out
+}
+
+/// Per-head RMS norm: row `h` is normalised with the shared `w`.
+///
+/// Kernel: `head_rmsnorm_f32`, one block per head.
+pub fn head_rmsnorm_f32(
+    x: &[f32],
+    w: &[f32],
+    n_heads: usize,
+    head_dim: usize,
+    eps: f32,
+) -> Vec<f32> {
+    assert_eq!(x.len(), n_heads * head_dim, "x must be n_heads*head_dim");
+    assert_eq!(w.len(), head_dim, "w must be head_dim");
+    let mut out = vec![0.0f32; x.len()];
+    for h in 0..n_heads {
+        let r = rmsnorm_f32(&x[h * head_dim..(h + 1) * head_dim], w, eps);
+        out[h * head_dim..(h + 1) * head_dim].copy_from_slice(&r);
+    }
+    out
+}
+
+/// `y[i] = q[i] * sigmoid(gate[i])` — the attention output gate.
+///
+/// Kernel: `q_gate_f32`, elementwise.
+pub fn q_gate_f32(q: &[f32], gate: &[f32]) -> Vec<f32> {
+    assert_eq!(q.len(), gate.len(), "q and gate must match");
+    q.iter()
+        .zip(gate)
+        .map(|(v, g)| v * (1.0 / (1.0 + (-g).exp())))
+        .collect()
+}
+
+/// Append one row to a position-major KV cache pair.
+///
+/// Returns `k_cache` followed by `v_cache`, both `[n_ctx][width]`.
+/// Kernel: `kv_append_f32`, one linear pass over the row.
+pub fn kv_append_f32(
+    k_cache: &[f32],
+    v_cache: &[f32],
+    k: &[f32],
+    v: &[f32],
+    off: usize,
+    width: usize,
+) -> Vec<f32> {
+    assert_eq!(k.len(), width, "k must be width");
+    assert_eq!(v.len(), width, "v must be width");
+    assert_eq!(k_cache.len(), v_cache.len(), "caches must match");
+    let n_ctx = k_cache.len() / width;
+    assert!(off < n_ctx, "offset {off} beyond cache {n_ctx}");
+    let mut out = Vec::with_capacity(2 * k_cache.len());
+    out.extend_from_slice(k_cache);
+    out.extend_from_slice(v_cache);
+    out[off * width..(off + 1) * width].copy_from_slice(k);
+    let base = k_cache.len() + off * width;
+    out[base..base + width].copy_from_slice(v);
+    out
+}
+
 /// `c[i] = a[i] + b[i]` — the residual add.
 ///
 /// Kernel: `residual_add_f32`, elementwise.

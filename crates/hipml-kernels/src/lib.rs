@@ -7,8 +7,11 @@
 
 use std::path::PathBuf;
 
+pub mod attn_gpu;
+pub mod attn_ops;
 pub mod launch;
 
+pub use attn_gpu::AttnLayer;
 pub use launch::Launcher;
 
 /// How a kernel is gridded.
@@ -104,6 +107,36 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "attn_decode_f32",
         entry: "attn_decode_f32",
         kind: KernelKind::PerHeadOnDim,
+    },
+    KernelSpec {
+        name: "attn_decode_pm_f32",
+        entry: "attn_decode_f32",
+        kind: KernelKind::PerHeadOnDim,
+    },
+    KernelSpec {
+        name: "qg_split_f32",
+        entry: "qg_split_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
+    KernelSpec {
+        name: "head_rmsnorm_f32",
+        entry: "head_rmsnorm_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
+    KernelSpec {
+        name: "mrope_f32",
+        entry: "mrope_f32",
+        kind: KernelKind::PerHead { block: 32 },
+    },
+    KernelSpec {
+        name: "q_gate_f32",
+        entry: "q_gate_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "kv_append_f32",
+        entry: "kv_append_f32",
+        kind: KernelKind::Linear { block: 256 },
     },
     KernelSpec {
         name: "sample_top_p_f32",
