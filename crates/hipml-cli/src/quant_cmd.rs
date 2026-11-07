@@ -64,8 +64,10 @@ pub fn gguf(args: &[String]) -> i32 {
     }
 
     // The three shapes the quantized GEMV work cares about, at blk.0.
+    // blk.0 is an SSM block in this hybrid model, so it has attn_qkv rather than
+    // attn_q; the first full-attention block (blk.3) carries attn_q.
     println!();
-    for suffix in ["ffn_up.weight", "ffn_down.weight", "attn_q.weight"] {
+    for suffix in ["ffn_up.weight", "ffn_down.weight", "attn_qkv.weight"] {
         if let Some(t) = g
             .tensors
             .iter()
@@ -81,6 +83,17 @@ pub fn gguf(args: &[String]) -> i32 {
         } else {
             println!("blk.0 {}: not found", suffix);
         }
+    }
+    if let Some(t) = g.tensors.iter().find(|t| t.name.ends_with("attn_q.weight")) {
+        println!(
+            "first attn_q {}: shape {} type {} bytes {}",
+            t.name,
+            shape_string(&t.dims),
+            t.ty.name(),
+            t.nbytes
+        );
+    } else {
+        println!("attn_q.weight: not found");
     }
     0
 }
