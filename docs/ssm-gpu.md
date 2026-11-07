@@ -81,7 +81,7 @@ On the GPU box, from `C:\hipml-ssm`:
 
 ```
 target\release\hipml.exe ssm
-target\release\hipml.exe parity ssm      # small cases, standard harness
+target\release\hipml.exe parity          # small cases, standard harness
 ```
 
 ## Not verified here
