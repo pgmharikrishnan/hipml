@@ -5,8 +5,10 @@
 //! implementation here with the same signature and the same memory layout, so a
 //! device result can be compared against it directly.
 
+pub mod gguf;
 pub mod ops;
 pub mod parity;
+pub mod quant;
 pub mod rng;
 pub mod tensor;
 
