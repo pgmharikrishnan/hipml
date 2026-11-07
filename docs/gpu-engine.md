@@ -73,28 +73,35 @@ prefix-cacheable, so prefill and decode cost the same per token.
 
 ## Chunked prefill
 
-`--chunk N` (and `gpu-bench --prefill N`, which defaults to 256) runs the prompt
-as tiles of N tokens instead of N decode steps. Per tile:
+The prompt is a tile of `--chunk N` tokens (512 by default) instead of N decode
+steps. Per tile:
 
 ```text
 xc  = embed(tokens)                     N row dequants into [N][n_embd]
 per layer:
   tc   = rmsnorm_rows(xc, attn_norm)    one block per row
-  block: projections as prefill GEMMs   prefill_q4_k / _q6_k / _q8_0
-         + the sequential part per token (conv, GDN, rope, KV append, attention)
+  block: projections as prefill GEMMs   prefill_q4_k_h / _q6_k_h / _q8_0_h
+         + one GDN chain for the tile (6 launches)
+         or one attention chain for the tile (4 launches + output GEMM)
   x1c  = xc + block;  tc = rmsnorm_rows(x1c, post_attention_norm)
   act  = silu(gemm(gate, tc)) * gemm(up, tc)
   xc   = x1c + gemm(down, act)
 logits = lm_head(rmsnorm(last row))
 ```
 
-A tile streams the 15.89 GiB of weights **once** instead of once per token; the
-gated-delta-net recurrence, the conv window, rope, the cache append and causal
-attention stay per token because they are genuinely sequential in time. The
-projections use the tiled GEMM, which accumulates a 32-value k-tile at a time
-instead of the GEMV's 2,048-value shared tile, so a tile can differ from the
-token loop in the last bits — measured: the 20 ids are identical, and the token
-loop remains the default (`--chunk` opts in) and the parity reference.
+A tile streams the 15.89 GiB of weights **once** instead of once per token. The
+projections use the fp16 tiled GEMM (half in shared, `v_dot2_f32_f16`, f32
+accumulate); `HIPML_PREFILL_F32=1` selects the f32 kernels. The GDN recurrence
+and causal attention are still sequential in time, but they are now one launch
+per stage per tile rather than one per token: the conv window is recomputed in
+parallel from the tile's rows, the delta-net state stays in registers, and the
+attention kernel tiles 32 queries per block. `HIPML_TOKEN_STEPS=1` keeps the
+per-token chain as an A/B reference.
+
+Numerics: fp16 operands and a 32-value k-tile accumulation mean a tile is not
+bit-identical to the token loop. Measured: the 20 acceptance ids are identical;
+the first-step logits and the kernel-level fp16 budgets are in
+`docs/benchmarks.md`.
 
 ## Commands
 
@@ -103,7 +110,9 @@ loop remains the default (`--chunk` opts in) and the parity reference.
 hipml generate --gguf C:\models\Qwen3.8-27B-Q4_K_M.gguf `
   --ids 760,6511,314,9338,369 --tokens 20 --device
 hipml generate ... --device --compare-cpu        # loads the CPU oracle too
-hipml generate ... --device --chunk 256          # chunked prompt tile
+hipml generate ... --device                     # chunked prefill (chunk 512)
+hipml generate ... --device --chunk 256          # explicit tile
+hipml generate ... --device --chunk 0            # token-loop prefill
 
 # the oracle itself, no GPU build needed
 hipml generate ... --cpu
@@ -141,16 +150,20 @@ device and CPU argmax both 11751.
 
 ### Acceptance 2 — speed
 
-| measurement | WP13 | WP14 |
-| --- | --- | --- |
-| short-context decode, tokens 2..20 | 27.9 tok/s (35.9 ms) | **28.0 tok/s (35.7 ms)** |
-| 512-token prefill | 22.99 s, 22.27 tok/s (token loop) | **5.35 s, 95.8 tok/s** (chunk 256) |
-| 8,192-token prefill | — | **89.1 s, 91.9 tok/s** |
-| decode at depth 20,000, q8 KV | 21.21 tok/s (47.1 ms) | **26.5 tok/s (37.7 ms)** |
-| decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | **21.0 tok/s (47.7 ms)** |
+| measurement | WP13 | WP14 | WP15 |
+| --- | --- | --- | --- |
+| short-context decode, tokens 2..20 | 27.9 tok/s (35.9 ms) | 28.0 tok/s (35.7 ms) | **28.3 tok/s (35.3 ms)** |
+| 512-token prefill | 22.99 s, 22.27 tok/s (token loop) | 5.35 s, 95.8 tok/s (chunk 256) | **1.13 s, 454.9 tok/s** (chunk 512) |
+| 8,192-token prefill | — | 89.1 s, 91.9 tok/s | **21.93 s, 373.5 tok/s** (chunk 512) |
+| decode at depth 20,000, q8 KV | 21.21 tok/s (47.1 ms) | 26.5 tok/s (37.7 ms) | unchanged |
+| decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | 21.0 tok/s (47.7 ms) | unchanged |
 
 llama.cpp HIP on the same box: 31.4 tok/s short context, 21.86 tok/s at a
-97,387-token prompt.
+97,387-token prompt, pp512 **1256.5 tok/s**, 97K prefill **844.9 tok/s**.
+
+The 20-id acceptance string is unchanged by WP15 (fp16 projections, chunked
+recurrence and chunked attention): `11751 13 198 760 6511 314 14898 369 21047
+13 198 760 6511 314 17163 369 23327 13 198 760`.
 
 ### Where a short-context token's 35.7 ms goes
 
@@ -188,13 +201,52 @@ that WP13 paid are gone: 56.9 → 47.7 ms).
 
 | tokens | chunk | wall | tok/s | ms/token |
 | --- | ---: | ---: | ---: | ---: |
-| 512 | 128 | 6.92 s | 74.0 | 13.5 |
-| 512 | 256 | 5.34 s | **95.9** | 10.4 |
-| 8,192 | 256 | 89.1 s | **91.9** | 10.9 |
+| 512 | 128 | 5.18 s | 98.9 | 10.1 |
+| 512 | 256 | 1.43 s | 357.1 | 2.80 |
+| 512 | 512 | **1.13 s** | **454.9** | 2.20 |
+| 8,192 | 512 | **21.93 s** | **373.5** | 2.68 |
 
-The per-token part of a chunk is what dominates now: each token still launches
-48 × 7 gated-delta-net kernels and 16 × 8 attention kernels, about 464 launches
-a token, and those small kernels are ~2.4 s of the 2.7 s a 256-token chunk takes.
+The chunk graph is the device default (`--chunk N`, 512 unless overridden;
+`--chunk 0` and `--compare-cpu` keep the token loop). Three changes from WP14:
+
+1. **fp16 projections.** The tiled GEMM holds half in shared and uses
+   `v_dot2_f32_f16` with f32 accumulators: 21–27 TFLOPS against 15–17 for the
+   f32 kernel, i.e. 44–57% of the quoted fp32 peak and 66% of the 41.4 TFLOPS
+   VALU ceiling measured for this instruction mix (`prefill-bench --f32` runs
+   the old path for an A/B).
+2. **Chunked GDN.** `steps_chunk` runs gates, conv, L2, the delta recurrence
+   and the gated RMS once per layer per tile. The recurrence keeps each head's
+   128×128 state in registers across the tile, so the state is read once and
+   written once instead of per token.
+3. **Chunked attention.** q-gate split, norm+rope, KV append and causal
+   attention are four tile-wide launches; the attention kernel is 32 queries
+   per block (4 per warp) with shuffle reductions, and hides future rows with
+   the causal loop bound instead of a branch.
+
+Launch count per 512-token prompt:
+
+| stage | WP14 (per token) | WP15 (per tile) |
+| --- | ---: | ---: |
+| GDN recurrent chain | 48 × 7 × 512 = 172,032 | 48 × 6 = 288 |
+| attention chain | 16 × 8 × 512 = 65,536 | 16 × 6 = 96 |
+| everything else | ~1 launch/token/op | count in `PrefillReport` |
+| **total** | **≈ 237,600 (464/token)** | **≈ 1,700 (3.3/token)** |
+
+Where a 512-token, chunk-512 prompt's 1.13 s goes (`gpu-bench --prefill-split`):
+
+| stage | ms | note |
+| --- | ---: | --- |
+| ffn GEMMs + SwiGLU | 687 | 17.5 TFLOP at ~25 TFLOPS |
+| ssm GEMMs | 152 | qkv/gate/out, 5.7 TFLOP |
+| attention GEMMs | 53 | q/k/v/o |
+| elementwise | 16 | norms, residuals |
+| sequential GDN | 165 | 48 layers × 6 launches, state in registers |
+| sequential attention | 59 | 16 layers × 4 launches + output |
+| final head | 2 | lm_head on the last row |
+
+At 8K the same breakdown is dominated by the ffn GEMMs (11.4 s, 50%) and
+attention (4.8 s, 21%, now O(T²) in the tile kernel), with the GDN chain at
+2.7 s (12%).
 
 ## What runs where
 
@@ -220,12 +272,22 @@ Nothing on the decode path round-trips to the host except the 4-byte id.
   bit-exact. The graph's short-context tokens verify the rest.
 - Chunked prefill requires `--kv f32`; the quantized caches are the decode path.
 - The 8,192-token prefill is a real prefill; 100K prefill is not measured
-  (extrapolated: 100K × 10.9 ms ≈ 18 minutes at chunk 256).
-- Q5_K has no GEMV kernel; two tensors take the f32 fallback.
+  (extrapolated from the 8K rate and the T² attention term, not timed).
+- Q5_K still has no GEMV kernel: two decode tensors take the f32 GEMV. Prefill
+  uses a half copy made at load.
 - No fp16 KV path.
-- **Next step, in order of size:** (1) chunk variants of the conv/GDN kernels so
-  a tile runs one kernel per layer instead of 464 launches (the 10.4 ms/token
-  prefill floor); (2) a fused layer kernel or two-stream scheduling to remove
-  the 6.4 ms of DRAM ramp from 1,299 short kernels — that is what stands between
-  35.7 ms and llama.cpp's 31.8 ms; (3) the quantized-KV attention kernel at
-  ~280 GB/s of 632, worth ~7 ms at 100K.
+- **fp16 numerics.** The projections quantise x and w to fp16 and accumulate in
+  f32. The 20 greedy ids above are identical, but this is a numerical change,
+  not a bit-exact one: `hipml parity` compares the fp16 kernels at ~1e-3
+  relative, and the synthetic 512-token bench prompt samples a different first
+  id than the all-f32 path did (489 vs 220). The real-prompt ids are the
+  acceptance check; the bench prompt is not.
+- **Attention is now the 8K limit after the ffn GEMMs.** The tile kernel is
+  still O(T²) and runs at ~1.4 TFLOPS at 8K; a KV-row tile in shared (flash
+  shape) is the next step there.
+- **Next step, in order of size:** (1) WMMA fp16 for the ffn GEMMs — the VALU
+  dot2 path is at 66% of its measured 41.4 TFLOPS ceiling, and the quoted 95.7
+  needs the matrix unit; (2) a flash-shaped attention tile to cut the 8K
+  attention 4.8 s; (3) a fused layer kernel or two-stream scheduling to remove
+  the 6.4 ms of DRAM ramp from 1,299 short decode kernels, still what stands
+  between 35.3 ms and llama.cpp's 31.8 ms.

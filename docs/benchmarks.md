@@ -222,40 +222,66 @@ is above the fp32 peak, so an fp32 prefill cannot match it by construction. Ever
 number below is against the **fp32** ceiling; the fp16 column is shown for the
 same reason, not as an excuse.
 
-### Kernel
+### Kernel: fp16 shared tile, dot2 accumulate
 
-One block owns **256 prompt tokens × 64 output rows**. The weight tile is
-dequantised ONCE into 42 KB of shared memory (Q4_K/Q6_K/Q8_0, 32-value k-tiles)
-and multiplied against all 256 tokens, which is the entire win over 256 GEMVs:
-the dequantisation cost is paid once per 256 tokens instead of once per token.
-Each of 256 threads holds 8 tokens × 8 rows = 64 f32 accumulators; that 8×8
-microtile needs 16 shared dwords per 64 FMAs, which is what a 128-FMA/cycle CU
-can feed. A thread's tokens are strided by 32 (`tg + 32*tt`), so the 32 lanes of
-a warp read 32 banks rather than 8. f32 accumulate throughout; no fp16 anywhere.
+One block owns **256 prompt tokens × 128 output rows**. The weight tile is
+dequantised ONCE into shared memory (Q4_K/Q6_K/Q8_0, 32-value k-tiles) and
+multiplied against all 256 tokens, which is the entire win over 256 GEMVs: the
+dequantisation cost is paid once per 256 tokens instead of once per token.
+Each of 512 threads holds 8 tokens × 8 rows = 64 f32 accumulators.
 
-The first version used a 4×8 microtile (128 tokens × 64 rows). It measured
-**10.1–11.0 TFLOPS**; the 8×8 tile measures **15.1–16.9**, a 1.5× step from
-cutting shared traffic per FMA from 0.375 to 0.25 dwords and LDS instruction
-count per FMA in half. 130 VGPRs, no spills, 42,240 B LDS per block.
+Two things changed from the first (WP13) kernel:
+
+1. **Shared holds half, not float.** The x tile and the dequantised weight tile
+   are `__half2`, so an LDS dword carries two k values and bytes per FMA halve.
+2. **`v_dot2_f32_f16` in the inner loop** (`amd_mixed_dot`): two fp16 products
+   per instruction with an f32 accumulator. Per 16 half2 k-steps a thread reads
+   8 x-half2 + 8 w-half2 (64 B) and issues 64 dot2 (128 FMAs) — 4 FLOP/byte,
+   which matches a 128 B/cycle LDS at the packed-fp16 rate.
+
+A thread's tokens are strided by 32 (`tg + 32*tt`) and the shared row stride is
+17 half2 (68 B), coprime with the 32 banks, so a warp reads 32 banks; weight
+rows are a broadcast. 119 VGPRs, no spills, 58 KB LDS per block (17.4 KB x tile,
+8.7 KB weight tile, 32 KB epilogue transpose — reusing the tile regions was not
+possible, the static allocation is the sum).
+
+The first version used a 4×8 f32 microtile (128 tokens × 64 rows) and measured
+**10.1–11.0 TFLOPS**; the 8×8 f32 tile measured **15.1–16.9**; the fp16 tile
+measures **21.2–27.3**, 1.6× the f32 kernel. At M=2048 the per-token cost is
+flat, so the tile is compute-bound rather than launch-bound.
+
+### What the ceiling actually is
+
+The 47.8 / 95.7 TFLOPS figures are vendor dense numbers (WMMA-class for fp16).
+A register-only throughput probe on this card — 8 independent accumulators,
+256-thread blocks, no shared memory, loop kept alive with inline asm — measures:
+
+| Instruction | Measured | % of the quoted peak |
+| --- | ---: | ---: |
+| `v_fma_f32` | 17.5 TFLOPS | 37% of 47.8 |
+| `v_dot2_f32_f16` | 41.4 TFLOPS | 43% of 95.7 |
+| `v_pk_fma_f16` | 41.1 TFLOPS | 43% of 95.7 |
+
+So **41.4 TFLOPS is the VALU ceiling for this inner loop on this card**, and the
+GEMM at 27.3 TFLOPS is at **66% of it**. Reaching the quoted 95.7 needs the WMMA
+matrix path, which is a different kernel family and is not implemented.
 
 ### Qwen3.8-27B ffn shapes
 
-`hipml prefill-bench --reps 5`, 5 launches averaged per row after one warm-up:
+`hipml prefill-bench --reps 5`, 5 launches averaged per row after one warm-up.
+Default is the fp16 kernels; `--f32` measures the previous path.
 
-| Weight | Shape `[m,k]` | Type | M | us | TFLOPS | tok/s-eq | % fp32 (888) | % fp16 (1779) |
+| Weight | Shape `[m,k]` | Type | M | fp16 us | fp16 TFLOPS | f32 TFLOPS | % fp32 (47.8) | % fp16 (95.7) |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| ffn_up | 17408×5120 | Q6_K | 512 | 5579.4 | 16.36 | 91766.8 | 34.2% | 17.1% |
-| ffn_up | 17408×5120 | Q6_K | 2048 | 21684.3 | 16.84 | 94446.4 | 35.2% | 17.6% |
-| ffn_gate | 5120×17408 | Q4_K | 512 | 6027.1 | 15.14 | 84949.9 | 31.7% | 15.8% |
-| ffn_gate | 5120×17408 | Q4_K | 2048 | 21555.7 | 16.94 | 95009.5 | 35.4% | 17.7% |
-| ffn_down | 17408×5120 | Q6_K | 512 | 5675.9 | 16.08 | 90206.6 | 33.6% | 16.8% |
-| ffn_down | 17408×5120 | Q6_K | 2048 | 21655.2 | 16.86 | 94573.0 | 35.3% | 17.6% |
+| ffn_up | 17408×5120 | Q6_K | 512 | 3610.8 | 25.28 | 16.36 | 52.9% | 26.4% |
+| ffn_up | 17408×5120 | Q6_K | 2048 | 13473.1 | 27.10 | 16.84 | 56.7% | 28.3% |
+| ffn_gate | 5120×17408 | Q4_K | 512 | 4301.8 | 21.22 | 15.14 | 44.4% | 22.2% |
+| ffn_gate | 5120×17408 | Q4_K | 2048 | 13555.2 | 26.93 | 16.94 | 56.3% | 28.1% |
+| ffn_down | 17408×5120 | Q6_K | 512 | 3608.6 | 25.29 | 16.08 | 52.9% | 26.4% |
+| ffn_down | 17408×5120 | Q6_K | 2048 | 13367.8 | 27.31 | 16.86 | 57.1% | 28.5% |
 
-`tok/s-eq` is M tokens through that one tensor per second; it is not comparable
-to 888/1779, which describe a whole model token. The two percentage columns are
-the comparable numbers: **31.7–35.4% of the fp32 ceiling**, 15.8–17.7% of fp16.
-At M=2048 the per-token cost is already flat, so the tile is compute-bound rather
-than launch-bound.
+`tok/s-eq` (omitted) is M tokens through that one tensor per second; it is not
+comparable to the whole-model ceilings. The percentage columns are.
 
 ### Whole model, one M=512 chunk
 
@@ -263,14 +289,16 @@ than launch-bound.
 tensor once in 64 MiB row-aligned chunks and times only the kernel launches
 (file read and uploads excluded, same method as `decode-bench`). 399 tensors run:
 Q4_K, Q6_K, Q8_0, plus `output.weight`; the token embedding is a lookup and is
-not a GEMM.
+not a GEMM. The two Q5_K `ffn_down` tensors are excluded from this harness (its
+filter is Q4_K/Q6_K/Q8_0); in the graph they stream from a half copy made at
+load time (`prefill_halfw_h`), described below.
 
 | Pass | Tensors | Bytes | ms | TFLOP | TFLOPS | implied tok/s | % fp32 | % fp16 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| cold (all blocks) | 399 | 16.250 GB | 1889.6 | 26.0 | 13.78 | **271.0** | 30.5% | 15.2% |
-| warm (16 attention blocks skipped) | 289 | 12.444 GB | 1367.2 | 20.1 | 14.71 | **374.5** | 42.2% | 21.0% |
+| cold (all blocks) | 399 | 16.250 GB | 1136.2 | 26.0 | 22.91 | **450.6** | 47.9% | 23.9% |
+| warm (16 attention blocks skipped) | 289 | 12.444 GB | 877.6 | 20.1 | 22.92 | **583.4** | 47.9% | 23.9% |
 
-The whole-model TFLOPS is below the single-tensor 15–17 because a 64 MiB chunk
+The whole-model TFLOPS is below the single-tensor 21–27 because a 64 MiB chunk
 is a few hundred blocks, not a full tensor, so launch and tail effects show up.
 
 **The sum is compute-bound, not weight-read-bound.** 26.0 TFLOP at 13.78 TFLOPS
@@ -280,9 +308,10 @@ FLOP/byte, so the weight stream is 21× from being the limit at M=512; at M=2048
 it is 84×.
 
 Two Q5_K tensors exist — `blk.51.ffn_down.weight` and `blk.55.ffn_down.weight`,
-5120×17408, 61,276,160 B each — and are **not implemented**. They are 0.123 GB,
-0.7% of the quantized bytes and 0.66% of model FLOPs; the cold number above is
-that much optimistic. They are reported, not silently dropped.
+5120×17408, 61,276,160 B each. They were the one hole in the prefill path: with
+no unpack kernel they took the decode-shaped `gemm_f32`, which measured ~18 ms a
+layer in the graph and cost ~0.9 s of a 512-token prompt. They are now
+dequantised once at load (f32 for the decode GEMV, half for the prefill GEMM).
 
 ### Cached input: cold versus warm TTFT
 
@@ -311,18 +340,22 @@ attention correctness (there is no Flash Attention path yet).
 ### Parity
 
 Reference is `ops::gemm_q4_k/q6_k/q8_0` (dequantise a row, dot every token, same
-k order as the kernel). Small cases use `Tol::DEFAULT` (1e-4 abs / 1e-3 rel); the
-17408×5120 case uses 2e-3 abs / 3e-2 rel because a near-zero output from 5120
-terms can legitimately move that far through cancellation.
+k order as the kernel). `hipml parity` now compares the **shipped fp16 kernels**
+(`HIPML_PREFILL_F32=1` switches back to the f32 rows). fp16 operands cost ~1e-3
+relative: 2e-2 abs / 5e-2 rel for the small cases and 2.5e-1 abs / 5e-2 rel at
+17408×5120, where a near-zero output from 5120 products can move by ~0.1 (still
+1e-3 of the output scale). Both budgets are far below a layout bug, which moves
+values by O(1) on O(100) outputs.
 
-| Case | max_abs | max_rel |
+| Case (fp16) | max_abs | max_rel |
 | --- | ---: | ---: |
-| `prefill_q4_k` 64×512, t=4 | 3.81e-6 | 3.52e-5 |
-| `prefill_q6_k` 64×512, t=4 | 2.29e-5 | 3.42e-5 |
-| `prefill_q8_0` 64×512, t=4 | 9.54e-7 | 4.01e-5 |
-| `prefill_q6_k` 17408×5120, t=2 | 1.68e-4 | 4.40e-3 |
+| `prefill_q4_k` 64×512, t=4 | 4.44e-3 | 1.02e-1 |
+| `prefill_q6_k` 64×512, t=4 | 3.15e-2 | 4.44e-2 |
+| `prefill_q8_0` 64×512, t=4 | 1.24e-3 | 7.23e-2 |
+| `prefill_q6_k` 17408×5120, t=2 | 1.12e-1 | 2.36e1 |
 
-`hipml parity` → `17 passed, 0 failed, 1 skipped` (the host-only top-p case).
+`hipml parity` → `43 passed, 0 failed, 1 skipped` (the host-only top-p case).
+The f32 cases still pass at their original budgets when `HIPML_PREFILL_F32=1`.
 
 ### Commands
 
