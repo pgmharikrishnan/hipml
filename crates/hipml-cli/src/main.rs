@@ -3,7 +3,7 @@
 //! The parity runner is the gate: a kernel that is not compared against the
 //! reference here is not a kernel hipml can use.
 
-use hipml_core::parity::{bench_cases, cases, compare, OpCase};
+use hipml_core::parity::{bench_cases, cases, compare, deep_cases, OpCase};
 use hipml_core::tensor::Tensor;
 use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
 
@@ -21,10 +21,17 @@ fn main() {
     match cmd {
         "probe" => probe(),
         "kernels" => kernels(),
+        "vram" => vram(&args[1..]),
         "bench" => std::process::exit(bench()),
+        "bench-kv" => std::process::exit(bench_kv(&args[1..])),
         "parity" => {
-            let filter = args.iter().skip(1).find(|a| !a.starts_with('-')).cloned();
-            std::process::exit(parity(filter.as_deref()));
+            let filter = args
+                .iter()
+                .skip(1)
+                .find(|a| !a.starts_with('-'))
+                .cloned();
+            let deep = args.iter().any(|a| a == "--deep");
+            std::process::exit(parity(filter.as_deref(), deep));
         }
         "help" | "--help" | "-h" => help(),
         other => {
@@ -44,8 +51,12 @@ fn help() {
          commands:\n\
          \x20 probe     show the HIP device and how this binary was built\n\
          \x20 kernels   list the kernel manifest\n\
+         \x20 vram      hipMemGetInfo now; --need BYTES also reports whether a cache fits\n\
          \x20 parity    run every parity case (reference vs device); optional name filter\n\
+         \x20           --deep adds the 100K-context cases (slow host reference)\n\
          \x20 bench     time each kernel launch and report effective bandwidth\n\
+         \x20 bench-kv  quantized-KV decode attention: depth x q8/q4 x 1 head / 16 layers\n\
+         \x20           --depths 1024,8192,32768,100000 --reps 3\n\
          \n\
          build with `--features hip` on a machine with the ROCm/HIP runtime.",
         version = env!("CARGO_PKG_VERSION")
@@ -86,6 +97,7 @@ fn kernels() {
             KernelKind::PerRow { block } => format!("per-row, {block} threads"),
             KernelKind::PerHead { block } => format!("per-head, {block} threads"),
             KernelKind::PerHeadOnDim => "per-head, one thread per dim".to_string(),
+            KernelKind::KvSplit => "per (kv head, split), 32*gqa-group threads".to_string(),
             KernelKind::Linear { block } => format!("linear, {block} threads"),
             KernelKind::HostOnly(why) => format!("host-only: {why}"),
         };
@@ -95,11 +107,16 @@ fn kernels() {
 
 /// Run every case. Exit 0 only when nothing failed; skips are reported but do
 /// not fail the run, so the suite stays meaningful on a machine without a GPU.
-fn parity(filter: Option<&str>) -> i32 {
+fn parity(filter: Option<&str>, deep: bool) -> i32 {
     let launcher = hipml_kernels::Launcher::new();
     match &launcher {
         Ok(l) => println!("device: {}", l.device_name),
         Err(e) => println!("device: none ({e})"),
+    }
+
+    let mut all = cases();
+    if deep {
+        all.extend(deep_cases());
     }
 
     let mut pass = 0usize;
@@ -107,7 +124,7 @@ fn parity(filter: Option<&str>) -> i32 {
     let mut skip = 0usize;
     println!("\n{:<20} {:<7} {}", "case", "result", "detail");
 
-    for case in cases() {
+    for case in all {
         if let Some(f) = filter {
             if !case.name.contains(f) {
                 continue;
@@ -201,6 +218,11 @@ fn bench() -> i32 {
 
     let all: Vec<OpCase> = cases().into_iter().chain(bench_cases()).collect();
     for case in all {
+        // The quantized-KV cases are timed by `bench-kv`, with depths and layer
+        // counts that a single parity-shaped launch cannot show.
+        if case.name.starts_with("attn_decode_kv") {
+            continue;
+        }
         let Some(spec) = hipml_kernels::spec(case.name) else {
             continue;
         };
@@ -247,6 +269,134 @@ fn bench() -> i32 {
         );
     }
     0
+}
+
+/// `hipml vram`: current `hipMemGetInfo`, and with `--need BYTES` whether a
+/// cache of that size fits right now. No kernel, so it is safe to run beside
+/// another agent's job when only the arithmetic is wanted.
+fn vram(args: &[String]) {
+    let need = args
+        .iter()
+        .position(|a| a == "--need")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse::<u64>().ok());
+
+    let devices = match hipml_hip::Device::probe() {
+        Ok(d) => d,
+        Err(e) => {
+            println!("device: none ({e})");
+            return;
+        }
+    };
+    if devices.is_empty() {
+        println!("device: none found");
+        return;
+    }
+    println!(
+        "{:<4} {:<34} {:>10} {:>10} {:>10}",
+        "dev", "name", "total_GiB", "free_GiB", "used_GiB"
+    );
+    for d in &devices {
+        #[cfg(feature = "hip")]
+        let (free, total) = d.mem_info().unwrap_or((0, d.total_mem_bytes()));
+        #[cfg(not(feature = "hip"))]
+        let (free, total) = (0usize, d.total_mem_bytes());
+        let gib = |b: usize| b as f64 / (1024.0 * 1024.0 * 1024.0);
+        println!(
+            "{:<4} {:<34} {:>10.2} {:>10.2} {:>10.2}",
+            d.ordinal(),
+            d.name(),
+            gib(total),
+            gib(free),
+            gib(total.saturating_sub(free))
+        );
+        if let Some(n) = need {
+            let fits = (n as usize) <= free;
+            println!(
+                "     need {} bytes ({:.2} GiB): {}",
+                n,
+                gib(n as usize),
+                if fits { "fits" } else { "DOES NOT FIT" }
+            );
+        }
+    }
+}
+
+/// `hipml bench-kv`: quantized decode attention over the bench depths.
+fn bench_kv(args: &[String]) -> i32 {
+    let depths: Vec<usize> = args
+        .iter()
+        .position(|a| a == "--depths")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect())
+        .unwrap_or_else(|| vec![1024, 8192, 32768, 100_000]);
+    let reps = args
+        .iter()
+        .position(|a| a == "--reps")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(3)
+        .max(1);
+
+    #[cfg(feature = "hip")]
+    {
+        let report = match hipml_kernels::kvbench::run(&depths, reps) {
+            Ok(r) => r,
+            Err(e) => {
+                println!("bench-kv failed: {e}");
+                return 1;
+            }
+        };
+        let gib = |b: usize| b as f64 / (1024.0 * 1024.0 * 1024.0);
+        println!("device: {}", report.device);
+        println!(
+            "VRAM: total {:.2} GiB, free before {:.2} GiB, free after {:.2} GiB",
+            gib(report.vram_total),
+            gib(report.vram_free_before),
+            gib(report.vram_free_after)
+        );
+        println!(
+            "weights stream: {:.1} GB/s -> {:.2} ms for 17.19 GB",
+            report.weights_gbs,
+            report.weights_us / 1e3
+        );
+        println!("cache bytes are synthetic but format-valid; 100K correctness is `hipml parity --deep`\n");
+        println!(
+            "{:<5} {:>5} {:>6} {:>7} {:>6} {:>11} {:>9} {:>8} {:>8} {:>7}",
+            "dtype", "heads", "layers", "depth", "splits", "us", "KV_GiB", "GB/s", "share", "tok/s"
+        );
+        for r in &report.rows {
+            let step = report.weights_us + r.us;
+            let (share, tps) = if r.layers > 1 {
+                (
+                    format!("{:.1}%", 100.0 * r.us / step),
+                    format!("{:.2}", 1e6 / step),
+                )
+            } else {
+                ("-".to_string(), "-".to_string())
+            };
+            println!(
+                "{:<5} {:>5} {:>6} {:>7} {:>6} {:>11.1} {:>9.3} {:>8.1} {:>8} {:>7}",
+                r.dtype.name(),
+                r.heads,
+                r.layers,
+                r.seq,
+                r.splits,
+                r.us,
+                r.bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                r.gbs,
+                share,
+                tps
+            );
+        }
+        0
+    }
+    #[cfg(not(feature = "hip"))]
+    {
+        let _ = (depths, reps);
+        println!("built without the `hip` feature");
+        1
+    }
 }
 
 fn timed(f: impl FnOnce() -> Result<Vec<f32>, String>) -> Result<f64, String> {
