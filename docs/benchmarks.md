@@ -89,12 +89,12 @@ as in the hand-computed vectors in `crates/hipml-core/tests/quant_reference.rs`.
 
 | Weight | Shape `[m,k]` | Type | Bytes | us | GB/s | % of 631 |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
-| ffn_up | 17408x5120 | Q6_K | 73,113,600 | 160.59 | 455.3 | 72.2% |
-| ffn_gate | 5120x17408 | Q4_K | 50,135,040 | 112.32 | 446.4 | 70.7% |
-| ffn_down | 5120x17408 | Q6_K | 73,113,600 | 152.05 | 480.8 | 76.2% |
-| ffn_down | 17408x5120 | Q4_K | 50,135,040 | 133.37 | 375.9 | 59.6% |
+| ffn_up | 17408x5120 | Q6_K | 73,113,600 | 165.25 | 442.5 | 70.1% |
+| ffn_gate | 5120x17408 | Q4_K | 50,135,040 | 113.12 | 443.2 | 70.2% |
+| ffn_down | 5120x17408 | Q6_K | 73,113,600 | 151.21 | 483.5 | 76.6% |
+| ffn_down | 17408x5120 | Q4_K | 50,135,040 | 134.52 | 372.7 | 59.1% |
 
-The same run's fp32 `gemv_f32` was **618.8 GB/s** (839 MB), so 631 GB/s remains
+The same run's fp32 `gemv_f32` was **629.8 GB/s** (839 MB), so 631 GB/s remains
 the reference ceiling.
 
 ### Decode step: stream the model once
@@ -120,7 +120,7 @@ same 17.19 GB. Including the 227 MB of F32 tensors at the same bandwidth gives
 All four Qwen3.8-27B-shaped cases move the same activation volume: `m*k*4 = 356 MB` of
 x re-reads per tensor, against only 50–73 MB of weights. With one block per row
 and no shared-memory staging, those reads are served from L2/Infinity Cache. The
-measured total (x + weights) is 406–429 MB in 112–161 us, i.e. **~2.7–3.6 TB/s of
+measured total (x + weights) is 406–429 MB in 113–165 us, i.e. **~2.6–3.6 TB/s of
 L2 traffic**; the weight stream alone would take 80–116 us at 631 GB/s. The fp32
 GEMV does not hit this because its x:weight ratio is 1:1; the quantized ratio is
 5–8:1. Reaching 95% needs multiple rows per block reusing x from registers or
@@ -148,11 +148,12 @@ Parity for the two formats (reference vs device, `max_abs` / `max_rel`):
 | --- | --- | --- |
 | `gemv_q4_k` | 6.68e-6 / 5.21e-5 | 1.41e-4 / 8.21e-3 |
 | `gemv_q6_k` | 3.43e-5 / 6.46e-6 | 1.13e-3 / 2.26e-2 |
+| `gemv_q8_0` | 2.38e-6 / 4.27e-6 | — |
 
 The 5k-term rows are compared against a sequential f32 reference: an output near
 zero from 5120 terms can legitimately move by ~1e-3 through cancellation. The
 hand-computed block vectors are exact (`assert_eq!`), so a layout misread cannot
-hide inside that budget. `12 passed, 0 failed, 1 skipped` (the host-only top-p
+hide inside that budget. `13 passed, 0 failed, 1 skipped` (the host-only top-p
 case).
 
 ## Method notes
