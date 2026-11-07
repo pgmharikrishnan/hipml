@@ -161,6 +161,9 @@ impl Buffer {
                 ),
                 "hipMemcpy host->device",
             )?;
+            // Make the upload complete before a caller starts timing a kernel
+            // on a different stream; otherwise the copy competes for bandwidth.
+            check(ffi::hipDeviceSynchronize(), "hipDeviceSynchronize")?;
         }
         Ok(buf)
     }
@@ -258,6 +261,7 @@ impl ByteBuffer {
                     ),
                     "hipMemcpy bytes host->device",
                 )?;
+                check(ffi::hipDeviceSynchronize(), "hipDeviceSynchronize")?;
             }
         }
         Ok(buf)

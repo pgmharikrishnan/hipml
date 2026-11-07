@@ -40,6 +40,7 @@ extern "C" {
     pub fn hipFree(ptr: *mut c_void) -> HipError;
     pub fn hipMemGetInfo(free: *mut usize, total: *mut usize) -> HipError;
     pub fn hipMemcpy(dst: *mut c_void, src: *const c_void, size: usize, kind: c_int) -> HipError;
+    pub fn hipDeviceSynchronize() -> HipError;
 
     pub fn hipStreamCreate(stream: *mut HipStream) -> HipError;
     pub fn hipStreamDestroy(stream: HipStream) -> HipError;
