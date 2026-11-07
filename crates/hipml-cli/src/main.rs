@@ -16,6 +16,8 @@ mod gen_cmd;
 mod kv_cmds;
 mod load_cmd;
 mod prefill_cmd;
+#[cfg(feature = "hip")]
+mod profile_cmd;
 mod quant_cmd;
 #[cfg(feature = "hip")]
 mod ssm_cmd;
@@ -56,6 +58,15 @@ fn main() {
             #[cfg(not(feature = "hip"))]
             {
                 eprintln!("gpu-bench needs a build with `--features hip`");
+                std::process::exit(2);
+            }
+        }
+        "gpu-profile" => {
+            #[cfg(feature = "hip")]
+            std::process::exit(profile_cmd::profile(&args[1..]));
+            #[cfg(not(feature = "hip"))]
+            {
+                eprintln!("gpu-profile needs a build with `--features hip`");
                 std::process::exit(2);
             }
         }
@@ -101,6 +112,7 @@ fn help() {
          \x20 attn-parity --gguf PATH   GPU full-attention block vs CPU reference\n\
          \x20 attn-bench  --gguf PATH   per-layer time at depths 0/8192/100000\n\
          \x20 gpu-bench --gguf PATH [--prefill N] [--depth D --kv q8]\n\
+         \x20 gpu-profile --gguf PATH  launch cost, host round-trips, graph token\n\
          \x20 bench-kv  quantized-KV decode attention: depth x q8/q4 x 1 head / 16 layers\n\
          \x20           --depths 1024,8192,32768,100000 --reps 3\n\
          \n\
