@@ -22,7 +22,7 @@
 __device__ __forceinline__ float wave_sum(float v)
 {
     for (int off = warpSize / 2; off > 0; off >>= 1) {
-        v += __shfl_down_sync(0xffffffffu, v, off, warpSize);
+        v += __shfl_down_sync(0xffffffffffffffffULL, v, off, warpSize);
     }
     return v;
 }
