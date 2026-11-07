@@ -155,10 +155,11 @@ card) and are not a bandwidth statement; they are here because the brief asks
 for them. The 24-head rows are the meaningful measurement.
 
 **The kernel does not reach the 300 GB/s acceptance target.** The best deep
-number is 161.3 GB/s of unique KV traffic (q8, 128K), 25% of the card's 632 GB/s.
-q4 is limited by the same thing at half the bytes: 82.8 GB/s at 100K because it
-takes the same 22 ms as q8 on half the data, so the loop is bounded by work per
-cached value, not by DRAM. Getting to 300 needs fewer instructions per value —
+number is 159–162 GB/s of unique KV traffic (q8, 100K and 128K; the range is
+repeated runs of the same binary), 25% of the card's 632 GB/s. q4 is limited by
+the same thing at half the bytes: 83–84 GB/s at 100K because it takes the same
+22 ms as q8 on half the data, so the loop is bounded by work per cached value,
+not by DRAM. Getting to 300 needs fewer instructions per value —
 wider shared reads (`float2`/`float4` per lane), or an MMA path for the score —
 not more parallelism.
 
