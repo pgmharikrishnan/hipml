@@ -8,21 +8,26 @@
 // State is `s[h][j][i]`, i (the key axis) innermost, matching
 // gated_delta_net_f32.c (`s_out[j*S_v + i] = S[i][j]`).
 //
-// One block per value head. A wave owns a value row `j`: each lane holds
-// sd/warpSize elements of that row in registers, and the two dots are wave
+// One block per value head. A 32-lane group owns a value row `j`: each lane
+// holds sd/32 elements of that row in registers, and the two dots are group
 // reductions. No barrier is needed because rows never overlap.
 //
 // Kernel: gdn_ar_f32. Reference: delta::gdn_ar_f32.
 
 #include <hip/hip_runtime.h>
 
-// sd <= 128 for qwen35 (state size 128); four values per lane covers wave32.
+// sd <= 128 for qwen35 (state size 128); four values per lane covers 32 lanes.
 #define GDN_MAXV 4
+// Reduction groups are pinned to 32 lanes. That is one hardware wave on RDNA
+// in wave32 mode and one half-wave in wave64 mode, so the same code is correct
+// either way; using `warpSize` as the shuffle width is not (it exceeds the
+// supported segment width when the compiler emits wave32).
+#define GDN_LANES 32
 
 __device__ __forceinline__ float wave_sum(float v)
 {
-    for (int off = warpSize / 2; off > 0; off >>= 1) {
-        v += __shfl_down_sync(0xffffffffffffffffULL, v, off, warpSize);
+    for (int off = GDN_LANES / 2; off > 0; off >>= 1) {
+        v += __shfl_down_sync(0xffffffffffffffffULL, v, off, GDN_LANES);
     }
     return v;
 }
@@ -40,9 +45,9 @@ extern "C" __global__ void gdn_ar_f32(
     int sd)
 {
     const int h = blockIdx.x;
-    const int lane = threadIdx.x % warpSize;
-    const int wave = threadIdx.x / warpSize;
-    const int nwave = blockDim.x / warpSize;
+    const int lane = threadIdx.x % GDN_LANES;
+    const int wave = threadIdx.x / GDN_LANES;
+    const int nwave = blockDim.x / GDN_LANES;
 
     const int hk = h % n_k;
     const float decay = expf(g[h]);
@@ -59,7 +64,7 @@ extern "C" __global__ void gdn_ar_f32(
     float kk[GDN_MAXV];
     #pragma unroll
     for (int t = 0; t < GDN_MAXV; ++t) {
-        const int i = lane + t * warpSize;
+        const int i = lane + t * GDN_LANES;
         if (i < sd) {
             qq[t] = qh[i];
             kk[t] = kh[i];
@@ -76,7 +81,7 @@ extern "C" __global__ void gdn_ar_f32(
         float dot = 0.0f;
         #pragma unroll
         for (int t = 0; t < GDN_MAXV; ++t) {
-            const int i = lane + t * warpSize;
+            const int i = lane + t * GDN_LANES;
             r[t] = i < sd ? row[i] : 0.0f;
             dot += r[t] * decay * kk[t];
         }
@@ -87,7 +92,7 @@ extern "C" __global__ void gdn_ar_f32(
         float acc = 0.0f;
         #pragma unroll
         for (int t = 0; t < GDN_MAXV; ++t) {
-            const int i = lane + t * warpSize;
+            const int i = lane + t * GDN_LANES;
             if (i < sd) {
                 const float nv = r[t] * decay + kk[t] * delta;
                 row[i] = nv;

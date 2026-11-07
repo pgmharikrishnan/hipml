@@ -5,11 +5,9 @@
 //! (conv1d, L2 norms, delta-net recurrence, gated RMS norm) so the cost the
 //! SSM block adds on top of streaming weights is visible.
 
-use hipml_core::parity::{cases, ssm_real_layer_case, REAL_SSM};
+use hipml_core::parity::{cases, compare, ssm_real_layer_case, OpCase, REAL_SSM};
 use hipml_kernels::ssm::{SsmDims, SsmGpuLayer, SsmLayerRefs};
 use hipml_kernels::Launcher;
-
-use crate::{run_case, Outcome};
 
 const SSM_CASES: [&str; 5] = [
     "ssm_conv1d_f32",
@@ -34,8 +32,7 @@ pub fn ssm(_args: &[String]) -> i32 {
     println!("\n{:<22} {:<7} {}", "case", "result", "detail");
     for case in cases().into_iter().filter(|c| SSM_CASES.contains(&c.name)) {
         let (inputs, expected) = case.reference();
-        let outcome = run_case(&case, &inputs, &expected, Ok(&launcher));
-        if report(case.name, outcome) {
+        if !report(&launcher, &case, &inputs, &expected) {
             fail += 1;
         }
     }
@@ -55,8 +52,7 @@ pub fn ssm(_args: &[String]) -> i32 {
     );
     println!("building {} f32 weights on the host...", REAL_SSM.n_embd);
     let (inputs, expected) = real.reference();
-    let outcome = run_case(&real, &inputs, &expected, Ok(&launcher));
-    if report("ssm_layer_f32 real", outcome) {
+    if !report(&launcher, &real, &inputs, &expected) {
         fail += 1;
     }
 
@@ -72,21 +68,56 @@ pub fn ssm(_args: &[String]) -> i32 {
     }
 }
 
-/// Print one row. Returns true on failure.
-fn report(name: &str, outcome: Outcome) -> bool {
-    match outcome {
-        Outcome::Pass(d) => {
-            println!("{name:<22} {:<7} {d}", "PASS");
+/// Run one case, print the verdict, and dump the worst element on failure.
+/// Returns true on pass.
+fn report(launcher: &Launcher, case: &OpCase, inputs: &[hipml_core::tensor::Tensor], expected: &[f32]) -> bool {
+    match launcher.run(case, inputs) {
+        Err(e) => {
+            println!("{:<22} {:<7} launch failed: {e}", case.name, "FAIL");
             false
         }
-        Outcome::Fail(d) => {
-            println!("{name:<22} {:<7} {d}", "FAIL");
-            true
+        Ok(actual) => match compare(expected, &actual, case.tol) {
+            Ok(stats) => {
+                println!(
+                    "{:<22} {:<7} max_abs {:.2e}  max_rel {:.2e}",
+                    case.name, "PASS", stats.max_abs, stats.max_rel
+                );
+                true
+            }
+            Err(stats) => {
+                println!(
+                    "{:<22} {:<7} max_abs {:.2e} > {:.1e}, max_rel {:.2e} > {:.1e}",
+                    case.name,
+                    "FAIL",
+                    stats.max_abs,
+                    case.tol.abs,
+                    stats.max_rel,
+                    case.tol.rel
+                );
+                dump(expected, &actual);
+                false
+            }
+        },
+    }
+}
+
+/// First mismatch in context, plus the worst index, for a failing case.
+fn dump(expected: &[f32], actual: &[f32]) {
+    let n = expected.len().min(actual.len());
+    let mut worst = (0usize, 0.0f32);
+    for i in 0..n {
+        let d = (expected[i] - actual[i]).abs();
+        if d > worst.1 {
+            worst = (i, d);
         }
-        Outcome::Skip(d) => {
-            println!("{name:<22} {:<7} {d}", "SKIP");
-            false
-        }
+    }
+    let start = worst.0.saturating_sub(3);
+    println!(
+        "  worst idx {} exp {:.6} got {:.6} (n={})",
+        worst.0, expected[worst.0], actual[worst.0], n
+    );
+    for i in start..(start + 8).min(n) {
+        println!("  [{i}] exp {:+.6} got {:+.6}", expected[i], actual[i]);
     }
 }
 
