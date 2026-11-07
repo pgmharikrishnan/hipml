@@ -161,28 +161,51 @@ __device__ __forceinline__ void kv_decode_body(
         stage_tile<Loader>(ks, vs, krow, vrow, rows, row_bytes, head_dim);
         __syncthreads();
 
-        for (int r = 0; r < rows; ++r) {
+        // Fixed KV_TILE iterations so the whole tile is one straight-line
+        // block: rows past the end read row 0 and score -inf, which contributes
+        // exp(-inf) = 0 to both the sum and the accumulator.
+        float s[KV_TILE];
+        float vv[KV_TILE][KV_MAX_CHUNKS];
+        #pragma unroll
+        for (int t = 0; t < KV_TILE; ++t) {
+            const int r = (t < rows) ? t : 0;
             const float* kr = ks + r * head_dim;
             const float* vr = vs + r * head_dim;
-            float kk[KV_MAX_CHUNKS];
-            float vv[KV_MAX_CHUNKS];
-            #pragma unroll
-            for (int c = 0; c < KV_MAX_CHUNKS; ++c) {
-                kk[c] = (c < nb) ? kr[c * 32 + lane] : 0.0f;
-                vv[c] = (c < nb) ? vr[c * 32 + lane] : 0.0f;
-            }
             float dot = 0.0f;
             #pragma unroll
-            for (int c = 0; c < KV_MAX_CHUNKS; ++c) dot += qv[c] * kk[c];
-            const float s = warp_sum(dot) * scale;
+            for (int c = 0; c < KV_MAX_CHUNKS; ++c) {
+                // Unconditional shared loads: a `(c < nb) ? load : 0` turns into
+                // a branch per chunk, which is what made the first version slow.
+                // qv is already 0 past nb, so only V needs the mask.
+                const int cc = (c < nb) ? c : 0;
+                const float mask = (c < nb) ? 1.0f : 0.0f;
+                dot += qv[c] * kr[cc * 32 + lane];
+                vv[t][c] = mask * vr[cc * 32 + lane];
+            }
+            const float ssum = warp_sum(dot) * scale;
+            s[t] = (t < rows) ? ssum : -INFINITY;
+        }
 
-            const float m_new = fmaxf(m, s);
-            const float corr = expf(m - m_new);
-            const float p = expf(s - m_new);
-            l = l * corr + p;
-            m = m_new;
+        float m_new = m;
+        #pragma unroll
+        for (int t = 0; t < KV_TILE; ++t) m_new = fmaxf(m_new, s[t]);
+        const float corr = expf(m - m_new);
+        float p[KV_TILE];
+        float lsum = 0.0f;
+        #pragma unroll
+        for (int t = 0; t < KV_TILE; ++t) {
+            p[t] = expf(s[t] - m_new);
+            lsum += p[t];
+        }
+        l = l * corr + lsum;
+        m = m_new;
+
+        #pragma unroll
+        for (int c = 0; c < KV_MAX_CHUNKS; ++c) {
+            float a = acc[c] * corr;
             #pragma unroll
-            for (int c = 0; c < KV_MAX_CHUNKS; ++c) acc[c] = acc[c] * corr + p * vv[c];
+            for (int t = 0; t < KV_TILE; ++t) a += p[t] * vv[t][c];
+            acc[c] = a;
         }
     }
 
