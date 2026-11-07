@@ -4,32 +4,6 @@
 //! are visible without widening the type's surface.
 
 use super::*;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-/// Whether the chunked graph's projections use the packed-fp16 kernels.
-/// Default on; `HIPML_PREFILL_F32` or the CLI flag turns it off for an A/B.
-static PREFILL_HALF: AtomicBool = AtomicBool::new(true);
-
-pub fn set_prefill_half(on: bool) {
-    PREFILL_HALF.store(on, Ordering::Relaxed);
-}
-
-pub fn prefill_half() -> bool {
-    // The environment override is the no-rebuild A/B switch: both kernels are
-    // in the code object, and the f32 one is the reference for a divergence.
-    PREFILL_HALF.load(Ordering::Relaxed) && std::env::var_os("HIPML_PREFILL_F32").is_none()
-}
-
-/// Map a fp32 prefill entry to its packed-fp16 sibling. `None` for an entry
-/// that has no half kernel (`gemm_f32`, which stays f32 by definition).
-fn half_entry(name: &str) -> Option<&'static str> {
-    match name {
-        "prefill_q4_k" => Some("prefill_q4_k_h"),
-        "prefill_q6_k" => Some("prefill_q6_k_h"),
-        "prefill_q8_0" => Some("prefill_q8_0_h"),
-        _ => None,
-    }
-}
 
 impl Launcher {
     /// Tiled prefill GEMM with both ends and the weight already on the device:
@@ -193,11 +167,7 @@ pub fn prefill_resident(
     k: usize,
     tokens: usize,
 ) -> Result<(), String> {
-    let name = if prefill_half() {
-        half_entry(name).unwrap_or(name)
-    } else {
-        name
-    };
+    let name = crate::prefill_entry_for(name).unwrap_or(name);
     let spec = crate::spec(name).ok_or_else(|| format!("{name} is not in the manifest"))?;
     let (rpb, tpb, block) = match spec.kind {
         crate::KernelKind::Prefill {

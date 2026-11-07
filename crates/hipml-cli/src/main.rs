@@ -282,12 +282,7 @@ fn parity(filter: Option<&str>, deep: bool) -> i32 {
         // reference. fp16 inputs lose ~1e-3 of relative precision, so the
         // comparison uses a looser budget that still catches a layout bug (O(1)).
         let half = ::hipml_kernels::prefill_half();
-        let entry = match (half, case.name) {
-            (true, "prefill_q4_k") => "prefill_q4_k_h",
-            (true, "prefill_q6_k") => "prefill_q6_k_h",
-            (true, "prefill_q8_0") => "prefill_q8_0_h",
-            _ => case.name,
-        };
+        let entry = ::hipml_kernels::prefill_entry_for(case.name).unwrap_or(case.name);
         // fp16 operands cost ~1e-3 relative. At 64x512 that is a few 1e-2
         // absolute; at 17408x5120 a near-zero output from 5120 products can
         // move by ~0.1, which is still 1e-3 of the output scale. Both budgets

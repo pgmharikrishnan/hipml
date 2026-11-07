@@ -18,10 +18,12 @@
 // banks, so the 32 lanes of a warp hit 32 banks; weight rows are a broadcast.
 //
 // Q4_K/Q6_K/Q8_0 differ only in how 8 contiguous values are dequantised, so
-// the three entry points share one templated body.
+// the three entry points share one templated body, and the block decoding comes
+// from `prefill_common.inc` (shared with the WMMA kernel).
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include "prefill_common.inc"
 
 #define PFH_TPB 256
 #define PFH_RPB 128
@@ -35,82 +37,6 @@
 #define PFH_XSTRIDE (PFH_KH2 + 1)
 #define PFH_WSTRIDE (PFH_KH2 + 1)
 #define PFH_QUARTER (PFH_TPB / 4)
-
-#define PF4H_BLOCK_BYTES 144
-#define PF6H_BLOCK_BYTES 210
-#define PF8H_BLOCK_BYTES 34
-
-static __device__ __forceinline__ void pf4h_scale_min(int j, const unsigned char* q,
-                                                      int* sc, int* mn)
-{
-    if (j < 4) {
-        *sc = q[j] & 63;
-        *mn = q[j + 4] & 63;
-    } else {
-        *sc = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
-        *mn = (q[j + 4] >> 4) | ((q[j] >> 6) << 4);
-    }
-}
-
-// Dequantise 8 contiguous values of one row, starting at value index `v`
-// (a multiple of 8). KIND: 0 Q4_K, 1 Q6_K, 2 Q8_0.
-template <int KIND>
-static __device__ __forceinline__ void pfh_dequant8(const unsigned char* __restrict__ rp,
-                                                    int v, float* out)
-{
-    if (KIND == 0) {
-        const int blk = v >> 8;
-        const int within = v & 255;
-        const int sub = within >> 5;
-        const int part = (within & 31) >> 3;
-        const unsigned char* b = rp + (size_t)blk * PF4H_BLOCK_BYTES;
-        const float d = __half2float(*reinterpret_cast<const __half*>(b));
-        const float dmin = __half2float(*reinterpret_cast<const __half*>(b + 2));
-        int sc, mn;
-        pf4h_scale_min(sub, b + 4, &sc, &mn);
-        const float scale = d * (float)sc;
-        const float minv = dmin * (float)mn;
-        const bool high = (sub & 1) != 0;
-        const unsigned char* qp = b + 16 + (sub >> 1) * 32 + part * 8;
-#pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            const int q = high ? (qp[i] >> 4) : (qp[i] & 0xF);
-            out[i] = scale * (float)q - minv;
-        }
-    } else if (KIND == 1) {
-        const int blk = v >> 8;
-        const int within = v & 255;
-        const int j = within >> 4;
-        const int l0 = within & 15;
-        const unsigned char* b = rp + (size_t)blk * PF6H_BLOCK_BYTES;
-        const float d = __half2float(*reinterpret_cast<const __half*>(b + 208));
-        const float scale =
-            d * (float)reinterpret_cast<const signed char*>(b + 192)[j];
-        const int half = j >> 3;
-        const int s = j & 7;
-        const int group = s >> 1;
-        const int is = s & 1;
-        const int ql_off = half * 64 + (group & 1) * 32 + is * 16 + l0;
-        const int qh_off = 128 + half * 32 + is * 16 + l0;
-        const int shift = 2 * group;
-        const bool high = group >= 2;
-#pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            const int qb = b[ql_off + i];
-            const int hb = (b[qh_off + i] >> shift) & 3;
-            const int nib = high ? (qb >> 4) : (qb & 0xF);
-            out[i] = scale * (float)((nib | (hb << 4)) - 32);
-        }
-    } else {
-        const int blk = v >> 5;
-        const int part = (v & 31) >> 3;
-        const unsigned char* b = rp + (size_t)blk * PF8H_BLOCK_BYTES;
-        const float d = __half2float(*reinterpret_cast<const __half*>(b));
-        const signed char* qs = reinterpret_cast<const signed char*>(b + 2 + part * 8);
-#pragma unroll
-        for (int i = 0; i < 8; ++i) out[i] = d * (float)qs[i];
-    }
-}
 
 template <int KIND>
 static __device__ __forceinline__ void pfh_body(
@@ -166,10 +92,10 @@ static __device__ __forceinline__ void pfh_body(
                 } else {
                     const unsigned char* rp =
                         w + (size_t)r * (size_t)nblocks *
-                                (KIND == 0 ? PF4H_BLOCK_BYTES
-                                           : KIND == 1 ? PF6H_BLOCK_BYTES : PF8H_BLOCK_BYTES);
+                                (KIND == 0 ? PF_Q4K_BLOCK_BYTES
+                                           : KIND == 1 ? PF_Q6K_BLOCK_BYTES : PF_Q8_0_BLOCK_BYTES);
                     float v[8];
-                    pfh_dequant8<KIND>(rp, base + d_q * 8, v);
+                    pf_dequant8<KIND>(rp, base + d_q * 8, v);
 #pragma unroll
                     for (int i = 0; i < 4; ++i)
                         dst[i] = __floats2half2_rn(v[2 * i], v[2 * i + 1]);

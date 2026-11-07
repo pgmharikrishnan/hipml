@@ -70,7 +70,11 @@ fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
                 i += 1;
             }
             "--prefill-f32" => {
-                ::hipml_kernels::set_prefill_half(false);
+                ::hipml_kernels::set_prefill_path(::hipml_kernels::PrefillPath::F32);
+                i += 1;
+            }
+            "--prefill-dot2" => {
+                ::hipml_kernels::set_prefill_path(::hipml_kernels::PrefillPath::Dot2);
                 i += 1;
             }
             other => return Err(format!("unknown argument {other}")),

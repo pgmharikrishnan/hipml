@@ -19,7 +19,7 @@ pub(crate) mod device {
     #[path = "prefill_launch.rs"]
     mod prefill_launch;
 
-    pub use prefill_launch::{gemm_rows_f32, prefill_half, prefill_resident, set_prefill_half};
+    pub use prefill_launch::{gemm_rows_f32, prefill_resident};
     #[path = "quant_launch.rs"]
     mod quant_launch;
 
@@ -456,18 +456,11 @@ pub(crate) mod device {
 }
 
 #[cfg(feature = "hip")]
-pub use device::{gemm_rows_f32, prefill_half, prefill_resident, set_prefill_half};
+pub use device::{gemm_rows_f32, prefill_resident};
 #[cfg(feature = "hip")]
 pub use device::Launcher;
 
-/// The fp16-prefill switch is a no-op without a device: nothing launches.
-#[cfg(not(feature = "hip"))]
-pub fn set_prefill_half(_on: bool) {}
 
-#[cfg(not(feature = "hip"))]
-pub fn prefill_half() -> bool {
-    false
-}
 
 /// Without the `hip` feature the launcher exists but refuses to run, so callers
 /// need no conditional compilation of their own.
@@ -570,4 +563,97 @@ impl Launcher {
     pub fn synchronize(&self) -> Result<(), String> {
         Err("hipml was built without the `hip` feature".to_string())
     }
+}
+
+/// Which inner loop the tiled prefill GEMM runs.
+///
+/// `F32` is the original kernel and the numerical reference. `Dot2` is the
+/// packed-fp16 path (`v_dot2_f32_f16`; a register-only probe on this card puts
+/// that instruction mix at 41.4 TFLOPS). `Wmma` is the matrix unit
+/// (`wmma_f32_16x16x16_f16`, gfx12), which is what the quoted 95.7 TFLOPS
+/// dense fp16 figure belongs to.
+///
+/// Lives outside the `hip` gate because the CLI and the parity runner pick an
+/// entry point on both builds; without a device nothing is launched either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrefillPath {
+    F32,
+    Dot2,
+    Wmma,
+}
+
+impl PrefillPath {
+    pub fn name(self) -> &'static str {
+        match self {
+            PrefillPath::F32 => "f32",
+            PrefillPath::Dot2 => "fp16 dot2",
+            PrefillPath::Wmma => "fp16 wmma",
+        }
+    }
+}
+
+/// Default is the matrix unit. The two environment switches are the
+/// no-rebuild A/B hooks (`HIPML_PREFILL_DOT2`, `HIPML_PREFILL_F32`): all three
+/// kernels stay in the code object, and the f32 one is the reference for a
+/// divergence.
+#[cfg(feature = "hip")]
+static PREFILL_PATH: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(PrefillPath::Wmma as u8);
+
+pub fn set_prefill_path(p: PrefillPath) {
+    #[cfg(feature = "hip")]
+    std::sync::atomic::AtomicU8::store(
+        &PREFILL_PATH,
+        p as u8,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    #[cfg(not(feature = "hip"))]
+    let _ = p;
+}
+
+pub fn prefill_path() -> PrefillPath {
+    if std::env::var_os("HIPML_PREFILL_F32").is_some() {
+        return PrefillPath::F32;
+    }
+    if std::env::var_os("HIPML_PREFILL_DOT2").is_some() {
+        return PrefillPath::Dot2;
+    }
+    #[cfg(feature = "hip")]
+    match std::sync::atomic::AtomicU8::load(
+        &PREFILL_PATH,
+        std::sync::atomic::Ordering::Relaxed,
+    ) {
+        0 => PrefillPath::F32,
+        1 => PrefillPath::Dot2,
+        _ => PrefillPath::Wmma,
+    }
+    #[cfg(not(feature = "hip"))]
+    PrefillPath::Wmma
+}
+
+/// Kept for callers that only ask "is this an fp16 path" (the looser parity
+/// budget): true unless the f32 kernel is selected.
+pub fn set_prefill_half(on: bool) {
+    set_prefill_path(if on { PrefillPath::Wmma } else { PrefillPath::F32 });
+}
+
+pub fn prefill_half() -> bool {
+    prefill_path() != PrefillPath::F32
+}
+
+/// The entry point a base (f32) prefill kernel name maps to on the active path.
+/// `None` means the f32 kernel is the one to launch.
+pub fn prefill_entry_for(name: &str) -> Option<&'static str> {
+    Some(match (prefill_path(), name) {
+        (PrefillPath::F32, _) => return None,
+        (PrefillPath::Dot2, "prefill_q4_k") => "prefill_q4_k_h",
+        (PrefillPath::Dot2, "prefill_q6_k") => "prefill_q6_k_h",
+        (PrefillPath::Dot2, "prefill_q8_0") => "prefill_q8_0_h",
+        (PrefillPath::Dot2, "prefill_halfw") => "prefill_halfw_h",
+        (PrefillPath::Wmma, "prefill_q4_k") => "prefill_q4_k_w",
+        (PrefillPath::Wmma, "prefill_q6_k") => "prefill_q6_k_w",
+        (PrefillPath::Wmma, "prefill_q8_0") => "prefill_q8_0_w",
+        (PrefillPath::Wmma, "prefill_halfw") => "prefill_halfw_w",
+        _ => return None,
+    })
 }

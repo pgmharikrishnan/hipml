@@ -27,7 +27,9 @@ pub mod launch_kv;
 #[cfg(feature = "hip")]
 pub use launch::{gemm_rows_f32, prefill_half, prefill_resident, set_prefill_half};
 #[cfg(not(feature = "hip"))]
-pub use launch::{prefill_half, set_prefill_half};
+pub use launch::{
+    prefill_entry_for, prefill_half, prefill_path, set_prefill_half, set_prefill_path, PrefillPath,
+};
 pub use launch::Launcher;
 
 /// How a kernel is gridded.
@@ -177,6 +179,44 @@ pub const KERNELS: &[KernelSpec] = &[
             rows: 128,
             tokens: 256,
             block: 512,
+        },
+    },
+    // Matrix-unit path (gfx12 `wmma_f32_16x16x16_f16`): 32 tokens x 256 output
+    // rows per block, 256 threads, f32 accumulators, f32 epilogue.
+    KernelSpec {
+        name: "prefill_q4_k_w",
+        entry: "prefill_q4_k_w",
+        kind: KernelKind::Prefill {
+            rows: 256,
+            tokens: 32,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_q6_k_w",
+        entry: "prefill_q6_k_w",
+        kind: KernelKind::Prefill {
+            rows: 256,
+            tokens: 32,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_q8_0_w",
+        entry: "prefill_q8_0_w",
+        kind: KernelKind::Prefill {
+            rows: 256,
+            tokens: 32,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_halfw_w",
+        entry: "prefill_halfw_w",
+        kind: KernelKind::Prefill {
+            rows: 256,
+            tokens: 32,
+            block: 256,
         },
     },
     KernelSpec {

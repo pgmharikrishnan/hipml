@@ -26,6 +26,9 @@ pub const FP32_CEIL_TOKS: f64 = 888.0;
 pub const FP16_CEIL_TOKS: f64 = 1779.0;
 /// `llama.cpp` HIP, pp512, same file, same box.
 pub const LLAMA_PP512: f64 = 1256.5;
+/// Register-only probe of the packed-fp16 inner loop on this card: the ceiling
+/// the dot2 kernel is measured against.
+pub const DOT2_TFLOPS: f64 = 41.4;
 
 fn arg_value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
     args.iter()
@@ -40,9 +43,13 @@ pub fn bench(args: &[String]) -> i32 {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(5)
         .max(1);
-    // fp16 is the default compute path; `--f32` measures the old kernel.
-    let half = !args.iter().any(|a| a == "--f32");
-    ::hipml_kernels::set_prefill_half(half);
+    // The matrix unit is the default; `--dot2` and `--f32` are the A/B paths.
+    let path = match (args.iter().any(|a| a == "--f32"), args.iter().any(|a| a == "--dot2")) {
+        (true, _) => ::hipml_kernels::PrefillPath::F32,
+        (_, true) => ::hipml_kernels::PrefillPath::Dot2,
+        _ => ::hipml_kernels::PrefillPath::Wmma,
+    };
+    ::hipml_kernels::set_prefill_path(path);
     let launcher = match Launcher::new() {
         Ok(l) => l,
         Err(e) => {
@@ -53,8 +60,9 @@ pub fn bench(args: &[String]) -> i32 {
     println!("device: {}", launcher.device_name);
     println!(
         "reps {reps}; compute path {}; fp32 dense peak {FP32_TFLOPS:.1} TFLOPS ({FP32_CEIL_TOKS:.0} tok/s), \
-         fp16 dense peak {FP16_TFLOPS:.1} TFLOPS ({FP16_CEIL_TOKS:.0} tok/s)",
-        if half { "fp16" } else { "fp32" }
+         fp16 dense peak {FP16_TFLOPS:.1} TFLOPS ({FP16_CEIL_TOKS:.0} tok/s), \
+         dot2 VALU probe {DOT2_TFLOPS:.1} TFLOPS",
+        path.name()
     );
     println!("llama.cpp HIP pp512 reference: {LLAMA_PP512:.1} tok/s");
     println!(
@@ -68,16 +76,7 @@ pub fn bench(args: &[String]) -> i32 {
         let (w, x) = (case.inputs)(case.seed, case.m, case.k, MAX_TOKENS);
         for &tokens in &[512usize, MAX_TOKENS] {
             let xs = &x[..tokens * case.k];
-            let entry = if half {
-                match case.name {
-                    "prefill_q4_k" => "prefill_q4_k_h",
-                    "prefill_q6_k" => "prefill_q6_k_h",
-                    "prefill_q8_0" => "prefill_q8_0_h",
-                    other => other,
-                }
-            } else {
-                case.name
-            };
+            let entry = ::hipml_kernels::prefill_entry_for(case.name).unwrap_or(case.name);
             if let Err(e) =
                 launcher.run_prefill_reps(entry, &w, xs, case.m, case.k, tokens, 1)
             {
@@ -138,8 +137,12 @@ pub fn model(args: &[String]) -> i32 {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(512)
         .max(1);
-    let half = !args.iter().any(|a| a == "--f32");
-    ::hipml_kernels::set_prefill_half(half);
+    let compute = match (args.iter().any(|a| a == "--f32"), args.iter().any(|a| a == "--dot2")) {
+        (true, _) => ::hipml_kernels::PrefillPath::F32,
+        (_, true) => ::hipml_kernels::PrefillPath::Dot2,
+        _ => ::hipml_kernels::PrefillPath::Wmma,
+    };
+    ::hipml_kernels::set_prefill_path(compute);
     let mut g = match Gguf::open(path) {
         Ok(g) => g,
         Err(e) => {
@@ -330,15 +333,13 @@ fn run_pass(
     };
     let mut buf: Vec<u8> = Vec::new();
     for t in &tensors {
-        let op = match (t.ty, ::hipml_kernels::prefill_half()) {
-            (TensorType::Q4K, false) => "prefill_q4_k",
-            (TensorType::Q6K, false) => "prefill_q6_k",
-            (TensorType::Q8_0, false) => "prefill_q8_0",
-            (TensorType::Q4K, true) => "prefill_q4_k_h",
-            (TensorType::Q6K, true) => "prefill_q6_k_h",
-            (TensorType::Q8_0, true) => "prefill_q8_0_h",
+        let base = match t.ty {
+            TensorType::Q4K => "prefill_q4_k",
+            TensorType::Q6K => "prefill_q6_k",
+            TensorType::Q8_0 => "prefill_q8_0",
             _ => unreachable!(),
         };
+        let op = ::hipml_kernels::prefill_entry_for(base).unwrap_or(base);
         let k = t.ne0() as usize;
         let m = t.rows() as usize;
         if k == 0 || m == 0 || k % 64 != 0 {
