@@ -5,9 +5,11 @@
 //! implementation here with the same signature and the same memory layout, so a
 //! device result can be compared against it directly.
 
+pub mod cache;
 pub mod gguf;
 pub mod ops;
 pub mod parity;
+pub mod prefill_parity;
 pub mod quant;
 pub mod quant_parity;
 pub mod rng;
