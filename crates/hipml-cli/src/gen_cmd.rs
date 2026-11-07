@@ -65,6 +65,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 logprobs = true;
                 i += 1;
             }
+            // `--cpu` is the default oracle path; accept the flag so a script
+            // can say which path it means.
+            "--cpu" => i += 1,
             other => return Err(format!("unknown argument {other}")),
         }
     }
