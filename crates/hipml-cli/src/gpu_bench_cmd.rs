@@ -17,6 +17,8 @@ struct BenchArgs {
     kv_set: bool,
     prefill: Option<usize>,
     chunk: Option<usize>,
+    /// Report the prefill stage breakdown (adds a sync per stage).
+    split: bool,
 }
 
 fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
@@ -28,6 +30,7 @@ fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
         kv_set: false,
         prefill: None,
         chunk: None,
+        split: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -61,6 +64,14 @@ fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
             "--chunk" => {
                 a.chunk = Some(need(i)?.parse().map_err(|e| format!("bad --chunk: {e}"))?);
                 i += 2;
+            }
+            "--prefill-split" => {
+                a.split = true;
+                i += 1;
+            }
+            "--prefill-f32" => {
+                ::hipml_kernels::set_prefill_half(false);
+                i += 1;
             }
             other => return Err(format!("unknown argument {other}")),
         }
@@ -130,13 +141,42 @@ pub fn bench(args: &[String]) -> i32 {
     let mut st = engine.new_state();
     if let Some(n) = a.prefill {
         let prompt: Vec<u32> = (0..n).map(|i| 100 + (i % 1000) as u32).collect();
-        let chunk = a.chunk.unwrap_or(256);
+        let chunk = a.chunk.unwrap_or(512);
         let t = Instant::now();
-        let sink = match engine.prefill_chunked(&prompt, &mut st, chunk) {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("gpu-bench: prefill: {e}");
-                return 1;
+        let sink = if a.split {
+            match engine.prefill_chunked_report(&prompt, &mut st, chunk) {
+                Ok((id, rep)) => {
+                    let s = t.elapsed().as_secs_f64();
+                    println!(
+                        "prefill: {n} tokens in {:.2}s ({:.2} tok/s) [chunk {chunk}, last id {id}]",
+                        s,
+                        n as f64 / s
+                    );
+                    println!(
+                        "  embed      {:8.1} ms\n  elementwise{:8.1} ms\n  gemm attn  {:8.1} ms\n  gemm ssm   {:8.1} ms\n  gemm ffn   {:8.1} ms\n  final      {:8.1} ms\n  seq ssm    {:8.1} ms\n  seq attn   {:8.1} ms",
+                        rep.embed_ms,
+                        rep.elementwise_ms,
+                        rep.attn_gemm_ms,
+                        rep.ssm_gemm_ms,
+                        rep.ffn_gemm_ms,
+                        rep.final_ms,
+                        rep.ssm_seq_ms,
+                        rep.attn_seq_ms
+                    );
+                    id
+                }
+                Err(e) => {
+                    eprintln!("gpu-bench: prefill: {e}");
+                    return 1;
+                }
+            }
+        } else {
+            match engine.prefill_chunked(&prompt, &mut st, chunk) {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("gpu-bench: prefill: {e}");
+                    return 1;
+                }
             }
         };
         let s = t.elapsed().as_secs_f64();

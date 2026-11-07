@@ -106,6 +106,8 @@ fn help() {
          \x20 gguf      list the tensors in a GGUF file; `gguf <file> read <tensor>`\n\
          \x20 decode-bench  stream every Q4_K/Q6_K/Q8_0 tensor through GEMV once\n\
          \x20 generate  --gguf PATH --text \"prompt\" --tokens 20   greedy decode\n\
+         \x20           --device uses the chunked prefill graph (--chunk N, default 512);\n\
+         \x20           --chunk 0 keeps the token loop, and --compare-cpu implies it\n\
          \x20 load      load every tensor into VRAM and verify residency\n\
          \x20 logits    run lm_head on a 5120-value f32 vector file\n\
          \x20 prefill-bench time the tiled prefill GEMM at Qwen3.8-27B shapes, M=512/2048\n\
@@ -276,20 +278,35 @@ fn parity(filter: Option<&str>, deep: bool) -> i32 {
                 continue;
             }
         }
+        // The half kernels are the shipped path; the f32 rows stay as the
+        // reference. fp16 inputs lose ~1e-3 of relative precision, so the
+        // comparison uses a looser budget that still catches a layout bug (O(1)).
+        let half = ::hipml_kernels::prefill_half();
+        let entry = match (half, case.name) {
+            (true, "prefill_q4_k") => "prefill_q4_k_h",
+            (true, "prefill_q6_k") => "prefill_q6_k_h",
+            (true, "prefill_q8_0") => "prefill_q8_0_h",
+            _ => case.name,
+        };
+        let tol = if half {
+            hipml_core::parity::Tol::new(2e-2, 5e-2)
+        } else {
+            case.tol
+        };
         let outcome = match launcher.as_ref() {
             Err(e) => Outcome::Skip(e.clone()),
             Ok(l) => {
                 let (w, x, expected) = case.reference();
-                match l.run_prefill_reps(case.name, &w, &x, case.m, case.k, case.tokens, 1) {
+                match l.run_prefill_reps(entry, &w, &x, case.m, case.k, case.tokens, 1) {
                     Err(e) => Outcome::Fail(format!("launch failed: {e}")),
-                    Ok((actual, _)) => match compare(&expected, &actual, case.tol) {
+                    Ok((actual, _)) => match compare(&expected, &actual, tol) {
                         Ok(stats) => Outcome::Pass(format!(
                             "max_abs {:.2e}  max_rel {:.2e}",
                             stats.max_abs, stats.max_rel
                         )),
                         Err(stats) => Outcome::Fail(format!(
                             "max_abs {:.2e} > {:.2e}, max_rel {:.2e} > {:.2e}",
-                            stats.max_abs, case.tol.abs, stats.max_rel, case.tol.rel
+                            stats.max_abs, tol.abs, stats.max_rel, tol.rel
                         )),
                     },
                 }

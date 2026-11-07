@@ -161,7 +161,16 @@ pub fn generate(args: &[String]) -> i32 {
         t0.elapsed().as_secs_f64()
     );
 
-    if a.chunk.is_some() && a.compare_cpu {
+    // The chunked graph is the default: a prompt tile is batched GEMMs plus a
+    // chunked recurrence, not N decode steps. `--chunk 0` (or --compare-cpu,
+    // which needs the logit vector) keeps the token loop as the reference.
+    let chunk = match a.chunk {
+        Some(0) => None,
+        Some(n) => Some(n),
+        None if a.compare_cpu => None,
+        None => Some(512),
+    };
+    if chunk.is_some() && a.compare_cpu {
         eprintln!("generate: --chunk returns only the sampled id; --compare-cpu needs the token loop");
         return 2;
     }
@@ -169,7 +178,7 @@ pub fn generate(args: &[String]) -> i32 {
     let t_prefill = Instant::now();
     let mut first_id: Option<u32> = None;
     let mut logits = Vec::new();
-    if let Some(chunk) = a.chunk {
+    if let Some(chunk) = chunk {
         match engine.prefill_chunked(&prompt_ids, &mut st, chunk) {
             Ok(id) => first_id = Some(id),
             Err(e) => {
