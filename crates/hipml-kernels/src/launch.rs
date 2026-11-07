@@ -58,7 +58,9 @@ pub(crate) mod device {
                 "softmax_f32" => self.softmax(case, inputs, reps),
                 "attn_decode_f32" | "attn_decode_pm_f32" => self.attention(case, inputs, reps),
                 "qg_split_f32" | "head_rmsnorm_f32" | "mrope_f32" | "q_gate_f32"
-                | "kv_append_f32" => self.run_attn_case(case, inputs, reps),
+                | "kv_append_f32" | "attn_decode_split_f32" => {
+                    self.run_attn_case(case, inputs, reps)
+                }
                 other => Err(format!("{other} has no device launcher")),
             }
         }

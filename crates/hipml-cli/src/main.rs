@@ -106,6 +106,7 @@ fn kernels() {
             KernelKind::PerHead { block } => format!("per-head, {block} threads"),
             KernelKind::PerHeadOnDim => "per-head, one thread per dim".to_string(),
             KernelKind::Linear { block } => format!("linear, {block} threads"),
+            KernelKind::SplitK => "split-K grid, launcher-sized".to_string(),
             KernelKind::HostOnly(why) => format!("host-only: {why}"),
         };
         println!("{:<20} {:<18} {}", k.name, k.entry, geometry);

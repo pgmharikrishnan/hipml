@@ -131,5 +131,36 @@ pub fn cases() -> Vec<OpCase> {
                 (vec![q, k, v], expected)
             },
         },
+        OpCase {
+            name: "attn_decode_split_f32",
+            tol: Tol::DEFAULT,
+            seed: 0x8888_9999_AAAA_BBBB,
+            scalars: &[
+                ("n_heads", 8.0),
+                ("n_kv", 2.0),
+                ("head_dim", 64.0),
+                ("seq", 37.0),
+                ("scale", 0.125),
+                ("splits", 5.0),
+            ],
+            build: |rng| {
+                let (n_heads, n_kv, head_dim, seq, scale) =
+                    (8usize, 2usize, 64usize, 37usize, 0.125f32);
+                let q = Tensor::from_fn(vec![n_heads, head_dim], |_| rng.normal());
+                let k = Tensor::from_fn(vec![seq, n_kv * head_dim], |_| rng.normal_scaled(0.3));
+                let v = Tensor::from_fn(vec![seq, n_kv * head_dim], |_| rng.normal());
+                let expected = crate::attention::attn_causal_f32(
+                    q.data(),
+                    k.data(),
+                    v.data(),
+                    n_heads,
+                    n_kv,
+                    head_dim,
+                    seq,
+                    scale,
+                );
+                (vec![q, k, v], expected)
+            },
+        },
     ]
 }

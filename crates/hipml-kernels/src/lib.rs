@@ -28,6 +28,8 @@ pub enum KernelKind {
     PerHeadOnDim,
     /// 1-D coverage of `n` elements.
     Linear { block: u32 },
+    /// Split-K grid sized by the launcher (sequence slices x KV heads).
+    SplitK,
     /// No device kernel: this op stays on the host by design.
     HostOnly(&'static str),
 }
@@ -112,6 +114,16 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "attn_decode_pm_f32",
         entry: "attn_decode_f32",
         kind: KernelKind::PerHeadOnDim,
+    },
+    KernelSpec {
+        name: "attn_decode_split_f32",
+        entry: "attn_decode_split_f32",
+        kind: KernelKind::SplitK,
+    },
+    KernelSpec {
+        name: "attn_reduce_f32",
+        entry: "attn_reduce_f32",
+        kind: KernelKind::SplitK,
     },
     KernelSpec {
         name: "qg_split_f32",

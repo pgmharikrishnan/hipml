@@ -31,6 +31,7 @@ mod imp {
                 "mrope_f32" => self.case_mrope(case, inputs, reps),
                 "q_gate_f32" => self.case_q_gate(case, inputs, reps),
                 "kv_append_f32" => self.case_kv_append(case, inputs, reps),
+                "attn_decode_split_f32" => self.case_attn_split(case, inputs, reps),
                 other => Err(format!("{other} has no attention launcher")),
             }
         }
@@ -221,6 +222,83 @@ mod imp {
             }
             self.stream.synchronize()?;
             cache.to_host()
+        }
+
+        /// Split-K attention + merge, position-major cache.
+        fn case_attn_split(
+            &self,
+            case: &OpCase,
+            inputs: &[Tensor],
+            reps: usize,
+        ) -> Result<Vec<f32>, String> {
+            let n_heads = case.scalar("n_heads") as usize;
+            let n_kv = case.scalar("n_kv") as usize;
+            let hd = case.scalar("head_dim") as usize;
+            let seq = case.scalar("seq") as usize;
+            let scale = case.scalar("scale");
+            let splits = case.scalar("splits") as usize;
+            let q = Buffer::from_host(inputs[0].data())?;
+            let k = Buffer::from_host(inputs[1].data())?;
+            let v = Buffer::from_host(inputs[2].data())?;
+            let part_acc = Buffer::alloc(n_heads * splits * hd)?;
+            let part_ml = Buffer::alloc(n_heads * splits * 2)?;
+            let out = Buffer::alloc(n_heads * hd)?;
+
+            let split = self.module.kernel("attn_decode_split_f32")?;
+            let reduce = self.module.kernel("attn_reduce_f32")?;
+            let mut p_q = q.as_ptr();
+            let mut p_k = k.as_ptr();
+            let mut p_v = v.as_ptr();
+            let mut p_acc = part_acc.as_ptr();
+            let mut p_ml = part_ml.as_ptr();
+            let mut v_nh = n_heads as i32;
+            let mut v_kv = n_kv as i32;
+            let mut v_hd = hd as i32;
+            let mut v_seq = seq as i32;
+            let mut v_scale = scale;
+            let mut v_splits = splits as i32;
+            let mut width = (n_kv * hd) as i32;
+            let mut params: [*mut c_void; 12] = [
+                &mut p_q as *mut _ as *mut c_void,
+                &mut p_k as *mut _ as *mut c_void,
+                &mut p_v as *mut _ as *mut c_void,
+                &mut p_acc as *mut _ as *mut c_void,
+                &mut p_ml as *mut _ as *mut c_void,
+                &mut v_nh as *mut _ as *mut c_void,
+                &mut v_kv as *mut _ as *mut c_void,
+                &mut v_hd as *mut _ as *mut c_void,
+                &mut v_seq as *mut _ as *mut c_void,
+                &mut v_scale as *mut _ as *mut c_void,
+                &mut v_splits as *mut _ as *mut c_void,
+                &mut width as *mut _ as *mut c_void,
+            ];
+            let group = n_heads / n_kv;
+            let cfg = LaunchConfig {
+                grid: ((n_kv * splits) as u32, 1, 1),
+                block: ((group * 32) as u32, 1, 1),
+                shared_mem_bytes: (2 * 8 * hd * 4) as u32,
+            };
+            for _ in 0..reps {
+                split.launch(cfg, &self.stream, &mut params)?;
+                let mut p_acc = part_acc.as_ptr();
+                let mut p_ml = part_ml.as_ptr();
+                let mut p_out = out.as_ptr();
+                let mut params: [*mut c_void; 5] = [
+                    &mut p_acc as *mut _ as *mut c_void,
+                    &mut p_ml as *mut _ as *mut c_void,
+                    &mut p_out as *mut _ as *mut c_void,
+                    &mut v_hd as *mut _ as *mut c_void,
+                    &mut v_splits as *mut _ as *mut c_void,
+                ];
+                let cfg = LaunchConfig {
+                    grid: (n_heads as u32, 1, 1),
+                    block: (hd as u32, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                reduce.launch(cfg, &self.stream, &mut params)?;
+            }
+            self.stream.synchronize()?;
+            out.to_host()
         }
     }
 }

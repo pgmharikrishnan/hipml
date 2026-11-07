@@ -18,6 +18,11 @@ mod imp {
     use hipml_hip::{Buffer, ByteBuffer, LaunchConfig};
     use std::ffi::c_void;
 
+    /// Upper bound on sequence splits; the partial buffers are sized for it.
+    const MAX_SPLITS: usize = 64;
+    /// Must match SPLIT_TILE in attn_decode_split_f32.hip.
+    const SPLIT_TILE: usize = 8;
+
     /// One weight tensor resident in VRAM, in its GGUF block form.
     struct ResidentMat {
         data: ByteBuffer,
@@ -79,6 +84,8 @@ mod imp {
         y: Buffer,
         kv_k: Buffer,
         kv_v: Buffer,
+        part_acc: Buffer,
+        part_ml: Buffer,
         pub dims: LayerDims,
     }
 
@@ -141,6 +148,8 @@ mod imp {
                 y: Buffer::alloc(cfg.n_embd)?,
                 kv_k: Buffer::alloc(n_ctx * width)?,
                 kv_v: Buffer::alloc(n_ctx * width)?,
+                part_acc: Buffer::alloc(n_head * MAX_SPLITS * hd)?,
+                part_ml: Buffer::alloc(n_head * MAX_SPLITS * 2)?,
                 dims,
             })
         }
@@ -319,36 +328,7 @@ mod imp {
                 &mut params,
             )?;
 
-            let attn = self.module_kernel(l, "attn_decode_f32")?;
-            let mut p_q = self.q.as_ptr();
-            let mut p_kc = self.kv_k.as_ptr();
-            let mut p_vc = self.kv_v.as_ptr();
-            let mut p_out = self.out.as_ptr();
-            let mut v_heads = d.n_head as i32;
-            let mut v_kv = d.n_kv as i32;
-            let mut v_seq = (pos + 1) as i32;
-            let mut scale = 1.0f32 / (d.head_dim as f32).sqrt();
-            let mut head_stride = d.head_dim as i32;
-            let mut row_stride = d.width as i32;
-            let mut params: [*mut c_void; 11] = [
-                &mut p_q as *mut _ as *mut c_void,
-                &mut p_kc as *mut _ as *mut c_void,
-                &mut p_vc as *mut _ as *mut c_void,
-                &mut p_out as *mut _ as *mut c_void,
-                &mut v_heads as *mut _ as *mut c_void,
-                &mut v_kv as *mut _ as *mut c_void,
-                &mut hd as *mut _ as *mut c_void,
-                &mut v_seq as *mut _ as *mut c_void,
-                &mut scale as *mut _ as *mut c_void,
-                &mut head_stride as *mut _ as *mut c_void,
-                &mut row_stride as *mut _ as *mut c_void,
-            ];
-            let cfg = LaunchConfig {
-                grid: (d.n_head as u32, 1, 1),
-                block: (d.head_dim as u32, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            attn.launch(cfg, &l.stream, &mut params)?;
+            self.attention(l, pos)?;
 
             let gate = self.module_kernel(l, "q_gate_f32")?;
             let mut p_out = self.out.as_ptr();
@@ -368,6 +348,107 @@ mod imp {
             )?;
 
             self.gemv(l, &self.wo, &self.out, &self.y, d.n_embd)
+        }
+
+        /// Causal attention for this token. Uses the split-K kernel when the
+        /// head shape allows it, otherwise the one-block-per-head kernel.
+        fn attention(&self, l: &Launcher, pos: usize) -> Result<(), String> {
+            let d = self.dims;
+            let seq = pos + 1;
+            let group = d.n_head / d.n_kv;
+            let dpl = d.head_dim / 32;
+            let shared = 2 * SPLIT_TILE * d.head_dim * 4;
+            let split_ok = d.head_dim % 32 == 0
+                && dpl <= 8
+                && group * 32 <= 1024
+                && shared <= 64 * 1024;
+
+            if split_ok {
+                let splits = (seq / 128).clamp(1, MAX_SPLITS);
+                let mut p_q = self.q.as_ptr();
+                let mut p_k = self.kv_k.as_ptr();
+                let mut p_v = self.kv_v.as_ptr();
+                let mut p_acc = self.part_acc.as_ptr();
+                let mut p_ml = self.part_ml.as_ptr();
+                let mut n_heads = d.n_head as i32;
+                let mut n_kv = d.n_kv as i32;
+                let mut hd = d.head_dim as i32;
+                let mut v_seq = seq as i32;
+                let mut scale = 1.0f32 / (d.head_dim as f32).sqrt();
+                let mut v_splits = splits as i32;
+                let mut width = d.width as i32;
+                let mut params: [*mut c_void; 12] = [
+                    &mut p_q as *mut _ as *mut c_void,
+                    &mut p_k as *mut _ as *mut c_void,
+                    &mut p_v as *mut _ as *mut c_void,
+                    &mut p_acc as *mut _ as *mut c_void,
+                    &mut p_ml as *mut _ as *mut c_void,
+                    &mut n_heads as *mut _ as *mut c_void,
+                    &mut n_kv as *mut _ as *mut c_void,
+                    &mut hd as *mut _ as *mut c_void,
+                    &mut v_seq as *mut _ as *mut c_void,
+                    &mut scale as *mut _ as *mut c_void,
+                    &mut v_splits as *mut _ as *mut c_void,
+                    &mut width as *mut _ as *mut c_void,
+                ];
+                let cfg = LaunchConfig {
+                    grid: ((d.n_kv * splits) as u32, 1, 1),
+                    block: ((group * 32) as u32, 1, 1),
+                    shared_mem_bytes: shared as u32,
+                };
+                self.module_kernel(l, "attn_decode_split_f32")?
+                    .launch(cfg, &l.stream, &mut params)?;
+
+                let reduce = self.module_kernel(l, "attn_reduce_f32")?;
+                let mut p_acc = self.part_acc.as_ptr();
+                let mut p_ml = self.part_ml.as_ptr();
+                let mut p_out = self.out.as_ptr();
+                let mut params: [*mut c_void; 5] = [
+                    &mut p_acc as *mut _ as *mut c_void,
+                    &mut p_ml as *mut _ as *mut c_void,
+                    &mut p_out as *mut _ as *mut c_void,
+                    &mut hd as *mut _ as *mut c_void,
+                    &mut v_splits as *mut _ as *mut c_void,
+                ];
+                let cfg = LaunchConfig {
+                    grid: (d.n_head as u32, 1, 1),
+                    block: (d.head_dim as u32, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                return reduce.launch(cfg, &l.stream, &mut params);
+            }
+
+            let attn = self.module_kernel(l, "attn_decode_f32")?;
+            let mut p_q = self.q.as_ptr();
+            let mut p_k = self.kv_k.as_ptr();
+            let mut p_v = self.kv_v.as_ptr();
+            let mut p_out = self.out.as_ptr();
+            let mut n_heads = d.n_head as i32;
+            let mut n_kv = d.n_kv as i32;
+            let mut hd = d.head_dim as i32;
+            let mut v_seq = seq as i32;
+            let mut scale = 1.0f32 / (d.head_dim as f32).sqrt();
+            let mut head_stride = d.head_dim as i32;
+            let mut row_stride = d.width as i32;
+            let mut params: [*mut c_void; 11] = [
+                &mut p_q as *mut _ as *mut c_void,
+                &mut p_k as *mut _ as *mut c_void,
+                &mut p_v as *mut _ as *mut c_void,
+                &mut p_out as *mut _ as *mut c_void,
+                &mut n_heads as *mut _ as *mut c_void,
+                &mut n_kv as *mut _ as *mut c_void,
+                &mut hd as *mut _ as *mut c_void,
+                &mut v_seq as *mut _ as *mut c_void,
+                &mut scale as *mut _ as *mut c_void,
+                &mut head_stride as *mut _ as *mut c_void,
+                &mut row_stride as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: (d.n_head as u32, 1, 1),
+                block: (d.head_dim as u32, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            attn.launch(cfg, &l.stream, &mut params)
         }
 
         fn module_kernel<'a>(
