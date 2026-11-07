@@ -127,6 +127,14 @@ pub struct SsmChunk {
     pub o: Buffer,
     pub gated: Buffer,
     pub out: Buffer,
+    /// Per-token gate and sigmoid(beta), `[tokens][n_v]`; the chunk's
+    /// replacement for the layer's one-token scratch.
+    pub g: Buffer,
+    pub beta_sig: Buffer,
+    /// The carried window after this chunk. Written by the conv kernel and
+    /// copied into the layer's `conv_state` (the conv reads and writes the
+    /// window, so it cannot alias).
+    pub conv_next: Buffer,
     pub tokens: usize,
 }
 
@@ -142,6 +150,9 @@ impl SsmChunk {
             o: zeros(tokens * d.inner())?,
             gated: zeros(tokens * d.inner())?,
             out: zeros(tokens * d.n_embd)?,
+            g: zeros(tokens * d.n_v)?,
+            beta_sig: zeros(tokens * d.n_v)?,
+            conv_next: zeros((d.d_conv - 1) * d.conv_ch)?,
             tokens,
         })
     }
@@ -151,7 +162,10 @@ impl SsmChunk {
         (self.qkv.len() + self.z.len() + self.alpha.len() + self.beta.len() + self.conv.len()
             + self.o.len()
             + self.gated.len()
-            + self.out.len())
+            + self.out.len()
+            + self.g.len()
+            + self.beta_sig.len()
+            + self.conv_next.len())
             * 4
     }
 }

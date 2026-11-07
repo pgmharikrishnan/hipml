@@ -4,6 +4,32 @@
 //! are visible without widening the type's surface.
 
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Whether the chunked graph's projections use the packed-fp16 kernels.
+/// Default on; `HIPML_PREFILL_F32` or the CLI flag turns it off for an A/B.
+static PREFILL_HALF: AtomicBool = AtomicBool::new(true);
+
+pub fn set_prefill_half(on: bool) {
+    PREFILL_HALF.store(on, Ordering::Relaxed);
+}
+
+pub fn prefill_half() -> bool {
+    // The environment override is the no-rebuild A/B switch: both kernels are
+    // in the code object, and the f32 one is the reference for a divergence.
+    PREFILL_HALF.load(Ordering::Relaxed) && std::env::var_os("HIPML_PREFILL_F32").is_none()
+}
+
+/// Map a fp32 prefill entry to its packed-fp16 sibling. `None` for an entry
+/// that has no half kernel (`gemm_f32`, which stays f32 by definition).
+fn half_entry(name: &str) -> Option<&'static str> {
+    match name {
+        "prefill_q4_k" => Some("prefill_q4_k_h"),
+        "prefill_q6_k" => Some("prefill_q6_k_h"),
+        "prefill_q8_0" => Some("prefill_q8_0_h"),
+        _ => None,
+    }
+}
 
 impl Launcher {
     /// Tiled prefill GEMM with both ends and the weight already on the device:
@@ -116,6 +142,40 @@ impl Launcher {
     }
 }
 
+/// Warp-per-output f32 GEMM for the few wide-and-short projections (the SSM
+/// `alpha`/`beta` pair). `gemm_f32`'s row-per-block structure is a decode
+/// kernel; on a 512-token chunk it costs more than the weights it reads.
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_rows_f32(
+    module: &Module,
+    stream: &Stream,
+    w: *mut std::ffi::c_void,
+    x: *mut std::ffi::c_void,
+    y: *mut std::ffi::c_void,
+    tokens: usize,
+    m: usize,
+    k: usize,
+) -> Result<(), String> {
+    let kernel = module.kernel("gemm_rows_f32")?;
+    let mut p_w = w;
+    let mut p_x = x;
+    let mut p_y = y;
+    let mut v_t = tokens as i32;
+    let mut v_m = m as i32;
+    let mut v_k = k as i32;
+    let mut params: [*mut std::ffi::c_void; 6] = [
+        &mut p_w as *mut _ as *mut std::ffi::c_void,
+        &mut p_x as *mut _ as *mut std::ffi::c_void,
+        &mut p_y as *mut _ as *mut std::ffi::c_void,
+        &mut v_t as *mut _ as *mut std::ffi::c_void,
+        &mut v_m as *mut _ as *mut std::ffi::c_void,
+        &mut v_k as *mut _ as *mut std::ffi::c_void,
+    ];
+    let warps = 8usize;
+    let cfg = LaunchConfig::linear((tokens * m + warps - 1) / warps, (warps * 32) as u32);
+    kernel.launch(cfg, stream, &mut params)
+}
+
 /// Tiled prefill GEMM over a resident weight payload.
 ///
 /// Free function as well as a `Launcher` method because the gated-delta-net and
@@ -133,9 +193,18 @@ pub fn prefill_resident(
     k: usize,
     tokens: usize,
 ) -> Result<(), String> {
+    let name = if prefill_half() {
+        half_entry(name).unwrap_or(name)
+    } else {
+        name
+    };
     let spec = crate::spec(name).ok_or_else(|| format!("{name} is not in the manifest"))?;
-    let (rpb, tpb) = match spec.kind {
-        crate::KernelKind::Prefill { rows, tokens, .. } => (rows, tokens),
+    let (rpb, tpb, block) = match spec.kind {
+        crate::KernelKind::Prefill {
+            rows,
+            tokens,
+            block,
+        } => (rows, tokens, block),
         _ => return Err(format!("{name}: not a prefill kernel")),
     };
     if k % 64 != 0 {
@@ -156,6 +225,6 @@ pub fn prefill_resident(
         &mut v_k as *mut _ as *mut c_void,
         &mut v_tokens as *mut _ as *mut c_void,
     ];
-    let cfg = LaunchConfig::prefill(m, tokens, rpb, tpb, 256);
+    let cfg = LaunchConfig::prefill(m, tokens, rpb, tpb, block);
     kernel.launch(cfg, stream, &mut params)
 }

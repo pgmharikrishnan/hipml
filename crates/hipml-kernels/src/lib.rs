@@ -25,7 +25,9 @@ pub use attn_gpu::AttnLayer;
 #[cfg(feature = "hip")]
 pub mod launch_kv;
 #[cfg(feature = "hip")]
-pub use launch::prefill_resident;
+pub use launch::{gemm_rows_f32, prefill_half, prefill_resident, set_prefill_half};
+#[cfg(not(feature = "hip"))]
+pub use launch::{prefill_half, set_prefill_half};
 pub use launch::Launcher;
 
 /// How a kernel is gridded.
@@ -138,10 +140,54 @@ pub const KERNELS: &[KernelSpec] = &[
             block: 256,
         },
     },
+    // Packed-fp16 compute path: half weights and activations in shared, f32
+    // accumulators, `v_dot2_f32_f16` in the inner loop. 128 output rows per
+    // block, 512 threads.
+    KernelSpec {
+        name: "prefill_q4_k_h",
+        entry: "prefill_q4_k_h",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 512,
+        },
+    },
+    KernelSpec {
+        name: "prefill_q6_k_h",
+        entry: "prefill_q6_k_h",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 512,
+        },
+    },
+    KernelSpec {
+        name: "prefill_q8_0_h",
+        entry: "prefill_q8_0_h",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 512,
+        },
+    },
+    KernelSpec {
+        name: "prefill_halfw_h",
+        entry: "prefill_halfw_h",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 512,
+        },
+    },
     KernelSpec {
         name: "gemm_f32",
         entry: "gemm_f32",
         kind: KernelKind::PerRow { block: 256 },
+    },
+    KernelSpec {
+        name: "gemm_rows_f32",
+        entry: "gemm_rows_f32",
+        kind: KernelKind::Linear { block: 256 },
     },
     KernelSpec {
         name: "rmsnorm_f32",
@@ -207,6 +253,64 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "ssm_layer_f32",
         entry: "ssm_layer_f32",
         kind: KernelKind::Composite,
+    },
+    // Chunked GDN chain: one launch per stage per prompt tile instead of one
+    // per token. Grids are set by `SsmGpuLayer::steps_chunk`.
+    // Chunked attention chain: four launches per layer per prompt tile.
+    KernelSpec {
+        name: "qg_split_chunk_f32",
+        entry: "qg_split_chunk_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
+    KernelSpec {
+        name: "norm_rope_chunk_f32",
+        entry: "norm_rope_chunk_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
+    KernelSpec {
+        name: "kv_append_chunk_f32",
+        entry: "kv_append_chunk_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "attn_chunk_f32",
+        entry: "attn_chunk_f32",
+        kind: KernelKind::PerHeadOnDim,
+    },
+    KernelSpec {
+        name: "attn_chunk_tile_f32",
+        entry: "attn_chunk_tile_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
+    KernelSpec {
+        name: "ssm_gates_chunk_f32",
+        entry: "ssm_gates_chunk_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "ssm_conv1d_chunk_f32",
+        entry: "ssm_conv1d_chunk_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "l2norm_chunk_f32",
+        entry: "l2norm_chunk_f32",
+        kind: KernelKind::PerHead { block: 128 },
+    },
+    KernelSpec {
+        name: "gdn_chunk_f32",
+        entry: "gdn_chunk_f32",
+        kind: KernelKind::PerHead { block: 1024 },
+    },
+    KernelSpec {
+        name: "gate_norm_chunk_f32",
+        entry: "gate_norm_chunk_f32",
+        kind: KernelKind::PerHead { block: 128 },
+    },
+    KernelSpec {
+        name: "copy_f32",
+        entry: "copy_f32",
+        kind: KernelKind::Linear { block: 256 },
     },
     KernelSpec {
         name: "attn_decode_pm_f32",

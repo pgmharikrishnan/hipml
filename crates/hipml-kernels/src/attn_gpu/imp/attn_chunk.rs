@@ -50,6 +50,161 @@ impl AttnLayer<'_> {
         Ok(())
     }
 
+    /// Whether `step_chunk` covers this layer: one thread per head component,
+    /// power-of-two head dimension up to the 256-thread block.
+    pub fn chunk_supported(&self) -> bool {
+        let hd = self.dims.head_dim;
+        hd.is_power_of_two() && hd <= 256 && hd >= 32
+    }
+
+    /// The whole chunk's attention chain in four launches: q-gate split, head
+    /// norm + rope, cache append, causal attention. The chunk buffers are
+    /// `[tokens][..]`; rows are appended before attention and the kernel's
+    /// causal bound hides the future ones.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_chunk(
+        &self,
+        l: &Launcher,
+        qg: &Buffer,
+        k: &Buffer,
+        v: &Buffer,
+        q: &Buffer,
+        gate: &Buffer,
+        out: &Buffer,
+        pos0: usize,
+        tokens: usize,
+    ) -> Result<(), String> {
+        if !self.chunk_supported() {
+            return Err("chunked attention: unsupported head dimension".to_string());
+        }
+        let d = self.dims;
+        let t = tokens as u32;
+
+        let split = self.module_kernel(l, "qg_split_chunk_f32")?;
+        let mut p_qg = qg.as_ptr();
+        let mut p_q = q.as_ptr();
+        let mut p_g = gate.as_ptr();
+        let mut nh = d.n_head as i32;
+        let mut hd = d.head_dim as i32;
+        let mut nt = tokens as i32;
+        let mut params: [*mut c_void; 6] = [
+            &mut p_qg as *mut _ as *mut c_void,
+            &mut p_q as *mut _ as *mut c_void,
+            &mut p_g as *mut _ as *mut c_void,
+            &mut nh as *mut _ as *mut c_void,
+            &mut hd as *mut _ as *mut c_void,
+            &mut nt as *mut _ as *mut c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (d.n_head as u32, t, 1),
+            block: (d.head_dim as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        split.launch(cfg, &l.stream, &mut params)?;
+
+        let nr = self.module_kernel(l, "norm_rope_chunk_f32")?;
+        let mut p_q = q.as_ptr();
+        let mut p_k = k.as_ptr();
+        let mut p_qw = self.q_norm.as_ptr();
+        let mut p_kw = self.k_norm.as_ptr();
+        let mut nh = d.n_head as i32;
+        let mut nkv = d.n_kv as i32;
+        let mut hd = d.head_dim as i32;
+        let mut nrot = d.n_rot as i32;
+        let mut base = d.rope_base;
+        let mut eps = d.eps;
+        let mut pos = pos0 as i32;
+        let mut nt = tokens as i32;
+        let mut params: [*mut c_void; 12] = [
+            &mut p_q as *mut _ as *mut c_void,
+            &mut p_k as *mut _ as *mut c_void,
+            &mut p_qw as *mut _ as *mut c_void,
+            &mut p_kw as *mut _ as *mut c_void,
+            &mut nh as *mut _ as *mut c_void,
+            &mut nkv as *mut _ as *mut c_void,
+            &mut hd as *mut _ as *mut c_void,
+            &mut nrot as *mut _ as *mut c_void,
+            &mut base as *mut _ as *mut c_void,
+            &mut eps as *mut _ as *mut c_void,
+            &mut pos as *mut _ as *mut c_void,
+            &mut nt as *mut _ as *mut c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: ((d.n_head + d.n_kv) as u32, t, 1),
+            block: (d.head_dim as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        nr.launch(cfg, &l.stream, &mut params)?;
+
+        let app = self.module_kernel(l, "kv_append_chunk_f32")?;
+        let mut p_kc = self.kv_k.as_ptr();
+        let mut p_vc = self.kv_v.as_ptr();
+        let mut p_k = k.as_ptr();
+        let mut p_v = v.as_ptr();
+        let mut pos = pos0 as i32;
+        let mut width = d.width as i32;
+        let mut nt = tokens as i32;
+        let mut params: [*mut c_void; 7] = [
+            &mut p_kc as *mut _ as *mut c_void,
+            &mut p_vc as *mut _ as *mut c_void,
+            &mut p_k as *mut _ as *mut c_void,
+            &mut p_v as *mut _ as *mut c_void,
+            &mut pos as *mut _ as *mut c_void,
+            &mut width as *mut _ as *mut c_void,
+            &mut nt as *mut _ as *mut c_void,
+        ];
+        app.launch(
+            LaunchConfig::linear(2 * tokens * d.width, 256),
+            &l.stream,
+            &mut params,
+        )?;
+
+        // The tiled kernel needs 8 head components per lane (head_dim 256).
+        let tiled = d.head_dim == 256;
+        let att = self.module_kernel(
+            l,
+            if tiled { "attn_chunk_tile_f32" } else { "attn_chunk_f32" },
+        )?;
+        let mut p_q = q.as_ptr();
+        let mut p_kc = self.kv_k.as_ptr();
+        let mut p_vc = self.kv_v.as_ptr();
+        let mut p_out = out.as_ptr();
+        let mut nh = d.n_head as i32;
+        let mut nkv = d.n_kv as i32;
+        let mut hd = d.head_dim as i32;
+        let mut width = d.width as i32;
+        let mut pos = pos0 as i32;
+        let mut nt = tokens as i32;
+        let mut scale = 1.0f32 / (d.head_dim as f32).sqrt();
+        let mut params: [*mut c_void; 11] = [
+            &mut p_q as *mut _ as *mut c_void,
+            &mut p_kc as *mut _ as *mut c_void,
+            &mut p_vc as *mut _ as *mut c_void,
+            &mut p_out as *mut _ as *mut c_void,
+            &mut nh as *mut _ as *mut c_void,
+            &mut nkv as *mut _ as *mut c_void,
+            &mut hd as *mut _ as *mut c_void,
+            &mut width as *mut _ as *mut c_void,
+            &mut pos as *mut _ as *mut c_void,
+            &mut nt as *mut _ as *mut c_void,
+            &mut scale as *mut _ as *mut c_void,
+        ];
+        let cfg = if tiled {
+            LaunchConfig {
+                grid: (d.n_head as u32, (tokens as u32 + 31) / 32, 1),
+                block: (256, 1, 1),
+                shared_mem_bytes: 0,
+            }
+        } else {
+            LaunchConfig {
+                grid: (d.n_head as u32, t, 1),
+                block: (d.head_dim as u32, 1, 1),
+                shared_mem_bytes: 0,
+            }
+        };
+        att.launch(cfg, &l.stream, &mut params)
+    }
+
     /// One token of a chunk: q-gate split, head norm, rope, cache append and
     /// causal attention, all reading/writing row `t` of the chunk buffers.
     #[allow(clippy::too_many_arguments)]

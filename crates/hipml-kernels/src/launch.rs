@@ -19,7 +19,7 @@ pub(crate) mod device {
     #[path = "prefill_launch.rs"]
     mod prefill_launch;
 
-    pub use prefill_launch::prefill_resident;
+    pub use prefill_launch::{gemm_rows_f32, prefill_half, prefill_resident, set_prefill_half};
     #[path = "quant_launch.rs"]
     mod quant_launch;
 
@@ -456,9 +456,18 @@ pub(crate) mod device {
 }
 
 #[cfg(feature = "hip")]
-pub use device::prefill_resident;
+pub use device::{gemm_rows_f32, prefill_half, prefill_resident, set_prefill_half};
 #[cfg(feature = "hip")]
 pub use device::Launcher;
+
+/// The fp16-prefill switch is a no-op without a device: nothing launches.
+#[cfg(not(feature = "hip"))]
+pub fn set_prefill_half(_on: bool) {}
+
+#[cfg(not(feature = "hip"))]
+pub fn prefill_half() -> bool {
+    false
+}
 
 /// Without the `hip` feature the launcher exists but refuses to run, so callers
 /// need no conditional compilation of their own.
