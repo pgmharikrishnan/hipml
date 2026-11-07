@@ -74,14 +74,19 @@ Flash Attention path, and it disappears as soon as llama.cpp gains one.
 ## Quantized GEMV: Q4_K and Q6_K
 
 The fp32 GEMV above measures the card, not the model. Qwen3.8-27B is Q4_K_M, so a
-decode step streams **Q4_K, Q6_K, Q8_0 and Q5_K** blocks. These kernels dequantise
-in registers and never materialise the fp32 matrix.
+decode step streams **Q4_K, Q6_K, Q8_0 and Q5_K** blocks. These kernels
+dequantise in registers and never materialise the fp32 matrix.
 
-`gemv_q4_k` and `gemv_q6_k` use one block per output row and 256 threads. A thread
-owns 8 consecutive columns, so x is read as two `float4`s, the 8 quant bytes are
-one 64-bit (Q4_K) or eight 16-bit (Q6_K) loads, and one scale/min pair covers the
-chunk. Q4_K's 6-bit header and Q6_K's four 2-bit `qh` planes are unpacked exactly
-as in the hand-computed vectors in `crates/hipml-core/tests/quant_reference.rs`.
+The first version used one block per output row. At 4-bit weights x is 5-8x the
+weight bytes, so every row re-read x from L2 and the kernel topped out at
+373-483 GB/s. The fix is the row-tile structure from `gemm_f32`: one block owns
+16 output rows, each warp owns 2 rows, and the x k-tile is staged in shared once
+per tile. A shared x value is applied to both of the warp's rows before it is
+discarded, so the weight stream, not x, sets the pace. The tile is de-interleaved
+by 512-value group (`sx[g*512 + comp*32 + lane]`) so the 16 scalar reads hit
+distinct banks. Q4_K lanes take 16 columns (one scale/min per half sub-block);
+Q6_K lanes take 8 (one scale per 8 of a 16-value sub-block). Two barriers per
+k-tile, one warp shuffle reduction per row, no reordering of the maths.
 
 ### Single tensor, Qwen3.8-27B shapes
 
@@ -89,13 +94,37 @@ as in the hand-computed vectors in `crates/hipml-core/tests/quant_reference.rs`.
 
 | Weight | Shape `[m,k]` | Type | Bytes | us | GB/s | % of 631 |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
-| ffn_up | 17408x5120 | Q6_K | 73,113,600 | 165.25 | 442.5 | 70.1% |
-| ffn_gate | 5120x17408 | Q4_K | 50,135,040 | 113.12 | 443.2 | 70.2% |
-| ffn_down | 5120x17408 | Q6_K | 73,113,600 | 151.21 | 483.5 | 76.6% |
-| ffn_down | 17408x5120 | Q4_K | 50,135,040 | 134.52 | 372.7 | 59.1% |
+| ffn_up | 17408x5120 | Q6_K | 73,113,600 | 110.31 | 662.8 | 105.0% |
+| ffn_gate | 5120x17408 | Q4_K | 50,135,040 | 77.15 | 649.8 | 103.0% |
+| ffn_down | 5120x17408 | Q6_K | 73,113,600 | 117.27 | 623.5 | 98.8% |
+| ffn_down | 17408x5120 | Q4_K | 50,135,040 | 70.61 | 710.1 | 112.5% |
 
-The same run's fp32 `gemv_f32` was **629.8 GB/s** (839 MB), so 631 GB/s remains
-the reference ceiling.
+The same run's fp32 `gemv_f32` was **634.2 GB/s** (839 MB), so the reference
+ceiling stays 631 GB/s. The >100% rows are the 50-73 MB tensors fitting partly in
+the 64 MB Infinity Cache across the 51 benchmark reps; the decode stream below
+is the conservative number.
+
+### Tile tuning
+
+All rows are GB/s at the four shapes above, in the same order. The best
+compromise is the last row: Q6_K regresses when its lane widens to 16 values at
+k=17408, so the two formats use different lane widths.
+
+| Config | ffn_up Q6_K | ffn_gate Q4_K | ffn_down Q6_K | ffn_down Q4_K |
+| --- | ---: | ---: | ---: | ---: |
+| per-row block (old) | 442.5 | 443.2 | 483.5 | 372.7 |
+| 1 warp/row, 8-value, K=512 | 541.2 | 395.9 | 511.7 | 423.9 |
+| 2 rows/warp, 8-value, K=512 | 631.6 | 417.5 | 583.6 | 495.4 |
+| 2 rows/warp, 8-value, K=1024 | 654.0 | 454.0 | 608.8 | 534.1 |
+| 2 rows/warp, 8-value, K=2048 | 662.5 | 476.5 | 624.0 | 551.7 |
+| 2 rows/warp, 8-value, K=4096 | 664.0 | 497.2 | 602.8 | 560.9 |
+| 4 rows/warp, 8-value, K=2048 | 504.6 | 456.9 | 417.1 | 549.5 |
+| 2 rows/warp, 16-value both, K=2048 | 654.9 | 642.7 | 544.5 | 706.7 |
+| **2 rows/warp, Q4 16-val / Q6 8-val, K=2048** | **662.9** | **648.8** | **623.1** | **709.2** |
+
+Four rows per warp loses Q6_K (more registers and fewer rows in flight), and
+16-value Q6_K lanes lose 80 GB/s at k=17408; Q4_K wants the wider lane because
+its 6-bit header is a larger share of its weight bytes.
 
 ### Decode step: stream the model once
 
@@ -105,26 +134,14 @@ chunks, uploads each chunk, and launches the matching kernel. It never holds the
 
 | Pass | Bytes | GB/s | implied tok/s |
 | --- | ---: | ---: | ---: |
-| single pass, one launch + sync per chunk (`reps=1`) | 16,964,915,200 | 217.8 | 12.84 |
-| kernel-only, 11 launches per chunk (`--reps 11`) | 16,964,915,200 | 393.6 | 23.20 |
+| single pass, one launch + sync per chunk (`reps=1`) | 16,964,915,200 | 259.7 | 15.31 |
+| kernel-only, 11 launches per chunk (`--reps 11`) | 16,964,915,200 | 604.3 | 35.62 |
 
-The second row amortises launch/sync latency (the first is a hard lower bound for
-this harness, not for a real engine, which enqueues all tensors and syncs once).
-Some small tensors become cache-resident across the 11 reps, so 23.2 tok/s is an
-optimistic kernel-side estimate. `llama.cpp` HIP measures **31.4 tok/s** on the
-same 17.19 GB. Including the 227 MB of F32 tensors at the same bandwidth gives
-22.89 tok/s, so the miss is the kernel, not the accounting.
-
-### Why not 95% of bandwidth
-
-All four Qwen3.8-27B-shaped cases move the same activation volume: `m*k*4 = 356 MB` of
-x re-reads per tensor, against only 50–73 MB of weights. With one block per row
-and no shared-memory staging, those reads are served from L2/Infinity Cache. The
-measured total (x + weights) is 406–429 MB in 113–165 us, i.e. **~2.6–3.6 TB/s of
-L2 traffic**; the weight stream alone would take 80–116 us at 631 GB/s. The fp32
-GEMV does not hit this because its x:weight ratio is 1:1; the quantized ratio is
-5–8:1. Reaching 95% needs multiple rows per block reusing x from registers or
-shared memory, which the one-block-per-row specification excludes.
+Per type at `--reps 11`: Q4_K **612.1**, Q6_K **557.0**, Q8_0 **708.5**. The
+first row is a hard lower bound for this harness (it syncs per 64 MiB chunk, not
+per token); the second amortises launch/sync latency and is the comparable
+number. Including all 17.192 GB of tensor bytes at the same bandwidth gives
+**35.15 tok/s**; `llama.cpp` HIP measures **31.4 tok/s** on the same file.
 
 ### Commands
 
@@ -142,12 +159,12 @@ target\release\hipml.exe decode-bench C:\models\Qwen3.8-27B-Q4_K_M.gguf -v --rep
 target\release\hipml.exe gguf C:\models\Qwen3.8-27B-Q4_K_M.gguf
 ```
 
-Parity for the two formats (reference vs device, `max_abs` / `max_rel`):
+Parity for the three kernels (reference vs device, `max_abs` / `max_rel`):
 
 | Case | 64x512 | 17408x5120 |
 | --- | --- | --- |
-| `gemv_q4_k` | 6.68e-6 / 5.21e-5 | 1.41e-4 / 8.21e-3 |
-| `gemv_q6_k` | 3.43e-5 / 6.46e-6 | 1.13e-3 / 2.26e-2 |
+| `gemv_q4_k` | 5.48e-6 / 3.49e-5 | 1.37e-4 / 9.20e-3 |
+| `gemv_q6_k` | 4.20e-5 / 1.44e-5 | 1.10e-3 / 5.40e-2 |
 | `gemv_q8_0` | 2.38e-6 / 4.27e-6 | — |
 
 The 5k-term rows are compared against a sequential f32 reference: an output near

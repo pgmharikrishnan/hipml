@@ -1,12 +1,12 @@
 // y[row] = dequant_q4_k(W[row,:]) . x
 //
-// Row-tile GEMV: one block owns ROW_TILE output rows and stages the x k-tile in
-// shared memory once. Each warp owns ROWS_PER_WARP rows and keeps one
+// Row-tile GEMV: one block owns Q4K_ROW_TILE output rows and stages the x k-tile in
+// shared memory once. Each warp owns Q4K_ROWS_PER_WARP rows and keeps one
 // accumulator per row, so a value read from shared is applied to
-// ROWS_PER_WARP weight rows before it is discarded. With 4-bit weights x is 8x
+// Q4K_ROWS_PER_WARP weight rows before it is discarded. With 4-bit weights x is 8x
 // the weight bytes, so this reuse is what removes the shared/L2 ceiling.
 //
-// Each lane owns VALUES_PER_LANE (16) consecutive columns, i.e. half of one
+// Each lane owns Q4K_VPL (16) consecutive columns, i.e. half of one
 // 32-value Q4_K sub-block, so one d/dmin/scale/min set covers all 16 values and
 // their 16 quant bytes are four aligned 32-bit loads.
 //
@@ -25,15 +25,15 @@
 
 #define Q4K_VALUES 256
 #define Q4K_BLOCK_BYTES 144
-#define BLOCK 256
-#define WARPS (BLOCK / 32)
-#define ROWS_PER_WARP 2
-#define ROW_TILE (WARPS * ROWS_PER_WARP)
-#define VALUES_PER_LANE 16
-#define GROUP_VALUES (VALUES_PER_LANE * 32)
-#define K_TILE 2048
+#define Q4K_BLOCK 256
+#define Q4K_WARPS (Q4K_BLOCK / 32)
+#define Q4K_ROWS_PER_WARP 2
+#define Q4K_ROW_TILE (Q4K_WARPS * Q4K_ROWS_PER_WARP)
+#define Q4K_VPL 16
+#define Q4K_GROUP (Q4K_VPL * 32)
+#define Q4K_K_TILE 2048
 
-// Mirrors the manifest's KernelKind::RowTile { rows = ROW_TILE, block = BLOCK };
+// Mirrors the manifest's KernelKind::RowTile { rows = Q4K_ROW_TILE, block = Q4K_BLOCK };
 // change both together.
 
 static __device__ __forceinline__ void q4k_scale_min(int j, const unsigned char* q,
@@ -54,8 +54,8 @@ static __device__ __forceinline__ void stage_group(const float* __restrict__ x,
 {
     const int g = j >> 5; // 32 chunks of 16 values per 512-value group
     const int lane = j & 31;
-    float* s = sx + g * GROUP_VALUES + lane;
-    const float4* src = reinterpret_cast<const float4*>(x + base + VALUES_PER_LANE * j);
+    float* s = sx + g * Q4K_GROUP + lane;
+    const float4* src = reinterpret_cast<const float4*>(x + base + Q4K_VPL * j);
 #pragma unroll
     for (int q = 0; q < 4; ++q) {
         const float4 v = src[q];
@@ -97,7 +97,7 @@ static __device__ __forceinline__ void q4k_acc(const unsigned char* __restrict__
 
     float a = *acc;
 #pragma unroll
-    for (int i = 0; i < VALUES_PER_LANE; ++i) {
+    for (int i = 0; i < Q4K_VPL; ++i) {
         const unsigned int byte = q.b[i];
         const int v = high ? (int)(byte >> 4) : (int)(byte & 0xF);
         a = fmaf(scale * (float)v - minv, xv[i], a);
@@ -112,46 +112,46 @@ extern "C" __global__ void gemv_q4_k(
     int m,
     int k)
 {
-    __shared__ __align__(16) float sx[K_TILE];
+    __shared__ __align__(16) float sx[Q4K_K_TILE];
 
     const int tid = threadIdx.x;
     const int lane = tid & 31;
     const int warp = tid >> 5;
     const int nblocks = k / Q4K_VALUES;
 
-    int row[ROWS_PER_WARP];
-    int r[ROWS_PER_WARP];
-    const unsigned char* rp[ROWS_PER_WARP];
-    float acc[ROWS_PER_WARP];
+    int row[Q4K_ROWS_PER_WARP];
+    int r[Q4K_ROWS_PER_WARP];
+    const unsigned char* rp[Q4K_ROWS_PER_WARP];
+    float acc[Q4K_ROWS_PER_WARP];
 #pragma unroll
-    for (int rr = 0; rr < ROWS_PER_WARP; ++rr) {
-        row[rr] = blockIdx.x * ROW_TILE + warp * ROWS_PER_WARP + rr;
+    for (int rr = 0; rr < Q4K_ROWS_PER_WARP; ++rr) {
+        row[rr] = blockIdx.x * Q4K_ROW_TILE + warp * Q4K_ROWS_PER_WARP + rr;
         r[rr] = min(row[rr], m - 1);
         rp[rr] = w + (size_t)r[rr] * (size_t)nblocks * Q4K_BLOCK_BYTES;
         acc[rr] = 0.0f;
     }
 
-    for (int base = 0; base < k; base += K_TILE) {
-        const int n = min(K_TILE, k - base);
-        const int nchunks = n / VALUES_PER_LANE;
-        for (int j = tid; j < nchunks; j += BLOCK) stage_group(x, sx, base, j);
+    for (int base = 0; base < k; base += Q4K_K_TILE) {
+        const int n = min(Q4K_K_TILE, k - base);
+        const int nchunks = n / Q4K_VPL;
+        for (int j = tid; j < nchunks; j += Q4K_BLOCK) stage_group(x, sx, base, j);
         __syncthreads();
 
-        for (int c = lane * VALUES_PER_LANE; c < n; c += GROUP_VALUES) {
-            const int g = c / GROUP_VALUES;
-            const int s = g * GROUP_VALUES + lane;
-            float xv[VALUES_PER_LANE];
+        for (int c = lane * Q4K_VPL; c < n; c += Q4K_GROUP) {
+            const int g = c / Q4K_GROUP;
+            const int s = g * Q4K_GROUP + lane;
+            float xv[Q4K_VPL];
 #pragma unroll
-            for (int comp = 0; comp < VALUES_PER_LANE; ++comp) xv[comp] = sx[s + comp * 32];
+            for (int comp = 0; comp < Q4K_VPL; ++comp) xv[comp] = sx[s + comp * 32];
             const int p = base + c;
 #pragma unroll
-            for (int rr = 0; rr < ROWS_PER_WARP; ++rr) q4k_acc(rp[rr], p, xv, &acc[rr]);
+            for (int rr = 0; rr < Q4K_ROWS_PER_WARP; ++rr) q4k_acc(rp[rr], p, xv, &acc[rr]);
         }
         __syncthreads();
     }
 
 #pragma unroll
-    for (int rr = 0; rr < ROWS_PER_WARP; ++rr) {
+    for (int rr = 0; rr < Q4K_ROWS_PER_WARP; ++rr) {
         float a = acc[rr];
 #pragma unroll
         for (int off = 16; off > 0; off >>= 1) a += __shfl_down(a, off);
