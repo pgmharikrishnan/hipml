@@ -207,3 +207,30 @@ pub fn read_f32_file(path: &Path) -> Result<Vec<f32>, String> {
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checksum_is_stable_and_input_sensitive() {
+        assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a(b"hipml"), fnv1a(b"hipml"));
+        assert_ne!(fnv1a(b"hipml"), fnv1a(b"hipm1"));
+    }
+
+    #[test]
+    fn top_k_is_descending_and_complete() {
+        let v = [0.5, -1.0, 3.0, 2.0, 3.5];
+        assert_eq!(top_k(&v, 3), vec![(4, 3.5), (2, 3.0), (3, 2.0)]);
+        assert_eq!(top_k(&v, 9).len(), 5);
+    }
+
+    #[test]
+    fn compare_counts_exact_values() {
+        let c = compare_rows(&[1.0, 2.0, 3.5], &[1.0, 2.0, 3.0]).expect("same len");
+        assert_eq!(c.values, 3);
+        assert_eq!(c.exact, 2);
+        assert!((c.max_abs - 0.5).abs() < 1e-6);
+    }
+}

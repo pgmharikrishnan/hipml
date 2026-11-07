@@ -102,8 +102,8 @@ fn print_report(model: &Model, r: &LoadReport, path: &Path) {
     );
 
     println!(
-        "\n{:<8} {:>8} {:>16} {:>10}  {}",
-        "dtype", "tensors", "bytes", "resident", "status"
+        "\n{:<8} {:>8} {:>16} {:>16} {:>9}  {}",
+        "dtype", "tensors", "bytes", "resident", "GiB", "status"
     );
     for t in &r.per_type {
         let status = if t.ty == "Q5_K" {
@@ -112,18 +112,20 @@ fn print_report(model: &Model, r: &LoadReport, path: &Path) {
             "supported"
         };
         println!(
-            "{:<8} {:>8} {:>16} {:>9.2}G  {}",
+            "{:<8} {:>8} {:>16} {:>16} {:>9.2}  {}",
             t.ty,
             t.tensors,
+            commas(t.bytes),
             commas(t.bytes),
             gib(t.bytes),
             status
         );
     }
     println!(
-        "{:<8} {:>8} {:>16} {:>9.2}G",
+        "{:<8} {:>8} {:>16} {:>16} {:>9.2}",
         "total",
         r.tensor_count,
+        commas(r.tensor_bytes),
         commas(r.tensor_bytes),
         gib(r.tensor_bytes)
     );
