@@ -55,6 +55,7 @@ mod device {
                 "silu_mul_f32" => self.linear2(case, inputs, reps),
                 "residual_add_f32" => self.linear2(case, inputs, reps),
                 "softmax_f32" => self.softmax(case, inputs, reps),
+                "attn_decode_f32" => self.attention(case, inputs, reps),
                 other => Err(format!("{other} has no device launcher")),
             }
         }

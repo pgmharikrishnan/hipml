@@ -85,6 +85,7 @@ fn kernels() {
         let geometry = match k.kind {
             KernelKind::PerRow { block } => format!("per-row, {block} threads"),
             KernelKind::PerHead { block } => format!("per-head, {block} threads"),
+            KernelKind::PerHeadOnDim => "per-head, one thread per dim".to_string(),
             KernelKind::Linear { block } => format!("linear, {block} threads"),
             KernelKind::HostOnly(why) => format!("host-only: {why}"),
         };
@@ -254,6 +255,7 @@ fn bytes_moved(case: &OpCase, inputs: &[Tensor]) -> usize {
     let read: usize = inputs.iter().map(|t| t.numel() * 4).sum();
     let written = match case.name {
         "gemv_f32" => case.scalar("m") as usize * 4,
+        "attn_decode_f32" => case.scalar("n_heads") as usize * case.scalar("head_dim") as usize * 4,
         "rmsnorm_f32" | "softmax_f32" => case.scalar("n") as usize * 4,
         _ => inputs[0].numel() * 4,
     };

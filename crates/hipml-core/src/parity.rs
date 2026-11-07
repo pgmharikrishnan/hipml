@@ -185,6 +185,36 @@ pub fn cases() -> Vec<OpCase> {
             },
         },
         OpCase {
+            name: "attn_decode_f32",
+            tol: Tol::DEFAULT,
+            seed: 0x0F1E_2D3C_4B5A_6978,
+            scalars: &[
+                ("n_heads", 8.0),
+                ("n_kv", 2.0),
+                ("head_dim", 64.0),
+                ("seq", 64.0),
+                ("scale", 0.125),
+            ],
+            build: |rng| {
+                let (n_heads, n_kv, head_dim, seq, scale) =
+                    (8usize, 2usize, 64usize, 64usize, 0.125f32);
+                let q = Tensor::from_fn(vec![n_heads, head_dim], |_| rng.normal());
+                let k = Tensor::from_fn(vec![n_kv, seq, head_dim], |_| rng.normal_scaled(0.3));
+                let v = Tensor::from_fn(vec![n_kv, seq, head_dim], |_| rng.normal());
+                let expected = ops::attn_decode_f32(
+                    q.data(),
+                    k.data(),
+                    v.data(),
+                    n_heads,
+                    n_kv,
+                    head_dim,
+                    seq,
+                    scale,
+                );
+                (vec![q, k, v], expected)
+            },
+        },
+        OpCase {
             name: "sample_top_p_f32",
             tol: Tol::EXACT,
             seed: 0xDDDD_EEEE_FFFF_0001,
@@ -207,21 +237,46 @@ pub fn cases() -> Vec<OpCase> {
 /// These are the shapes that decide whether a kernel approaches the card's
 /// roofline, so they are measured and never compared against a CPU reference.
 pub fn bench_cases() -> Vec<OpCase> {
-    vec![OpCase {
-        name: "gemv_f32",
+    let attention = OpCase {
+        name: "attn_decode_f32",
         tol: Tol::DEFAULT,
-        seed: 0xBEEF_1234_5678_9ABC,
-        // Ripple-65B's ffn_up: [40960, 5120] — 838 MB of fp32 weights, which is
-        // the bandwidth-bound case a dense model actually runs.
-        scalars: &[("m", 40960.0), ("k", 5120.0)],
+        seed: 0x1234_5678_9ABC_DEF0,
+        // Ripple-65B at a 12K context: 80 query heads over 8 KV heads, head_dim
+        // 128. K and V are 100 MB of fp32, which is the cache a token streams.
+        scalars: &[
+            ("n_heads", 80.0),
+            ("n_kv", 8.0),
+            ("head_dim", 128.0),
+            ("seq", 12288.0),
+            ("scale", 0.08838834764831845),
+        ],
         build: |rng| {
-            let (m, k) = (40960usize, 5120usize);
-            // Uniform, not normal: 210M Box-Muller draws would take seconds and
-            // the values are irrelevant to a bandwidth measurement.
-            let w = Tensor::from_fn(vec![m, k], |_| (rng.uniform() - 0.5) * 0.04);
-            let x = Tensor::from_fn(vec![k], |_| rng.uniform() - 0.5);
-            let expected = Vec::new();
-            (vec![w, x], expected)
+            let (n_heads, n_kv, head_dim, seq) = (80usize, 8usize, 128usize, 12288usize);
+            let q = Tensor::from_fn(vec![n_heads, head_dim], |_| (rng.uniform() - 0.5) * 0.1);
+            let k = Tensor::from_fn(vec![n_kv, seq, head_dim], |_| (rng.uniform() - 0.5) * 0.1);
+            let v = Tensor::from_fn(vec![n_kv, seq, head_dim], |_| rng.uniform() - 0.5);
+            (vec![q, k, v], Vec::new())
         },
-    }]
+    };
+
+    vec![
+        OpCase {
+            name: "gemv_f32",
+            tol: Tol::DEFAULT,
+            seed: 0xBEEF_1234_5678_9ABC,
+            // Ripple-65B's ffn_up: [40960, 5120] — 838 MB of fp32 weights, which is
+            // the bandwidth-bound case a dense model actually runs.
+            scalars: &[("m", 40960.0), ("k", 5120.0)],
+            build: |rng| {
+                let (m, k) = (40960usize, 5120usize);
+                // Uniform, not normal: 210M Box-Muller draws would take seconds and
+                // the values are irrelevant to a bandwidth measurement.
+                let w = Tensor::from_fn(vec![m, k], |_| (rng.uniform() - 0.5) * 0.04);
+                let x = Tensor::from_fn(vec![k], |_| rng.uniform() - 0.5);
+                let expected = Vec::new();
+                (vec![w, x], expected)
+            },
+        },
+        attention,
+    ]
 }
