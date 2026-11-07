@@ -28,7 +28,7 @@
 #define WARPS (BLOCK / 32)
 #define ROWS_PER_WARP 2
 #define ROW_TILE (WARPS * ROWS_PER_WARP)
-#define K_TILE 1024
+#define K_TILE 2048
 
 // Mirrors the manifest's KernelKind::RowTile { rows = ROW_TILE, block = BLOCK };
 // change both together.
