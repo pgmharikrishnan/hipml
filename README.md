@@ -115,7 +115,8 @@ launched that is not also testable.
 - **One vendor API.** `amdhip64` only, no wrappers, no rocBLAS yet.
 
 See [`docs/architecture.md`](docs/architecture.md) for the layer budget, the
-memory model and the milestones.
+memory model and the milestones, and [`docs/benchmarks.md`](docs/benchmarks.md)
+for measured speeds against the bandwidth and compute rooflines.
 
 ## License
 
