@@ -2,13 +2,15 @@
 //
 // Row-tile GEMV: one block owns ROW_TILE output rows (one warp per row) and
 // stages the x k-tile in shared memory once, so x is read once per tile instead
-// of once per row. This is the same structure that took the f32 GEMM from
-// 92.7 GB/s to 627 GB/s.
+// of once per row. Same structure that took the f32 batched GEMM to 627 GB/s.
 //
-// Each lane owns 4 consecutive columns, read as one float4 from shared. Its
-// weight bytes are four ql bytes and four qh bytes (2-byte aligned in Q6_K, so
-// two uint16 loads each). A 4-value chunk never crosses a 16-value scale
-// sub-block, so one int8 scale covers it.
+// The shared tile is de-interleaved by 256-value group: component `c` of a group
+// lives at sx[g*256 + c*32 + lane], so a lane's eight scalar reads hit eight
+// distinct banks and the warp has no bank conflicts.
+//
+// Each lane owns 8 consecutive columns. In Q6_K those are eight ql bytes and
+// eight qh bytes (2-byte aligned, so four uint16 loads each) and one int8
+// scale: a chunk never crosses a 16-value scale sub-block.
 //
 // Q6_K super-block (210 bytes, 256 values):
 //   ql(128) qh(64) scales(16) d(2)
@@ -28,6 +30,31 @@
 
 // Mirrors the manifest's KernelKind::RowTile { rows = ROW_TILE, block = BLOCK };
 // change both together.
+
+static __device__ __forceinline__ void stage_group6(const float* __restrict__ x,
+                                                    float* __restrict__ sx,
+                                                    int base, int j)
+{
+    const float4 a = reinterpret_cast<const float4*>(x + base)[2 * j];
+    const float4 b = reinterpret_cast<const float4*>(x + base)[2 * j + 1];
+    const int g = j >> 5;
+    const int lane = j & 31;
+    float* s = sx + g * 256 + lane;
+    s[0 * 32] = a.x;
+    s[1 * 32] = a.y;
+    s[2 * 32] = a.z;
+    s[3 * 32] = a.w;
+    s[4 * 32] = b.x;
+    s[5 * 32] = b.y;
+    s[6 * 32] = b.z;
+    s[7 * 32] = b.w;
+}
+
+static __device__ __forceinline__ unsigned int join16(unsigned short a,
+                                                      unsigned short b)
+{
+    return (unsigned int)a | ((unsigned int)b << 16);
+}
 
 extern "C" __global__ void gemv_q6_k(
     const unsigned char* __restrict__ w,
@@ -50,18 +77,17 @@ extern "C" __global__ void gemv_q6_k(
     float acc = 0.0f;
     for (int base = 0; base < k; base += K_TILE) {
         const int n = min(K_TILE, k - base);
-
-        if ((n & 3) == 0) {
-            const int nv = n >> 2;
-            for (int j = tid; j < nv; j += BLOCK)
-                reinterpret_cast<float4*>(sx)[j] =
-                    reinterpret_cast<const float4*>(x + base)[j];
-        } else {
-            for (int j = tid; j < n; j += BLOCK) sx[j] = x[base + j];
-        }
+        const int nchunks = n >> 3;
+        for (int j = tid; j < nchunks; j += BLOCK) stage_group6(x, sx, base, j);
         __syncthreads();
 
-        for (int c = lane * 4; c < n; c += 128) {
+        for (int c = lane * 8; c < n; c += 256) {
+            const int g = c >> 8;
+            const int s = g * 256 + lane;
+            float xv[8];
+#pragma unroll
+            for (int comp = 0; comp < 8; ++comp) xv[comp] = sx[s + comp * 32];
+
             const int p = base + c;
             const int blk = p >> 8;
             const int within = p & 255;
@@ -79,33 +105,32 @@ extern "C" __global__ void gemv_q6_k(
 
             const int ql_off = half * 64 + ((group & 1) ? 32 : 0) + l;
             const int qh_off = 128 + half * 32 + l;
-            const unsigned short ql0 =
-                *reinterpret_cast<const unsigned short*>(b + ql_off);
-            const unsigned short ql1 =
-                *reinterpret_cast<const unsigned short*>(b + ql_off + 2);
-            const unsigned short qh0 =
-                *reinterpret_cast<const unsigned short*>(b + qh_off);
-            const unsigned short qh1 =
-                *reinterpret_cast<const unsigned short*>(b + qh_off + 2);
-            const unsigned int qlw = (unsigned int)ql0 | ((unsigned int)ql1 << 16);
-            const unsigned int qhw = (unsigned int)qh0 | ((unsigned int)qh1 << 16);
+            const unsigned int qlw0 = join16(
+                *reinterpret_cast<const unsigned short*>(b + ql_off),
+                *reinterpret_cast<const unsigned short*>(b + ql_off + 2));
+            const unsigned int qlw1 = join16(
+                *reinterpret_cast<const unsigned short*>(b + ql_off + 4),
+                *reinterpret_cast<const unsigned short*>(b + ql_off + 6));
+            const unsigned int qhw0 = join16(
+                *reinterpret_cast<const unsigned short*>(b + qh_off),
+                *reinterpret_cast<const unsigned short*>(b + qh_off + 2));
+            const unsigned int qhw1 = join16(
+                *reinterpret_cast<const unsigned short*>(b + qh_off + 4),
+                *reinterpret_cast<const unsigned short*>(b + qh_off + 6));
 
-            const float4 xv = reinterpret_cast<const float4*>(sx)[c >> 2];
             const int shift = 2 * group;
             const bool high = group >= 2;
 
 #pragma unroll
-            for (int i = 0; i < 4; ++i) {
-                const unsigned int qb = (qlw >> (8 * i)) & 0xFFu;
-                const unsigned int hb = (qhw >> (8 * i)) & 0xFFu;
+            for (int i = 0; i < 8; ++i) {
+                const unsigned int qw = (i < 4) ? qlw0 : qlw1;
+                const unsigned int hw = (i < 4) ? qhw0 : qhw1;
+                const unsigned int qb = (qw >> (8 * (i & 3))) & 0xFFu;
+                const unsigned int hb = (hw >> (8 * (i & 3))) & 0xFFu;
                 const unsigned int nib = high ? (qb >> 4) : (qb & 0xF);
                 const unsigned int hi = (hb >> shift) & 3u;
                 const int v = (int)(nib | (hi << 4)) - 32;
-                const float xf = (i == 0) ? xv.x
-                                : (i == 1) ? xv.y
-                                : (i == 2) ? xv.z
-                                           : xv.w;
-                acc = fmaf(scale * (float)v, xf, acc);
+                acc = fmaf(scale * (float)v, xv[i], acc);
             }
         }
         __syncthreads();

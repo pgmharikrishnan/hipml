@@ -1,22 +1,25 @@
 // y[row] = dequant_q4_k(W[row,:]) . x
 //
 // Row-tile GEMV: one block owns ROW_TILE output rows (one warp per row) and
-// stages the x k-tile in shared memory once. Every warp then reuses that tile,
-// so x is read from global/L2 once per ROW_TILE rows instead of once per row.
-// With 4-bit weights the old per-row kernel read 5-8x more x bytes than weight
+// stages the x k-tile in shared memory once. Every warp reuses that tile, so x
+// is read from global/L2 once per ROW_TILE rows instead of once per row. With
+// 4-bit weights the old per-row kernel read 5-8x more x bytes than weight
 // bytes and was L2-bound; this is the fix.
 //
-// Each lane owns 4 consecutive columns, read as one float4 from shared. Its
-// weight bytes are one 32-bit word (four nibbles) from the Q4_K row. Lanes 0-7
-// cover sub-block 0, 8-15 sub-block 1 (the high nibble of the same bytes), and
-// so on, so a warp's weight load spans two 32-byte groups with no waste.
+// The shared tile is de-interleaved by 256-value group: component `c` of the
+// 256-value group lives at sx[g*256 + c*32 + lane]. A lane reads eight
+// consecutive columns as eight scalar shared loads, one bank per lane, so there
+// are no bank conflicts. (A float4 read at a 4-float stride would put lanes
+// 0/8/16/24 on the same banks.)
+//
+// Each lane owns 8 consecutive columns and loads their 8 Q4_K bytes as two
+// 32-bit words; one d/dmin/scale/min set covers them.
 //
 // Q4_K super-block (144 bytes, 256 values):
 //   d(2) dmin(2) scales(12) qs(128)
 // Math is unchanged: y = d*scale[j]*q - dmin*min[j] for sub-block j.
 //
-// Two barriers per k-tile, none per row. The only reduction is a warp shuffle
-// tree: 32 lanes are the only partials left.
+// Two barriers per k-tile, none per row; the reduction is a warp shuffle tree.
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -43,6 +46,26 @@ static __device__ __forceinline__ void q4k_scale_min(int j, const unsigned char*
     }
 }
 
+// Stage a 256-value group de-interleaved: sx[g*256 + comp*32 + lane].
+static __device__ __forceinline__ void stage_group(const float* __restrict__ x,
+                                                   float* __restrict__ sx,
+                                                   int base, int j)
+{
+    const float4 a = reinterpret_cast<const float4*>(x + base)[2 * j];
+    const float4 b = reinterpret_cast<const float4*>(x + base)[2 * j + 1];
+    const int g = j >> 5;  // 32 chunks of 8 values per 256-value group
+    const int lane = j & 31;
+    float* s = sx + g * 256 + lane;
+    s[0 * 32] = a.x;
+    s[1 * 32] = a.y;
+    s[2 * 32] = a.z;
+    s[3 * 32] = a.w;
+    s[4 * 32] = b.x;
+    s[5 * 32] = b.y;
+    s[6 * 32] = b.z;
+    s[7 * 32] = b.w;
+}
+
 extern "C" __global__ void gemv_q4_k(
     const unsigned char* __restrict__ w,
     const float* __restrict__ x,
@@ -56,7 +79,7 @@ extern "C" __global__ void gemv_q4_k(
     const int lane = tid & 31;
     const int warp = tid >> 5;
     const int row = blockIdx.x * ROW_TILE + warp;
-    const int r = min(row, m - 1); // clamp, do not store when row >= m
+    const int r = min(row, m - 1);
     const int nblocks = k / Q4K_VALUES;
     const unsigned char* rp =
         w + (size_t)r * (size_t)nblocks * Q4K_BLOCK_BYTES;
@@ -64,25 +87,22 @@ extern "C" __global__ void gemv_q4_k(
     float acc = 0.0f;
     for (int base = 0; base < k; base += K_TILE) {
         const int n = min(K_TILE, k - base);
-
-        // Stage x[base, base+n) once for all ROW_TILE rows.
-        if ((n & 3) == 0) {
-            const int nv = n >> 2;
-            for (int j = tid; j < nv; j += BLOCK)
-                reinterpret_cast<float4*>(sx)[j] =
-                    reinterpret_cast<const float4*>(x + base)[j];
-        } else {
-            for (int j = tid; j < n; j += BLOCK) sx[j] = x[base + j];
-        }
+        const int nchunks = n >> 3;
+        for (int j = tid; j < nchunks; j += BLOCK) stage_group(x, sx, base, j);
         __syncthreads();
 
-        // One warp per row; each lane owns four consecutive columns.
-        for (int c = lane * 4; c < n; c += 128) {
+        for (int c = lane * 8; c < n; c += 256) {
+            const int g = c >> 8;
+            const int s = g * 256 + lane;
+            float xv[8];
+#pragma unroll
+            for (int comp = 0; comp < 8; ++comp) xv[comp] = sx[s + comp * 32];
+
             const int p = base + c;
-            const int blk = p >> 8; // p / 256
+            const int blk = p >> 8;
             const int within = p & 255;
             const int sub = within >> 5;
-            const int part = (within & 31) >> 2;
+            const int part = (within & 31) >> 3;
 
             const unsigned char* b = rp + (size_t)blk * Q4K_BLOCK_BYTES;
             const float d = __half2float(*reinterpret_cast<const __half*>(b));
@@ -93,20 +113,21 @@ extern "C" __global__ void gemv_q4_k(
             const float scale = d * (float)sc;
             const float minv = dmin * (float)mn;
 
-            const unsigned int qw = *reinterpret_cast<const unsigned int*>(
-                b + 16 + (sub >> 1) * 32 + part * 4);
-            const float4 xv = reinterpret_cast<const float4*>(sx)[c >> 2];
+            const unsigned int* qp = reinterpret_cast<const unsigned int*>(
+                b + 16 + (sub >> 1) * 32 + part * 8);
+            union Q4Bytes {
+                unsigned int w[2];
+                unsigned char b[8];
+            } q;
+            q.w[0] = qp[0];
+            q.w[1] = qp[1];
             const bool high = (sub & 1) != 0;
 
 #pragma unroll
-            for (int i = 0; i < 4; ++i) {
-                const unsigned int byte = (qw >> (8 * i)) & 0xFFu;
+            for (int i = 0; i < 8; ++i) {
+                const unsigned int byte = q.b[i];
                 const int v = high ? (int)(byte >> 4) : (int)(byte & 0xF);
-                const float xf = (i == 0) ? xv.x
-                                : (i == 1) ? xv.y
-                                : (i == 2) ? xv.z
-                                           : xv.w;
-                acc = fmaf(scale * (float)v - minv, xf, acc);
+                acc = fmaf(scale * (float)v - minv, xv[i], acc);
             }
         }
         __syncthreads();
