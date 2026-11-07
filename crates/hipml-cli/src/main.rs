@@ -12,6 +12,8 @@ use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
 mod attn_cmd;
 #[cfg(feature = "hip")]
 mod device_cmd;
+#[cfg(feature = "hip")]
+mod gpu_bench_cmd;
 mod gen_cmd;
 mod kv_cmds;
 mod load_cmd;
@@ -54,7 +56,7 @@ fn main() {
         "bench-kv" => std::process::exit(kv_cmds::bench_kv(&args[1..])),
         "gpu-bench" => {
             #[cfg(feature = "hip")]
-            std::process::exit(device_cmd::bench(&args[1..]));
+            std::process::exit(gpu_bench_cmd::bench(&args[1..]));
             #[cfg(not(feature = "hip"))]
             {
                 eprintln!("gpu-bench needs a build with `--features hip`");

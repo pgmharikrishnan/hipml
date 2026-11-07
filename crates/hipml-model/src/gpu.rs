@@ -13,7 +13,11 @@
 //! Every weight matvec goes through the quantized GEMV over the loader's
 //! resident `DeviceTensor`s: nothing is dequantized on the host and no weight
 //! is uploaded twice. Launches are chained on one stream and the token is
-//! synchronized once, before the logits are read back for argmax.
+//! synchronized once, before the sampled id comes back.
+//!
+//! Nothing on the decode path round-trips to the host: the embedding row is
+//! dequantized into `x` on the device and the 248,320-way argmax runs on the
+//! device, returning one u32. `prefill.rs` adds the chunked prompt path.
 //!
 //! The full-attention block borrows the resident projections through
 //! `AttnLayer::new_resident`; the SSM block borrows them through
@@ -36,6 +40,15 @@ use crate::Model;
 /// reach the engine's private scratch and layer list.
 #[path = "gpu/prefill.rs"]
 mod prefill;
+#[path = "gpu/deep_kv.rs"]
+mod deep_kv;
+#[path = "gpu/layers.rs"]
+mod layers;
+
+use layers::{build_attn, build_ssm};
+
+pub use deep_kv::DeepKv;
+use deep_kv::MAX_SPLITS;
 
 struct Block<'a> {
     attn_norm: Buffer,
@@ -79,85 +92,6 @@ impl KvMode {
             KvMode::Q8 => "q8",
             KvMode::Q4 => "q4",
         }
-    }
-}
-
-/// One layer's quantized K/V cache plus the split-K scratch.
-pub struct DeepKv {
-    pub dtype: KvDtype,
-    pub seq: usize,
-    n_kv: usize,
-    head_dim: usize,
-    k: Buffer,
-    v: Buffer,
-    part_acc: Buffer,
-    part_ml: Buffer,
-}
-
-/// Same bound as `attn_gpu`; the partial buffers are sized once.
-///
-/// The split count sets the grid: `n_kv * splits` blocks. At 100K a 64-split
-/// grid is 256 blocks, four waves on this card, and each block walks 1,562
-/// rows. Doubling and quadrupling that (measured) is slower: the partials grow
-/// faster than the parallelism helps.
-const MAX_SPLITS: usize = 64;
-
-impl DeepKv {
-    fn new(cfg: &Config, seq: usize, dtype: KvDtype) -> Result<DeepKv, String> {
-        let row = dtype.row_bytes(cfg.head_dim);
-        let bytes = cfg.n_head_kv * seq * row;
-        let f32s = bytes.div_ceil(4);
-        Ok(DeepKv {
-            dtype,
-            seq,
-            n_kv: cfg.n_head_kv,
-            head_dim: cfg.head_dim,
-            k: Buffer::alloc(f32s)?,
-            v: Buffer::alloc(f32s)?,
-            part_acc: Buffer::alloc(cfg.n_head * MAX_SPLITS * cfg.head_dim)?,
-            part_ml: Buffer::alloc(cfg.n_head * MAX_SPLITS * 2)?,
-        })
-    }
-
-    fn row(&self) -> usize {
-        self.dtype.row_bytes(self.head_dim)
-    }
-
-    /// `2 * n_kv * seq * row_bytes`.
-    pub fn bytes(&self) -> usize {
-        2 * self.n_kv * self.seq * self.row()
-    }
-
-    /// Fill the first `depth` positions of every head with format-valid blocks
-    /// so a 100K decode can be measured without a 100K token prefill.
-    fn fill_synthetic(&self, depth: usize, seed: u64) -> Result<(), String> {
-        let blocks_per_row = self.head_dim / kv::BLOCK;
-        let pattern = kv::synthetic_blocks(self.dtype, depth * blocks_per_row, seed);
-        let row = self.row();
-        for h in 0..self.n_kv {
-            let off = h * self.seq * row;
-            self.k.upload_bytes(off, &pattern)?;
-            self.v.upload_bytes(off, &pattern)?;
-        }
-        Ok(())
-    }
-
-    /// Quantize one token's K/V rows and append them at `pos`.
-    ///
-    /// Kept as the host definition of the format for tests and for the parity
-    /// harness; the graph itself appends with `kv_encode` on the device.
-    #[allow(dead_code)]
-    fn append(&self, k: &[f32], v: &[f32], pos: usize) -> Result<(), String> {
-        let hd = self.head_dim;
-        let row = self.row();
-        for h in 0..self.n_kv {
-            let kb = kv::quantize(self.dtype, &k[h * hd..(h + 1) * hd]);
-            let vb = kv::quantize(self.dtype, &v[h * hd..(h + 1) * hd]);
-            let off = (h * self.seq + pos) * row;
-            self.k.upload_bytes(off, &kb)?;
-            self.v.upload_bytes(off, &vb)?;
-        }
-        Ok(())
     }
 }
 
@@ -466,70 +400,4 @@ fn deep_attention(
         0,
         0,
     )
-}
-
-fn build_attn<'a>(
-    model: &'a Model,
-    l: &Launcher,
-    cfg: &Config,
-    i: usize,
-    n_ctx: usize,
-) -> Result<AttnLayer<'a>, String> {
-    let q = attn_mat(model, &format!("blk.{i}.attn_q.weight"))?;
-    let k = attn_mat(model, &format!("blk.{i}.attn_k.weight"))?;
-    let v = attn_mat(model, &format!("blk.{i}.attn_v.weight"))?;
-    let o = attn_mat(model, &format!("blk.{i}.attn_output.weight"))?;
-    let qn = model.f32_vec(&format!("blk.{i}.attn_q_norm.weight"))?;
-    let kn = model.f32_vec(&format!("blk.{i}.attn_k_norm.weight"))?;
-    AttnLayer::new_resident(l, q, k, v, o, &qn, &kn, cfg, n_ctx)
-}
-
-/// `(resident payload, rows, cols, kind)` for one full-attention projection.
-fn attn_mat<'a>(
-    model: &'a Model,
-    name: &str,
-) -> Result<(&'a ByteBuffer, usize, usize, Kind), String> {
-    let t = model.tensor(name).ok_or_else(|| format!("model has no tensor {name}"))?;
-    let shape = t.shape();
-    if shape.len() != 2 {
-        return Err(format!("{name}: expected a matrix, got {shape:?}"));
-    }
-    Ok((
-        t.buffer(),
-        shape[0] as usize,
-        shape[1] as usize,
-        mat_kind(t.ty())?,
-    ))
-}
-
-fn build_ssm<'a>(
-    model: &'a Model,
-    l: &'a Launcher,
-    cfg: &Config,
-    i: usize,
-) -> Result<SsmGpuLayer<'a>, String> {
-    let dims = SsmDims::from_config(cfg);
-    let proj = |name: &str| -> Result<(&'a ByteBuffer, &'static str), String> {
-        let t = model.tensor(name).ok_or_else(|| format!("model has no tensor {name}"))?;
-        Ok((t.buffer(), gemv_entry(t.ty())?))
-    };
-    let conv = model.f32_vec(&format!("blk.{i}.ssm_conv1d.weight"))?;
-    let dt = model.f32_vec(&format!("blk.{i}.ssm_dt.bias"))?;
-    let a = model.f32_vec(&format!("blk.{i}.ssm_a"))?;
-    let norm = model.f32_vec(&format!("blk.{i}.ssm_norm.weight"))?;
-    let refs = SsmResidentRefs {
-        wqkv: proj(&format!("blk.{i}.attn_qkv.weight"))?,
-        wgate: proj(&format!("blk.{i}.attn_gate.weight"))?,
-        alpha: proj(&format!("blk.{i}.ssm_alpha.weight"))?,
-        beta: proj(&format!("blk.{i}.ssm_beta.weight"))?,
-        wout: proj(&format!("blk.{i}.ssm_out.weight"))?,
-        conv_w: &conv,
-        dt_bias: &dt,
-        a: &a,
-        norm: &norm,
-    };
-    // The small vectors live as long as the layer; `new_resident` uploads them.
-    let layer = SsmGpuLayer::new_resident(l.module(), l.stream(), dims, &refs)?;
-    let _ = l;
-    Ok(layer)
 }
