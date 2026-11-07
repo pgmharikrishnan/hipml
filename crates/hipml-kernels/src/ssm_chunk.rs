@@ -81,8 +81,9 @@ impl<'a> SsmGpuLayer<'a> {
         self.gate_norm_at(o, z, gated)
     }
 
-    /// The whole recurrent chain for the chunk: five launches for the layer
-    /// instead of `tokens * 6` plus `tokens` for the out projection.
+    /// The whole recurrent chain for the chunk: six launches for the layer
+    /// (gates, conv, the carried window copy, L2, recurrence, gated RMS)
+    /// instead of `tokens * 6` of them.
     pub fn steps_chunk(&self, c: &SsmChunk, tokens: usize) -> Result<(), String> {
         let d = &self.dims;
         let s = self.stream;
