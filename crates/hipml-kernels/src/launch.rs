@@ -50,6 +50,7 @@ mod device {
         ) -> Result<Vec<f32>, String> {
             match case.name {
                 "gemv_f32" => self.gemv(case, inputs, reps),
+                "gemm_f32" => self.gemm(case, inputs, reps),
                 "rmsnorm_f32" => self.rmsnorm(case, inputs, reps),
                 "rope_neox_f32" => self.rope(case, inputs, reps),
                 "silu_mul_f32" => self.linear2(case, inputs, reps),
@@ -76,6 +77,37 @@ mod device {
                 &mut p_w as *mut _ as *mut c_void,
                 &mut p_x as *mut _ as *mut c_void,
                 &mut p_y as *mut _ as *mut c_void,
+                &mut v_m as *mut _ as *mut c_void,
+                &mut v_k as *mut _ as *mut c_void,
+            ];
+            for _ in 0..reps {
+                kernel.launch(LaunchConfig::per_row(m, 256), &self.stream, &mut params)?;
+            }
+            self.stream.synchronize()?;
+            y.to_host()
+        }
+
+        fn gemm(&self, case: &OpCase, inputs: &[Tensor], reps: usize) -> Result<Vec<f32>, String> {
+            let (r, m, k) = (
+                case.scalar("r") as usize,
+                case.scalar("m") as usize,
+                case.scalar("k") as usize,
+            );
+            let w = Buffer::from_host(inputs[0].data())?;
+            let x = Buffer::from_host(inputs[1].data())?;
+            let y = Buffer::alloc(r * m)?;
+            let kernel = self.module.kernel("gemm_f32")?;
+            let mut p_w = w.as_ptr();
+            let mut p_x = x.as_ptr();
+            let mut p_y = y.as_ptr();
+            let mut v_r = r as i32;
+            let mut v_m = m as i32;
+            let mut v_k = k as i32;
+            let mut params: [*mut c_void; 6] = [
+                &mut p_w as *mut _ as *mut c_void,
+                &mut p_x as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut v_r as *mut _ as *mut c_void,
                 &mut v_m as *mut _ as *mut c_void,
                 &mut v_k as *mut _ as *mut c_void,
             ];

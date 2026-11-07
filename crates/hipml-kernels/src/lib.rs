@@ -43,6 +43,11 @@ pub const KERNELS: &[KernelSpec] = &[
         kind: KernelKind::PerRow { block: 256 },
     },
     KernelSpec {
+        name: "gemm_f32",
+        entry: "gemm_f32",
+        kind: KernelKind::PerRow { block: 256 },
+    },
+    KernelSpec {
         name: "rmsnorm_f32",
         entry: "rmsnorm_f32",
         kind: KernelKind::PerRow { block: 256 },
