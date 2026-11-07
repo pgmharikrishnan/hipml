@@ -26,7 +26,7 @@
 #define Q6K_BLOCK_BYTES 210
 #define BLOCK 256
 #define WARPS (BLOCK / 32)
-#define ROWS_PER_WARP 2
+#define ROWS_PER_WARP 4
 #define ROW_TILE (WARPS * ROWS_PER_WARP)
 #define K_TILE 512
 
