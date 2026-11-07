@@ -39,8 +39,14 @@ residual_add_f32     PASS    max_abs 0.00e0  max_rel 0.00e0
 
 | Case | Launch | Effective bandwidth |
 |---|---:|---:|
-| gemv `[40960, 5120]` fp32 (838 MB) | 1324 µs | **633.6 GB/s** |
-| gemv `[64, 512]` | 0.55 µs | launch-bound |
+| gemv `[40960, 5120]` fp32 (838 MB) | 1349 µs | **621.7 GB/s** |
+| attn decode, Ripple at 12K (100.7 MB) | 14868 µs | 6.8 GB/s |
+| gemv `[64, 512]` | 1.14 µs | launch-bound |
+
+The attention kernel is correct (parity `1.34e-7`) and deliberately unoptimised:
+one block per head with a block reduction per cache row serialises 12,288 rows.
+Splitting the KV range across blocks — the flash-decoding shape — is the next
+piece of work, and the floor is ~157 µs, so there is room for a 10–30x gain.
 
 ### What that means for M3
 
