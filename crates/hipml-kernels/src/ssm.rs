@@ -243,13 +243,13 @@ impl<'a> SsmGpuLayer<'a> {
     /// Bytes of resident f32 weights (the quantized loader would be smaller).
     pub fn weight_bytes(&self) -> usize {
         let d = &self.dims;
+        // wqkv + (wgate + wout) + conv tap + alpha/beta + dt_bias/a + norm.
         (d.conv_ch * d.n_embd
             + 2 * d.inner() * d.n_embd
             + d.d_conv * d.conv_ch
             + 2 * d.n_v * d.n_embd
             + 2 * d.n_v
-            + d.head_v
-            + d.n_embd * d.inner())
+            + d.head_v)
             * 4
     }
 
