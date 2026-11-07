@@ -51,11 +51,16 @@ fn mat_kind(ty: TensorType) -> Result<Kind, String> {
     })
 }
 
+enum ProjData<'a> {
+    /// A GGUF block payload streamed by the quantized GEMV.
+    Resident(&'a ByteBuffer, &'static str),
+    /// An f32 matrix dequantized once at build time (Q5_K has no GEMV kernel).
+    F32(Buffer),
+}
+
 /// A projection that a launcher can stream straight from VRAM.
-#[derive(Clone, Copy)]
 pub struct Proj<'a> {
-    pub data: &'a ByteBuffer,
-    pub entry: &'static str,
+    data: ProjData<'a>,
     pub rows: usize,
     pub cols: usize,
 }
@@ -69,22 +74,55 @@ impl<'a> Proj<'a> {
         if shape.len() != 2 {
             return Err(format!("{name}: expected a matrix, got {shape:?}"));
         }
-        Ok(Proj {
-            data: t.buffer(),
-            entry: gemv_entry(t.ty())?,
-            rows: shape[0] as usize,
-            cols: shape[1] as usize,
-        })
+        let (rows, cols) = (shape[0] as usize, shape[1] as usize);
+        let data = match t.ty() {
+            TensorType::Q5K => ProjData::F32(Buffer::from_host(&dequant_q5_k(t, rows, cols)?)?),
+            ty => ProjData::Resident(t.buffer(), gemv_entry(ty)?),
+        };
+        Ok(Proj { data, rows, cols })
     }
 
-    fn gemv(
-        &self,
-        l: &Launcher,
-        x: &Buffer,
-        y: &Buffer,
-    ) -> Result<(), String> {
-        l.run_quant_resident(self.entry, self.data, x, y, self.rows, self.cols)
+    fn gemv(&self, l: &Launcher, x: &Buffer, y: &Buffer) -> Result<(), String> {
+        match &self.data {
+            ProjData::Resident(w, entry) => {
+                l.run_quant_resident(entry, w, x, y, self.rows, self.cols)
+            }
+            ProjData::F32(w) => l.run_f32_resident(w, x, y, self.rows, self.cols),
+        }
     }
+
+    fn bytes(&self) -> usize {
+        match &self.data {
+            ProjData::Resident(w, _) => w.len(),
+            ProjData::F32(w) => w.len() * 4,
+        }
+    }
+}
+
+/// Dequantize a resident Q5_K matrix once. Qwen3.8-27B stores exactly two of these
+/// (`blk.51/55.ffn_down`), and the loader keeps their bytes resident.
+fn dequant_q5_k(t: &DeviceTensor, rows: usize, cols: usize) -> Result<Vec<f32>, String> {
+    use hipml_core::quant::{dequant_q5_k, Q5_K_BYTES, QK_K};
+    let raw = t.read_back()?;
+    let blocks = cols / QK_K;
+    let row_bytes = blocks * Q5_K_BYTES;
+    if raw.len() != rows * row_bytes {
+        return Err(format!(
+            "{}: {} bytes, expected {} rows x {} bytes",
+            t.name(),
+            raw.len(),
+            rows,
+            row_bytes
+        ));
+    }
+    let mut out = vec![0.0f32; rows * cols];
+    for r in 0..rows {
+        for b in 0..blocks {
+            let src = &raw[r * row_bytes + b * Q5_K_BYTES..r * row_bytes + (b + 1) * Q5_K_BYTES];
+            dequant_q5_k(src, &mut out[r * cols + b * QK_K..r * cols + (b + 1) * QK_K]);
+        }
+    }
+    Ok(out)
 }
 
 struct Block<'a> {
@@ -182,7 +220,7 @@ impl<'a> GpuEngine<'a> {
     pub fn weight_bytes(&self) -> usize {
         let mut b = 0usize;
         for l in &self.layers {
-            b += l.gate.data.len() + l.up.data.len() + l.down.data.len();
+            b += l.gate.bytes() + l.up.bytes() + l.down.bytes();
             b += match &l.kind {
                 BlockKind::Full(a) => a.weight_bytes(),
                 BlockKind::Ssm(s) => s.weight_bytes(),
@@ -265,27 +303,31 @@ fn build_attn<'a>(
     i: usize,
     n_ctx: usize,
 ) -> Result<AttnLayer<'a>, String> {
-    let q = Proj::of(model, &format!("blk.{i}.attn_q.weight"))?;
-    let k = Proj::of(model, &format!("blk.{i}.attn_k.weight"))?;
-    let v = Proj::of(model, &format!("blk.{i}.attn_v.weight"))?;
-    let o = Proj::of(model, &format!("blk.{i}.attn_output.weight"))?;
-    let tensor = |name: &str| -> Result<&DeviceTensor, String> {
-        model.tensor(name).ok_or_else(|| format!("model has no tensor {name}"))
-    };
+    let q = attn_mat(model, &format!("blk.{i}.attn_q.weight"))?;
+    let k = attn_mat(model, &format!("blk.{i}.attn_k.weight"))?;
+    let v = attn_mat(model, &format!("blk.{i}.attn_v.weight"))?;
+    let o = attn_mat(model, &format!("blk.{i}.attn_output.weight"))?;
     let qn = model.f32_vec(&format!("blk.{i}.attn_q_norm.weight"))?;
     let kn = model.f32_vec(&format!("blk.{i}.attn_k_norm.weight"))?;
-    let kind = |t: &DeviceTensor| mat_kind(t.ty());
-    AttnLayer::new_resident(
-        l,
-        (q.data, q.rows, q.cols, kind(tensor(&format!("blk.{i}.attn_q.weight"))?)?),
-        (k.data, k.rows, k.cols, kind(tensor(&format!("blk.{i}.attn_k.weight"))?)?),
-        (v.data, v.rows, v.cols, kind(tensor(&format!("blk.{i}.attn_v.weight"))?)?),
-        (o.data, o.rows, o.cols, kind(tensor(&format!("blk.{i}.attn_output.weight"))?)?),
-        &qn,
-        &kn,
-        cfg,
-        n_ctx,
-    )
+    AttnLayer::new_resident(l, q, k, v, o, &qn, &kn, cfg, n_ctx)
+}
+
+/// `(resident payload, rows, cols, kind)` for one full-attention projection.
+fn attn_mat<'a>(
+    model: &'a Model,
+    name: &str,
+) -> Result<(&'a ByteBuffer, usize, usize, Kind), String> {
+    let t = model.tensor(name).ok_or_else(|| format!("model has no tensor {name}"))?;
+    let shape = t.shape();
+    if shape.len() != 2 {
+        return Err(format!("{name}: expected a matrix, got {shape:?}"));
+    }
+    Ok((
+        t.buffer(),
+        shape[0] as usize,
+        shape[1] as usize,
+        mat_kind(t.ty())?,
+    ))
 }
 
 fn build_ssm<'a>(

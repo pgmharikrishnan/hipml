@@ -111,6 +111,32 @@ impl Launcher {
             kernel.launch(cfg, &self.stream, &mut params)
         }
 
+        /// `gemv_f32` with the weight already resident (the Q5_K fallback, which
+        /// the loader dequantises once at graph build).
+        pub fn run_f32_resident(
+            &self,
+            w: &Buffer,
+            x: &Buffer,
+            y: &Buffer,
+            m: usize,
+            k: usize,
+        ) -> Result<(), String> {
+            let kernel = self.module.kernel("gemv_f32")?;
+            let mut p_w = w.as_ptr();
+            let mut p_x = x.as_ptr();
+            let mut p_y = y.as_ptr();
+            let mut v_m = m as i32;
+            let mut v_k = k as i32;
+            let mut params: [*mut c_void; 5] = [
+                &mut p_w as *mut _ as *mut c_void,
+                &mut p_x as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut v_m as *mut _ as *mut c_void,
+                &mut v_k as *mut _ as *mut c_void,
+            ];
+            kernel.launch(LaunchConfig::per_row(m, 256), &self.stream, &mut params)
+        }
+
         /// Frozen-weight variant of `run_quant_reps`: `w` is already resident in
         /// VRAM, so only x is copied. This is the per-token vocabulary cost.
         pub fn run_quant_resident_reps(
