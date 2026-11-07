@@ -9,8 +9,10 @@
 //! ne1]` tensor in the file is `ne1` rows of `ne0` values here.
 
 use std::io::{self, Read, Seek};
+use std::sync::Arc;
 
 use crate::gguf::Gguf;
+use crate::mmap::Map;
 use crate::quant::{
     dequant_q4_k, dequant_q5_k, dequant_q6_k, dequant_q8_0, TensorType, Q4_K_BYTES, Q5_K_BYTES,
     Q6_K_BYTES, Q8_0_BYTES, QK_K,
@@ -56,12 +58,36 @@ impl Kind {
     }
 }
 
+/// Where the matrix bytes live: read into memory, or a window into the
+/// read-only file map.
+pub enum Bytes {
+    Owned(Vec<u8>),
+    /// `(map, start, len)`; `len` is exactly the tensor payload.
+    Mapped(Arc<Map>, usize, usize),
+}
+
+impl Bytes {
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Bytes::Owned(v) => v,
+            Bytes::Mapped(m, start, len) => m.slice(*start, *len),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Bytes::Owned(v) => v.len(),
+            Bytes::Mapped(_, _, len) => *len,
+        }
+    }
+}
+
 /// A `rows x cols` matrix, row-major, in `kind` blocks.
 pub struct Mat {
     pub rows: usize,
     pub cols: usize,
     pub kind: Kind,
-    pub data: Vec<u8>,
+    pub data: Bytes,
 }
 
 impl Mat {
@@ -92,7 +118,46 @@ impl Mat {
             rows,
             cols,
             kind,
-            data: g.read_tensor(name)?,
+            data: Bytes::Owned(g.read_tensor(name)?),
+        })
+    }
+
+    /// Map a tensor directly from the file, without copying it.
+    pub fn from_map<R: Read + Seek>(
+        map: &Arc<Map>,
+        g: &Gguf<R>,
+        name: &str,
+    ) -> io::Result<Mat> {
+        let info = g
+            .tensor(name)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no tensor {name}")))?
+            .clone();
+        let cols = info.ne0() as usize;
+        let rows = info.rows() as usize;
+        let kind = Kind::of(info.ty)
+            .map_err(|e| io::Error::new(e.kind(), format!("tensor {name}: {e}")))?;
+        let expect = rows * kind.row_bytes(cols);
+        if expect as u64 != info.nbytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "tensor {name}: {}x{} {} needs {expect} bytes, file has {}",
+                    rows,
+                    cols,
+                    info.ty.name(),
+                    info.nbytes
+                ),
+            ));
+        }
+        let start = usize::try_from(g.data_offset + info.offset)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "tensor offset too large"))?;
+        let len = usize::try_from(info.nbytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "tensor size too large"))?;
+        Ok(Mat {
+            rows,
+            cols,
+            kind,
+            data: Bytes::Mapped(map.clone(), start, len),
         })
     }
 
@@ -102,7 +167,8 @@ impl Mat {
     pub fn row_f32(&self, row: usize) -> Vec<f32> {
         assert!(row < self.rows, "row {row} out of {}", self.rows);
         let rb = self.kind.row_bytes(self.cols);
-        let bytes = &self.data[row * rb..(row + 1) * rb];
+        let data = self.data.as_slice();
+        let bytes = &data[row * rb..(row + 1) * rb];
         let mut out = vec![0.0f32; self.cols];
         dequant_row(self.kind, bytes, &mut out);
         out
@@ -138,9 +204,11 @@ impl Mat {
 
     fn gemv_chunk(&self, start: usize, out: &mut [f32], x: &[f32]) {
         let rb = self.kind.row_bytes(self.cols);
+        // One bounds check per chunk instead of per row; the map is huge.
+        let data = self.data.as_slice();
         for (i, o) in out.iter_mut().enumerate() {
             let row = start + i;
-            let bytes = &self.data[row * rb..(row + 1) * rb];
+            let bytes = &data[row * rb..(row + 1) * rb];
             *o = dot_row(self.kind, bytes, self.cols, x);
         }
     }

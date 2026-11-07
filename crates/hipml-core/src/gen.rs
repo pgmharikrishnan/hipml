@@ -13,12 +13,12 @@ pub struct Generated {
 ///
 /// `n_ctx` sizes the KV cache; pass prompt length + `n` + slack.
 pub fn greedy(model: &Model, tok: &Tokenizer, prompt_ids: &[u32], n: usize, n_ctx: usize) -> Generated {
-    greedy_with(model, tok, prompt_ids, n, n_ctx, |_, _| {})
+    greedy_with(model, tok, prompt_ids, n, n_ctx, |_, _, _| {})
 }
 
 /// As [`greedy`], calling `on_token(index, id)` as each token is produced so a
 /// caller can stream progress.
-pub fn greedy_with<F: FnMut(usize, u32)>(
+pub fn greedy_with<F: FnMut(usize, u32, &[f32])>(
     model: &Model,
     tok: &Tokenizer,
     prompt_ids: &[u32],
@@ -42,7 +42,7 @@ pub fn greedy_with<F: FnMut(usize, u32)>(
     let mut ids = Vec::with_capacity(n);
     for i in 0..n {
         let next = argmax_f32(&logits) as u32;
-        on_token(i, next);
+        on_token(i, next, &logits);
         ids.push(next);
         if i + 1 < n {
             logits = model.forward_token(next, &mut st);
@@ -54,6 +54,27 @@ pub fn greedy_with<F: FnMut(usize, u32)>(
         text: tok.decode(&ids),
         ids,
     }
+}
+
+/// The `k` largest logits as `(index, log-probability)`, descending.
+///
+/// Kernel: `top_logprobs_f32`; the softmax normaliser is a max-shifted
+/// log-sum-exp so it stays finite on an untrained head.
+pub fn top_logprobs(logits: &[f32], k: usize) -> Vec<(usize, f32)> {
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let sum: f64 = logits.iter().map(|v| ((v - max) as f64).exp()).sum();
+    let log_z = max as f64 + sum.ln();
+    let mut order: Vec<usize> = (0..logits.len()).collect();
+    order.sort_by(|&a, &b| {
+        logits[b]
+            .partial_cmp(&logits[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    order
+        .into_iter()
+        .take(k)
+        .map(|i| (i, (logits[i] as f64 - log_z) as f32))
+        .collect()
 }
 
 /// Index of the largest value; ties go to the lowest index, as llama.cpp's

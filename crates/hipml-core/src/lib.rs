@@ -12,6 +12,7 @@ pub mod gen;
 pub mod gguf;
 pub mod gguf_value;
 pub mod mat;
+pub mod mmap;
 pub mod model;
 pub mod ops;
 pub mod parity;

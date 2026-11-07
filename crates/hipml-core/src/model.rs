@@ -16,12 +16,15 @@
 //! decoding, which is the behaviour this reference has to reproduce.
 
 use std::io::{self, Read, Seek};
+use std::path::Path;
+use std::sync::Arc;
 
 use crate::attention::{attn_layer_f32, FullAttnW, KvState};
 use crate::config::Config;
 use crate::delta::{ssm_layer_f32, SsmState, SsmW};
 use crate::gguf::Gguf;
 use crate::mat::Mat;
+use crate::mmap::Map;
 use crate::ops::{residual_add_f32, rmsnorm_f32};
 
 pub struct FfnW {
@@ -58,22 +61,46 @@ pub struct Model {
 }
 
 impl Model {
-    /// Load every weight tensor, keeping it quantized. Reads 17 GB; expect a
-    /// minute of disk on a warm file.
+    /// Load a model by mapping the file: weights stay file-backed and the
+    /// kernel can evict them, so a 17 GB model does not fight the page cache.
+    pub fn load_file(path: impl AsRef<Path>) -> io::Result<Model> {
+        let path = path.as_ref();
+        let mut g = Gguf::open(path)?;
+        let map = Arc::new(Map::open(path)?);
+        Self::load_impl(&mut g, Some(&map))
+    }
+
+    /// Load every weight tensor into memory, keeping it quantized. Reads 17 GB
+    /// and keeps it resident; prefer [`Model::load_file`] on a shared machine.
     pub fn load<R: Read + Seek>(g: &mut Gguf<R>) -> io::Result<Model> {
+        Self::load_impl(g, None)
+    }
+
+    fn load_impl<R: Read + Seek>(
+        g: &mut Gguf<R>,
+        map: Option<&Arc<Map>>,
+    ) -> io::Result<Model> {
+        // One entry point for weight tensors so the mapped and copied paths
+        // share all shape checks.
+        let mat = |g: &mut Gguf<R>, name: &str| -> io::Result<Mat> {
+            match map {
+                Some(m) => Mat::from_map(m, g, name),
+                None => Mat::load(g, name),
+            }
+        };
         let cfg = Config::from_gguf(g)?;
-        let tok_embd = Mat::load(g, "token_embd.weight")?;
+        let tok_embd = mat(g, "token_embd.weight")?;
         let output_norm = read_f32_vec(g, "output_norm.weight")?;
-        let output = Mat::load(g, "output.weight")?;
+        let output = mat(g, "output.weight")?;
 
         let mut layers = Vec::with_capacity(cfg.n_layer);
         for i in 0..cfg.n_layer {
             let attn_norm = read_f32_vec(g, &format!("blk.{i}.attn_norm.weight"))?;
             let post_norm = read_f32_vec(g, &format!("blk.{i}.post_attention_norm.weight"))?;
             let ffn = FfnW {
-                gate: Mat::load(g, &format!("blk.{i}.ffn_gate.weight"))?,
-                up: Mat::load(g, &format!("blk.{i}.ffn_up.weight"))?,
-                down: Mat::load(g, &format!("blk.{i}.ffn_down.weight"))?,
+                gate: mat(g, &format!("blk.{i}.ffn_gate.weight"))?,
+                up: mat(g, &format!("blk.{i}.ffn_up.weight"))?,
+                down: mat(g, &format!("blk.{i}.ffn_down.weight"))?,
             };
             expect(&ffn.gate, cfg.n_ff, cfg.n_embd, "ffn_gate")?;
             expect(&ffn.up, cfg.n_ff, cfg.n_embd, "ffn_up")?;
@@ -81,15 +108,15 @@ impl Model {
 
             let (attn, ssm) = if cfg.is_recr[i] {
                 let w = SsmW {
-                    wqkv: Mat::load(g, &format!("blk.{i}.attn_qkv.weight"))?,
-                    wgate: Mat::load(g, &format!("blk.{i}.attn_gate.weight"))?,
+                    wqkv: mat(g, &format!("blk.{i}.attn_qkv.weight"))?,
+                    wgate: mat(g, &format!("blk.{i}.attn_gate.weight"))?,
                     conv1d: read_f32_vec(g, &format!("blk.{i}.ssm_conv1d.weight"))?,
-                    alpha: Mat::load(g, &format!("blk.{i}.ssm_alpha.weight"))?,
-                    beta: Mat::load(g, &format!("blk.{i}.ssm_beta.weight"))?,
+                    alpha: mat(g, &format!("blk.{i}.ssm_alpha.weight"))?,
+                    beta: mat(g, &format!("blk.{i}.ssm_beta.weight"))?,
                     dt_bias: read_f32_vec(g, &format!("blk.{i}.ssm_dt.bias"))?,
                     a: read_f32_vec(g, &format!("blk.{i}.ssm_a"))?,
                     norm: read_f32_vec(g, &format!("blk.{i}.ssm_norm.weight"))?,
-                    wout: Mat::load(g, &format!("blk.{i}.ssm_out.weight"))?,
+                    wout: mat(g, &format!("blk.{i}.ssm_out.weight"))?,
                 };
                 let hd_v = cfg.ssm_head_v();
                 expect(&w.wqkv, cfg.ssm_conv_channels(), cfg.n_embd, "attn_qkv")?;
@@ -104,10 +131,10 @@ impl Model {
                 (None, Some(w))
             } else {
                 let w = FullAttnW {
-                    wq: Mat::load(g, &format!("blk.{i}.attn_q.weight"))?,
-                    wk: Mat::load(g, &format!("blk.{i}.attn_k.weight"))?,
-                    wv: Mat::load(g, &format!("blk.{i}.attn_v.weight"))?,
-                    wo: Mat::load(g, &format!("blk.{i}.attn_output.weight"))?,
+                    wq: mat(g, &format!("blk.{i}.attn_q.weight"))?,
+                    wk: mat(g, &format!("blk.{i}.attn_k.weight"))?,
+                    wv: mat(g, &format!("blk.{i}.attn_v.weight"))?,
+                    wo: mat(g, &format!("blk.{i}.attn_output.weight"))?,
                     q_norm: read_f32_vec(g, &format!("blk.{i}.attn_q_norm.weight"))?,
                     k_norm: read_f32_vec(g, &format!("blk.{i}.attn_k_norm.weight"))?,
                 };

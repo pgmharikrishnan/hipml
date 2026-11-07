@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use hipml_core::gen::greedy_with;
+use hipml_core::gen::{greedy_with, top_logprobs};
 use std::io::Write;
 use hipml_core::gguf::Gguf;
 use hipml_core::model::Model;
@@ -14,6 +14,7 @@ struct Args {
     ids: Option<Vec<u32>>,
     tokens: usize,
     ctx: Option<usize>,
+    topk: usize,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -22,6 +23,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
     let mut ids = None;
     let mut tokens = 20usize;
     let mut ctx = None;
+    let mut topk = 0usize;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&str, String> {
@@ -53,6 +55,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 ctx = Some(need(i)?.parse().map_err(|e| format!("bad --ctx: {e}"))?);
                 i += 2;
             }
+            "--topk" => {
+                topk = need(i)?.parse().map_err(|e| format!("bad --topk: {e}"))?;
+                i += 2;
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -62,6 +68,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         ids,
         tokens,
         ctx,
+        topk,
     })
 }
 
@@ -75,7 +82,7 @@ pub fn generate(args: &[String]) -> i32 {
     };
 
     let t0 = Instant::now();
-    let mut g = match Gguf::open(&a.gguf) {
+    let g = match Gguf::open(&a.gguf) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("generate: cannot open {}: {e}", a.gguf);
@@ -89,7 +96,7 @@ pub fn generate(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let model = match Model::load(&mut g) {
+    let model = match Model::load_file(&a.gguf) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("generate: load: {e}");
@@ -125,9 +132,14 @@ pub fn generate(args: &[String]) -> i32 {
 
     let t1 = Instant::now();
     let mut steps_done = 0usize;
-    let out = greedy_with(&model, &tok, &prompt_ids, a.tokens, n_ctx, |i, id| {
+    let out = greedy_with(&model, &tok, &prompt_ids, a.tokens, n_ctx, |i, id, logits| {
         steps_done = i + 1;
         println!("  [{i}] {id}");
+        if a.topk > 0 && i == 0 {
+            for (idx, lp) in top_logprobs(logits, a.topk) {
+                println!("        {idx:6} logprob {lp:.6}");
+            }
+        }
         let _ = std::io::stdout().flush();
     });
     let secs = t1.elapsed().as_secs_f64();
