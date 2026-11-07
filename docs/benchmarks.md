@@ -280,9 +280,10 @@ FLOP/byte, so the weight stream is 21× from being the limit at M=512; at M=2048
 it is 84×.
 
 Two Q5_K tensors exist — `blk.51.ffn_down.weight` and `blk.55.ffn_down.weight`,
-5120×17408, 61,276,160 B each — and are **not implemented**. They are 0.123 GB,
-0.7% of the quantized bytes and 0.66% of model FLOPs; the cold number above is
-that much optimistic. They are reported, not silently dropped.
+5120×17408, 61,276,160 B each — and had no GEMV when this was measured (WP16
+added `gemv_q5_k`; the decode step used an f32 copy before that). They are
+0.123 GB, 0.7% of the quantized bytes and 0.66% of model FLOPs. They are
+reported, not silently dropped.
 
 ### Cached input: cold versus warm TTFT
 
@@ -544,7 +545,7 @@ stay in their on-disk block layout; F32 tensors upload as raw little-endian f32.
 | F32 | 449 | 104,953,856 | 104,953,856 | supported |
 | Q8_0 | 64 | 1,392,640,000 | 1,392,640,000 | supported |
 | Q4_K | 257 | 11,449,958,400 | 11,449,958,400 | supported |
-| Q5_K | 2 | 122,552,320 | 122,552,320 | raw only, no dequant |
+| Q5_K | 2 | 122,552,320 | 122,552,320 | supported (`gemv_q5_k`, WP16) |
 | Q6_K | 79 | 4,122,316,800 | 4,122,316,800 | supported |
 | **total** | **851** | **17,192,421,376** | **17,192,421,376** | 16.01 GiB |
 
