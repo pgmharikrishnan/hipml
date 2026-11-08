@@ -7,13 +7,13 @@ Five prompt classes, each tokenised once by `hipml tokenize`. Both engines recei
 | model | `C:\models\Qwen3.8-27B-Q4_K_M.gguf` (17,203,416,064 bytes) |
 | GPU | AMD Radeon AI PRO R9700 32.0.32015.7029  |
 | host | rtx |
-| hipml commit | `4c8bc720d7aeed46d0878abc007f7100bab28828` (dirty worktree) |
-| hipml binary sha256 | `94cedd9e8f5c2240f91ae5fce991a393a7c4831cef31efb1a26d2ef21d4e60c7` |
+| hipml commit | `a8017373eda5beb6adfc9b999abf77c6a20ef5f2` |
+| hipml binary sha256 | `031621036a232d7da372fe411f80ee8cd20e270d52edf22303b1a50e885bcb92` |
 | llama.cpp | version: 0.7.0-dev (build 11820, commit d7725699) |
 | llama.cpp build | `11820` commit `d7725699` |
 | llama KV type | q8_0 |
 | hipml KV type | q8 |
-| generated | 2026-11-08T13:43:02.332864+00:00 |
+| generated | 2026-11-08T18:18:28.131792+00:00 |
 
 ## Results
 
@@ -21,51 +21,51 @@ Five prompt classes, each tokenised once by `hipml tokenize`. Both engines recei
 
 | prompt | depth | tokens | engine | KV | reps | TTFT ms | prefill tok/s | decode tok/s | peak GiB | spilled |
 | --- | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| code_edit | 0 | 672 | hipml | q8 | 3 | 1,711 (1,698-1,721) | 393 (390-396) | 29.8 (29.8-29.9) | 17.03 | - |
-| code_edit | 0 | 672 | llama | q8_0 | 3 | 681 (671-800) | 1,022 (857-1,028) | 30.6 (30.5-30.6) | 16.22 | no |
-| code_edit | 8192 | 8192 | hipml | q8 | 3 | 23,081 (22,968-23,111) | 355 (354-357) | 28.8 (28.8-28.8) | 17.33 | - |
-| code_edit | 8192 | 8192 | llama | q8_0 | 3 | 6,928 (6,900-6,996) | 1,185 (1,174-1,189) | 29.8 (29.7-29.8) | 16.47 | no |
-| code_edit | 32768 | 32768 | hipml | q8 | 1 | 143,039 | 229 | 26.2 | 17.99 | - |
-| code_edit | 32768 | 32768 | llama | q8_0 | 1 | 30,705 | 1,068 | 27.7 | 17.38 | no |
-| code_edit | 100000 | 100000 | hipml | q8 | 1 | 877,847 | 114 | 21.2 | 20.17 | - |
-| code_edit | 100000 | 100000 | llama | q8_0 | 1 | 120,953 | 827 | 22.0 | 19.88 | no |
-| json_tool_call | 0 | 300 | hipml | q8 | 3 | 816 (814-837) | 368 (358-369) | 29.9 (29.8-29.9) | 16.97 | - |
-| json_tool_call | 0 | 300 | llama | q8_0 | 3 | 375 (351-506) | 842 (612-858) | 30.5 (30.5-30.5) | 16.21 | no |
-| json_tool_call | 8192 | 8192 | hipml | q8 | 3 | 23,010 (22,922-23,122) | 356 (354-357) | 28.8 (28.8-28.8) | 17.33 | - |
-| json_tool_call | 8192 | 8192 | llama | q8_0 | 3 | 6,906 (6,905-7,005) | 1,187 (1,172-1,191) | 29.8 (29.8-29.8) | 16.47 | no |
-| prose_explanation | 0 | 373 | hipml | q8 | 3 | 966 (963-979) | 386 (381-388) | 29.9 (29.7-29.9) | 16.97 | - |
-| prose_explanation | 0 | 373 | llama | q8_0 | 3 | 416 (400-539) | 948 (714-963) | 30.5 (30.5-30.6) | 16.21 | no |
-| prose_explanation | 8192 | 8192 | hipml | q8 | 3 | 23,041 (23,010-23,168) | 356 (354-356) | 28.8 (28.6-28.8) | 17.33 | - |
-| prose_explanation | 8192 | 8192 | llama | q8_0 | 3 | 6,924 (6,885-6,995) | 1,186 (1,174-1,190) | 29.8 (29.7-29.9) | 16.47 | no |
-| longdoc_qa | 0 | 7694 | hipml | q8 | 3 | 21,617 (21,438-21,670) | 356 (355-359) | 28.9 (28.8-28.9) | 17.31 | - |
-| longdoc_qa | 0 | 7694 | llama | q8_0 | 3 | 6,595 (6,567-6,644) | 1,171 (1,161-1,176) | 29.8 (29.8-29.9) | 16.46 | no |
-| longdoc_qa | 8192 | 8192 | hipml | q8 | 3 | 22,998 (22,962-23,206) | 356 (353-357) | 28.8 (28.8-28.8) | 17.33 | - |
-| longdoc_qa | 8192 | 8192 | llama | q8_0 | 3 | 6,918 (6,899-6,997) | 1,186 (1,174-1,191) | 29.7 (29.7-29.8) | 16.47 | no |
-| copy_200_words | 0 | 285 | hipml | q8 | 3 | 791 (788-792) | 360 (360-362) | 29.8 (29.7-29.8) | 16.97 | - |
-| copy_200_words | 0 | 285 | llama | q8_0 | 3 | 350 (334-458) | 869 (624-883) | 30.5 (30.4-30.5) | 16.21 | no |
-| copy_200_words | 8192 | 8192 | hipml | q8 | 3 | 23,074 (23,022-23,394) | 355 (350-356) | 28.7 (28.7-28.8) | 17.33 | - |
-| copy_200_words | 8192 | 8192 | llama | q8_0 | 3 | 6,922 (6,901-6,992) | 1,187 (1,174-1,191) | 29.8 (29.7-29.8) | 16.47 | no |
+| code_edit | 0 | 672 | hipml | q8 | 3 | 715 (714-721) | 940 (932-942) | 29.8 (29.8-29.8) | 17.49 | - |
+| code_edit | 0 | 672 | llama | q8_0 | 3 | 675 (651-855) | 1,025 (790-1,034) | 30.6 (30.5-30.6) | 16.22 | no |
+| code_edit | 8192 | 8192 | hipml | q8 | 3 | 8,233 (8,196-8,248) | 995 (993-1000) | 28.7 (28.6-28.9) | 18.75 | - |
+| code_edit | 8192 | 8192 | llama | q8_0 | 3 | 6,928 (6,907-6,999) | 1,185 (1,173-1,189) | 29.8 (29.8-29.8) | 16.47 | no |
+| code_edit | 32768 | 32768 | hipml | q8 | 1 | 37,937 | 864 | 26.2 | 22.34 | - |
+| code_edit | 32768 | 32768 | llama | q8_0 | 1 | 30,670 | 1,069 | 27.7 | 17.38 | no |
+| code_edit | 100000 | 100000 | hipml | q8 | 1 | 860,789 | 116 | 21.2 | 20.50 | - |
+| code_edit | 100000 | 100000 | llama | q8_0 | 1 | 120,879 | 828 | 22.1 | 19.88 | no |
+| json_tool_call | 0 | 300 | hipml | q8 | 3 | 381 (380-390) | 787 (770-789) | 29.8 (29.8-29.9) | 17.36 | - |
+| json_tool_call | 0 | 300 | llama | q8_0 | 3 | 365 (348-491) | 851 (631-865) | 30.6 (30.6-30.7) | 16.21 | no |
+| json_tool_call | 8192 | 8192 | hipml | q8 | 3 | 8,259 (8,225-8,265) | 992 (991-996) | 28.7 (28.6-28.8) | 18.75 | - |
+| json_tool_call | 8192 | 8192 | llama | q8_0 | 3 | 6,921 (6,887-6,995) | 1,188 (1,174-1,192) | 29.8 (29.7-29.9) | 16.47 | no |
+| prose_explanation | 0 | 373 | hipml | q8 | 3 | 414 (414-422) | 901 (883-902) | 29.8 (29.8-29.8) | 17.36 | - |
+| prose_explanation | 0 | 373 | llama | q8_0 | 3 | 405 (392-534) | 955 (720-965) | 30.6 (30.5-30.6) | 16.21 | no |
+| prose_explanation | 8192 | 8192 | hipml | q8 | 3 | 8,251 (8,239-8,264) | 993 (991-994) | 28.7 (28.6-28.7) | 18.75 | - |
+| prose_explanation | 8192 | 8192 | llama | q8_0 | 3 | 6,918 (6,906-6,995) | 1,187 (1,174-1,190) | 29.9 (29.8-29.9) | 16.47 | no |
+| longdoc_qa | 0 | 7694 | hipml | q8 | 3 | 7,877 (7,822-7,899) | 977 (974-984) | 28.8 (28.8-28.9) | 18.67 | - |
+| longdoc_qa | 0 | 7694 | llama | q8_0 | 3 | 6,542 (6,536-6,611) | 1,177 (1,167-1,182) | 29.8 (29.8-29.9) | 16.46 | no |
+| longdoc_qa | 8192 | 8192 | hipml | q8 | 3 | 8,259 (8,240-8,270) | 992 (991-994) | 28.7 (28.6-28.7) | 18.75 | - |
+| longdoc_qa | 8192 | 8192 | llama | q8_0 | 3 | 6,930 (6,897-6,991) | 1,186 (1,174-1,190) | 29.8 (29.7-29.9) | 16.47 | no |
+| copy_200_words | 0 | 285 | hipml | q8 | 3 | 380 (377-387) | 751 (736-756) | 29.7 (29.7-29.7) | 17.36 | - |
+| copy_200_words | 0 | 285 | llama | q8_0 | 3 | 340 (336-470) | 872 (628-885) | 30.5 (30.4-30.6) | 16.21 | no |
+| copy_200_words | 8192 | 8192 | hipml | q8 | 3 | 8,251 (8,231-8,262) | 993 (991-995) | 28.8 (28.6-28.8) | 18.75 | - |
+| copy_200_words | 8192 | 8192 | llama | q8_0 | 3 | 6,928 (6,905-7,002) | 1,186 (1,173-1,189) | 29.8 (29.8-29.9) | 16.47 | no |
 
 ## Merged engine vs the WP18 like-for-like table
 
-WP18 (`bd6d18f`, the `feat/bench` tree) is the reference table: same model, same prompts, same 33 generated tokens, same q8-class KV. The merged tree is `4c8bc720d7ae`. Delta is `merged / WP18 - 1`; for TTFT a negative delta is better, for throughput a positive delta is better.
+WP18 (`bd6d18f`, the `feat/bench` tree) is the reference: same model, prompts, 33 generated tokens and q8-class KV. The merged tree is `a8017373eda5`. Delta is `merged / WP18 - 1`; for TTFT a negative delta is better, for throughput a positive delta is better.
 
-| prompt | depth | WP18 TTFT ms | merged TTFT ms | Δ TTFT | WP18 prefill | merged prefill | Δ prefill | WP18 decode | merged decode | Δ decode |
+| prompt | depth | WP18 TTFT | merged TTFT | Δ TTFT | WP18 prefill | merged prefill | Δ prefill | WP18 decode | merged decode | Δ decode |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| code_edit | 0 | 915 | 1,711 | +87.0% | 734.7 | 392.8 | -46.5% | 28.45 | 29.84 | +4.9% |
-| json_tool_call | 0 | 450 | 816 | +81.1% | 666.0 | 367.8 | -44.8% | 28.49 | 29.87 | +4.8% |
-| prose_explanation | 0 | 515 | 966 | +87.4% | 723.7 | 386.1 | -46.6% | 28.47 | 29.86 | +4.9% |
-| longdoc_qa | 0 | 12,349 | 21,617 | +75.1% | 623.1 | 355.9 | -42.9% | 27.55 | 28.87 | +4.8% |
-| copy_200_words | 0 | 438 | 791 | +80.6% | 650.6 | 360.2 | -44.6% | 28.41 | 29.78 | +4.8% |
-| code_edit | 8192 | 13,259 | 23,081 | +74.1% | 617.8 | 354.9 | -42.6% | 27.48 | 28.80 | +4.8% |
-| json_tool_call | 8192 | 13,250 | 23,010 | +73.7% | 618.2 | 356.0 | -42.4% | 27.46 | 28.80 | +4.9% |
-| prose_explanation | 8192 | 13,272 | 23,041 | +73.6% | 617.3 | 355.5 | -42.4% | 27.45 | 28.80 | +4.9% |
-| longdoc_qa | 8192 | 13,260 | 22,998 | +73.4% | 617.8 | 356.2 | -42.3% | 27.45 | 28.80 | +4.9% |
-| copy_200_words | 8192 | 13,260 | 23,074 | +74.0% | 617.8 | 355.0 | -42.5% | 27.48 | 28.71 | +4.5% |
-| code_edit | 32768 | 101,704 | 143,039 | +40.6% | 322.2 | 229.1 | -28.9% | 25.25 | 26.20 | +3.7% |
-| code_edit | 100000 | 733,577 | 877,847 | +19.7% | 136.3 | 113.9 | -16.4% | 20.61 | 21.18 | +2.8% |
+| code_edit | 0 | 915 | 715 | -21.9% | 734.7 | 940.1 | +28.0% | 28.45 | 29.83 | +4.9% |
+| json_tool_call | 0 | 450 | 381 | -15.4% | 666.0 | 786.9 | +18.2% | 28.49 | 29.81 | +4.6% |
+| prose_explanation | 0 | 515 | 414 | -19.7% | 723.7 | 901.3 | +24.5% | 28.47 | 29.78 | +4.6% |
+| longdoc_qa | 0 | 12,349 | 7,877 | -36.2% | 623.1 | 976.8 | +56.8% | 27.55 | 28.84 | +4.7% |
+| copy_200_words | 0 | 438 | 380 | -13.4% | 650.6 | 750.9 | +15.4% | 28.41 | 29.72 | +4.6% |
+| code_edit | 8192 | 13,259 | 8,233 | -37.9% | 617.8 | 995.1 | +61.1% | 27.48 | 28.68 | +4.4% |
+| json_tool_call | 8192 | 13,250 | 8,259 | -37.7% | 618.2 | 991.9 | +60.4% | 27.46 | 28.71 | +4.6% |
+| prose_explanation | 8192 | 13,272 | 8,251 | -37.8% | 617.3 | 992.8 | +60.8% | 27.45 | 28.68 | +4.5% |
+| longdoc_qa | 8192 | 13,260 | 8,259 | -37.7% | 617.8 | 991.8 | +60.5% | 27.45 | 28.70 | +4.5% |
+| copy_200_words | 8192 | 13,260 | 8,251 | -37.8% | 617.8 | 992.9 | +60.7% | 27.48 | 28.79 | +4.8% |
+| code_edit | 32768 | 101,704 | 37,937 | -62.7% | 322.2 | 863.8 | +168.1% | 25.25 | 26.18 | +3.7% |
+| code_edit | 100000 | 733,577 | 860,789 | +17.3% | 136.3 | 116.2 | -14.8% | 20.61 | 21.17 | +2.8% |
 
-Every merged cell is the code path the merge ships; the WP18 reference used the WP17 prefill GEMM (half of each GEMM's MACs were dead-code-eliminated) and the pre-fix KV stride. The prefill delta is therefore mostly the cost of doing the full GEMM, and the decode delta is the gain from the stride fix and the streamed GEMV/Q5_K path. No number is averaged across prompt classes.
+The depth-0 and 8K rows now use the f32 mirror for prefill and the q8 cache for decode. 32K also uses the mirror (4.0 GiB); 100K does not fit (12.2 GiB) and keeps the row-at-a-time quantized path.
 
 ## Gap (hipml minus llama.cpp)
 
@@ -73,24 +73,24 @@ Positive means hipml is faster; negative means llama.cpp is faster. Each row is 
 
 | prompt | depth | prefill | decode | TTFT (llama/hipml) |
 | --- | ---: | ---: | ---: | ---: |
-| code_edit | 0 | -61.6% | -2.4% | 0.40x |
-| code_edit | 8192 | -70.1% | -3.2% | 0.30x |
-| code_edit | 32768 | -78.6% | -5.5% | 0.21x |
-| code_edit | 100000 | -86.2% | -3.9% | 0.14x |
-| json_tool_call | 0 | -56.3% | -1.9% | 0.46x |
-| json_tool_call | 8192 | -70.0% | -3.5% | 0.30x |
-| prose_explanation | 0 | -59.2% | -2.3% | 0.43x |
-| prose_explanation | 8192 | -70.0% | -3.5% | 0.30x |
-| longdoc_qa | 0 | -69.6% | -3.2% | 0.31x |
-| longdoc_qa | 8192 | -70.0% | -3.2% | 0.30x |
-| copy_200_words | 0 | -58.5% | -2.3% | 0.44x |
-| copy_200_words | 8192 | -70.1% | -3.6% | 0.30x |
+| code_edit | 0 | -8.3% | -2.5% | 0.94x |
+| code_edit | 8192 | -16.0% | -3.8% | 0.84x |
+| code_edit | 32768 | -19.2% | -5.6% | 0.81x |
+| code_edit | 100000 | -86.0% | -4.1% | 0.14x |
+| json_tool_call | 0 | -7.5% | -2.6% | 0.96x |
+| json_tool_call | 8192 | -16.5% | -3.5% | 0.84x |
+| prose_explanation | 0 | -5.6% | -2.6% | 0.98x |
+| prose_explanation | 8192 | -16.3% | -4.0% | 0.84x |
+| longdoc_qa | 0 | -17.0% | -3.4% | 0.83x |
+| longdoc_qa | 8192 | -16.3% | -3.8% | 0.84x |
+| copy_200_words | 0 | -13.8% | -2.6% | 0.90x |
+| copy_200_words | 8192 | -16.3% | -3.5% | 0.84x |
 
 ## Headline gaps
 
-- **prefill**: hipml did not win any cell; llama.cpp fastest at `code_edit@100000` (-86.2%, reps 1/1).
-- **decode**: hipml did not win any cell; llama.cpp fastest at `code_edit@32768` (-5.5%, reps 1/1).
-- **ttft**: hipml did not win any cell; llama.cpp fastest at `code_edit@100000` (-86.2%, reps 1/1).
+- **prefill**: hipml did not win any cell; llama.cpp fastest at `code_edit@100000` (-86.0%, reps 1/1).
+- **decode**: hipml did not win any cell; llama.cpp fastest at `code_edit@32768` (-5.6%, reps 1/1).
+- **ttft**: hipml did not win any cell; llama.cpp fastest at `code_edit@100000` (-86.0%, reps 1/1).
 
 ## llama.cpp warm pass (cache_prompt=true)
 
@@ -98,18 +98,18 @@ Same ids immediately after the cold reps. A near-1 `prompt_n` and a large `cache
 
 | prompt | depth | TTFT ms | warm prefill tok/s | cache_n | prompt_n |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| code_edit | 0 | 97.7 | 41.3 | 668 | 4 |
-| code_edit | 8192 | 123 | 41.3 | 8188 | 4 |
-| code_edit | 32768 | 126 | 37.8 | 32764 | 4 |
-| code_edit | 100000 | 189 | 28.2 | 99996 | 4 |
-| json_tool_call | 0 | 113 | 42.6 | 296 | 4 |
-| json_tool_call | 8192 | 114 | 41.2 | 8188 | 4 |
-| prose_explanation | 0 | 109 | 42.4 | 369 | 4 |
-| prose_explanation | 8192 | 111 | 41.5 | 8188 | 4 |
-| longdoc_qa | 0 | 117 | 40.3 | 7690 | 4 |
-| longdoc_qa | 8192 | 111 | 41.3 | 8188 | 4 |
-| copy_200_words | 0 | 115 | 42.8 | 281 | 4 |
-| copy_200_words | 8192 | 127 | 40.4 | 8188 | 4 |
+| code_edit | 0 | 117 | 43.0 | 668 | 4 |
+| code_edit | 8192 | 121 | 40.4 | 8188 | 4 |
+| code_edit | 32768 | 135 | 37.1 | 32764 | 4 |
+| code_edit | 100000 | 184 | 27.7 | 99996 | 4 |
+| json_tool_call | 0 | 116 | 41.4 | 296 | 4 |
+| json_tool_call | 8192 | 118 | 40.9 | 8188 | 4 |
+| prose_explanation | 0 | 118 | 42.6 | 369 | 4 |
+| prose_explanation | 8192 | 111 | 41.6 | 8188 | 4 |
+| longdoc_qa | 0 | 119 | 40.6 | 7690 | 4 |
+| longdoc_qa | 8192 | 121 | 40.9 | 8188 | 4 |
+| copy_200_words | 0 | 117 | 42.2 | 281 | 4 |
+| copy_200_words | 8192 | 98.0 | 42.1 | 8188 | 4 |
 
 ## hipml prefill stage breakdown
 
@@ -117,30 +117,49 @@ One extra synchronised run per cell; the per-stage values include a stream sync 
 
 | prompt | depth | total_wall | embed | elementwise | gemm_attn | gemm_ssm | gemm_ffn | final | seq_ssm | seq_attn | stage_sum |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| code_edit | 0 | 1,732 | 1 | 22 | 33 | 91 | 528 | 4 | 166 | 885 | 1,730 |
-| json_tool_call | 0 | 826 | 1 | 10 | 18 | 51 | 276 | 2 | 77 | 391 | 826 |
-| prose_explanation | 0 | 969 | 1 | 11 | 19 | 52 | 304 | 2 | 92 | 488 | 969 |
-| longdoc_qa | 0 | 21,836 | 11 | 196 | 325 | 894 | 5,492 | 28 | 1,801 | 13,087 | 21,835 |
-| copy_200_words | 0 | 809 | 1 | 11 | 19 | 50 | 273 | 2 | 74 | 381 | 809 |
+| code_edit | 0 | 747 | 1 | 22 | 33 | 91 | 387 | 4 | 166 | 41 | 745 |
+| json_tool_call | 0 | 395 | 1 | 10 | 18 | 51 | 217 | 2 | 77 | 18 | 395 |
+| prose_explanation | 0 | 427 | 1 | 11 | 19 | 52 | 228 | 2 | 92 | 22 | 427 |
+| longdoc_qa | 0 | 8,237 | 12 | 231 | 335 | 914 | 4,017 | 29 | 1,898 | 800 | 8,235 |
+| copy_200_words | 0 | 391 | 1 | 10 | 18 | 51 | 217 | 2 | 75 | 18 | 391 |
 
+
+## Prefill bisect (512 and 8K, `gpu-bench --prefill`, chunk 512)
+
+| commit | what changed | 512 tok/s | 8K tok/s | 512 last id |
+| --- | --- | ---: | ---: | ---: |
+| `5945a08` | attn-mma base | 1,273.8 | 1,214.0 | 122271 (half-GEMM) |
+| `9532d84` | + graphs | 994.4 | 959.8 | 122271 (half-GEMM) |
+| `a967e18` | + wmma2 full-GEMM fix | 854.3 | 825.3 | 489 |
+| `219045a` | + cache | 851.8 | 821.1 | 489 |
+| `954af72` | + bench, f32 path | 844.8 | 817.7 | 489 |
+| `954af72` | + bench, q8 path | 429.6 | 362.1 | 0 (NaN) |
+| `4c8bc72` | + chunk sizing, f32 | 837.3 | 818.1 | 489 |
+| `4c8bc72` | + chunk sizing, q8 | 405.8 | 354.6 | 489 |
+| `4b02c75` | Q5_K half-copy prefill restored | 1,050.3 | 1,008.9 | 489 |
+| `145e872` | q8 prefill through the f32 mirror | 1,052.6 | 1,009.9 | 489 |
+
+The two real regressions were **graphs** (it replaced attn-mma's fp16 Q5_K prefill GEMM with one decode GEMV per row: -22%) and **feat/bench** (it forced the q8 prefill through per-row decode attention: another -57%). Both are fixed. The remaining gap to the 1,260/1,200 targets is the **wmma2 correctness fix**: WP17 computed half of every GEMM. The only commit that reaches the targets is `5945a08`, and it emits 122271/103687 for the 512/8K last ids instead of 489/292. With correct tokens the ceiling on this kernel is **~1,050 at 512 and ~1,010 at 8K**.
 
 ## What each merge contributed
 
-| branch | what it changed in the merged engine | measured effect |
+| branch | effect in the merged engine | measured |
 | --- | --- | --- |
-| `feat/attn-mma` (`5945a08`) | matrix-unit chunk attention for the f32 prefill path; split-K decode evidence | not on the q8 like-for-like prefill path; on the f32 path `gpu-bench --prefill` is **857 tok/s at 512** and **828 tok/s at 8K** in the merged tree |
-| `feat/graphs` (`ddac7e3`) | quantized-KV decode uses `dk.seq` as the cache stride, not the position count; reusable token graph; streamed GEMV jobs | every deep decode cell now reads the correct KV rows; decode **+4.8%** at 0/8K, **+3.7%** at 32K, **+2.8%** at 100K vs WP18 |
-| `feat/wmma2` (`cf41cbe`) | prefill accumulator-index fix (WP17 computed half of every GEMM) and kernel-config corrections | this is why prefill falls from WP18's 618 to **355 tok/s** at 8K: WP18's number was half a GEMM. The full-GEMM f32 path is 828 tok/s |
-| `feat/stream` (`fe0b644`) | 1-row-per-warp GEMV, Q5_K GEMV, streamed weight reads | already contained in `feat/graphs`; Q5_K no longer uses an f32 copy; part of the decode gain above |
-| `feat/cache` (`66bba78`) | SSM-state + KV prefix snapshots and an LRU prefix cache | not exercised by a cold like-for-like run; its own exact-repeat TTFT is 1801 -> 7.6 ms and shared-prefix TTFT 1.88-3.66x |
-| `feat/bench` (`2e0f642`) | q8/q4 chunked prefill and the `--json/--reps/--stage-report` bench CLI | required to run this comparison at all; it also exposed a short-final-tile NaN in the decode attention kernel, fixed in `0bd5403` |
+| `feat/attn-mma` | matrix-unit chunk attention | 8K attention stage 3.58 s -> 0.84 s; used by both f32 and q8 prefill now |
+| `feat/graphs` | KV stride fix, graph, streamed GEMV/Q5_K | decode +4.8% at 0/8K, +3.7% at 32K, +2.8% at 100K vs WP18; its Q5_K prefill regression is fixed in `4b02c75` |
+| `feat/wmma2` | full-GEMM accumulator fix | correctness: 512/8K last ids 489/292. It is the ~17% prefill gap to the old inflated numbers |
+| `feat/stream` | 1-row-per-warp GEMV, Q5_K GEMV | contained in graphs; part of the decode gain |
+| `feat/cache` | SSM+KV prefix snapshots | not in a cold bench; exact-repeat TTFT 1801 -> 7.6 ms, shared prefix 1.88-3.66x |
+| `feat/bench` | q8/q4 chunked prefill + bench CLI | its per-row q8 prefill was the 57% regression; now prefill uses the f32 mirror at <=64K and the q8 cache only for decode |
 
 ## Validation
 
-- 20-id acceptance, CPU oracle and GPU eager: `11751 13 198 760 6511 314 14898 369 21047 13 198 760 6511 314 17163 369 23327 13 198 760`. GPU q8 and `--graph` produce the same string.
-- `hipml parity`: 46 passed, 0 failed, 1 skipped. `hipml parity --deep`: 48 passed, 0 failed, 1 skipped (includes `attn_decode_kv_q8_hd256_s100000`).
-- `cargo test --workspace`: all test binaries pass on the host. `cargo check --features hip`: clean.
-- Every hipml cell's three reps generated the same 33-token id sequence; the bench's prompt ids are shared byte-for-byte with llama.cpp.
+- 20-id acceptance identical on CPU, GPU f32, GPU q8 and GPU q8 `--graph`:
+  `11751 13 198 760 6511 314 14898 369 21047 13 198 760 6511 314 17163 369 23327 13 198 760`.
+- Prefill last ids are the correct ones: 512 -> 489, 8K -> 292, 32K -> 868.
+- `hipml parity`: 46 passed, 0 failed, 1 skipped. `hipml parity --deep`: 48 passed, 0 failed, 1 skipped.
+- `cargo test --workspace`: all green. `cargo check --features hip`: clean.
+- Every hipml cell generated the same 33-token sequence across reps; prompt ids are shared byte-for-byte with llama.cpp.
 
 ## Completeness
 
