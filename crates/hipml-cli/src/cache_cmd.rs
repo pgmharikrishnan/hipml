@@ -334,12 +334,16 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
     for (pos, bytes, hash) in engine.prefix_entries().unwrap_or_default() {
         println!("  P@{pos:<6} {:.1} MiB  hash {:016x}", bytes as f64 / 1048576.0, hash);
     }
+    let ssm_mib = 149.64_f64;
+    let kv_mib = a.len as f64 * 131_072.0 / 1_048_576.0;
+    let logits_mib = 248_320.0 * 4.0 / 1_048_576.0;
     println!(
-        "memory per entry: {} SSM layers x {:.1} MiB + {} KV rows x {} B + logits",
-        48,
-        156.9 / 48.0,
-        16,
-        a.len * 1024 * 4
+        "memory per entry at {} tokens: {:.1} MiB SSM (48 layers) + {:.1} MiB KV (16 layers, K+V) + {:.1} MiB logits = {:.1} MiB",
+        a.len,
+        ssm_mib,
+        kv_mib,
+        logits_mib,
+        ssm_mib + kv_mib + logits_mib
     );
     println!(
         "3-request sequence: exact repeat -> hit @{}; shared prefix -> hit @{}; unrelated -> {} ({} at {:.1} MiB, {} evicted)",

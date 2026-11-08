@@ -69,7 +69,11 @@ against 13.1 GiB for the f32 path — which is why the f32 path is not used ther
 alpha, beta, out) and keeps the small f32 vectors (conv taps, dt bias, A, norm)
 as device buffers. The kernel chain is WP11's: gates → conv1d+silu → L2 →
 gated delta recurrence → gated RMS. State is 156.9 MB per sequence and is not
-prefix-cacheable, so prefill and decode cost the same per token.
+prefix-sliceable the way a KV cache is, so prefill and decode cost the same per
+token unless the state is snapshotted. WP22 does that: `cache-bench` captures the
+conv window and delta-net matrix at a prefix boundary and restores them on a
+repeat, which is what takes an exact repeat from 1.38× to 237× (see
+`docs/benchmarks.md`, "Cached prefill with SSM state").
 
 ## Chunked prefill
 
@@ -281,6 +285,11 @@ Nothing on the decode path round-trips to the host except the 4-byte id.
   reference at `s=100000`; `hipml parity kv_encode` verifies the encoder is
   bit-exact. The graph's short-context tokens verify the rest.
 - Chunked prefill requires `--kv f32`; the quantized caches are the decode path.
+- **Prefix snapshots cover the f32 KV path only.** `cache-bench` restores the
+  SSM state plus f32 KV rows; the q8/q4 decode caches are not snapshot targets.
+  Token parity for the cached path is asserted only against the cold *GPU* path
+  (20 greedy ids), not against the CPU oracle, and the capture is only exact when
+  the boundary is a token boundary the graph actually stopped at.
 - The 8,192-token prefill is a real prefill; 100K prefill is not measured
   (extrapolated from the 8K rate and the T² attention term, not timed).
 - Q5_K still has no GEMV kernel: two decode tensors take the f32 GEMV. Prefill
