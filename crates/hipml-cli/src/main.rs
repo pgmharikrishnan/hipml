@@ -138,7 +138,7 @@ fn help() {
          \x20 gguf      list the tensors in a GGUF file; `gguf <file> read <tensor>`\n\
          \x20 decode-bench  stream every Q4_K/Q6_K/Q8_0 tensor through GEMV once\n\
          \x20 generate  --gguf PATH --text \"prompt\" --tokens 20   greedy decode\n\
-         \x20           --device uses the chunked prefill graph (--chunk N, default 512);\n\
+         \x20           --device uses the chunked prefill graph (--chunk N, default 2048);\n\
          \x20           --chunk 0 keeps the token loop, and --compare-cpu implies it\n\
          \x20 load      load every tensor into VRAM and verify residency\n\
          \x20 logits    run lm_head on a 5120-value f32 vector file\n\

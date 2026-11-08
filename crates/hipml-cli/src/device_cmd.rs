@@ -249,7 +249,7 @@ pub fn generate(args: &[String]) -> i32 {
         Some(0) => None,
         Some(n) => Some(n),
         None if a.compare_cpu => None,
-        None => Some(512),
+        None => Some(2048),
     };
     if chunk.is_some() && a.compare_cpu {
         eprintln!(

@@ -157,7 +157,7 @@ pub fn bench(args: &[String]) -> i32 {
     let mut st = engine.new_state();
     if let Some(n) = a.prefill {
         let prompt: Vec<u32> = (0..n).map(|i| 100 + (i % 1000) as u32).collect();
-        let chunk = a.chunk.unwrap_or(512);
+        let chunk = a.chunk.unwrap_or(2048);
         let t = Instant::now();
         let sink = if a.split {
             match engine.prefill_chunked_report(&prompt, &mut st, chunk) {

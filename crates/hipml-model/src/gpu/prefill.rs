@@ -158,7 +158,8 @@ impl<'a> GpuEngine<'a> {
         st: &mut GpuState,
         chunk: usize,
     ) -> Result<u32, String> {
-        let chunk = chunk.max(1);
+        // Scratch is sized by the chunk, so a short prompt never asks for more.
+        let chunk = chunk.min(tokens.len()).max(1);
         self.ensure_chunk(chunk)?;
         let mut rep: Option<PrefillReport> = None;
         let mut last = 0u32;
@@ -176,7 +177,7 @@ impl<'a> GpuEngine<'a> {
         st: &mut GpuState,
         chunk: usize,
     ) -> Result<(u32, PrefillReport), String> {
-        let chunk = chunk.max(1);
+        let chunk = chunk.min(tokens.len()).max(1);
         self.ensure_chunk(chunk)?;
         let mut rep = Some(PrefillReport::default());
         let mut last = 0u32;
