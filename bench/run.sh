@@ -28,7 +28,7 @@ SYNC=1
 BUILD=1
 REFRESH_FIXTURE=0
 STAGE=1
-LLAMA_KV="${HIPML_BENCH_LLAMA_KV:-f32}"
+LLAMA_KV="${HIPML_BENCH_LLAMA_KV:-f16}"
 PROMPTS=""
 
 usage() {
@@ -143,10 +143,10 @@ else
   IFS=',' read -r -a PROMPT_ARR <<< "$(trim "$PROMPTS")"
 fi
 
-for engine in "${ENGINE_ARR[@]}"; do
-  case "$engine" in hipml|llama) ;; *) die "unknown engine $engine" ;; esac
+for depth in "${DEPTH_ARR[@]}"; do
   for prompt in "${PROMPT_ARR[@]}"; do
-    for depth in "${DEPTH_ARR[@]}"; do
+    for engine in "${ENGINE_ARR[@]}"; do
+      case "$engine" in hipml|llama) ;; *) die "unknown engine $engine" ;; esac
       out="bench/out/jobs/${engine}_${prompt}_${depth}/result.json"
       if [ -f "$out" ] && [ "$FORCE" = 0 ]; then
         echo "== skip $engine $prompt@$depth (result exists)"
@@ -191,7 +191,7 @@ HIPML_COMMIT="$(git rev-parse HEAD)"
 HIPML_DIRTY="false"
 if [ -n "$(git status --porcelain)" ]; then HIPML_DIRTY="true"; fi
 HIPML_SHA="$(ssh "$HOST" 'powershell -NoProfile -Command "(Get-FileHash C:\hipml-bench\target\release\hipml.exe -Algorithm SHA256).Hash.ToLower()"' 2>/dev/null | tr -d '\r')"
-LLAMA_VERSION="$(ssh "$HOST" "\"$LLAMA_SERVER\" --version" 2>/dev/null | head -1 | tr -d '\r')"
+LLAMA_VERSION="$(ssh "$HOST" "\"$LLAMA_SERVER\" --version" 2>&1 | head -1 | tr -d '\r')"
 LLAMA_BUILD="$(echo "$LLAMA_VERSION" | sed -n 's/.*build \([0-9][0-9]*\).*/\1/p')"
 LLAMA_COMMIT="$(echo "$LLAMA_VERSION" | sed -n 's/.*commit \([0-9a-f][0-9a-f]*\).*/\1/p')"
 GPU_INFO="$(ssh "$HOST" 'powershell -NoProfile -Command "Get-CimInstance Win32_VideoController | Format-Table -HideTableHeaders Name,DriverVersion"' 2>/dev/null | grep -i 'R9700' | head -1 | tr -d '\r')"

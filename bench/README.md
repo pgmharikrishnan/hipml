@@ -84,8 +84,12 @@ bench/
 
 - GPU clocks and thermals drift; runs are sequential, but not
   temperature-controlled beyond the lock.
-- hipml's chunked-prefill path requires f32 KV. llama.cpp is run with the same
-  `-ctk/-ctv` type by default; the chosen type is recorded in every result.
+- hipml's chunked-prefill path requires f32 KV, so hipml runs f32. llama.cpp
+  runs its default f16 KV. The dtype is recorded in every result. This is an
+  as-shipped comparison, not a same-KV-dtype one: at 100K the f32 KV path costs
+  llama.cpp most of its decode rate (the harness measured 6.36 tok/s with f32
+  versus the ~22 tok/s the project's own f16 measurement reports). Run
+  `--llama-kv f32` for the same-dtype sensitivity.
 - llama-server adds HTTP handling to TTFT (small on localhost, not zero).
 - hipml's TTFT includes the first-token argmax; llama's prompt timing does not.
 - A 100K cell marked `1` rep was too slow to repeat inside the lock window.

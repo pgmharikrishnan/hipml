@@ -407,8 +407,10 @@ def write_markdown(report, path):
         )
     lines.append(
         "- Same model file, same box, sequential engine runs. The two engines do "
-        "not share a KV dtype: hipml's chunked path requires f32, llama.cpp is run "
-        "with `-ctk/-ctv` set by the harness. That is recorded per run.")
+        "not share a KV dtype: hipml's chunked path requires f32, while llama.cpp "
+        "runs its default f16. The dtype is recorded per run; it is an as-shipped "
+        "comparison, not a same-KV-dtype one. At 100K the difference is large: "
+        "llama.cpp's f32 path measured 6.36 tok/s decode where f16 is ~22.")
     lines.append(
         "- 100K cells are real cold prefill. If a cell shows `1` rep, the run was "
         "too slow to repeat inside the lock window; it is not cache-prefilled.")
