@@ -33,14 +33,19 @@
 // Computing the score tile transposed is what makes both cache tiles stage
 // row-major and 16-byte aligned, and cuts the softmax to one shuffle:
 //
-//   QK^T:  A = K [key][d] (shared), B = Q^T [d][query] (registers)
+//   QK^T:  A = K [key][d] (shared),      B = Q [query][d] (registers)
 //          C = S^T [key][query]
-//   PV:    A = P [query][key] (shared, transposed on write), B = V [key][d]
+//   PV:    A = P [query][key] (shared), B = V^T [d][key] (shared)
 //          C = O [query][d]
 //
-// Probe layouts (`prefill_wmma.hip`):
+// Both operands are fed to the matrix unit the way the shipped prefill GEMM
+// feeds its weights: B is stored row-major by *output column*, so a B
+// fragment is eight contiguous inner-dimension values of one output column
+// (B_hw[n][k], verified by `prefill_wmma.hip`'s accumulator/operand probe).
+// That is why V is staged transposed and Q is not.
 //
-//   A/B operand:    lane l, element e -> (row l % 16, col 8*(l/16) + e)
+//   A operand:      lane l, element e -> (row l % 16, k 8*(l/16) + e)
+//   B operand:      lane l, element e -> (col n = l % 16, k 8*(l/16) + e)
 //   accumulator C:  lane l, element e -> (col l % 16, row 8*(l/16) + e)
 //
 // In S^T each lane holds one query (col) and eight keys (rows 8*(l/16)+e), so
@@ -75,8 +80,11 @@
 #ifndef AW_KST
 #define AW_KST 264
 #endif
+// V is [d][key] (the PV B operand is row-major by output column): 16 keys
+// plus 2 pad halfs. 18 keeps 4 B rows, so a fragment read is four 32-bit
+// loads, and makes the staging stores walk all 32 banks (stride 9 words).
 #ifndef AW_VST
-#define AW_VST 136            // 128 d + 8 pad
+#define AW_VST 18
 #endif
 // Queries per block, warps, and the GQA group cap.
 #define AW_QUERIES 32
@@ -103,7 +111,7 @@ extern "C" __global__ void attn_chunk_wmma_f16(
     float scale)
 {
     __shared__ __align__(16) _Float16 sk[AW_KT * AW_KST];       // [key][d]
-    __shared__ __align__(16) _Float16 sv[AW_KT * AW_VST];       // [key][d half]
+    __shared__ __align__(16) _Float16 sv[AW_DHALF * AW_VST];    // [d][key]
     __shared__ __align__(16) _Float16 sp[AW_MAXW * 16 * 16];    // [query][key]
 
     const int kvh = blockIdx.x;
@@ -119,23 +127,33 @@ extern "C" __global__ void attn_chunk_wmma_f16(
     const int koff = (lane >> 4) * 8;  // 8-value half of the 16-wide inner dim
     const int lrow = 8 * (lane >> 4);  // first accumulator row of this lane
 
-    // ---- Q^T fragments, once per block -----------------------------------
-    // B operand of S^T: element (d, query) = Q[query][d], i.e. lane l holds
-    // d = dd*16 + (l%16), queries 8*(l/16)+e. Eight scalar reads per fragment,
-    // paid once; the key loop re-reads no Q.
+    // ---- Q fragments, once per block -------------------------------------
+    // B operand of S^T is stored row-major by output column, i.e. B_hw is
+    // (query, d): lane l holds query l%16 and k = 8*(l/16)+e. That is Q's
+    // natural layout, so a fragment is one row of eight contiguous d.
     aw_h8 qt[16];
     {
-        const float* qb = q + (size_t)(tq + lrow) * n_heads * head_dim +
-                          (size_t)h * head_dim;
+        const float* qrow = q + (size_t)(tq + frow) * n_heads * head_dim +
+                            (size_t)h * head_dim;
+        const bool live = tq + frow < tokens;
 #pragma unroll
         for (int dd = 0; dd < 16; ++dd) {
             aw_h8 v;
+            if (live) {
+                const float* p = qrow + dd * 16 + koff;
+                const float4 a = *reinterpret_cast<const float4*>(p);
+                const float4 b = *reinterpret_cast<const float4*>(p + 4);
+                v[0] = __float2half_rn(a.x);
+                v[1] = __float2half_rn(a.y);
+                v[2] = __float2half_rn(a.z);
+                v[3] = __float2half_rn(a.w);
+                v[4] = __float2half_rn(b.x);
+                v[5] = __float2half_rn(b.y);
+                v[6] = __float2half_rn(b.z);
+                v[7] = __float2half_rn(b.w);
+            } else {
 #pragma unroll
-            for (int e = 0; e < 8; ++e) {
-                const int t = tq + lrow + e;
-                v[e] = (_Float16)((t < tokens)
-                                      ? qb[(size_t)e * n_heads * head_dim + dd * 16 + frow]
-                                      : 0.0f);
+                for (int e = 0; e < 8; ++e) v[e] = (_Float16)0.0f;
             }
             qt[dd] = v;
         }
@@ -179,18 +197,16 @@ extern "C" __global__ void attn_chunk_wmma_f16(
             kd[2] = __float2half_rn(a.z);
             kd[3] = __float2half_rn(a.w);
         }
-        // V: only this block's d half.
-        for (int idx = tid; idx < AW_KT * (AW_DHALF / 4); idx += nthreads) {
-            const int key = idx / (AW_DHALF / 4);
-            const int dq = (idx - key * (AW_DHALF / 4)) * 4;
+        // V: this block's d half, transposed to [d][key] because the PV B
+        // operand is row-major by output column with eight keys contiguous.
+        // Consecutive lanes take consecutive d of one key, so the global read
+        // is coalesced and the transposed store walks every bank.
+        for (int idx = tid; idx < AW_DHALF * AW_KT; idx += nthreads) {
+            const int d = idx % AW_DHALF;
+            const int key = idx / AW_DHALF;
             const int rr = (key < rows) ? key : (rows - 1);
-            const float4 b = *reinterpret_cast<const float4*>(
-                vb + (size_t)(base + rr) * width + dq);
-            _Float16* vd = sv + key * AW_VST + dq;
-            vd[0] = __float2half_rn(b.x);
-            vd[1] = __float2half_rn(b.y);
-            vd[2] = __float2half_rn(b.z);
-            vd[3] = __float2half_rn(b.w);
+            sv[d * AW_VST + key] =
+                __float2half_rn(vb[(size_t)(base + rr) * width + d]);
         }
         __syncthreads();
 
@@ -269,7 +285,7 @@ extern "C" __global__ void attn_chunk_wmma_f16(
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
             const aw_h8 vf =
-                *reinterpret_cast<const aw_h8*>(sv + frow * AW_VST + j * 16 + koff);
+                *reinterpret_cast<const aw_h8*>(sv + (j * 16 + frow) * AW_VST + koff);
             acc[j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(pf, vf, acc[j]);
         }
     }
