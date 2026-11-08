@@ -64,7 +64,6 @@ pub use prefix::PrefixHit;
 pub use deep_kv::DeepKv;
 pub use trace::Trace;
 
-
 struct Block<'a> {
     attn_norm: Buffer,
     post_norm: Buffer,
@@ -163,12 +162,12 @@ const ARGMAX_PARTS: usize = 64;
 /// Quantized-KV engines carry no f32 prefill mirror.
 ///
 /// The mirror existed so chunked prefill could read f32 KV tiles. The
-/// matrix-unit kernel now stages a q8_0/q4_0 tile in place, and that is not
-/// just cheaper in memory: at 8K it prefills at 1,016 tok/s against 993 through
-/// the mirror (a q8 row is 272 B, not 1 KB), and at 32K the two are level
-/// (870 vs 871). A 32K mirror is 4.3 GiB and 100K's would be 13.4 GiB, so the
-/// engine never allocates one; `--kv f32` keeps the f32 cache and the token
-/// loop, which is the parity reference.
+/// matrix-unit kernel now stages a q8_0/q4_0 tile in place, and that is no
+/// slower than the mirror it replaces: 8K prefills at 998 tok/s (993 through
+/// the mirror, which reads 4x the bytes) and 32K is level (867 vs 871). A 32K
+/// mirror is 4.3 GiB and 100K's would be 13.4 GiB, so the engine never
+/// allocates one; `--kv f32` keeps the f32 cache and the token loop, which is
+/// the parity reference.
 const MIRROR_ROWS: usize = 1;
 
 impl<'a> GpuEngine<'a> {
