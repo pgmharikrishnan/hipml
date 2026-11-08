@@ -566,7 +566,11 @@ fn deep_attention(
         cfg.n_head,
         cfg.n_head_kv,
         cfg.head_dim,
-        seq,
+        // The cache's per-head row count, not `seq`: the kernel reads `seq`
+        // positions starting at row 0 of a `dk.seq`-stride layout. Passing the
+        // position count here made every decode step above position 0 read the
+        // wrong rows for every KV head but the first.
+        dk.seq,
         1.0f32 / (cfg.head_dim as f32).sqrt(),
         splits,
         0,
