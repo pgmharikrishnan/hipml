@@ -400,11 +400,10 @@ impl<'a> GpuEngine<'a> {
     pub fn build_token_graph(&mut self) -> Result<(), String> {
         let l = self.model.launcher();
         let mut work = GpuState { pos: 0 };
-        // Reach the launch path once so code objects and buffers are resident
-        // before the capture (an allocation inside a capture is an error).
-        self.run_token_and_argmax(1, &mut work, true)?;
-        l.synchronize()?;
-
+        // No warm-up token here: running one would append to every layer's KV
+        // cache at the current position and change the tokens. Capture records
+        // launches without executing them, so the first real launch both warms
+        // the code objects and decodes the token.
         l.stream().begin_capture()?;
         let captured = self.run_token_and_argmax(1, &mut work, false);
         let graph = match captured {
