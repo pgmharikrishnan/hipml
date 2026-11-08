@@ -95,8 +95,11 @@ accumulate); `HIPML_PREFILL_F32=1` selects the f32 kernels. The GDN recurrence
 and causal attention are still sequential in time, but they are now one launch
 per stage per tile rather than one per token: the conv window is recomputed in
 parallel from the tile's rows, the delta-net state stays in registers, and the
-attention kernel tiles 32 queries per block. `HIPML_TOKEN_STEPS=1` keeps the
-per-token chain as an A/B reference.
+attention kernel is a matrix-unit flash kernel: one block per (KV head, 32
+queries, half of the head width), two warps per query head (16 queries each),
+K staged in full and V staged transposed, `wmma_f32_16x16x16_f16` for both
+QK^T and PV. `HIPML_ATTN_F32=1` selects the old f32 tiled kernel for A/B, and
+`HIPML_TOKEN_STEPS=1` keeps the per-token chain.
 
 Numerics: fp16 operands and a 32-value k-tile accumulation mean a tile is not
 bit-identical to the token loop. Measured: the 20 acceptance ids are identical;
@@ -150,13 +153,19 @@ device and CPU argmax both 11751.
 
 ### Acceptance 2 — speed
 
-| measurement | WP13 | WP14 | WP15 |
-| --- | --- | --- | --- |
-| short-context decode, tokens 2..20 | 27.9 tok/s (35.9 ms) | 28.0 tok/s (35.7 ms) | **28.3 tok/s (35.3 ms)** |
-| 512-token prefill | 22.99 s, 22.27 tok/s (token loop) | 5.35 s, 95.8 tok/s (chunk 256) | **0.44 s, 1153.8 tok/s** (chunk 512, matrix unit) |
-| 8,192-token prefill | — | 89.1 s, 91.9 tok/s | **9.93 s, 825.1 tok/s** (chunk 512, matrix unit) |
-| decode at depth 20,000, q8 KV | 21.21 tok/s (47.1 ms) | 26.5 tok/s (37.7 ms) | unchanged |
-| decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | 21.0 tok/s (47.7 ms) | unchanged |
+| measurement | WP13 | WP14 | WP15 | WP20 |
+| --- | --- | --- | --- | --- |
+| short-context decode, tokens 2..20 | 27.9 tok/s (35.9 ms) | 28.0 tok/s (35.7 ms) | 28.3 tok/s (35.3 ms) | **28.3** |
+| 512-token prefill | 22.99 s, 22.27 tok/s (token loop) | 5.35 s, 95.8 tok/s (chunk 256) | 0.44 s, 1153.8 tok/s | 0.41 s, 1239 tok/s (pre-fix run) |
+| 8,192-token prefill | — | 89.1 s, 91.9 tok/s | 9.93 s, 825.1 tok/s | **6.82 s, 1201.0 tok/s** |
+| decode at depth 20,000, q8 KV | 21.21 tok/s (47.1 ms) | 26.5 tok/s (37.7 ms) | 21.0 tok/s (47.7 ms) | unchanged |
+| decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | 21.0 tok/s (47.7 ms) | 21.0 tok/s (47.7 ms) | 20.7 tok/s (48.4 ms), re-measured |
+| decode at depth 32,768, q8 / q4 KV | — | — | — | 25.4 / 25.0 tok/s |
+
+The 512-token figure in the WP20 column is the pre-fix kernel (one
+`gpu-bench --prefill 512` run, before the causal-mask and P-layout fixes); it is
+kept because the 512-token tile is where the fix matters least, but it should be
+re-run before being quoted as a WP20 number.
 
 llama.cpp HIP on the same box: 31.4 tok/s short context, 21.86 tok/s at a
 97,387-token prompt, pp512 **1256.5 tok/s**, 97K prefill **844.9 tok/s**.
@@ -204,7 +213,7 @@ that WP13 paid are gone: 56.9 → 47.7 ms).
 | 512 | 128 | 5.18 s | 98.9 | 10.1 |
 | 512 | 256 | 1.43 s | 357.1 | 2.80 |
 | 512 | 512 | **0.44 s** | **1153.8** | 0.87 |
-| 8,192 | 512 | **9.93 s** | **825.1** | 1.21 |
+| 8,192 | 512 | **6.82 s** | **1201.0** | 0.83 |
 
 The chunk graph is the device default (`--chunk N`, 512 unless overridden;
 `--chunk 0` and `--compare-cpu` keep the token loop). Four changes from WP14,
@@ -292,25 +301,23 @@ Nothing on the decode path round-trips to the host except the 4-byte id.
   relative, and the synthetic 512-token bench prompt samples a different first
   id than the all-f32 path did (489 vs 220). The real-prompt ids are the
   acceptance check; the bench prompt is not.
-- **Attention is now the 8K limit.** 3.58 s of 9.93 s, ~3.7 TFLOPS: the tile
-  kernel reduces each (query, key) score with a 5-step 32-lane shuffle chain and
-  carries f32, so it is latency-bound, not FLOP-bound. What the measurements
-  rule out: KV bandwidth (doubling the query tile, 32 → 64 tokens, changed
-  nothing: 4294 → 4316 ms) and query ILP via registers (8 queries per warp,
-  ~160 VGPR, made it worse: 5098 ms). What worked: two cache rows per iteration
-  (+17%, 4316 → 3578 ms), because it doubles the number of independent shuffle
-  chains and halves the accumulator rescales. The remaining lever is the matrix
-  unit: 16 queries x 16 keys per `wmma` puts the score in registers with no
-  cross-lane reduction. Shape: block = 16 queries x 256 dims, 4 warps (one per
-  64-dim slice), S reduced through shared, P in shared as half, V stored
-  transposed (dim-major) for the P·V operand, online max/sum per query row. That
-  is the next kernel and it is not implemented.
+- **Attention was the 8K limit; the matrix unit took it (WP20).** The f32 tile
+  kernel reduced every (query, key) score with a five-step 32-lane shuffle chain
+  and carried f32: 3.58 s of 9.93 s at 3.7 TFLOPS, latency-bound rather than
+  FLOP-bound. `attn_chunk_wmma_f16` moves QK^T and PV to
+  `wmma_f32_16x16x16_f16` and leaves one `xor 16` per 16x16 score tile: the
+  attention stage is now **779 ms (16.9 TFLOPS)** and 8K prefill **1201 tok/s**.
+  Two register-pressure facts shaped the kernel and are worth keeping: a warp
+  holding both 16 Q fragments and 16 output fragments needs ~240 VGPRs and the
+  compiler spills the output fragments to scratch *inside the key loop*, and
+  the sparse-tile role split does not help because both live ranges span the
+  loop. Splitting the head width across `blockIdx.z` (8 output fragments per
+  warp) is what removed the spill.
 - **The GEMM's remaining gap** to its 185 TFLOPS instruction ceiling (79.74
   whole-model, 43%) is the dequant (~12% of the instruction count), LDS tile
   traffic, and grid tails: at 512 tokens `ffn_gate` launches 80 blocks on 64 CUs
   and loses ~25%.
-- **Next step, in order of size:** (1) the flash-shaped WMMA attention above
-  (8K: expect 4.3 s → ~0.6 s, i.e. ~1150 tok/s); (2) an 8-queries-per-warp or
+- **Next step, in order of size:** (1) an 8-queries-per-warp or
   split-K variant of the prefill GEMM for shapes with fewer than ~2 waves;
   (3) a fused layer kernel or two-stream scheduling to remove the 6.4 ms of DRAM
   ramp from 1,299 short decode kernels, still what stands between 35.3 ms and

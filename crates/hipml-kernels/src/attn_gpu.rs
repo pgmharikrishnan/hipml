@@ -737,6 +737,20 @@ impl AttnLayer {
         Err("hipml was built without the `hip` feature".to_string())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn chunk_attention(
+        &self,
+        _l: &crate::Launcher,
+        _q: &hipml_hip::Buffer,
+        _kc: &hipml_hip::Buffer,
+        _vc: &hipml_hip::Buffer,
+        _out: &hipml_hip::Buffer,
+        _pos0: usize,
+        _tokens: usize,
+    ) -> Result<(), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
     pub fn q_buf(&self) -> &hipml_hip::Buffer {
         unreachable!()
     }

@@ -86,10 +86,9 @@
 #ifndef AW_VST
 #define AW_VST 18
 #endif
-// Queries per block, warps, and the GQA group cap.
+// Queries per block and the GQA group cap the launcher enforces.
 #define AW_QUERIES 32
 #define AW_MAXGROUP 8
-#define AW_MAXW 16
 
 typedef _Float16 aw_h8 __attribute__((ext_vector_type(8)));
 typedef float aw_f8 __attribute__((ext_vector_type(8)));
