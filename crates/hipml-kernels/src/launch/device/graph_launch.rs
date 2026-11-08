@@ -391,9 +391,10 @@ impl Launcher {
         kernel.launch(cfg, &self.stream, &mut params)
     }
 
-    /// Quantize `rows` positions of the position-major f32 cache into the
-    /// head-major q8/q4 cache. The chunked prefill runs its attention on the
-    /// f32 mirror, then hands each chunk's new rows to decode in one launch.
+    /// Quantize `rows` positions of a position-major f32 buffer into the
+    /// head-major q8/q4 cache. `start` is the destination position of the first
+    /// row; `src0` is the source row of `k_f32`/`v_f32` that holds it (0 for a
+    /// chunk-local tile, `start` for the full f32 mirror).
     #[allow(clippy::too_many_arguments)]
     pub fn kv_encode_bulk(
         &self,
@@ -406,6 +407,7 @@ impl Launcher {
         head_dim: usize,
         stride: usize,
         start: usize,
+        src0: usize,
         rows: usize,
     ) -> Result<(), String> {
         let entry = match dtype {
@@ -422,8 +424,9 @@ impl Launcher {
         let mut v_hd = head_dim as i32;
         let mut v_stride = stride as i32;
         let mut v_start = start as i32;
+        let mut v_src0 = src0 as i32;
         let mut v_rows = rows as i32;
-        let mut params: [*mut c_void; 9] = [
+        let mut params: [*mut c_void; 10] = [
             &mut p_k as *mut _ as *mut c_void,
             &mut p_v as *mut _ as *mut c_void,
             &mut p_kc as *mut _ as *mut c_void,
@@ -433,6 +436,7 @@ impl Launcher {
             &mut v_stride as *mut _ as *mut c_void,
             &mut v_start as *mut _ as *mut c_void,
             &mut v_rows as *mut _ as *mut c_void,
+            &mut v_src0 as *mut _ as *mut c_void,
         ];
         let cfg = LaunchConfig {
             grid: ((n_kv * rows) as u32, 1, 1),

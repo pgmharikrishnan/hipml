@@ -294,8 +294,9 @@ impl<'a> GpuEngine<'a> {
                     // cache directly, with every KV tile dequantized inside the
                     // matrix-unit kernel. The row-at-a-time path remains the
                     // escape hatch (HIPML_TOKEN_STEPS) and the cover for shapes
-                    // the matrix-unit kernel does not handle; HIPML_Q8_CHUNK
-                    // forces the quantized chunk path for A/B at shallow depth.
+                    // the matrix-unit kernel does not handle. HIPML_Q8_CHUNK
+                    // forces the quantized chunk path at shallow depth and
+                    // HIPML_Q8_ROW forces the row path, both for A/B.
                     attn.project_chunk(l, &c.t, &c.qg, &c.k, &c.v, n_tok)?;
                     if let Some(r) = rep.as_mut() {
                         r.lap(l, |r| &mut r.attn_gemm_ms);
@@ -308,7 +309,10 @@ impl<'a> GpuEngine<'a> {
                                 l, &c.qg, &c.k, &c.v, &c.q, &c.aq_gate, &c.aout, t, pos0 + t,
                             )?;
                         }
-                    } else if dk.mirror && std::env::var_os("HIPML_Q8_CHUNK").is_none() {
+                    } else if dk.mirror
+                        && std::env::var_os("HIPML_Q8_CHUNK").is_none()
+                        && std::env::var_os("HIPML_Q8_ROW").is_none()
+                    {
                         attn.step_chunk(
                             l,
                             &c.qg,
@@ -330,9 +334,12 @@ impl<'a> GpuEngine<'a> {
                             cfg.head_dim,
                             dk.seq,
                             pos0,
+                            pos0,
                             n_tok,
                         )?;
-                    } else if attn.q8_chunk_supported() {
+                    } else if attn.q8_chunk_supported()
+                        && std::env::var_os("HIPML_Q8_ROW").is_none()
+                    {
                         // Quantize the tile straight into the decode cache, then
                         // run the same matrix-unit attention over it.
                         attn.chunk_front(l, &c.qg, &c.k, &c.q, &c.aq_gate, pos0, n_tok)?;
@@ -346,6 +353,7 @@ impl<'a> GpuEngine<'a> {
                             cfg.head_dim,
                             dk.seq,
                             pos0,
+                            0,
                             n_tok,
                         )?;
                         attn.chunk_attention_q8(

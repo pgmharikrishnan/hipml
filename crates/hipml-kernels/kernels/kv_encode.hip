@@ -96,9 +96,13 @@ extern "C" __global__ void kv_encode_q8(
 // 32 quantized values before anything can be written. Each lane keeps its own
 // `q` and reads the partner's with one shuffle.
 
-// Bulk variant for the chunked-prefill handoff: the f32 chunk attention has
-// just written `rows` positions of the position-major cache, and decode needs
+// Bulk variant for the chunked-prefill handoff: the f32 attention has just
+// written `rows` positions of a position-major f32 buffer, and decode needs
 // them in the head-major quantized cache. One block per (position, KV head).
+//
+// `src0` is the source row of `k`/`v` that holds position `start`: 0 when the
+// source is a chunk-local tile, `start` when it is the full f32 mirror. The
+// destination row is always the absolute position.
 extern "C" __global__ void kv_encode_bulk_q8(
     const float* __restrict__ k,
     const float* __restrict__ v,
@@ -108,7 +112,8 @@ extern "C" __global__ void kv_encode_bulk_q8(
     int head_dim,
     int stride,
     int start,
-    int rows)
+    int rows,
+    int src0)
 {
     const int r = blockIdx.x / n_kv;
     const int h = blockIdx.x - r * n_kv;
@@ -118,7 +123,7 @@ extern "C" __global__ void kv_encode_bulk_q8(
     const int nchunk = head_dim >> 5;
     if (chunk >= nchunk) return;
 
-    const int i = (pos * n_kv + h) * head_dim + chunk * KVQ_BLOCK + lane;
+    const int i = ((src0 + r) * n_kv + h) * head_dim + chunk * KVQ_BLOCK + lane;
     const size_t off = ((size_t)h * stride + pos) * nchunk * KVQ_Q8_BYTES
                      + (size_t)chunk * KVQ_Q8_BYTES;
 
@@ -146,7 +151,8 @@ extern "C" __global__ void kv_encode_bulk_q4(
     int head_dim,
     int stride,
     int start,
-    int rows)
+    int rows,
+    int src0)
 {
     const int r = blockIdx.x / n_kv;
     const int h = blockIdx.x - r * n_kv;
@@ -156,7 +162,7 @@ extern "C" __global__ void kv_encode_bulk_q4(
     const int nchunk = head_dim >> 5;
     if (chunk >= nchunk) return;
 
-    const int i = (pos * n_kv + h) * head_dim + chunk * KVQ_BLOCK + lane;
+    const int i = ((src0 + r) * n_kv + h) * head_dim + chunk * KVQ_BLOCK + lane;
     const size_t off = ((size_t)h * stride + pos) * nchunk * KVQ_Q4_BYTES
                      + (size_t)chunk * KVQ_Q4_BYTES;
 
