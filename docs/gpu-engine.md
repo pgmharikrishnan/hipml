@@ -153,8 +153,8 @@ device and CPU argmax both 11751.
 | measurement | WP13 | WP14 | WP15 |
 | --- | --- | --- | --- |
 | short-context decode, tokens 2..20 | 27.9 tok/s (35.9 ms) | 28.0 tok/s (35.7 ms) | **28.3 tok/s (35.3 ms)** |
-| 512-token prefill | 22.99 s, 22.27 tok/s (token loop) | 5.35 s, 95.8 tok/s (chunk 256) | **0.45 s, 1144.7 tok/s** (chunk 512, matrix unit) |
-| 8,192-token prefill | — | 89.1 s, 91.9 tok/s | **10.67 s, 767.7 tok/s** (chunk 512, matrix unit) |
+| 512-token prefill | 22.99 s, 22.27 tok/s (token loop) | 5.35 s, 95.8 tok/s (chunk 256) | **0.44 s, 1153.8 tok/s** (chunk 512, matrix unit) |
+| 8,192-token prefill | — | 89.1 s, 91.9 tok/s | **9.93 s, 825.1 tok/s** (chunk 512, matrix unit) |
 | decode at depth 20,000, q8 KV | 21.21 tok/s (47.1 ms) | 26.5 tok/s (37.7 ms) | unchanged |
 | decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | 21.0 tok/s (47.7 ms) | unchanged |
 
@@ -203,8 +203,8 @@ that WP13 paid are gone: 56.9 → 47.7 ms).
 | --- | ---: | ---: | ---: | ---: |
 | 512 | 128 | 5.18 s | 98.9 | 10.1 |
 | 512 | 256 | 1.43 s | 357.1 | 2.80 |
-| 512 | 512 | **0.45 s** | **1144.7** | 0.87 |
-| 8,192 | 512 | **10.67 s** | **767.7** | 1.30 |
+| 512 | 512 | **0.44 s** | **1153.8** | 0.87 |
+| 8,192 | 512 | **9.93 s** | **825.1** | 1.21 |
 
 The chunk graph is the device default (`--chunk N`, 512 unless overridden;
 `--chunk 0` and `--compare-cpu` keep the token loop). Four changes from WP14,
@@ -242,7 +242,7 @@ Launch count per 512-token prompt:
 | everything else | ~1 launch/token/op | count in `PrefillReport` |
 | **total** | **≈ 237,600 (464/token)** | **≈ 1,700 (3.3/token)** |
 
-Where a 512-token, chunk-512 prompt's 0.45 s goes (`gpu-bench --prefill-split`):
+Where a 512-token, chunk-512 prompt's 0.44 s goes (`gpu-bench --prefill-split`):
 
 | stage | ms | note |
 | --- | ---: | --- |
@@ -251,12 +251,12 @@ Where a 512-token, chunk-512 prompt's 0.45 s goes (`gpu-bench --prefill-split`):
 | attention GEMMs | 17 | q/k/v/o |
 | elementwise | 15 | norms, residuals |
 | sequential GDN | 113 | 48 layers × 6 launches, state in registers |
-| sequential attention | 42 | 16 layers × 4 launches + output |
+| sequential attention | 38 | 16 layers × 4 launches + output |
 | final head | 2 | lm_head on the last row |
 
-At 8K the same breakdown is ffn 3.22 s, attention 4.32 s, GDN 1.82 s, ssm GEMMs
+At 8K the same breakdown is attention 3.58 s, ffn 3.22 s, GDN 1.82 s, ssm GEMMs
 0.74 s. The GEMM terms moved 3.5×; the sequential ones did not, and attention is
-now the largest single term at 40%.
+now the largest single term at 36%.
 
 ## What runs where
 
@@ -292,17 +292,19 @@ Nothing on the decode path round-trips to the host except the 4-byte id.
   relative, and the synthetic 512-token bench prompt samples a different first
   id than the all-f32 path did (489 vs 220). The real-prompt ids are the
   acceptance check; the bench prompt is not.
-- **Attention is now the 8K limit.** 4.32 s of 10.67 s, ~3 TFLOPS: the tile
+- **Attention is now the 8K limit.** 3.58 s of 9.93 s, ~3.7 TFLOPS: the tile
   kernel reduces each (query, key) score with a 5-step 32-lane shuffle chain and
-  carries f32, so it is latency-bound, not FLOP-bound. Doubling the query tile
-  (32 → 64 tokens) to halve the KV re-reads changed nothing (4294 → 4316 ms), and
-  8 queries per warp (more ILP, ~160 VGPR) made it worse (5098 ms), which rules
-  out both KV bandwidth and ILP as the lever. The lever is the matrix unit: 16
-  queries x 16 keys per `wmma` puts the score in registers with no cross-lane
-  reduction. Shape: block = 16 queries x 256 dims, 4 warps (one per 64-dim
-  slice), S reduced through shared, P in shared as half, V stored transposed
-  (dim-major) for the P·V operand, online max/sum per query row. That is the
-  next kernel and it is not implemented.
+  carries f32, so it is latency-bound, not FLOP-bound. What the measurements
+  rule out: KV bandwidth (doubling the query tile, 32 → 64 tokens, changed
+  nothing: 4294 → 4316 ms) and query ILP via registers (8 queries per warp,
+  ~160 VGPR, made it worse: 5098 ms). What worked: two cache rows per iteration
+  (+17%, 4316 → 3578 ms), because it doubles the number of independent shuffle
+  chains and halves the accumulator rescales. The remaining lever is the matrix
+  unit: 16 queries x 16 keys per `wmma` puts the score in registers with no
+  cross-lane reduction. Shape: block = 16 queries x 256 dims, 4 warps (one per
+  64-dim slice), S reduced through shared, P in shared as half, V stored
+  transposed (dim-major) for the P·V operand, online max/sum per query row. That
+  is the next kernel and it is not implemented.
 - **The GEMM's remaining gap** to its 185 TFLOPS instruction ceiling (79.74
   whole-model, 43%) is the dequant (~12% of the instruction count), LDS tile
   traffic, and grid tails: at 512 tokens `ffn_gate` launches 80 blocks on 64 CUs
