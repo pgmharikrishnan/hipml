@@ -230,9 +230,19 @@ pub(crate) fn event_pass(
 /// The 1-row entry doubles the grid for shapes whose row count leaves the
 /// machine half empty (5120 rows = 320 blocks at 16 rows/block).
 pub(crate) fn variant_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result<(), String> {
-    let mut sets: Vec<(&str, Vec<(&ByteBuffer, usize, usize, &'static str, &'static str)>)> =
-        Vec::new();
-    for suffix in ["ffn_gate", "ffn_up", "ffn_down"] {
+    let mut sets: Vec<(
+        &str,
+        Vec<(&ByteBuffer, usize, usize, &'static str, &'static str, &'static str)>,
+    )> = Vec::new();
+    for suffix in [
+        "ffn_gate",
+        "ffn_up",
+        "ffn_down",
+        "attn_qkv",
+        "attn_gate",
+        "ssm_out",
+        "attn_output",
+    ] {
         let mut v = Vec::new();
         for i in 0..model.tensors().len() {
             let name = format!("blk.{i}.{suffix}.weight");
@@ -240,9 +250,9 @@ pub(crate) fn variant_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result
                 Some(t) => t,
                 None => continue,
             };
-            let (a, b) = match t.ty() {
-                TensorType::Q4K => ("gemv_q4_k", "gemv_q4_k_r1"),
-                TensorType::Q6K => ("gemv_q6_k", "gemv_q6_k_r1"),
+            let (a, b, c) = match t.ty() {
+                TensorType::Q4K => ("gemv_q4_k", "gemv_q4_k_r1", "gemv_q4_k_u4"),
+                TensorType::Q6K => ("gemv_q6_k", "gemv_q6_k_r1", "gemv_q6_k_r1"),
                 _ => continue,
             };
             v.push((
@@ -251,6 +261,7 @@ pub(crate) fn variant_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result
                 t.shape()[1] as usize,
                 a,
                 b,
+                c,
             ));
         }
         sets.push((suffix, v));
@@ -267,32 +278,38 @@ pub(crate) fn variant_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result
         let yb = Buffer::alloc(out_max)?;
         let bytes: usize = v.iter().map(|t| t.0.len()).sum();
 
-        // Exactness: the two entries must write the same bits.
+        // Exactness: every entry must write the same bits.
         let mut worst = 0usize;
-        for (w, m, k, a, b) in v.iter().take(4) {
+        for (w, m, k, a, b, c) in v.iter().take(4) {
             l.run_quant_resident(a, w, &x, &ya, *m, *k)?;
-            l.run_quant_resident(b, w, &x, &yb, *m, *k)?;
             l.synchronize()?;
             let ha = ya.download_bytes(0, m * 4)?;
-            let hb = yb.download_bytes(0, m * 4)?;
-            if ha != hb {
-                worst += 1;
+            for e in [b, c] {
+                l.run_quant_resident(e, w, &x, &yb, *m, *k)?;
+                l.synchronize()?;
+                if yb.download_bytes(0, m * 4)? != ha {
+                    worst += 1;
+                }
             }
         }
 
-        for pass in 0..2 {
-            let entry_idx = pass % 2;
+        let names = ["2 rows/warp", "1 row/warp ", "1 row + x4 "];
+        for pass in 0..3 {
             l.synchronize()?;
             let t = Instant::now();
-            for (w, m, k, a, b) in v.iter() {
-                let e = if entry_idx == 0 { a } else { b };
-                l.run_quant_resident(e, w, &x, if entry_idx == 0 { &ya } else { &yb }, *m, *k)?;
+            for (w, m, k, a, b, c) in v.iter() {
+                let e = match pass {
+                    0 => a,
+                    1 => b,
+                    _ => c,
+                };
+                l.run_quant_resident(e, w, &x, if pass == 0 { &ya } else { &yb }, *m, *k)?;
             }
             l.synchronize()?;
             let secs = t.elapsed().as_secs_f64();
-            let which = if entry_idx == 0 { "2 rows/warp" } else { "1 row/warp " };
             println!(
-                "{label:<9} {which} {:6.2} GB  {:7.3} ms  {:6.1} GB/s  ({} launches, {} blocks/launch avg)",
+                "{label:<12} {} {:6.2} GB  {:7.3} ms  {:6.1} GB/s  ({} launches, {} blocks/launch avg)",
+                names[pass],
                 bytes as f64 / 1e9,
                 secs * 1e3,
                 bytes as f64 / secs / 1e9,
@@ -301,9 +318,9 @@ pub(crate) fn variant_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result
             );
         }
         if worst > 0 {
-            return Err(format!("{label}: {worst} of 4 outputs differ between entries"));
+            return Err(format!("{label}: {worst} of 8 outputs differ between entries"));
         }
-        println!("{label:<9} entries write identical bytes (4 sampled tensors)");
+        println!("{label:<12} entries write identical bytes (4 sampled tensors)");
     }
     Ok(())
 }

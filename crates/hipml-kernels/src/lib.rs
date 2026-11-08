@@ -112,6 +112,16 @@ pub const KERNELS: &[KernelSpec] = &[
         },
     },
     KernelSpec {
+        name: "gemv_q4_k_u4",
+        entry: "gemv_q4_k_u4",
+        // Same geometry as _r1, one 128-bit load per 16 values instead of four
+        // dwords. A/B entry for the load-issue hypothesis.
+        kind: KernelKind::RowTile {
+            rows: 8,
+            block: 256,
+        },
+    },
+    KernelSpec {
         name: "gemv_q4_k_r1",
         entry: "gemv_q4_k_r1",
         // One row per warp: 8 rows per block, twice the grid of the two-row
