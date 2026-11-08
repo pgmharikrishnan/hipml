@@ -158,13 +158,15 @@ pub struct GpuEngine<'a> {
 /// is one wave on this card and turns the 993 KB logit pass into a single sweep.
 const ARGMAX_PARTS: usize = 64;
 
-/// Up to this context, a quantized-KV engine also carries the f32 KV mirror so
-/// prefill can run the matrix-unit chunk attention. The mirror is
-/// `2 * n_ctx * width * 4` bytes per attention layer, 16 layers: 0.54 GiB at
-/// 8K and 4.0 GiB at 32K. Deeper contexts run the same matrix-unit kernel
-/// straight out of the q8/q4 cache, dequantizing each KV tile in the staging
-/// pass (`attn_chunk_wmma_f16`), so no mirror is allocated above this bound.
-const F32_PREFILL_MAX: usize = 32768;
+/// The f32 prefill mirror is a convenience, not a requirement: it is only
+/// allocated while it costs at most this many bytes across the attention
+/// layers. At this model's shape the mirror is `2 * 4 B * width * layers` =
+/// 128 KiB per position, so 5 GiB covers a 40K context: the 32K bench cell
+/// (n_ctx 32832, 4.3 GiB) keeps the mirror, which measured 864 tok/s there
+/// against 847 on the q8 chunk path. A 64K context needs 8.6 GiB and 100K
+/// 13.4 GiB, so both run the matrix-unit kernel straight out of the q8/q4
+/// decode cache and no mirror is ever allocated.
+const F32_MIRROR_MAX_BYTES: usize = 5 << 30;
 
 impl<'a> GpuEngine<'a> {
     /// Build every resident layer, borrowing the loader's weight payloads.
@@ -202,11 +204,13 @@ impl<'a> GpuEngine<'a> {
             let kind = if cfg.is_recr[i] {
                 BlockKind::Ssm(build_ssm(model, l, &cfg, i)?)
             } else if let Some(dtype) = kv_mode.dtype() {
-                // The mirror is a prefill-only convenience: bounded to ~4 GiB
-                // (32K positions at this shape) and never allocated at the
-                // depths that need the VRAM, where the q8 chunk kernel reads
-                // the cache directly.
-                let mirror = n_ctx <= F32_PREFILL_MAX;
+                // The mirror is a prefill-only convenience, bounded by a byte
+                // budget (see F32_MIRROR_MAX_BYTES) and never allocated at the
+                // depths that need the VRAM, where the q8 chunk kernel reads the
+                // cache directly.
+                let n_attn = cfg.is_recr.iter().filter(|r| !**r).count();
+                let mirror_bytes = 2 * n_ctx * (cfg.n_head_kv * cfg.head_dim) * 4 * n_attn;
+                let mirror = mirror_bytes <= F32_MIRROR_MAX_BYTES;
                 let f32_mirror = if mirror { n_ctx } else { 1 };
                 BlockKind::Full {
                     attn: build_attn(model, l, &cfg, i, f32_mirror)?,
