@@ -1,0 +1,26 @@
+Explain, in continuous prose and without code, why a write-ahead log lets a
+database recover after a crash even though the data pages on disk may be only
+partially written. Your answer should cover the ordering guarantee between the
+log and the data files, what a checkpoint does, how redo and undo differ, and
+why torn pages are handled separately from committed transactions.
+
+Use this concrete case as the thread of the explanation:
+
+A banking database has two accounts, A and B, and a transfer of 100 units is
+in flight. The transaction has already appended a log record that says "debit
+A by 100" and "credit B by 100", and the log record is flushed to stable
+storage. The corresponding data page for account A has been written to disk,
+but the page for account B has not. Then the machine loses power while a third
+page, belonging to an index, is halfway through a 16 KB write. When the
+machine comes back, the storage stack reports that the index page has a bad
+checksum, the account A page is intact, and the account B page still contains
+its old value.
+
+Walk through what the recovery code must do in that state. Distinguish what is
+guaranteed by the log flush from what is merely likely, explain why the index
+page is not repaired by replaying the transaction log, and describe the role
+of checkpoints in bounding how much log has to be read. Mention the cost of
+forcing the log on every commit, the reason group commit exists, and the trade
+off between checkpoint frequency and recovery time. Aim for about 500 words.
+Do not assume the reader has implemented a storage engine, but do assume they
+understand transactions and durable writes.
