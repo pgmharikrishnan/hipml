@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use hipml_core::attention::{attn_causal_f32, attn_layer_f32, FullAttnW, KvState};
+use hipml_core::attention::{attn_layer_f32, FullAttnW, KvState};
 use hipml_core::config::Config;
 use hipml_core::gguf::Gguf;
 use hipml_core::model::load_attn_layer;
@@ -14,6 +14,9 @@ use hipml_core::ops::{head_rmsnorm_f32, rope_multi_f32};
 use hipml_core::parity::{compare, Tol};
 use hipml_core::rng::Rng;
 use hipml_kernels::{AttnLayer, Launcher};
+
+#[path = "attn_chunk_parity.rs"]
+mod attn_chunk_parity;
 
 struct Args {
     gguf: String,
@@ -257,94 +260,23 @@ fn parity_run(l: &Launcher, m: &Loaded) -> i32 {
         }
     }
 
-    // 2b. The chunked-prefill attention kernel alone: 37 queries at position
-    // 29 over a 66-row cache, compared row by row with the CPU reference.
-    {
-        const TOK: usize = 37;
-        const POS0: usize = 29;
-        let seq = POS0 + TOK;
-        let mut rng = Rng::new(0xC4A0_1234_5678);
-        let qc: Vec<f32> = (0..TOK * cfg.n_head * hd).map(|_| rng.normal()).collect();
-        let kc: Vec<f32> = (0..seq * width).map(|_| rng.normal()).collect();
-        let vc: Vec<f32> = (0..seq * width).map(|_| rng.normal()).collect();
-        let qb = hipml_hip::Buffer::from_host(&qc).unwrap();
-        let kb = hipml_hip::Buffer::from_host(&kc).unwrap();
-        let vb = hipml_hip::Buffer::from_host(&vc).unwrap();
-        let ob = hipml_hip::Buffer::alloc(TOK * cfg.n_head * hd).unwrap();
-        let layer = match AttnLayer::new(l, &m.w, cfg, seq + 8) {
-            Ok(x) => x,
-            Err(e) => {
-                eprintln!("attn: chunk layer alloc: {e}");
-                return 1;
-            }
-        };
-        if let Err(e) = layer.chunk_attention(l, &qb, &kb, &vb, &ob, POS0, TOK) {
-            eprintln!("attn: chunk attention launch: {e}");
-            return 1;
+    // 2b. The chunked-prefill attention kernel alone, against the CPU
+    // reference (module `attn_chunk_parity`: it is the only case that
+    // allocates its own q/k/v buffers).
+    match attn_chunk_parity::run(l, cfg, &m.w) {
+        Ok((ok, st)) => {
+            failed |= !ok;
+            println!(
+                "{:<30} {:>10.2e} {:>10.2e}  {}",
+                "chunk attention 37@29",
+                st.max_abs,
+                st.max_rel,
+                if ok { "PASS" } else { "FAIL" }
+            );
         }
-        match ob.to_host() {
-            Ok(gpu) => {
-                let scale = 1.0f32 / (hd as f32).sqrt();
-                let mut cpu = vec![0.0f32; TOK * cfg.n_head * hd];
-                for t in 0..TOK {
-                    let row = attn_causal_f32(
-                        &qc[t * cfg.n_head * hd..(t + 1) * cfg.n_head * hd],
-                        &kc,
-                        &vc,
-                        cfg.n_head,
-                        cfg.n_head_kv,
-                        hd,
-                        POS0 + t + 1,
-                        scale,
-                    );
-                    cpu[t * cfg.n_head * hd..(t + 1) * cfg.n_head * hd].copy_from_slice(&row);
-                }
-                let s = compare(&cpu, &gpu, Tol::new(2e-3, 2e-2));
-                let (ok, st) = verdict(s);
-                failed |= !ok;
-                println!(
-                    "{:<30} {:>10.2e} {:>10.2e}  {}",
-                    "chunk attention 37@29",
-                    st.max_abs,
-                    st.max_rel,
-                    if ok { "PASS" } else { "FAIL" }
-                );
-                if !ok {
-                    // Where the error lives: d half, head, row, and the two
-                    // magnitudes, so a layout regression is one line away.
-                    let nh = cfg.n_head * hd;
-                    let (mut worst, mut at) = (0.0f32, (0usize, 0usize, 0usize));
-                    let (mut half0, mut half1) = (0.0f32, 0.0f32);
-                    for t in 0..TOK {
-                        for hh in 0..cfg.n_head {
-                            for dd in 0..hd {
-                                let i = t * nh + hh * hd + dd;
-                                let e = (cpu[i] - gpu[i]).abs();
-                                if dd < hd / 2 {
-                                    half0 = half0.max(e);
-                                } else {
-                                    half1 = half1.max(e);
-                                }
-                                if e > worst {
-                                    worst = e;
-                                    at = (t, hh, dd);
-                                }
-                            }
-                        }
-                    }
-                    println!(
-                        "  diag: max|d| half0 {half0:.3e} half1 {half1:.3e}; worst at row {} head {} d {} \
-                         (cpu {:.4} gpu {:.4})",
-                        at.0, at.1, at.2,
-                        cpu[at.0 * nh + at.1 * hd + at.2],
-                        gpu[at.0 * nh + at.1 * hd + at.2]
-                    );
-                }
-            }
-            Err(e) => {
-                eprintln!("attn: chunk attention download: {e}");
-                return 1;
-            }
+        Err(e) => {
+            eprintln!("attn: chunk attention: {e}");
+            return 1;
         }
     }
 
