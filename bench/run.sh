@@ -29,6 +29,8 @@ SYNC=1
 BUILD=1
 REFRESH_FIXTURE=0
 STAGE=1
+SINGLE_HOLD=0
+VALIDATE=0
 LLAMA_KV="${HIPML_BENCH_LLAMA_KV:-q8_0}"
 HIPML_KV="${HIPML_BENCH_HIPML_KV:-q8}"
 PROMPTS=""
@@ -49,6 +51,11 @@ Options:
   --skip-build        do not run cargo build on the host
   --refresh-fixture   regenerate bench/fixtures/prompts.json from the host
   --no-stage          skip the hipml prefill stage breakdown at depth 0
+  --single-hold       acquire the GPU lock once for this invocation and hold
+                      it across every selected cell (keep the selection under
+                      20 minutes; the 100K pair is about 14)
+  --validate          fail the run if results.json is missing a planned cell,
+                      has the wrong rep count, or has the wrong KV type
   --llama-kv TYPE     f32, f16 or q8_0 (default: q8_0)
   --hipml-kv TYPE     f32, q8 or q4 (default: q8; same class as llama q8_0)
   --host NAME         ssh host (default: rtx, or $RTX_HOST)
@@ -71,6 +78,8 @@ while [ $# -gt 0 ]; do
     --skip-build) BUILD=0; shift ;;
     --refresh-fixture) REFRESH_FIXTURE=1; shift ;;
     --no-stage) STAGE=0; shift ;;
+    --single-hold) SINGLE_HOLD=1; shift ;;
+    --validate) VALIDATE=1; shift ;;
     --llama-kv) LLAMA_KV="$2"; shift 2 ;;
     --hipml-kv) HIPML_KV="$2"; shift 2 ;;
     --host) HOST="$2"; shift 2 ;;
@@ -151,6 +160,13 @@ fi
 
 # Group cells so one lock acquisition covers several short runs, while every
 # group stays comfortably under 20 minutes. 100K is always one cell per hold.
+# With --single-hold the whole invocation is one hold; the selection must be
+# chosen to fit the 20-minute budget.
+if [ "$SINGLE_HOLD" = 1 ]; then
+  echo "== single hold: acquiring once for ${DEPTHS} / ${ENGINES}"
+  if ! acquire_lock; then die "could not acquire GPU lock"; fi
+  single_start=$(date +%s)
+fi
 for depth in "${DEPTH_ARR[@]}"; do
   if [ "$depth" -ge 32768 ] && [ -z "$PROMPTS" ]; then
     DEPTH_PROMPTS=(code_edit)
@@ -180,12 +196,14 @@ for depth in "${DEPTH_ARR[@]}"; do
       fi
 
       echo "== $engine ${group[*]}@$depth"
-      if ! acquire_lock; then
-        echo "   could not acquire GPU lock; skipping group" >&2
-        JOBS_FAILED=$((JOBS_FAILED + 1))
-        LOCKED=0
-        i=$((i + group_size))
-        continue
+      if [ "$SINGLE_HOLD" = 0 ]; then
+        if ! acquire_lock; then
+          echo "   could not acquire GPU lock; skipping group" >&2
+          JOBS_FAILED=$((JOBS_FAILED + 1))
+          LOCKED=0
+          i=$((i + group_size))
+          continue
+        fi
       fi
       batch_start=$(date +%s)
       for prompt in "${group[@]}"; do
@@ -217,13 +235,23 @@ for depth in "${DEPTH_ARR[@]}"; do
         fi
       done
       held=$(( $(date +%s) - batch_start ))
-      echo "   lock hold ${held}s"
-      release_lock
-      LOCKED=0
+      if [ "$SINGLE_HOLD" = 0 ]; then
+        echo "   lock hold ${held}s"
+        release_lock
+        LOCKED=0
+      else
+        echo "   group ${held}s (single hold continues)"
+      fi
       i=$((i + group_size))
     done
   done
 done
+if [ "$SINGLE_HOLD" = 1 ]; then
+  held=$(( $(date +%s) - single_start ))
+  echo "   single lock hold ${held}s"
+  release_lock
+  LOCKED=0
+fi
 
 # ------------------------------------------------------------------------ meta
 echo "== collect metadata"
@@ -295,3 +323,6 @@ echo "== done: $JOBS_RAN jobs, $JOBS_FAILED failed"
 echo "   bench/results.json"
 echo "   bench/RESULTS.md"
 [ "$JOBS_FAILED" = 0 ] || exit 1
+if [ "$VALIDATE" = 1 ]; then
+  python3 bench/validate_results.py || die "results validation failed"
+fi

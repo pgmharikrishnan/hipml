@@ -18,7 +18,8 @@ planned cells, and `## Completeness` names any cell that is genuinely missing.
 | when | job | what happened | rerun |
 | --- | --- | --- | --- |
 | 15:27 | `llama prose_explanation@0` | GPU lock held by a stale `wp22` lock; `acquire` timed out after 30 min, job never started | reran at 15:41, OK |
-| 16:25 | `hipml prose_explanation@8192` | I terminated the process (`taskkill /PID`) to stop the incomplete 40-cell run and switch the head-to-head to q8 KV; log shows `hipml exit 1` | reran in the final matrix |
+| 16:25 | `hipml prose_explanation@8192` | I terminated the process (`taskkill /PID`) to stop the incomplete 40-cell run and switch the head-to-head to q8 KV; log shows `hipml exit 1` | reran in the final matrix, 3 reps |
+| 17:05 | `hipml code_edit@100000` | terminated at 497 s because I misread the lock clock and thought it had been held for 30 min; it was a healthy 8-minute-old prefill | reran at 17:12; finished in 745.7 s |
 
 The remaining cells in the first table were never attempted. The incomplete
 40-cell run had completed, before it was stopped:
@@ -52,3 +53,10 @@ new q8 run should land near that, not near 6.36.
 
 Every cell is labelled with its rep count, and the 100K row reports KV type,
 peak VRAM, and whether llama.cpp spilled.
+
+## Final outcome
+
+`bench/validate_results.py` reports `PASS: 12 cells, every cell present and
+labelled`. The two 100K rows are cold prefills at q8-class KV: hipml finished
+in 745.7 s at 21.13 GiB, llama.cpp in 120.9 s at 19.88 GiB with `spilled=no`.
+

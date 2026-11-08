@@ -315,8 +315,8 @@ def write_markdown(report, path):
 
     lines.append("## Gap (hipml minus llama.cpp)\n")
     lines.append(
-        "Positive means hipml is faster. Each row is its own prompt class; no "
-        "number is averaged across classes.\n"
+        "Positive means hipml is faster; negative means llama.cpp is faster. "
+        "Each row is its own prompt class; no number is averaged across classes.\n"
     )
     lines.append("| prompt | depth | prefill | decode | TTFT (llama/hipml) |")
     lines.append("| --- | ---: | ---: | ---: | ---: |")
@@ -345,9 +345,12 @@ def write_markdown(report, path):
         lo = best(metric, -1)
         if not hi:
             continue
-        line = (
-            f"- **{metric}**: hipml fastest at `{hi['prompt']}@{hi['depth']}` "
-            f"({hi['pct_hipml_minus_llama']:+.1f}%, reps {hi['reps_hipml']}/{hi['reps_llama']})")
+        if hi["pct_hipml_minus_llama"] > 0:
+            line = (
+                f"- **{metric}**: hipml fastest at `{hi['prompt']}@{hi['depth']}` "
+                f"({hi['pct_hipml_minus_llama']:+.1f}%, reps {hi['reps_hipml']}/{hi['reps_llama']})")
+        else:
+            line = f"- **{metric}**: hipml did not win any cell"
         if lo and lo["pct_hipml_minus_llama"] < 0:
             line += (
                 f"; llama.cpp fastest at `{lo['prompt']}@{lo['depth']}` "
@@ -437,6 +440,13 @@ def write_markdown(report, path):
             "- **Cache contamination:** these llama cells reported `cache_n > 0` on "
             "a cold rep: " + ", ".join(f"`{c['prompt']}@{c['depth']}`" for c in bad_cold) + "."
         )
+    lines.append(
+        "- The earlier incomplete table, every `ERROR: missing` cell, and all "
+        "reruns are documented in `bench/RUNLOG.md`.")
+    lines.append(
+        "- `hipml commit` is the Rust commit used; the `(dirty worktree)` flag on "
+        "that run refers to bench-script edits made after the Rust commit, not to "
+        "a different binary. The binary SHA-256 is recorded above.")
     lines.append(
         "- Same model file, same box, sequential engine runs. Both engines use "
         "quantized KV at every depth: hipml `q8` and llama.cpp `-ctk q8_0 -ctv q8_0`. "
