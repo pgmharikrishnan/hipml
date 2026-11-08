@@ -257,10 +257,15 @@ __device__ __forceinline__ void kv_decode_body(
     int n_heads,
     int n_kv,
     int head_dim,
-    int seq,
+    const int* __restrict__ step,
+    int stride,
     float scale,
     int splits)
 {
+    // `step[1]` is how many positions are valid (device memory: one graph is
+    // replayed at every step); `stride` is the cache's per-head row count and is
+    // fixed at graph build.
+    const int seq = step[1];
     // 16-byte aligned so a lane's float4 chunk really becomes one ds_load_b128;
     // with plain float alignment clang splits it into ds_load_2addr_b32 pairs.
     extern __shared__ __align__(16) float sh[];
@@ -293,8 +298,8 @@ __device__ __forceinline__ void kv_decode_body(
     float* ks = sh;
     float* vs = sh + TILE * head_dim;
     const int row_bytes = nb * Loader::BLOCK_BYTES;
-    const char* kbase = (const char*)k + (size_t)kvh * seq * row_bytes;
-    const char* vbase = (const char*)v + (size_t)kvh * seq * row_bytes;
+    const char* kbase = (const char*)k + (size_t)kvh * stride * row_bytes;
+    const char* vbase = (const char*)v + (size_t)kvh * stride * row_bytes;
 
     float m = -INFINITY;   // log2 units
     float l = 0.0f;
@@ -370,11 +375,12 @@ __device__ __forceinline__ void kv_dispatch(
     int n_heads,
     int n_kv,
     int head_dim,
-    int seq,
+    const int* __restrict__ step,
+    int stride,
     float scale,
     int splits)
 {
-#define KV_ARGS q, k, v, part_acc, part_ml, n_heads, n_kv, head_dim, seq, scale, splits
+#define KV_ARGS q, k, v, part_acc, part_ml, n_heads, n_kv, head_dim, step, stride, scale, splits
 #define KV_CASE(D) case D: kv_decode_body<Loader, D, TILE>(KV_ARGS); break;
     switch (head_dim >> 5) {
     KV_CASE(1) KV_CASE(2) KV_CASE(3) KV_CASE(4)
@@ -392,11 +398,12 @@ __device__ __forceinline__ void kv_dispatch(
         const void* __restrict__ v,                                           \
         float* __restrict__ part_acc,                                         \
         float* __restrict__ part_ml,                                          \
-        int n_heads, int n_kv, int head_dim, int seq, float scale, int splits)\
+        int n_heads, int n_kv, int head_dim, const int* step, int stride,     \
+        float scale, int splits)                                              \
     {                                                                         \
         kv_dispatch<LOADER, TILE>(                                            \
             q, k, v, part_acc, part_ml,                                       \
-            n_heads, n_kv, head_dim, seq, scale, splits);                     \
+            n_heads, n_kv, head_dim, step, stride, scale, splits);            \
     }
 
 KV_ENTRY(attn_decode_kv_q8, KvQ8, KV_TILE_Q8)

@@ -39,6 +39,13 @@ pub(crate) mod device {
         /// one, `ev_out` gates the main stream on the side one.
         pub(crate) ev_in: Event,
         pub(crate) ev_out: Event,
+        /// The step scalars, in device memory:
+        /// `[pos, seq, token, 0, p0, p1, p2, p3]`. The position, the sequence
+        /// length and the token id are the only kernel arguments that change
+        /// between decode steps, so keeping them here is what makes one captured
+        /// graph replayable. The last four are the M-RoPE section positions
+        /// (all the token position for text), read as `step + 16 bytes`.
+        pub(crate) step: Buffer,
         pub device_name: String,
     }
 
@@ -52,14 +59,37 @@ pub(crate) mod device {
             let side = Stream::new()?;
             let ev_in = Event::new()?;
             let ev_out = Event::new()?;
+            let step = Buffer::alloc(8)?;
             Ok(Launcher {
                 module,
                 stream,
                 side,
                 ev_in,
                 ev_out,
+                step,
                 device_name: device.name().to_string(),
             })
+        }
+
+        /// Write `[pos, seq, token]` for the next launches. Async on the main
+        /// stream, so it is ordered ahead of them and never stalls the host.
+        pub fn set_step(&self, pos: usize, seq: usize, token: usize) -> Result<(), String> {
+            let p = pos as i32;
+            let mut bytes = [0u8; 32];
+            for (i, v) in [p, seq as i32, token as i32, 0, p, p, p, p].iter().enumerate() {
+                bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            self.step.upload_bytes_async(0, &bytes, &self.stream)
+        }
+
+        /// The device buffer the position-aware kernels read.
+        pub fn step_buf(&self) -> &Buffer {
+            &self.step
+        }
+
+        /// The M-RoPE section positions: the four ints after `[pos, seq, token]`.
+        pub fn mrope_pos(&self) -> *mut c_void {
+            unsafe { (self.step.as_ptr() as *mut i32).add(4) as *mut c_void }
         }
 
         pub fn module(&self) -> &Module {
@@ -340,7 +370,9 @@ pub(crate) mod device {
 
             let mut v_dim = head_dim as i32;
 
-            let mut v_seq = seq as i32;
+            self.set_step(0, seq, 0)?;
+
+            let mut p_step = self.step.as_ptr();
 
             let mut v_scale = scale;
 
@@ -366,7 +398,7 @@ pub(crate) mod device {
                 &mut v_heads as *mut _ as *mut c_void,
                 &mut v_kv as *mut _ as *mut c_void,
                 &mut v_dim as *mut _ as *mut c_void,
-                &mut v_seq as *mut _ as *mut c_void,
+                &mut p_step as *mut _ as *mut c_void,
                 &mut v_scale as *mut _ as *mut c_void,
                 &mut v_head_stride as *mut _ as *mut c_void,
                 &mut v_row_stride as *mut _ as *mut c_void,
@@ -401,7 +433,7 @@ pub(crate) mod device {
             inputs: &[Tensor],
             reps: usize,
         ) -> Result<Vec<f32>, String> {
-            crate::launch_kv::run(&self.module, &self.stream, case, inputs, reps)
+            crate::launch_kv::run(&self.module, &self.stream, &self.step, case, inputs, reps)
         }
 
         /// Encode one token's K/V rows, then decode the bytes that landed in the
@@ -428,8 +460,9 @@ pub(crate) mod device {
             let nbytes = n_kv * seq * row;
             let kc = Buffer::alloc(nbytes.div_ceil(4))?;
             let vc = Buffer::alloc(nbytes.div_ceil(4))?;
+            self.set_step(pos, seq, 0)?;
             for _ in 0..reps {
-                self.kv_encode(dtype, &k, &v, &kc, &vc, n_kv, head_dim, seq, pos)?;
+                self.kv_encode(dtype, &k, &v, &kc, &vc, n_kv, head_dim, seq)?;
             }
             self.stream.synchronize()?;
             let kb = kc.download_bytes(0, nbytes)?;

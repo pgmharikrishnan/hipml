@@ -146,6 +146,37 @@ impl Launcher {
         kernel.launch(LaunchConfig::linear(n, 256), &self.stream, &mut params)
     }
 
+    /// Dequantise the embedding row named by `step[2]` into `out`: the step's
+    /// token id, so a captured graph is replayed for a new token without
+    /// re-capturing.
+    pub fn embed_row_q4_k_dev(
+        &self,
+        w: &ByteBuffer,
+        row_bytes: usize,
+        out: &Buffer,
+        n_embd: usize,
+    ) -> Result<(), String> {
+        let nblocks = n_embd / hipml_core::quant::QK_K;
+        let kernel = self.module.kernel("embed_q4_k_row")?;
+        let mut p_w = w.as_ptr();
+        let mut p_out = out.as_ptr();
+        let mut v_blocks = nblocks as i32;
+        let mut v_row_bytes = row_bytes as i32;
+        let mut p_step = self.step.as_ptr();
+        let mut params: [*mut c_void; 5] = [
+            &mut p_w as *mut _ as *mut c_void,
+            &mut p_out as *mut _ as *mut c_void,
+            &mut v_blocks as *mut _ as *mut c_void,
+            &mut v_row_bytes as *mut _ as *mut c_void,
+            &mut p_step as *mut _ as *mut c_void,
+        ];
+        kernel.launch(
+            LaunchConfig::per_row(nblocks, 256),
+            &self.stream,
+            &mut params,
+        )
+    }
+
     /// Dequantise one embedding row of a resident Q4_K tensor into `out`, on the
     /// device: the graph's `embed` step, with no host round-trip.
     ///
@@ -241,10 +272,12 @@ impl Launcher {
         fin.launch(cfg, &self.stream, &mut params)
     }
 
-    /// Quantize one token's K and V rows into the cache at `pos` on the device.
+    /// Quantize one token's K and V rows into the cache at `step[0]`.
     ///
     /// One launch per layer replaces a readback, a host quantize and eight
-    /// uploads. `dtype` is `KvDtype::id()`: 0 q8_0, 1 q4_0.
+    /// uploads. `dtype` is `KvDtype::id()`: 0 q8_0, 1 q4_0. `stride` is the
+    /// cache's rows per KV head and stays fixed; the position comes from the
+    /// step buffer so a captured graph replays at every step.
     #[allow(clippy::too_many_arguments)]
     pub fn kv_encode(
         &self,
@@ -255,8 +288,7 @@ impl Launcher {
         v_cache: &Buffer,
         n_kv: usize,
         head_dim: usize,
-        seq: usize,
-        pos: usize,
+        stride: usize,
     ) -> Result<(), String> {
         let entry = match dtype {
             0 => "kv_encode_q8",
@@ -269,16 +301,16 @@ impl Launcher {
         let mut p_kc = k_cache.as_ptr();
         let mut p_vc = v_cache.as_ptr();
         let mut v_hd = head_dim as i32;
-        let mut v_seq = seq as i32;
-        let mut v_pos = pos as i32;
+        let mut v_stride = stride as i32;
+        let mut p_step = self.step.as_ptr();
         let mut params: [*mut c_void; 7] = [
             &mut p_k as *mut _ as *mut c_void,
             &mut p_v as *mut _ as *mut c_void,
             &mut p_kc as *mut _ as *mut c_void,
             &mut p_vc as *mut _ as *mut c_void,
             &mut v_hd as *mut _ as *mut c_void,
-            &mut v_seq as *mut _ as *mut c_void,
-            &mut v_pos as *mut _ as *mut c_void,
+            &mut v_stride as *mut _ as *mut c_void,
+            &mut p_step as *mut _ as *mut c_void,
         ];
         let cfg = LaunchConfig {
             grid: (n_kv as u32, 1, 1),

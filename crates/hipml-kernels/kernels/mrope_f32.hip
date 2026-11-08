@@ -10,6 +10,10 @@
 // at 100K positions an f32 argument differs from the reference libm.
 //
 // One warp per head; x and y may alias (each thread owns both halves of a pair).
+//
+// The four position ids come from device memory (`pos[0..3]`) so one captured
+// graph can be replayed at every step: the token's position is the only argument
+// that changes between them.
 
 #include <hip/hip_runtime.h>
 
@@ -23,14 +27,15 @@ extern "C" __global__ void mrope_f32(
     int s1,
     int s2,
     int s3,
-    int p0,
-    int p1,
-    int p2,
-    int p3,
+    const int* __restrict__ pos,
     float theta_base)
 {
     const int h = blockIdx.x;
     if (h >= n_heads) return;
+    const int p0 = pos[0];
+    const int p1 = pos[1];
+    const int p2 = pos[2];
+    const int p3 = pos[3];
 
     const int half = n_rot >> 1;
     const int sect = s0 + s1 + s2 + s3;

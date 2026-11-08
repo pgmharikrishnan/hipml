@@ -29,6 +29,36 @@ static __device__ __forceinline__ void dq4k_scale_min(int j,
     }
 }
 
+// Embedding row for a graph that is replayed: the row index lives in device
+// memory (`step[2]`), so the captured launch needs no host round-trip. Body is
+// the same dequant as `dequant_q4_k_f32` over the selected row.
+extern "C" __global__ void embed_q4_k_row(
+    const unsigned char* __restrict__ w,
+    float* __restrict__ out,
+    int nblocks,
+    int row_bytes,
+    const int* __restrict__ step)
+{
+    const int b = blockIdx.x;
+    const int l = threadIdx.x;
+    if (b >= nblocks || l >= DQ4K_VALUES) return;
+
+    const unsigned char* bp = w + (size_t)step[2] * (size_t)row_bytes
+                            + (size_t)b * DQ4K_BLOCK_BYTES;
+    const int sub = l >> 5;
+    const int within = l & 31;
+    const float d = __half2float(*reinterpret_cast<const __half*>(bp));
+    const float dmin = __half2float(*reinterpret_cast<const __half*>(bp + 2));
+    int sc, mn;
+    dq4k_scale_min(sub, bp + 4, &sc, &mn);
+    const float scale = d * (float)sc;
+    const float minv = dmin * (float)mn;
+
+    const unsigned char qb = bp[16 + (sub >> 1) * 32 + within];
+    const int q = (sub & 1) ? (int)(qb >> 4) : (int)(qb & 0xF);
+    out[(size_t)b * DQ4K_VALUES + l] = scale * (float)q - minv;
+}
+
 extern "C" __global__ void dequant_q4_k_f32(
     const unsigned char* __restrict__ w,
     float* __restrict__ out,

@@ -34,11 +34,14 @@ extern "C" __global__ void attn_decode_split_f32(
     int n_heads,
     int n_kv,
     int head_dim,
-    int seq,
+    const int* __restrict__ step,
     float scale,
     int splits,
     int width)
 {
+    // `step[1]` is the sequence length (device memory: the graph is replayed as
+    // the context grows); `splits` is fixed when the graph is captured.
+    const int seq = step[1];
     extern __shared__ float sh[];
     const int kvh = blockIdx.x / splits;
     const int split = blockIdx.x - kvh * splits;

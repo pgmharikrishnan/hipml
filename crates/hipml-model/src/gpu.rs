@@ -158,6 +158,9 @@ pub struct GpuEngine<'a> {
     arg_out: Buffer,
     /// Chunked-prefill scratch, allocated on first use and reused after.
     chunk: Option<(usize, prefill::Chunk)>,
+    /// The captured token graph, built on first use: one `hipGraphLaunch`
+    /// submits the whole step instead of ~1,300 kernel launches.
+    graph: Option<hipml_hip::Graph>,
     /// Stage timing; `None` unless the caller asked for a trace.
     pub trace: Option<Trace>,
 }
@@ -244,6 +247,7 @@ impl<'a> GpuEngine<'a> {
             arg_i: zeros(ARGMAX_PARTS)?,
             arg_out: zeros(1)?,
             chunk: None,
+            graph: None,
             trace: None,
         })
     }
@@ -267,7 +271,7 @@ impl<'a> GpuEngine<'a> {
 
     /// One token through the whole graph; returns the `n_vocab` logits.
     pub fn forward_token(&mut self, token: u32, st: &mut GpuState) -> Result<Vec<f32>, String> {
-        self.run_token(token, st)?;
+        self.run_token(token, st, true)?;
         self.model.launcher().synchronize()?;
         self.logits.to_host()
     }
@@ -276,7 +280,7 @@ impl<'a> GpuEngine<'a> {
     /// back. This is the decode loop; `forward_token` stays for the oracle
     /// comparison, which needs the whole logit vector.
     pub fn forward_token_id(&mut self, token: u32, st: &mut GpuState) -> Result<u32, String> {
-        self.run_token(token, st)?;
+        self.run_token(token, st, true)?;
         let l = self.model.launcher();
         l.argmax_buf(
             &self.logits,
@@ -292,12 +296,20 @@ impl<'a> GpuEngine<'a> {
     }
 
     /// Everything up to and including `lm_head`; no synchronize.
-    fn run_token(&mut self, token: u32, st: &mut GpuState) -> Result<(), String> {
+    ///
+    /// `set_step` writes `[pos, seq, token]` into the launcher's device step
+    /// buffer. It is false inside a capture: the graph reads that buffer at
+    /// launch time, so the host writes it once per token instead and the captured
+    /// launch has no host arguments left.
+    fn run_token(&mut self, token: u32, st: &mut GpuState, set_step: bool) -> Result<(), String> {
         let l = self.model.launcher();
         let cfg = &self.cfg;
         let pos = st.pos;
+        if set_step {
+            l.set_step(pos, pos + 1, token as usize)?;
+        }
 
-        l.embed_row_q4_k(self.embed.0, token as usize, self.embed.1, &self.x)?;
+        l.embed_row_q4_k_dev(self.embed.0, self.embed.1, &self.x, cfg.n_embd)?;
         mark(&mut self.trace, l, "embed")?;
 
         for i in 0..self.layers.len() {
@@ -324,7 +336,7 @@ impl<'a> GpuEngine<'a> {
                 BlockKind::Full { attn, deep: Some(dk) } => {
                     l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
                     mark(&mut self.trace, l, "attn_in")?;
-                    attn.prepare_qkv(l, &self.t, pos)?;
+                    attn.prepare_qkv(l, &self.t)?;
                     // Quantize and append the new K/V row on the device: one
                     // launch instead of a readback and eight uploads.
                     l.kv_encode(
@@ -336,7 +348,6 @@ impl<'a> GpuEngine<'a> {
                         cfg.n_head_kv,
                         cfg.head_dim,
                         dk.seq,
-                        pos,
                     )?;
                     deep_attention(l, cfg, attn, dk, pos)?;
                     attn.apply_output(l)?;
@@ -380,6 +391,76 @@ impl<'a> GpuEngine<'a> {
         self.model
     }
 
+    /// Capture one token, argmax included, into a reusable graph.
+    ///
+    /// Every argument that changes between steps lives in the launcher's device
+    /// step buffer, so the graph is launched once per token and the host only
+    /// writes 32 bytes and reads 4 back. The position and token id are therefore
+    /// *not* baked: `graph_token` supplies them.
+    pub fn build_token_graph(&mut self) -> Result<(), String> {
+        let l = self.model.launcher();
+        let mut work = GpuState { pos: 0 };
+        // Reach the launch path once so code objects and buffers are resident
+        // before the capture (an allocation inside a capture is an error).
+        self.run_token_and_argmax(1, &mut work, true)?;
+        l.synchronize()?;
+
+        l.stream().begin_capture()?;
+        let captured = self.run_token_and_argmax(1, &mut work, false);
+        let graph = match captured {
+            Ok(()) => l.stream().end_capture(),
+            Err(e) => {
+                // The stream is left in capture mode; end it before reporting.
+                let _ = l.stream().end_capture();
+                return Err(e);
+            }
+        }?;
+        graph.upload(l.stream())?;
+        l.synchronize()?;
+        self.graph = Some(graph);
+        Ok(())
+    }
+
+    /// True once `build_token_graph` has run.
+    pub fn has_graph(&self) -> bool {
+        self.graph.is_some()
+    }
+
+    /// One token through the captured graph: write the step scalars, launch,
+    /// sync, read the id. Returns the same id the eager path produces.
+    pub fn graph_token(&mut self, token: u32, st: &mut GpuState) -> Result<u32, String> {
+        let l = self.model.launcher();
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| "no token graph: call build_token_graph".to_string())?;
+        l.set_step(st.pos, st.pos + 1, token as usize)?;
+        graph.launch(l.stream())?;
+        l.synchronize()?;
+        st.pos += 1;
+        let bytes = self.arg_out.download_bytes(0, 4)?;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    /// `run_token` followed by the device argmax, with no synchronize.
+    fn run_token_and_argmax(
+        &mut self,
+        token: u32,
+        st: &mut GpuState,
+        set_step: bool,
+    ) -> Result<(), String> {
+        self.run_token(token, st, set_step)?;
+        let l = self.model.launcher();
+        l.argmax_buf(
+            &self.logits,
+            &self.arg_v,
+            &self.arg_i,
+            &self.arg_out,
+            self.cfg.n_vocab,
+            ARGMAX_PARTS,
+        )
+    }
+
     /// Capture one token as a HIP graph and time it against the eager stream.
     ///
     /// The arguments are baked into the graph, including the position and the
@@ -396,7 +477,7 @@ impl<'a> GpuEngine<'a> {
         let l = self.model.launcher();
         let mut work = GpuState { pos: st.pos };
         // Warm: code objects, clocks, and the eager launch path.
-        self.run_token(token, &mut work)?;
+        self.run_token(token, &mut work, true)?;
         l.synchronize()?;
 
         let mut timed = |reps: usize| -> Result<(f64, f64), String> {
@@ -404,7 +485,7 @@ impl<'a> GpuEngine<'a> {
             let t = std::time::Instant::now();
             for _ in 0..reps {
                 let h = std::time::Instant::now();
-                self.run_token(token, &mut work)?;
+                self.run_token(token, &mut work, true)?;
                 submit += h.elapsed().as_secs_f64();
             }
             l.synchronize()?;
@@ -413,7 +494,7 @@ impl<'a> GpuEngine<'a> {
         let (eager_s, eager_submit) = timed(reps)?;
 
         l.stream().begin_capture()?;
-        self.run_token(token, &mut work)?;
+        self.run_token(token, &mut work, true)?;
         let graph = l.stream().end_capture()?;
         graph.upload(l.stream())?;
         l.synchronize()?;
@@ -483,10 +564,14 @@ fn deep_attention(
     if seq > dk.seq {
         return Err(format!("position {pos} beyond quantized cache {}", dk.seq));
     }
-    let splits = (seq / 64).clamp(1, MAX_SPLITS);
+    // Fixed for the whole cache, not per step: the grid is part of the captured
+    // graph. At depth this is the same count the per-step formula picked (64 at
+    // 100K), and shallow positions just leave the later splits empty.
+    let splits = (dk.seq / 64).clamp(1, MAX_SPLITS);
     launch_kv::launch(
         l.module(),
         l.stream(),
+        l.step_buf(),
         dk.dtype.id(),
         attn.q_buf(),
         &dk.k,

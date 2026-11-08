@@ -57,6 +57,8 @@ pub fn run(depths: &[usize], reps_min: usize, max_splits: Option<usize>) -> Resu
     let device = Device::first()?;
     let module = Module::load(&dir.join("hipml.co"))?;
     let stream = Stream::new()?;
+    // The position-aware kernels read `[pos, seq, token]` from device memory.
+    let step = Buffer::alloc(8)?;
     let (free0, total) = device.mem_info()?;
 
     // Measure the weight stream first: a second of 838 MB gemv also brings the
@@ -86,6 +88,13 @@ pub fn run(depths: &[usize], reps_min: usize, max_splits: Option<usize>) -> Resu
                 let part_acc = Buffer::alloc(heads * splits * head_dim)?;
                 let part_ml = Buffer::alloc(heads * splits * 2)?;
 
+                // The bench decodes one position at `seq`, cache stride `seq`.
+                let mut step_bytes = [0u8; 32];
+                for (i, v) in [0i32, seq as i32, 0, 0, 0, 0, 0, 0].iter().enumerate() {
+                    step_bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+                }
+                step.upload_bytes(0, &step_bytes)?;
+
                 let pass = |n: usize| -> Result<f64, String> {
                     let t0 = Instant::now();
                     for _ in 0..n {
@@ -93,6 +102,7 @@ pub fn run(depths: &[usize], reps_min: usize, max_splits: Option<usize>) -> Resu
                             launch(
                                 &module,
                                 &stream,
+                                &step,
                                 dtype.id(),
                                 &q,
                                 &k,

@@ -66,6 +66,9 @@ impl AttnLayer<'_> {
         pos: usize,
     ) -> Result<(), String> {
         let d = self.dims;
+        // The chunk walks rows, each at its own position: one async 16-byte
+        // write per row feeds every position-aware kernel below.
+        l.set_step(pos, pos + 1, 0)?;
         let qg_row = row_ptr(qg, t, 2 * d.n_head * d.head_dim);
         let q_row = row_ptr(q, t, d.n_head * d.head_dim);
         let gate_row = row_ptr(gate, t, d.n_head * d.head_dim);
@@ -93,21 +96,21 @@ impl AttnLayer<'_> {
         };
         split.launch(cfg, &l.stream, &mut params)?;
 
-        self.norm_rope_at(l, q_row, k_row, pos)?;
+        self.norm_rope_at(l, q_row, k_row)?;
 
         let append = self.module_kernel(l, "kv_append_f32")?;
         let mut p_kc = self.kv_k.as_ptr();
         let mut p_vc = self.kv_v.as_ptr();
         let mut p_k = k_row;
         let mut p_v = v_row;
-        let mut off = pos as i32;
+        let mut p_step = l.step_buf().as_ptr();
         let mut width = d.width as i32;
         let mut params: [*mut c_void; 6] = [
             &mut p_kc as *mut _ as *mut c_void,
             &mut p_vc as *mut _ as *mut c_void,
             &mut p_k as *mut _ as *mut c_void,
             &mut p_v as *mut _ as *mut c_void,
-            &mut off as *mut _ as *mut c_void,
+            &mut p_step as *mut _ as *mut c_void,
             &mut width as *mut _ as *mut c_void,
         ];
         append.launch(
@@ -116,7 +119,7 @@ impl AttnLayer<'_> {
             &mut params,
         )?;
 
-        self.attention_at(l, q_row, out_row, pos + 1)
+        self.attention_at(l, q_row, out_row)
     }
 
     /// `y[t, :] = W_o (attn_out[t] * gate[t])` for a whole chunk: one elementwise
