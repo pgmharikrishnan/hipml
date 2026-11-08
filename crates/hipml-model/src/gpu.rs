@@ -44,10 +44,13 @@ mod prefill;
 mod deep_kv;
 #[path = "gpu/layers.rs"]
 mod layers;
+#[path = "gpu/prefix.rs"]
+mod prefix;
 
 use layers::{build_attn, build_ssm};
 
 pub use prefill::PrefillReport;
+pub use prefix::PrefixHit;
 
 pub use deep_kv::DeepKv;
 use deep_kv::MAX_SPLITS;
@@ -134,6 +137,8 @@ pub struct GpuEngine<'a> {
     arg_out: Buffer,
     /// Chunked-prefill scratch, allocated on first use and reused after.
     chunk: Option<(usize, prefill::Chunk)>,
+    /// Prefix snapshots (SSM recurrent state + f32 KV rows), when enabled.
+    prefix: Option<hipml_core::prefix_cache::PrefixCache<prefix::Snapshot>>,
 }
 
 /// Blocks the device argmax reduces over before the one-block fold. 64 blocks
@@ -218,11 +223,28 @@ impl<'a> GpuEngine<'a> {
             arg_i: zeros(ARGMAX_PARTS)?,
             arg_out: zeros(1)?,
             chunk: None,
+            prefix: None,
         })
     }
 
     pub fn new_state(&self) -> GpuState {
         GpuState { pos: 0 }
+    }
+
+    /// Zero every SSM layer's carried state (conv window + delta-net matrix).
+    ///
+    /// `GpuState` only holds the position; the recurrent buffers live in the
+    /// layers and outlive it. A cold prefill on a reused engine must clear them
+    /// or it starts from the previous request's summary. The KV rows do not
+    /// need clearing: position `t` is appended before it is read.
+    pub fn reset_state(&self) -> Result<(), String> {
+        for b in &self.layers {
+            if let BlockKind::Ssm(s) = &b.kind {
+                s.conv_state_buf().zero()?;
+                s.s_state_buf().zero()?;
+            }
+        }
+        self.model.launcher().synchronize()
     }
 
     /// Bytes of resident weights actually streamed per token.

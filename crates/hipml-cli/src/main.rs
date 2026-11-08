@@ -11,6 +11,8 @@ use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
 
 mod attn_cmd;
 #[cfg(feature = "hip")]
+mod cache_cmd;
+#[cfg(feature = "hip")]
 mod device_cmd;
 #[cfg(feature = "hip")]
 mod gpu_bench_cmd;
@@ -49,6 +51,15 @@ fn main() {
         "matbench" => std::process::exit(gen_cmd::matbench(&args[1..])),
         "prefill-bench" => std::process::exit(prefill_cmd::bench(&args[1..])),
         "prefill-model" => std::process::exit(prefill_cmd::model(&args[1..])),
+        "cache-bench" => {
+            #[cfg(feature = "hip")]
+            std::process::exit(cache_cmd::bench(&args[1..]));
+            #[cfg(not(feature = "hip"))]
+            {
+                eprintln!("cache-bench needs a build with `--features hip`");
+                std::process::exit(2);
+            }
+        }
         #[cfg(feature = "hip")]
         "ssm" => std::process::exit(ssm_cmd::ssm(&args[1..])),
         "attn-parity" => std::process::exit(attn_cmd::parity(&args[1..])),
@@ -112,6 +123,7 @@ fn help() {
          \x20 logits    run lm_head on a 5120-value f32 vector file\n\
          \x20 prefill-bench time the tiled prefill GEMM at Qwen3.8-27B shapes, M=512/2048\n\
          \x20 prefill-model prefill the whole model cold, then warm from a KV prefix\n\
+         \x20 cache-bench cold / warm-exact / warm-shared TTFT on SSM+KV snapshots\n\
          \x20 ssm       gated-delta-net parity (small + real layer) and layer timing\n\
          \x20 attn-parity --gguf PATH   GPU full-attention block vs CPU reference\n\
          \x20 attn-bench  --gguf PATH   per-layer time at depths 0/8192/100000\n\
