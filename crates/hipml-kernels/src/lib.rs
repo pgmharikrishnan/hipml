@@ -180,42 +180,42 @@ pub const KERNELS: &[KernelSpec] = &[
             block: 512,
         },
     },
-    // Matrix-unit path (gfx12 `wmma_f32_16x16x16_f16`): 32 tokens x 256 output
-    // rows per block, 256 threads, f32 accumulators, f32 epilogue.
+    // Matrix-unit path (gfx12 `wmma_f32_16x16x16_f16`): 256 tokens x 128 output
+    // rows per block, 512 threads, f32 accumulators, f32 epilogue.
     KernelSpec {
         name: "prefill_q4_k_w",
         entry: "prefill_q4_k_w",
         kind: KernelKind::Prefill {
-            rows: 256,
-            tokens: 32,
-            block: 256,
+            rows: 128,
+            tokens: 256,
+            block: 512,
         },
     },
     KernelSpec {
         name: "prefill_q6_k_w",
         entry: "prefill_q6_k_w",
         kind: KernelKind::Prefill {
-            rows: 256,
-            tokens: 32,
-            block: 256,
+            rows: 128,
+            tokens: 256,
+            block: 512,
         },
     },
     KernelSpec {
         name: "prefill_q8_0_w",
         entry: "prefill_q8_0_w",
         kind: KernelKind::Prefill {
-            rows: 256,
-            tokens: 32,
-            block: 256,
+            rows: 128,
+            tokens: 256,
+            block: 512,
         },
     },
     KernelSpec {
         name: "prefill_halfw_w",
         entry: "prefill_halfw_w",
         kind: KernelKind::Prefill {
-            rows: 256,
-            tokens: 32,
-            block: 256,
+            rows: 128,
+            tokens: 256,
+            block: 512,
         },
     },
     KernelSpec {
