@@ -262,15 +262,16 @@ impl AttnLayer<'_> {
     /// One token of a chunk: q-gate split, head norm, rope, cache append and
     /// causal attention, all reading/writing row `t` of the chunk buffers.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_chunk_row(
+    /// The row-local front half of `step_chunk_row`: split q|gate, then apply
+    /// the per-head RMS norm and RoPE to q and k at `pos`. The quantized-KV
+    /// chunk path calls this and then encodes the row on the device.
+    pub fn prep_chunk_row(
         &self,
         l: &Launcher,
         qg: &Buffer,
         k: &Buffer,
-        v: &Buffer,
         q: &Buffer,
         gate: &Buffer,
-        out: &Buffer,
         t: usize,
         pos: usize,
     ) -> Result<(), String> {
@@ -282,8 +283,6 @@ impl AttnLayer<'_> {
         let q_row = row_ptr(q, t, d.n_head * d.head_dim);
         let gate_row = row_ptr(gate, t, d.n_head * d.head_dim);
         let k_row = row_ptr(k, t, d.width);
-        let v_row = row_ptr(v, t, d.width);
-        let out_row = row_ptr(out, t, d.n_head * d.head_dim);
 
         let split = self.module_kernel(l, "qg_split_f32")?;
         let mut p_qg = qg_row;
@@ -305,7 +304,29 @@ impl AttnLayer<'_> {
         };
         split.launch(cfg, &l.stream, &mut params)?;
 
-        self.norm_rope_at(l, q_row, k_row)?;
+        self.norm_rope_at(l, q_row, k_row)
+    }
+
+    pub fn step_chunk_row(
+        &self,
+        l: &Launcher,
+        qg: &Buffer,
+        k: &Buffer,
+        v: &Buffer,
+        q: &Buffer,
+        gate: &Buffer,
+        out: &Buffer,
+        t: usize,
+        pos: usize,
+    ) -> Result<(), String> {
+        let d = self.dims;
+        let q_row = row_ptr(q, t, d.n_head * d.head_dim);
+        let k_row = row_ptr(k, t, d.width);
+        let v_row = row_ptr(v, t, d.width);
+        let out_row = row_ptr(out, t, d.n_head * d.head_dim);
+
+        self.prep_chunk_row(l, qg, k, q, gate, t, pos)?;
+
 
         let append = self.module_kernel(l, "kv_append_f32")?;
         let mut p_kc = self.kv_k.as_ptr();

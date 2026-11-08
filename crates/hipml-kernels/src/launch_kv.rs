@@ -96,6 +96,53 @@ pub fn launch(
     // `seq` is both the number of valid positions and the cache's per-head row
     // stride; the count comes from the step buffer at run time and the stride is
     // baked here, so one captured graph serves every step.
+    launch_ptrs(
+        module,
+        stream,
+        step,
+        dtype,
+        q.as_ptr(),
+        k,
+        v,
+        part_acc,
+        part_ml,
+        out.as_ptr(),
+        n_heads,
+        n_kv,
+        head_dim,
+        seq,
+        scale,
+        splits,
+        k_off,
+        v_off,
+    )
+}
+
+/// Same pair, with the query row and output row given as raw device pointers.
+/// The chunked q8 prefill walks one token at a time over the chunk's projection
+/// buffers, so it needs row pointers instead of a whole-buffer `Buffer`.
+#[cfg(feature = "hip")]
+#[allow(clippy::too_many_arguments)]
+pub fn launch_ptrs(
+    module: &Module,
+    stream: &Stream,
+    step: &Buffer,
+    dtype: usize,
+    q_ptr: *mut std::ffi::c_void,
+    k: &Buffer,
+    v: &Buffer,
+    part_acc: &Buffer,
+    part_ml: &Buffer,
+    out_ptr: *mut std::ffi::c_void,
+    n_heads: usize,
+    n_kv: usize,
+    head_dim: usize,
+    seq: usize,
+    scale: f32,
+    splits: usize,
+    k_off: usize,
+    v_off: usize,
+) -> Result<(), String> {
     if n_kv == 0 || n_heads % n_kv != 0 {
         return Err(format!("n_heads {n_heads} is not a multiple of n_kv {n_kv}"));
     }
@@ -131,7 +178,7 @@ pub fn launch(
     };
 
     let kernel = module.kernel(entry)?;
-    let mut p_q = q.as_ptr();
+    let mut p_q = q_ptr;
     let mut p_k = (k.as_ptr() as *mut u8).wrapping_add(k_off) as *mut std::ffi::c_void;
     let mut p_v = (v.as_ptr() as *mut u8).wrapping_add(v_off) as *mut std::ffi::c_void;
     let mut p_acc = part_acc.as_ptr();
@@ -171,7 +218,7 @@ pub fn launch(
     let reduce = module.kernel("attn_decode_kv_reduce")?;
     let mut p_acc = part_acc.as_ptr();
     let mut p_ml = part_ml.as_ptr();
-    let mut p_out = out.as_ptr();
+    let mut p_out = out_ptr;
     let mut v_dim = head_dim as i32;
     let mut v_splits = splits as i32;
     let mut params: [*mut std::ffi::c_void; 5] = [

@@ -104,6 +104,11 @@ pub(crate) struct Chunk {
     pub y: Buffer,
 }
 
+/// Device pointer of row `t` of a `[tokens][width]` f32 buffer.
+fn row_ptr(buf: &Buffer, t: usize, width: usize) -> *mut std::ffi::c_void {
+    unsafe { (buf.as_ptr() as *mut u8).add(t * width * 4) as *mut std::ffi::c_void }
+}
+
 impl Chunk {
     fn new(cfg: &hipml_core::config::Config, tokens: usize) -> Result<Chunk, String> {
         let n = cfg.n_embd;
@@ -158,9 +163,6 @@ impl<'a> GpuEngine<'a> {
         st: &mut GpuState,
         chunk: usize,
     ) -> Result<u32, String> {
-        if self.kv_mode != KvMode::F32 {
-            return Err("chunked prefill needs --kv f32 (the chunk path appends to the f32 cache)".to_string());
-        }
         let chunk = chunk.max(1);
         self.ensure_chunk(chunk)?;
         let mut rep: Option<PrefillReport> = None;
@@ -179,9 +181,6 @@ impl<'a> GpuEngine<'a> {
         st: &mut GpuState,
         chunk: usize,
     ) -> Result<(u32, PrefillReport), String> {
-        if self.kv_mode != KvMode::F32 {
-            return Err("chunked prefill needs --kv f32".to_string());
-        }
         let chunk = chunk.max(1);
         self.ensure_chunk(chunk)?;
         let mut rep = Some(PrefillReport::default());
@@ -287,8 +286,45 @@ impl<'a> GpuEngine<'a> {
                     }
                     &c.y
                 }
-                BlockKind::Full { deep: Some(_), .. } => {
-                    return Err("chunked prefill does not cover the quantized KV cache".to_string())
+                BlockKind::Full { attn, deep: Some(dk) } => {
+                    // The projections are still one batched GEMM per chunk; the
+                    // attention itself walks the chunk one row at a time through
+                    // the same q8/q4 cache the decode path uses. That keeps the
+                    // quantized KV format in one place and makes the 100K peek
+                    // fit without a 13 GiB f32 mirror.
+                    attn.project_chunk(l, &c.t, &c.qg, &c.k, &c.v, n_tok)?;
+                    if let Some(r) = rep.as_mut() {
+                        r.lap(l, |r| &mut r.attn_gemm_ms);
+                    }
+                    let width = cfg.n_head_kv * cfg.head_dim;
+                    let q_width = cfg.n_head * cfg.head_dim;
+                    for t in 0..n_tok {
+                        let pos = pos0 + t;
+                        attn.prep_chunk_row(l, &c.qg, &c.k, &c.q, &c.aq_gate, t, pos)?;
+                        l.kv_encode_ptr(
+                            dk.dtype.id(),
+                            row_ptr(&c.k, t, width),
+                            row_ptr(&c.v, t, width),
+                            &dk.k,
+                            &dk.v,
+                            cfg.n_head_kv,
+                            cfg.head_dim,
+                            dk.seq,
+                        )?;
+                        deep_attention_ptr(
+                            l,
+                            &cfg,
+                            dk,
+                            pos,
+                            row_ptr(&c.q, t, q_width),
+                            row_ptr(&c.aout, t, q_width),
+                        )?;
+                    }
+                    attn.apply_output_chunk(l, &c.aout, &c.aq_gate, &c.y, n_tok)?;
+                    if let Some(r) = rep.as_mut() {
+                        r.lap(l, |r| &mut r.attn_seq_ms);
+                    }
+                    &c.y
                 }
             };
             l.residual_buf(&c.x, block_out, &c.x1, n_tok * n)?;
