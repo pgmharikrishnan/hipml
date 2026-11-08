@@ -461,59 +461,44 @@ impl<'a> GpuEngine<'a> {
         )
     }
 
-    /// Capture one token as a HIP graph and time it against the eager stream.
+    /// Eager versus captured step, both through the public per-token calls.
     ///
-    /// The arguments are baked into the graph, including the position and the
-    /// token id, so repeated launches decode the *same* step: this measures what
-    /// submission costs and what a graph saves, not a correct sequence. The
-    /// reusable-per-step version needs the step scalars in device memory, which
-    /// `StepScalars` does.
+    /// `graph_token` writes the step scalars, launches, syncs and reads the id,
+    /// which is exactly what `forward_token_id` does with ~1,300 launches, so the
+    /// difference is submission and the queue gaps between kernels.
     pub fn graph_probe(
         &mut self,
         token: u32,
         st: &mut GpuState,
         reps: usize,
     ) -> Result<GraphTiming, String> {
-        let l = self.model.launcher();
         let mut work = GpuState { pos: st.pos };
-        // Warm: code objects, clocks, and the eager launch path.
-        self.run_token(token, &mut work, true)?;
-        l.synchronize()?;
-
-        let mut timed = |reps: usize| -> Result<(f64, f64), String> {
-            let mut submit = 0.0f64;
-            let t = std::time::Instant::now();
-            for _ in 0..reps {
-                let h = std::time::Instant::now();
-                self.run_token(token, &mut work, true)?;
-                submit += h.elapsed().as_secs_f64();
-            }
-            l.synchronize()?;
-            Ok((t.elapsed().as_secs_f64(), submit))
-        };
-        let (eager_s, eager_submit) = timed(reps)?;
-
-        l.stream().begin_capture()?;
-        self.run_token(token, &mut work, true)?;
-        let graph = l.stream().end_capture()?;
-        graph.upload(l.stream())?;
-        l.synchronize()?;
-
         let mut submit = 0.0f64;
         let t = std::time::Instant::now();
         for _ in 0..reps {
             let h = std::time::Instant::now();
-            graph.launch(l.stream())?;
+            self.forward_token_id(token, &mut work)?;
             submit += h.elapsed().as_secs_f64();
         }
-        l.synchronize()?;
+        let eager_s = t.elapsed().as_secs_f64();
+
+        self.build_token_graph()?;
+        let mut submit_g = 0.0f64;
+        let t = std::time::Instant::now();
+        let mut last = 0u32;
+        for _ in 0..reps {
+            let h = std::time::Instant::now();
+            last = self.graph_token(token, &mut work)?;
+            submit_g += h.elapsed().as_secs_f64();
+        }
         let graph_s = t.elapsed().as_secs_f64();
+        let _ = last;
 
         Ok(GraphTiming {
             eager_ms: eager_s * 1e3 / reps as f64,
-            eager_submit_ms: eager_submit * 1e3 / reps as f64,
+            eager_submit_ms: submit * 1e3 / reps as f64,
             graph_ms: graph_s * 1e3 / reps as f64,
-            graph_submit_ms: submit * 1e3 / reps as f64,
+            graph_submit_ms: submit_g * 1e3 / reps as f64,
             launches: launches_per_token(self.cfg.n_layer, &self.cfg.is_recr),
         })
     }
