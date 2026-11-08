@@ -114,22 +114,22 @@ typedef float aw_f8 __attribute__((ext_vector_type(8)));
 
 // Four consecutive head components of one cache row, as halfs.
 //
-// `dtype` selects how `row` is addressed: f32 rows are `width` floats wide and
-// `row` points at component 0, while a quantized row is a run of 34 B (q8_0) or
-// 18 B (q4_0) blocks and `d` picks block and offset. The dequantized values go
+// DT selects how `row` is addressed: f32 rows are `width` floats wide and `row`
+// points at component 0, while a quantized row is a run of 34 B (q8_0) or 18 B
+// (q4_0) blocks and `d` picks block and offset. The dequantized values go
 // straight to f16 — the matrix unit takes f16 operands either way, so the only
 // difference from the f32 mirror is the 8-bit cache's own rounding.
-static __device__ __forceinline__ void aw_ld4(
-    _Float16* o, const void* row, int d, int dtype)
+template <int DT>
+static __device__ __forceinline__ void aw_ld4(_Float16* o, const char* row, int d)
 {
-    if (dtype == AW_DT_F32) {
+    if (DT == AW_DT_F32) {
         const float4 a = *reinterpret_cast<const float4*>(
             reinterpret_cast<const float*>(row) + d);
         o[0] = __float2half_rn(a.x);
         o[1] = __float2half_rn(a.y);
         o[2] = __float2half_rn(a.z);
         o[3] = __float2half_rn(a.w);
-    } else if (dtype == AW_DT_Q8) {
+    } else if (DT == AW_DT_Q8) {
         const unsigned char* b =
             reinterpret_cast<const unsigned char*>(row) + (size_t)(d >> 5) * 34;
         const float s = __half2float(*reinterpret_cast<const __half*>(b));
@@ -149,6 +149,37 @@ static __device__ __forceinline__ void aw_ld4(
             const int q = (int)((w >> (8 * j)) & 0x0f) - 8;
             o[j] = __float2half_rn(s * (float)q);
         }
+    }
+}
+
+// Stage the 16-key tile: K in full, V only for this block's d half, both from
+// cache dtype DT. One thread fetches four consecutive d of one key (16 B from
+// the f32 mirror, one 4-value group from a quantized block).
+template <int DT>
+static __device__ __forceinline__ void aw_stage(
+    _Float16* sk, _Float16* sv, const char* kb, const char* vb,
+    size_t row_bytes, int base, int rows, int dh, int tid, int nthreads)
+{
+    for (int idx = tid; idx < AW_KT * (AW_HD / 4); idx += nthreads) {
+        const int key = idx / (AW_HD / 4);
+        const int dq = (idx - key * (AW_HD / 4)) * 4;
+        const int rr = (key < rows) ? key : (rows - 1);
+        aw_ld4<DT>(sk + key * AW_KST + dq, kb + (size_t)(base + rr) * row_bytes, dq);
+    }
+    // V is transposed to [d][key] because the PV B operand is row-major by
+    // output column with eight keys contiguous. A lane writes four halfs into
+    // four d rows; the 18-half stride walks the banks four ways, which is
+    // cheaper than four times as many scalar loads.
+    for (int idx = tid; idx < AW_KT * (AW_DHALF / 4); idx += nthreads) {
+        const int key = idx / (AW_DHALF / 4);
+        const int dq = (idx - key * (AW_DHALF / 4)) * 4;
+        const int rr = (key < rows) ? key : (rows - 1);
+        _Float16 t[4];
+        aw_ld4<DT>(t, vb + (size_t)(base + rr) * row_bytes, dh * AW_DHALF + dq);
+        sv[(dq + 0) * AW_VST + key] = t[0];
+        sv[(dq + 1) * AW_VST + key] = t[1];
+        sv[(dq + 2) * AW_VST + key] = t[2];
+        sv[(dq + 3) * AW_VST + key] = t[3];
     }
 }
 
@@ -251,32 +282,15 @@ extern "C" __global__ void attn_chunk_wmma_f16(
 
         __syncthreads();
 
-        // K: full head width, [key][d]. One thread fetches four consecutive d
-        // of one key (16 B from the f32 mirror, one 4-value group from a q8/q4
-        // block) and stores a half4.
-        for (int idx = tid; idx < AW_KT * (AW_HD / 4); idx += nthreads) {
-            const int key = idx / (AW_HD / 4);
-            const int dq = (idx - key * (AW_HD / 4)) * 4;
-            const int rr = (key < rows) ? key : (rows - 1);
-            aw_ld4(sk + key * AW_KST + dq, kb + (size_t)(base + rr) * row_bytes,
-                   dq, kv_dtype);
-        }
-        // V: this block's d half, transposed to [d][key] because the PV B
-        // operand is row-major by output column with eight keys contiguous.
-        // A lane fetches four consecutive d of one key and writes four halfs
-        // into four d rows; the 18-half stride walks the banks four ways, which
-        // is cheaper than four times as many scalar loads.
-        for (int idx = tid; idx < AW_KT * (AW_DHALF / 4); idx += nthreads) {
-            const int key = idx / (AW_DHALF / 4);
-            const int dq = (idx - key * (AW_DHALF / 4)) * 4;
-            const int rr = (key < rows) ? key : (rows - 1);
-            _Float16 t[4];
-            aw_ld4(t, vb + (size_t)(base + rr) * row_bytes,
-                   dh * AW_DHALF + dq, kv_dtype);
-            sv[(dq + 0) * AW_VST + key] = t[0];
-            sv[(dq + 1) * AW_VST + key] = t[1];
-            sv[(dq + 2) * AW_VST + key] = t[2];
-            sv[(dq + 3) * AW_VST + key] = t[3];
+        // One uniform dispatch per tile; the staging loops are compiled once
+        // per cache dtype so the f32 mirror keeps exactly the load shape it
+        // was tuned on.
+        if (kv_dtype == AW_DT_F32) {
+            aw_stage<AW_DT_F32>(sk, sv, kb, vb, row_bytes, base, rows, dh, tid, nthreads);
+        } else if (kv_dtype == AW_DT_Q8) {
+            aw_stage<AW_DT_Q8>(sk, sv, kb, vb, row_bytes, base, rows, dh, tid, nthreads);
+        } else {
+            aw_stage<AW_DT_Q4>(sk, sv, kb, vb, row_bytes, base, rows, dh, tid, nthreads);
         }
         __syncthreads();
 
