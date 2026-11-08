@@ -116,6 +116,21 @@ fn fill(tok: &Tokenizer, text: &str, n: usize) -> Vec<u32> {
     out
 }
 
+fn decode(
+    engine: &mut GpuEngine<'_>,
+    st: &mut hipml_model::gpu::GpuState,
+    first: u32,
+    n: usize,
+) -> Result<Vec<u32>, String> {
+    let mut ids = Vec::with_capacity(n);
+    ids.push(first);
+    while ids.len() < n {
+        let next = engine.forward_token_id(*ids.last().unwrap(), st)?;
+        ids.push(next);
+    }
+    Ok(ids)
+}
+
 /// Prefill `tokens` (from `st.pos`), then emit `n` greedy ids.
 fn run(
     engine: &mut GpuEngine<'_>,
@@ -128,13 +143,7 @@ fn run(
     let t = Instant::now();
     let first = engine.prefill_chunked(tokens, &mut st, chunk)?;
     let ms = t.elapsed().as_secs_f64() * 1e3;
-    let mut ids = Vec::with_capacity(n);
-    ids.push(first);
-    for _ in 1..n {
-        let next = engine.forward_token_id(*ids.last().unwrap(), &mut st)?;
-        ids.push(next);
-    }
-    Ok((ms, ids))
+    Ok((ms, decode(engine, &mut st, first, n)?))
 }
 
 fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
@@ -221,7 +230,6 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
         .prefix_restore(hit, &mut st)?
         .ok_or("end snapshot has no cached logits")?;
     let restore_ms = t.elapsed().as_secs_f64() * 1e3;
-    let first_exact = argmax_f32(&cached) as u32;
 
     // 4. Warm exact P: restore + cached logits, then decode.
     let mut st = engine.new_state();
@@ -230,15 +238,9 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
     let cached = engine
         .prefix_restore(hit, &mut st)?
         .ok_or("end snapshot has no cached logits")?;
-    let mut ids_exact = vec![argmax_f32(&cached) as u32];
+    let first = argmax_f32(&cached) as u32;
     let warm_exact = t.elapsed().as_secs_f64() * 1e3;
-    for _ in 1..a.tokens {
-        let next = engine.forward_token_id(*ids_exact.last().unwrap(), &mut st)?;
-        ids_exact.push(next);
-    }
-    if ids_exact[0] != first_exact {
-        return Err("exact repeat changed its first id".to_string());
-    }
+    let ids_exact = decode(engine, &mut st, first, a.tokens)?;
 
     // 5. Cold Q: a shared prefix but a different suffix, computed from zero.
     let (cold_q, ids_q) = run(engine, &q, a.chunk, a.tokens)?;
@@ -257,11 +259,7 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
     let computed = q.len() - hit.pos;
     let first_shared = engine.prefill_chunked(&q[hit.pos..], &mut st, a.chunk)?;
     let warm_shared = t.elapsed().as_secs_f64() * 1e3;
-    let mut ids_shared = vec![first_shared];
-    for _ in 1..a.tokens {
-        let next = engine.forward_token_id(*ids_shared.last().unwrap(), &mut st)?;
-        ids_shared.push(next);
-    }
+    let ids_shared = decode(engine, &mut st, first_shared, a.tokens)?;
     if ids_shared != ids_q {
         return Err("shared-prefix ids differ from the cold path".to_string());
     }
@@ -276,11 +274,7 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
     // Capture before decoding: the state must be exactly `r`, not `r + ids`.
     let logits_r = engine.logits_host()?;
     let inserted = engine.prefix_capture(&r, r.len(), Some(&logits_r))?;
-    let mut ids_r = vec![first_r];
-    for _ in 1..a.tokens {
-        let next = engine.forward_token_id(*ids_r.last().unwrap(), &mut st)?;
-        ids_r.push(next);
-    }
+    let ids_r = decode(engine, &mut st, first_r, a.tokens)?;
     let final_stats = engine.prefix_stats().ok_or("cache disabled")?;
     let after_evict = engine.prefix_lookup(&p);
 
