@@ -239,12 +239,21 @@ extern "C" __global__ void attn_chunk_wmma_f16(
         run_sum += sreg;
 
         // Rescale only when this tile raised the max (rare after the first few
-        // tiles); the factor is one scalar per lane, not one per output row.
-        if (run_max > old_max) {
+        // tiles). `corr` belongs to this lane's query (col = l%16), while the
+        // output rows are queries 8*(l/16)+e, so the factor is broadcast from
+        // the lane that owns each row before it touches the accumulators.
+        float c[8];
+        bool grow = false;
+#pragma unroll
+        for (int e = 0; e < 8; ++e) {
+            c[e] = __shfl_sync(0xffffffffffffffffULL, corr, lrow + e);
+            grow |= (c[e] != 1.0f);
+        }
+        if (grow) {
 #pragma unroll
             for (int j = 0; j < 8; ++j)
 #pragma unroll
-                for (int e = 0; e < 8; ++e) acc[j][e] *= corr;
+                for (int e = 0; e < 8; ++e) acc[j][e] *= c[e];
         }
 
         // ---- P to shared, transposed into the A-fragment layout ----------
