@@ -37,7 +37,7 @@ struct HipmlGemvJob {
 };
 
 // Defined in the format files later in this translation unit.
-template <int RPW, bool WIDE>
+template <int RPW, bool WIDE, bool STREAM>
 __device__ __forceinline__ void q4k_tile(
     const unsigned char* __restrict__ w,
     const float* __restrict__ x,
@@ -91,7 +91,7 @@ extern "C" __global__ void gemv_jobs(
     __shared__ __align__(16) float sx[2048];
     switch (job.kind) {
     case GJ_Q4K:
-        q4k_tile<1, false>(job.w, job.x, job.y, job.m, job.k, sx, tile);
+        q4k_tile<1, false, false>(job.w, job.x, job.y, job.m, job.k, sx, tile);
         break;
     case GJ_Q6K:
         q6k_tile<1>(job.w, job.x, job.y, job.m, job.k, sx, tile);

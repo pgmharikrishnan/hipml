@@ -98,12 +98,10 @@ static __device__ __forceinline__ void q4k_acc(const unsigned char* __restrict__
     if (WIDE && STREAM) {
         // sc1 (streaming): the 17 GB stream is read once per token and never
         // reused, so it should not be kept in L2. Same bytes, same arithmetic.
-        const uint4 wide = __builtin_nontemporal_load(
-            reinterpret_cast<const uint4*>(qp));
-        q.w[0] = wide.x;
-        q.w[1] = wide.y;
-        q.w[2] = wide.z;
-        q.w[3] = wide.w;
+        // `__builtin_nontemporal_load` does not take HIP vector types, so this
+        // is four dword loads carrying the streaming cache policy.
+#pragma unroll
+        for (int i = 0; i < 4; ++i) q.w[i] = __builtin_nontemporal_load(qp + i);
     } else if (WIDE) {
         const uint4 wide = *reinterpret_cast<const uint4*>(qp);
         q.w[0] = wide.x;
