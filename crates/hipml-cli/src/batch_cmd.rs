@@ -18,6 +18,7 @@ struct Args {
     depths: Vec<usize>,
     kv: KvMode,
     check: bool,
+    split: bool,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -28,6 +29,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         depths: vec![0],
         kv: KvMode::Q8,
         check: false,
+        split: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -66,6 +68,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--check" => {
                 a.check = true;
+                i += 1;
+            }
+            "--split" => {
+                a.split = true;
                 i += 1;
             }
             other => return Err(format!("unknown argument {other}")),
@@ -156,6 +162,7 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     let n = a.tokens;
+    eng.trace = a.split;
     let t = Instant::now();
     let mut last = vec![0u32; a.slots];
     for _ in 0..n {
@@ -181,6 +188,19 @@ pub fn run(args: &[String]) -> i32 {
         gbs,
         &last[..last.len().min(4)]
     );
+    if a.split {
+        const NAMES: [&str; 9] = [
+            "embed", "attn proj", "attn kv+core", "attn out", "ssm proj", "ssm rec",
+            "ssm out", "ffn", "final",
+        ];
+        for (i, name) in NAMES.iter().enumerate() {
+            println!(
+                "  {name:<13} {:8.2} ms/step ({:5.1}%)",
+                eng.stages[i] * 1e3 / n as f64,
+                100.0 * eng.stages[i] / secs
+            );
+        }
+    }
 
     // Single-stream reference on the same engine shape, so the efficiency is
     // measured on this run rather than copied from a doc.

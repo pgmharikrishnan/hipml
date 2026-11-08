@@ -19,6 +19,7 @@
 
 use super::layers::{build_attn, build_ssm};
 use super::*;
+use std::time::Instant;
 
 /// Slot bookkeeping. Capacity is fixed when the engine is built; allocation
 /// just hands out the indices, so nothing in the forward path assumes slot 0
@@ -128,6 +129,10 @@ pub struct BatchEngine<'a> {
     pool: SlotPool,
     positions: Vec<usize>,
     active: Vec<usize>,
+    /// Stage timing (sync at group boundaries); costs a sync per group.
+    pub trace: bool,
+    /// Seconds per stage accumulated by `forward` when `trace` is on.
+    pub stages: [f64; 9],
 }
 
 impl<'a> BatchEngine<'a> {
@@ -237,6 +242,8 @@ impl<'a> BatchEngine<'a> {
             pool: SlotPool::new(slots),
             positions: vec![0; slots],
             active: Vec::new(),
+            trace: false,
+            stages: [0.0; 9],
         })
     }
 
@@ -354,9 +361,28 @@ impl<'a> BatchEngine<'a> {
         let n = cfg.n_embd;
         let positions: Vec<usize> = self.active.iter().map(|&s| self.positions[s]).collect();
 
+        // Stage timing: `stage!(i)` closes the previous bucket and opens `i`.
+        let trace = self.trace;
+        let mut stg = self.stages;
+        let mut last: Option<Instant> = None;
+        let mut prev = 0usize;
+        macro_rules! stage {
+            ($i:expr) => {
+                if trace {
+                    l.synchronize()?;
+                    if let Some(t) = last.take() {
+                        stg[prev] += t.elapsed().as_secs_f64();
+                    }
+                    last = Some(Instant::now());
+                    prev = $i;
+                }
+            };
+        }
+        stage!(0);
         for (bi, &tok) in tokens.iter().enumerate() {
             l.embed_row_q4_k_at(self.embed.0, tok as usize, self.embed.1, &self.x, bi * n, n)?;
         }
+        stage!(1);
 
         for i in 0..self.layers.len() {
             let block = &self.layers[i];
@@ -365,6 +391,7 @@ impl<'a> BatchEngine<'a> {
                 BatchKind::Full(f) => {
                     f.attn.qkv_rows(l, &self.t, &f.qg, &f.k, &f.v, b)?;
                     f.attn.split_rope_rows(l, &f.qg, &f.k, &f.q, &f.gate, &positions)?;
+                    stage!(2);
                     let width = cfg.n_head_kv * cfg.head_dim;
                     let qw = cfg.n_head * cfg.head_dim;
                     for bi in 0..b {
@@ -391,13 +418,17 @@ impl<'a> BatchEngine<'a> {
                             row_ptr(&f.out, bi, qw),
                         )?;
                     }
+                    stage!(3);
                     f.attn.out_rows(l, &f.out, &f.gate, &f.y, b)?;
+                    stage!(7);
                     &f.y
                 }
                 BatchKind::Ssm(s) => {
+                    stage!(4);
                     s.per_slot[0].gemvs_batched(
                         l, &self.t, &s.qkv, &s.z, &s.alpha, &s.beta, b,
                     )?;
+                    stage!(5);
                     let d = SsmDims::from_config(&cfg);
                     for bi in 0..b {
                         let slot = self.active[bi];
@@ -414,7 +445,9 @@ impl<'a> BatchEngine<'a> {
                             row_ptr(&s.gated, bi, d.inner()),
                         )?;
                     }
+                    stage!(6);
                     s.per_slot[0].output_gemv_batched(l, &s.gated, &s.out, b)?;
+                    stage!(7);
                     &s.out
                 }
             };
@@ -430,6 +463,7 @@ impl<'a> BatchEngine<'a> {
             self.positions[slot] += 1;
         }
 
+        stage!(8);
         l.rmsnorm_rows(&self.x, &self.output_norm, &self.final_h, n, cfg.eps, b)?;
         let out = self
             .model
@@ -456,6 +490,12 @@ impl<'a> BatchEngine<'a> {
             b,
         )?;
         l.synchronize()?;
+        if trace {
+            if let Some(t) = last.take() {
+                stg[prev] += t.elapsed().as_secs_f64();
+            }
+            self.stages = stg;
+        }
         let bytes = self.arg_out.download_bytes(0, 4 * b)?;
         Ok((0..b)
             .map(|i| {
