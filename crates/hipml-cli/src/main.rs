@@ -23,6 +23,8 @@ mod profile_cmd;
 #[cfg(feature = "hip")]
 mod sweep_ab;
 #[cfg(feature = "hip")]
+mod sweep_merge;
+#[cfg(feature = "hip")]
 mod sweep_cmd;
 mod quant_cmd;
 #[cfg(feature = "hip")]

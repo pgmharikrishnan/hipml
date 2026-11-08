@@ -146,13 +146,13 @@ device and CPU argmax both 11751.
 
 ### Acceptance 2 — speed
 
-| measurement | WP13 | WP14 | WP16 |
-| --- | --- | --- | --- |
-| short-context decode, tokens 2..20 | 27.9 tok/s (35.9 ms) | 28.0 tok/s (35.7 ms) | **29.9 tok/s (33.5 ms)** |
+| measurement | WP13 | WP14 | WP16 | WP21 |
+| --- | --- | --- | --- | --- |
+| short-context decode, tokens 2..20 | 27.9 tok/s (35.9 ms) | 28.0 tok/s (35.7 ms) | **29.9 tok/s (33.5 ms)** | 30.0 tok/s (33.3 ms) |
 | 512-token prefill | 22.99 s, 22.27 tok/s (token loop) | **5.35 s, 95.8 tok/s** (chunk 256) | 5.35 s |
 | 8,192-token prefill | — | **89.1 s, 91.9 tok/s** | unchanged |
 | decode at depth 20,000, q8 KV | 21.21 tok/s (47.1 ms) | 26.5 tok/s (37.7 ms) | **28.0 tok/s (35.7 ms)** |
-| decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | 21.0 tok/s (47.7 ms) | **21.8 tok/s (45.9 ms)** |
+| decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | 21.0 tok/s (47.7 ms) | 21.8 tok/s (45.9 ms) | 21.6 tok/s (46.4 ms) |
 
 WP16 measured every stage of a token with HIP events (`gpu-profile --trace`)
 instead of attributing the remainder to "DRAM ramp". It found that the gap is
@@ -230,6 +230,72 @@ The quantized-KV attention kernel runs at 282 GB/s and is not block-limited:
 (stage to shared, one dot per query head, one rescale per tile) that sets its
 pace, so the remaining 12 ms at 100K needs a different kernel, not a wider grid.
 
+### Driver-level submission (WP21)
+
+The previous section attributed the 33.5 ms to "per-kernel memory ramp across
+fifteen separate weight streams" and implied that submitting faster would
+reclaim it. WP21 tested that directly, with the runtime rather than the kernels:
+stream capture into a HIP graph, one kernel over a device-side job list, a
+second stream, split-K, and cache hints on the weight loads.
+
+The capture experiment needs one thing from the graph before it is reusable: the
+step scalars. `pos`, `seq`, the token id and the four M-RoPE positions moved into
+a 32-byte device buffer (`Launcher::step`), and `mrope_f32`, `kv_append_f32`,
+`attn_decode_f32`, `attn_decode_split_f32`, `attn_decode_kv` and `kv_encode` read
+them there. The split count is fixed per layer from `n_ctx` instead of per step,
+because the grid is part of a captured graph. With that, one graph decodes every
+step: `hipml generate --device --graph` prints the same twenty ids as the eager
+path, and `gpu-bench --graph` the same argmax, at depth 0 and at 100K.
+
+| approach | effective GB/s | ms/token | tok/s | submit |
+| --- | ---: | ---: | ---: | ---: |
+| eager, 1,299 launches | 494 | 33.32 | 30.01 | 2.35 ms/token host, overlapped |
+| capture + `hipGraphLaunch` | 494 | 33.27 | 30.06 | 0.006 ms/token host |
+| one kernel over an ffn gate+up job list | 562 vs 568 | — | — | 64 vs 128 launches |
+| split-K x2 / x4 / x8 on ffn_down | 546 / 551 / 531 vs 559 | — | — | 120 vs 60 launches |
+| sc1 streaming loads (`nontemporal`) | 491 vs 559 | — | — | — |
+| two weight streams (`gpu-sweep --pair`, WP16) | 370 vs 500 | — | — | — |
+| `hipMemAdvise` / `hipMemPrefetchAsync` | not applicable | | | |
+
+**Submission is not on the critical path.** 1,299 launches at 1.81 us are
+2.35 ms of host time against 33.3 ms of GPU work, so the host finishes a token
+eight times over before the device does; a graph launch at 6 us changes nothing
+(0.998x). The 1.6 ms of "idle between launches" the event pass reports is
+GPU-side drain at each kernel boundary, and capture does not remove it.
+
+**The fifteen weight streams are not paying for being fifteen.** The same 6.85 GB
+of ffn gate+up bytes stream at 568 GB/s as 128 launches and 562 GB/s as 64
+launches of one job-list kernel — and 561 GB/s as a single launch over all 96
+jobs, which is not schedulable but bounds the idea. Splitting k to widen the
+grid (546/551/531 GB/s at 2/4/8 splits, plus an ordered reduce) and marking the
+payload loads streaming (491 vs 559, sc1 costs 12% — the L2 was helping) are both
+worse. The equivalent change that did pay earlier was row-grain, not launch-grain.
+
+That leaves the honest attribution of a 33.3 ms short-context token:
+
+| component | ms | note |
+| --- | ---: | --- |
+| weight roofline at lm_head's 622 GB/s | 26.5 | 16.47 GB |
+| the other fourteen shapes at 556 GB/s average | +3.1 | 493-577 GB/s per share, insensitive to launch count, grid shape, split-K, load width and cache policy |
+| GDN recurrent chain + elementwise + attention compute | +1.7 | 1.18 + 0.25 + ~0.3 |
+| kernel-boundary drain that survives capture | +2.0 | residual |
+| **measured** | **33.3** | 30.0 tok/s |
+
+At depth the same 33.3 ms is the base: 46.4 = 33.3 + 5.5 KV roofline + 6.9
+attention excess + 0.7.
+
+Instruments, all on the resident weights: `gpu-sweep --merge` (job-list kernel,
+three launch shapes over the same ffn bytes, with the merged rows checked against
+the standalone entries), `gpu-sweep --split` (r1 vs sc1 vs 1/2/4/8 k-splits, with
+the relative difference against the unsplit kernel), `gpu-sweep --pair` (two
+streams) and `gpu-bench --graph-probe` (eager vs captured step).
+
+Two bugs fell out of the capture work and are fixed: the quantized-KV decode
+passed the position count where the cache stride belongs, so every KV head but
+the first read rows at the wrong offset whenever `n_ctx > pos + 1` (invisible to
+`parity --deep`, which uses `seq == stride`); and a capture warm-up token must
+not run, because it appends to every layer's cache at the current position.
+
 ### Prefill
 
 | tokens | chunk | wall | tok/s | ms/token |
@@ -274,12 +340,18 @@ Nothing on the decode path round-trips to the host except the 4-byte id.
   parity cases still exercise the 2-row entry, and `gpu-sweep --variant`
   checks that the two write identical bytes.
 - No fp16 KV path.
+- **Not launch-bound, not graph-bound, not grid-bound.** Measured in WP21 and
+  left here so they are not re-attempted: stream capture (0.998x), a job-list
+  kernel over the independent projections (561 vs 568 GB/s), split-K to widen
+  the grid (546-551 vs 559), sc1/streaming weight loads (491 vs 559), two
+  streams (0.74x, WP16). Reusable capture does work and is kept behind
+  `--graph`; it is worth 0.06 ms, not 3 ms.
 - **Next step, in order of size:** (1) the quantized-KV attention kernel at
   282 GB/s of 632, worth ~5 ms at 100K — it needs the stage/dot/rescale work
   reorganized (more than one query head's worth of rows per staged tile, or
   f32 scores over a shorter row), not more blocks; (2) the GDN output
   projection at 385 GB/s and the GDN input projections at 466 — both are Q8_0,
   whose per-row kernel has 5.2 KB per block and a two-stage reduction, so it is
-  the last format without a row-tile entry; (3) chunk variants of the conv/GDN
-  kernels so a prefill tile runs one kernel per layer instead of 464 launches
-  (the 10.4 ms/token prefill floor).
+  the last format without a row-tile entry and worth ~1 ms of the 3.1;
+  (3) chunk variants of the conv/GDN kernels so a prefill tile runs one kernel
+  per layer instead of 464 launches (the 10.4 ms/token prefill floor).

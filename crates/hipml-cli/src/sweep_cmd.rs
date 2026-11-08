@@ -19,9 +19,8 @@ use hipml_core::quant::TensorType;
 use hipml_hip::{Buffer, ByteBuffer};
 use hipml_model::Model;
 
-use crate::sweep_ab::{
-    event_pass, gemv_pass, merge_pass, pair_pass, report, split_pass, variant_pass,
-};
+use crate::sweep_ab::{event_pass, gemv_pass, pair_pass, report, variant_pass};
+use crate::sweep_merge::{merge_pass, split_pass};
 
 pub(crate) struct Weight<'a> {
     pub(crate) buf: &'a ByteBuffer,
