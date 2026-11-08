@@ -309,6 +309,37 @@ fn parity_run(l: &Launcher, m: &Loaded) -> i32 {
                     st.max_rel,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if !ok {
+                    // Where the error lives: d half, head, row, and the two
+                    // magnitudes, so a layout regression is one line away.
+                    let nh = cfg.n_head * hd;
+                    let (mut worst, mut at) = (0.0f32, (0usize, 0usize, 0usize));
+                    let (mut half0, mut half1) = (0.0f32, 0.0f32);
+                    for t in 0..TOK {
+                        for hh in 0..cfg.n_head {
+                            for dd in 0..hd {
+                                let i = t * nh + hh * hd + dd;
+                                let e = (cpu[i] - gpu[i]).abs();
+                                if dd < hd / 2 {
+                                    half0 = half0.max(e);
+                                } else {
+                                    half1 = half1.max(e);
+                                }
+                                if e > worst {
+                                    worst = e;
+                                    at = (t, hh, dd);
+                                }
+                            }
+                        }
+                    }
+                    println!(
+                        "  diag: max|d| half0 {half0:.3e} half1 {half1:.3e}; worst at row {} head {} d {} \
+                         (cpu {:.4} gpu {:.4})",
+                        at.0, at.1, at.2,
+                        cpu[at.0 * nh + at.1 * hd + at.2],
+                        gpu[at.0 * nh + at.1 * hd + at.2]
+                    );
+                }
             }
             Err(e) => {
                 eprintln!("attn: chunk attention download: {e}");

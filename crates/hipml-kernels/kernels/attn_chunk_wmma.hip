@@ -35,7 +35,7 @@
 //
 //   QK^T:  A = K [key][d] (shared),      B = Q [query][d] (registers)
 //          C = S^T [key][query]
-//   PV:    A = P [query][key] (shared), B = V^T [d][key] (shared)
+//   PV:    A = P [query][key] (registers, same layout as S^T), B = V^T [d][key]
 //          C = O [query][d]
 //
 // Both operands are fed to the matrix unit the way the shipped prefill GEMM
@@ -112,7 +112,6 @@ extern "C" __global__ void attn_chunk_wmma_f16(
 {
     __shared__ __align__(16) _Float16 sk[AW_KT * AW_KST];       // [key][d]
     __shared__ __align__(16) _Float16 sv[AW_DHALF * AW_VST];    // [d][key]
-    __shared__ __align__(16) _Float16 sp[AW_MAXW * 16 * 16];    // [query][key]
 
     const int kvh = blockIdx.x;
     const int dh = blockIdx.z;                    // 0 or 1
@@ -281,21 +280,18 @@ extern "C" __global__ void attn_chunk_wmma_f16(
                 for (int e = 0; e < 8; ++e) acc[j][e] *= c[e];
         }
 
-        // ---- P to shared, transposed into the A-fragment layout ----------
-        // Writes P[query][key]; lane l owns query l%16, keys 8*(l/16)+e.
-        _Float16* pw = sp + warp * 256;
+        // ---- PV: A = P [query][key], B = V^T [d][key] --------------------
+        // The A-fragment layout is (row = l%16, k = 8*(l/16)+e), i.e. query
+        // l%16 and keys 8*(l/16)+e -- bit-for-bit the score tile's layout, so
+        // P goes straight from the softmax registers into the matrix unit.
+        aw_h8 ph;
 #pragma unroll
-        for (int e = 0; e < 8; ++e) {
-            pw[(lrow + e) * 16 + (lane & 15)] = __float2half_rn(p[e]);
-        }
-
-        // ---- PV: A = P [query][key], B = V [key][d] ----------------------
-        const aw_h8 pf = *reinterpret_cast<const aw_h8*>(pw + frow * 16 + koff);
+        for (int e = 0; e < 8; ++e) ph[e] = __float2half_rn(p[e]);
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
             const aw_h8 vf =
                 *reinterpret_cast<const aw_h8*>(sv + (j * 16 + frow) * AW_VST + koff);
-            acc[j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(pf, vf, acc[j]);
+            acc[j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(ph, vf, acc[j]);
         }
     }
 
