@@ -116,15 +116,6 @@ fn fill(tok: &Tokenizer, text: &str, n: usize) -> Vec<u32> {
     out
 }
 
-struct Run {
-    label: &'static str,
-    hit: bool,
-    matched: usize,
-    computed: usize,
-    ms: f64,
-    ids: Vec<u32>,
-}
-
 /// Prefill `tokens` (from `st.pos`), then emit `n` greedy ids.
 fn run(
     engine: &mut GpuEngine<'_>,
