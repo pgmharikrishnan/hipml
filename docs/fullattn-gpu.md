@@ -148,6 +148,24 @@ ceiling is the block's KV re-read (32-query tiles re-read the prefix; the layer
 moves ~12.6 GB of K/V because the d-half split reads K twice) and the 8-row
 PV/16-key tile's ratio of staging bytes to matrix work.
 
+### Reading the quantized cache instead of the mirror (WP25)
+
+The chunk kernel's staging pass now takes a cache dtype. `aw_ld4` turns a
+4-value group of a q8_0 (34 B) or q4_0 (18 B) block into the same half4 the f32
+mirror writes, so QK^T, the causal mask, the softmax and PV are untouched; the
+staging loops are compiled once per dtype and dispatched once per tile, because
+a dtype branch inside the load cost the f32 mirror 1.5% at 32K. A q8 row is 272 B
+at head_dim 256 instead of 1 KB, and there is no 12 GiB mirror.
+
+The engine only allocates the mirror while it fits a byte budget
+(`F32_MIRROR_MAX_BYTES` = 5 GiB, 128 KiB per position here): 32K keeps it
+(4.3 GiB, 871 tok/s vs 866 on the q8 path), 64K (8.6 GiB) and 100K (13.4 GiB)
+use the q8 cache. 100K prefill went 116 -> 638 tok/s (TTFT 860.8 -> 156.6 s) at
+20,995 MiB peak. The staged tile traffic is `3 * row_bytes` per key position
+(K twice, once per d half, and V once): 8.16 TB at 100K, i.e. 2,345x the 3.48 GB
+unique cache, at an effective 124-137 GB/s. That is well under the 640 GB/s
+spec, so the deep kernel is matrix-issue bound (~50 TFLOPS), not HBM bound.
+
 ## Decode at 100K: what the 12 ms is bound by
 
 `hipml bench-kv --depths 100000` on the q8 cache, 24 heads x 16 layers,

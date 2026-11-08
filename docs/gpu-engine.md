@@ -414,14 +414,17 @@ Nothing on the decode path round-trips to the host except the 4-byte id.
   by design. `hipml parity --deep` verifies the kernel itself against the
   reference at `s=100000`; `hipml parity kv_encode` verifies the encoder is
   bit-exact. The graph's short-context tokens verify the rest.
-- Chunked prefill requires `--kv f32`; the quantized caches are the decode path.
+- Chunked prefill runs on f32, q8 or q4 KV. The matrix-unit kernel stages each
+  tile from whichever cache the engine carries (`aw_ld4`), so the f32 mirror is
+  only a <=40K convenience and the q8/q4 caches are the prefill path above it.
 - **Prefix snapshots cover the f32 KV path only.** `cache-bench` restores the
   SSM state plus f32 KV rows; the q8/q4 decode caches are not snapshot targets.
   Token parity for the cached path is asserted only against the cold *GPU* path
   (20 greedy ids), not against the CPU oracle, and the capture is only exact when
   the boundary is a token boundary the graph actually stopped at.
-- The 8,192-token prefill is a real prefill; 100K prefill is not measured
-  (extrapolated from the 8K rate and the T² attention term, not timed).
+- The 8,192-token prefill is a real prefill. 100K prefill is now timed too:
+  156.6 s (638 tok/s) after the q8 chunk kernel replaced the row-at-a-time
+  fallback (860.8 s, 116 tok/s); see `bench/RESULTS.md`, WP25.
 - Q5_K still has no GEMV kernel: two decode tensors take the f32 GEMV. Prefill
   uses a half copy made at load.
 - No fp16 KV path.

@@ -65,7 +65,7 @@ WP18 (`bd6d18f`, the `feat/bench` tree) is the reference: same model, prompts, 3
 | code_edit | 32768 | 101,704 | 37,937 | -62.7% | 322.2 | 863.8 | +168.1% | 25.25 | 26.18 | +3.7% |
 | code_edit | 100000 | 733,577 | 860,789 | +17.3% | 136.3 | 116.2 | -14.8% | 20.61 | 21.17 | +2.8% |
 
-The depth-0 and 8K rows now use the f32 mirror for prefill and the q8 cache for decode. 32K also uses the mirror (4.0 GiB); 100K does not fit (12.2 GiB) and keeps the row-at-a-time quantized path.
+The depth-0 and 8K rows prefill through the bounded f32 mirror; 32K also keeps it (4.3 GiB) because it measured 0.6% faster there. 100K does not fit (13.4 GiB) and runs the same matrix-unit chunk kernel straight out of the q8 cache (WP25); see "WP25: 100K prefill" below.  The 100K row above predates that work.
 
 ## Gap (hipml minus llama.cpp)
 
@@ -150,7 +150,7 @@ The two real regressions were **graphs** (it replaced attn-mma's fp16 Q5_K prefi
 | `feat/wmma2` | full-GEMM accumulator fix | correctness: 512/8K last ids 489/292. It is the ~17% prefill gap to the old inflated numbers |
 | `feat/stream` | 1-row-per-warp GEMV, Q5_K GEMV | contained in graphs; part of the decode gain |
 | `feat/cache` | SSM+KV prefix snapshots | not in a cold bench; exact-repeat TTFT 1801 -> 7.6 ms, shared prefix 1.88-3.66x |
-| `feat/bench` | q8/q4 chunked prefill + bench CLI | its per-row q8 prefill was the 57% regression; now prefill uses the f32 mirror at <=64K and the q8 cache only for decode |
+| `feat/bench` | q8/q4 chunked prefill + bench CLI | its per-row q8 prefill was the 57% regression; the mirror covers <=40K and the chunk kernel reads the q8 cache above that |
 
 ## Validation
 
@@ -176,3 +176,45 @@ All planned cells are present: 5 prompts x depths 0 and 8192 at 3 reps, and `cod
 - 100K cells are real cold prefill. If a cell shows `1` rep, the run was too slow to repeat inside the lock window; it is not cache-prefilled.
 - The harness cannot control: GPU clocks/thermal state, driver scheduling, other processes on the box outside the lock, llama.cpp's own thread and graph choices, or the difference between hipml's argmax-in-prefill TTFT and llama-server's prompt-only timing.
 
+
+## WP25: 100K prefill (q8 KV tiles read in the chunk kernel)
+
+The 100K cliff was the f32 KV mirror: 12.2 GiB beside 17 GiB of weights does not
+fit, so every 100K prompt fell back to one decode-attention call per token
+(116 tok/s). `attn_chunk_wmma_f16` now stages each KV tile through `aw_ld4`,
+which turns a 4-value group of a q8_0 (34 B) or q4_0 (18 B) block into the same
+f16 shared tile the mirror filled. The mirror is bounded by a byte budget
+(`F32_MIRROR_MAX_BYTES`, 5 GiB = 128 KiB per position), so 32K keeps it and 64K
+and above never allocate it.
+
+Measured on the same card, `generate --device --kv q8`, 33-token decode window,
+code_edit, one cold rep at 32K/100K:
+
+| depth | prefill (before -> after) | TTFT (before -> after) | decode (before -> after) | peak VRAM |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 940 -> 939 | 715 -> 716 ms | 29.8 -> 29.8 | 17,909 MiB |
+| 8K | 995 -> 993 | 8.23 -> 8.25 s | 28.7 -> 28.9 | 19,202 MiB |
+| 32K | 864 -> 871 | 37.9 -> 37.6 s | 26.2 -> 26.1 | 23,003 MiB |
+| 100K | **116 -> 638** | **860.8 -> 156.6 s** | 21.2 -> 21.2 | 20,995 MiB |
+
+The 8K/32K cells still run the mirror. Forcing the q8 chunk path there
+(`HIPML_Q8_CHUNK=1`) gives 1,003 and 866 tok/s, so the quantized path alone
+clears both gates; the mirror buys 0.6% at 32K.
+
+### Effective KV bandwidth of the q8 chunk attention
+
+Traffic per (KV head, 32-query tile, d half) is one full K row and half a V row,
+and both d halves read K: `3 * row_bytes` = 816 B per staged key position.
+Summed over query blocks the kernel re-reads the prefix 193x (8K), 769x (32K)
+and 2,345x (100K) the 0.29/1.14/3.48 GB unique cache.
+
+| depth | staged KV | `seq_attn` stage | stage GB/s | kernel GB/s* |
+| ---: | ---: | ---: | ---: | ---: |
+| 8K | 55.0 GB | 830 ms | 66 | 171 |
+| 32K | 877 GB | 8,197 ms | 107 | 142 |
+| 100K | 8,163 GB | 65.6 s | 124 | 137 |
+
+\* subtracting the per-token front/o-projection cost measured at depth 0
+(62 us/token). 137-171 GB/s is 21-27% of the card's 640 GB/s, so the deep chunk
+attention is not HBM-bound: the prefix reads hit L2, and the kernel runs at
+~50 TFLOPS (29% of the measured 171 TFLOPS matrix-unit ceiling).
