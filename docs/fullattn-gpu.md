@@ -157,14 +157,18 @@ staging loops are compiled once per dtype and dispatched once per tile, because
 a dtype branch inside the load cost the f32 mirror 1.5% at 32K. A q8 row is 272 B
 at head_dim 256 instead of 1 KB, and there is no 12 GiB mirror.
 
-The engine only allocates the mirror while it fits a byte budget
-(`F32_MIRROR_MAX_BYTES` = 5 GiB, 128 KiB per position here): 32K keeps it
-(4.3 GiB, 871 tok/s vs 866 on the q8 path), 64K (8.6 GiB) and 100K (13.4 GiB)
-use the q8 cache. 100K prefill went 116 -> 638 tok/s (TTFT 860.8 -> 156.6 s) at
-20,995 MiB peak. The staged tile traffic is `3 * row_bytes` per key position
-(K twice, once per d half, and V once): 8.16 TB at 100K, i.e. 2,345x the 3.48 GB
-unique cache, at an effective 124-137 GB/s. That is well under the 640 GB/s
-spec, so the deep kernel is matrix-issue bound (~50 TFLOPS), not HBM bound.
+With the q8 staging in place the mirror stopped paying for itself: 8K prefills
+at 998 tok/s without it (993 through the mirror, which reads 4x the bytes) and
+32K is level (867 vs 871). A 32K mirror costs 4.3 GiB and 100K's would be
+13.4 GiB, so quantized engines never allocate one; `--kv f32` keeps the f32
+cache and the token loop as the parity reference. 100K prefill went
+116 -> 637 tok/s (TTFT 860.8 -> 156.9 s) at 20,995 MiB peak, and the mirror
+removal takes 1.1 GiB off 8K and 4.0 GiB off 32K.
+
+The staged tile traffic is `3 * row_bytes` per key position (K twice, once per
+d half, and V once): 8.16 TB at 100K, i.e. 2,345x the 3.48 GB unique cache, at
+an effective 124-137 GB/s. That is well under the 640 GB/s spec, so the deep
+kernel is matrix-issue bound (~50 TFLOPS), not HBM bound.
 
 ## Decode at 100K: what the 12 ms is bound by
 
