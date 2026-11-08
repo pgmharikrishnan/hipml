@@ -13,6 +13,11 @@
 
 use super::*;
 
+/// Query rows per block in `attn_chunk_wmma_f16` (AW_TILES fragments of 16)
+/// and the warps per query head that cover them.
+pub const ATTN_WMMA_QUERIES: u32 = 32;
+pub const ATTN_WMMA_WARPS: usize = 2;
+
 /// Query tokens per block in `attn_chunk_tile_f32`. Must match ACQ_TOKENS in
 /// `attn_chunk_f32.hip`, which is also the KV re-read stride.
 pub const ATTN_QUERY_TILE: u32 = 64;
@@ -193,7 +198,23 @@ impl AttnLayer<'_> {
             &mut nt as *mut _ as *mut c_void,
             &mut scale as *mut _ as *mut c_void,
         ];
-        let cfg = if tiled {
+        let cfg = if tiled && std::env::var_os("HIPML_ATTN_F32").is_none() {
+            // Matrix-unit flash attention: one block per (KV head, query
+            // fragment group); every query head of the GQA group reads the
+            // staged K/V tile once. Must match AW_TILES in attn_chunk_wmma.hip.
+            let warp_heads = d.n_head / d.n_kv;
+            let kernel = self.module_kernel(l, "attn_chunk_wmma_f16")?;
+            let cfg = LaunchConfig {
+                grid: (
+                    d.n_kv as u32,
+                    (t + ATTN_WMMA_QUERIES - 1) / ATTN_WMMA_QUERIES,
+                    1,
+                ),
+                block: ((warp_heads * ATTN_WMMA_WARPS * 32) as u32, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            return kernel.launch(cfg, &l.stream, &mut params);
+        } else if tiled {
             // Must match ACQ_TOKENS / ACQ_PER_WARP in attn_chunk_f32.hip.
             LaunchConfig {
                 grid: (
