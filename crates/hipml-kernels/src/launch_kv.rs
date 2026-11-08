@@ -168,6 +168,9 @@ pub fn launch_ptrs(
         3 => "attn_decode_kv_q8g",
         4 => "attn_decode_kv_w2",
         5 => "attn_decode_kv_w4",
+        7 => "attn_decode_kv_s2",
+        13 => "attn_decode_kv_s4",
+        14 => "attn_decode_kv_s1",
         8 => "attn_decode_kv_lab_full",
         9 => "attn_decode_kv_lab_nov",
         10 => "attn_decode_kv_lab_nok",
@@ -227,7 +230,7 @@ pub fn launch_ptrs(
     ];
     // The warp kernel launches one warp per (KV head, split) task, four to a
     // block; the staged kernels launch one block per task.
-    let warps = if dtype == 4 || dtype == 5 { 4 } else { 0 };
+    let warps = if matches!(dtype, 4 | 5 | 7 | 13 | 14) { 4 } else { 0 };
     let tasks = n_kv * splits;
     let grid = if warps > 0 {
         tasks.div_ceil(warps) as u32
