@@ -143,44 +143,73 @@ else
   IFS=',' read -r -a PROMPT_ARR <<< "$(trim "$PROMPTS")"
 fi
 
+# Group cells so one lock acquisition covers several short runs, while every
+# group stays comfortably under 20 minutes. 100K is always one cell per hold.
 for depth in "${DEPTH_ARR[@]}"; do
-  for prompt in "${PROMPT_ARR[@]}"; do
-    for engine in "${ENGINE_ARR[@]}"; do
-      case "$engine" in hipml|llama) ;; *) die "unknown engine $engine" ;; esac
-      out="bench/out/jobs/${engine}_${prompt}_${depth}/result.json"
-      if [ -f "$out" ] && [ "$FORCE" = 0 ]; then
-        echo "== skip $engine $prompt@$depth (result exists)"
+  case "$depth" in
+    32768) group_size=2 ;;
+    100000) group_size=1 ;;
+    *) group_size=${#PROMPT_ARR[@]} ;;
+  esac
+  for engine in "${ENGINE_ARR[@]}"; do
+    case "$engine" in hipml|llama) ;; *) die "unknown engine $engine" ;; esac
+    i=0
+    while [ "$i" -lt "${#PROMPT_ARR[@]}" ]; do
+      group=("${PROMPT_ARR[@]:i:group_size}")
+      need=0
+      for prompt in "${group[@]}"; do
+        out="bench/out/jobs/${engine}_${prompt}_${depth}/result.json"
+        if [ ! -f "$out" ] || [ "$FORCE" = 1 ]; then
+          need=$((need + 1))
+        fi
+      done
+      if [ "$need" -eq 0 ]; then
+        echo "== skip $engine ${group[*]}@$depth (results exist)"
+        i=$((i + group_size))
         continue
       fi
 
-      reps="$REPS"
-      [ "$depth" -ge 100000 ] && reps="$REPS_100K"
-      extra=""
-      if [ "$engine" = hipml ] && [ "$STAGE" = 1 ] && [ "$depth" = 0 ]; then
-        extra="--stage-report"
-      fi
-
-      echo "== $engine $prompt@$depth reps=$reps"
+      echo "== $engine ${group[*]}@$depth"
       if ! acquire_lock; then
-        echo "   could not acquire GPU lock; skipping cell" >&2
+        echo "   could not acquire GPU lock; skipping group" >&2
         JOBS_FAILED=$((JOBS_FAILED + 1))
         LOCKED=0
+        i=$((i + group_size))
         continue
       fi
-      start=$(date +%s)
-      ssh "$HOST" "$REMOTE_DIR\\bench\\remote\\with-env.cmd python bench\\job.py --engine $engine --prompt $prompt --depth $depth --reps $reps --model $MODEL --llama-server $LLAMA_SERVER --llama-kv $LLAMA_KV --fixture bench\\fixtures\\prompts.json --out-dir bench\\out\\jobs --tmp bench\\out\\tmp $extra"
-      rc=$?
-      elapsed=$(( $(date +%s) - start ))
+      batch_start=$(date +%s)
+      for prompt in "${group[@]}"; do
+        out="bench/out/jobs/${engine}_${prompt}_${depth}/result.json"
+        if [ -f "$out" ] && [ "$FORCE" = 0 ]; then
+          echo "== skip $engine $prompt@$depth (result exists)"
+          continue
+        fi
+        reps="$REPS"
+        [ "$depth" -ge 100000 ] && reps="$REPS_100K"
+        extra=""
+        if [ "$engine" = hipml ] && [ "$STAGE" = 1 ] && [ "$depth" = 0 ]; then
+          extra="--stage-report"
+        fi
+
+        echo "== run $engine $prompt@$depth reps=$reps"
+        start=$(date +%s)
+        ssh "$HOST" "$REMOTE_DIR\\bench\\remote\\with-env.cmd python bench\\job.py --engine $engine --prompt $prompt --depth $depth --reps $reps --model $MODEL --llama-server $LLAMA_SERVER --llama-kv $LLAMA_KV --fixture bench\\fixtures\\prompts.json --out-dir bench\\out\\jobs --tmp bench\\out\\tmp $extra"
+        rc=$?
+        elapsed=$(( $(date +%s) - start ))
+        echo "   ${elapsed}s, exit $rc"
+        if [ "$rc" -ne 0 ]; then
+          JOBS_FAILED=$((JOBS_FAILED + 1))
+        fi
+        JOBS_RAN=$((JOBS_RAN + 1))
+        if [ "$elapsed" -ge 1080 ]; then
+          echo "   WARNING: this cell took ${elapsed}s; keep 100K at one rep" >&2
+        fi
+      done
+      held=$(( $(date +%s) - batch_start ))
+      echo "   lock hold ${held}s"
       release_lock
       LOCKED=0
-      echo "   ${elapsed}s, exit $rc"
-      if [ "$rc" -ne 0 ]; then
-        JOBS_FAILED=$((JOBS_FAILED + 1))
-      fi
-      JOBS_RAN=$((JOBS_RAN + 1))
-      if [ "$elapsed" -ge 1200 ]; then
-        echo "   WARNING: this lock hold was ${elapsed}s; chunk reps smaller" >&2
-      fi
+      i=$((i + group_size))
     done
   done
 done
