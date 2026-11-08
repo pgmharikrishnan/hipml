@@ -188,12 +188,61 @@ extern "C" __global__ void attn_chunk_tile_f32(
     const float* kb = k_cache + (size_t)kvh * head_dim + (size_t)lane * ACQ_D;
     const float* vb = v_cache + (size_t)kvh * head_dim + (size_t)lane * ACQ_D;
 
-    for (int row = 0; row < seq_max; ++row) {
+    // Two cache rows per iteration: the second dot product is an independent
+    // 5-step shuffle chain, so the warp has 2x the reduction ILP, the online
+    // max is lifted once for both rows, and the accumulator is rescaled once
+    // instead of twice.
+    const int rows2 = seq_max & ~1;
+    for (int row = 0; row < rows2; row += 2) {
         const float4 k0 = *reinterpret_cast<const float4*>(kb + (size_t)row * width);
         const float4 k1 = *reinterpret_cast<const float4*>(kb + (size_t)row * width + 4);
         const float4 v0 = *reinterpret_cast<const float4*>(vb + (size_t)row * width);
         const float4 v1 = *reinterpret_cast<const float4*>(vb + (size_t)row * width + 4);
+        const float4 k2 = *reinterpret_cast<const float4*>(kb + (size_t)(row + 1) * width);
+        const float4 k3 = *reinterpret_cast<const float4*>(kb + (size_t)(row + 1) * width + 4);
+        const float4 v2 = *reinterpret_cast<const float4*>(vb + (size_t)(row + 1) * width);
+        const float4 v3 = *reinterpret_cast<const float4*>(vb + (size_t)(row + 1) * width + 4);
 
+#pragma unroll
+        for (int i = 0; i < ACQ_PER_WARP; ++i) {
+            const int bound = pos0 + tq[i];
+            if (!live[i] || row > bound) continue;
+            const bool two = row + 1 <= bound;
+            float da = qv[i][0] * k0.x + qv[i][1] * k0.y + qv[i][2] * k0.z +
+                       qv[i][3] * k0.w + qv[i][4] * k1.x + qv[i][5] * k1.y +
+                       qv[i][6] * k1.z + qv[i][7] * k1.w;
+            float db = qv[i][0] * k2.x + qv[i][1] * k2.y + qv[i][2] * k2.z +
+                       qv[i][3] * k2.w + qv[i][4] * k3.x + qv[i][5] * k3.y +
+                       qv[i][6] * k3.z + qv[i][7] * k3.w;
+#pragma unroll
+            for (int off = 16; off > 0; off >>= 1) {
+                da += __shfl_xor_sync(0xffffffffffffffffULL, da, off);
+                db += __shfl_xor_sync(0xffffffffffffffffULL, db, off);
+            }
+            const float sa = da * scale;
+            const float sb = two ? db * scale : -3.402823466e+38f;
+            const float m_new = fmaxf(run_max[i], fmaxf(sa, sb));
+            const float corr = run_max[i] == m_new ? 1.0f : expf(run_max[i] - m_new);
+            const float pa = expf(sa - m_new);
+            const float pb = two ? expf(sb - m_new) : 0.0f;
+            run_max[i] = m_new;
+            run_sum[i] = run_sum[i] * corr + pa + pb;
+            acc[i][0] = acc[i][0] * corr + pa * v0.x + pb * v2.x;
+            acc[i][1] = acc[i][1] * corr + pa * v0.y + pb * v2.y;
+            acc[i][2] = acc[i][2] * corr + pa * v0.z + pb * v2.z;
+            acc[i][3] = acc[i][3] * corr + pa * v0.w + pb * v2.w;
+            acc[i][4] = acc[i][4] * corr + pa * v1.x + pb * v3.x;
+            acc[i][5] = acc[i][5] * corr + pa * v1.y + pb * v3.y;
+            acc[i][6] = acc[i][6] * corr + pa * v1.z + pb * v3.z;
+            acc[i][7] = acc[i][7] * corr + pa * v1.w + pb * v3.w;
+        }
+    }
+    if (seq_max & 1) {
+        const int row = seq_max - 1;
+        const float4 k0 = *reinterpret_cast<const float4*>(kb + (size_t)row * width);
+        const float4 k1 = *reinterpret_cast<const float4*>(kb + (size_t)row * width + 4);
+        const float4 v0 = *reinterpret_cast<const float4*>(vb + (size_t)row * width);
+        const float4 v1 = *reinterpret_cast<const float4*>(vb + (size_t)row * width + 4);
 #pragma unroll
         for (int i = 0; i < ACQ_PER_WARP; ++i) {
             if (!live[i] || row > pos0 + tq[i]) continue;
@@ -205,7 +254,7 @@ extern "C" __global__ void attn_chunk_tile_f32(
                 dot += __shfl_xor_sync(0xffffffffffffffffULL, dot, off);
             const float score = dot * scale;
             const float m_new = fmaxf(run_max[i], score);
-            const float corr = expf(run_max[i] - m_new);
+            const float corr = run_max[i] == m_new ? 1.0f : expf(run_max[i] - m_new);
             const float p = expf(score - m_new);
             run_max[i] = m_new;
             run_sum[i] = run_sum[i] * corr + p;
