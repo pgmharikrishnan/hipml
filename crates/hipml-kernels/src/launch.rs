@@ -79,7 +79,11 @@ pub(crate) mod device {
             for (i, v) in [p, seq as i32, token as i32, 0, p, p, p, p].iter().enumerate() {
                 bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
             }
-            self.step.upload_bytes_async(0, &bytes, &self.stream)
+            if std::env::var("HIPML_STEP_SYNC").is_ok() {
+                self.step.upload_bytes(0, &bytes)
+            } else {
+                self.step.upload_bytes_async(0, &bytes, &self.stream)
+            }
         }
 
         /// The device buffer the position-aware kernels read.
