@@ -238,8 +238,11 @@ extern "C" __global__ void attn_chunk_wmma_f16(
         const float sl2 = scale * AW_LOG2E;
         float p[8];
 #pragma unroll
+        // The cache row index is the global position: the chunk appended its
+        // rows at pos0.. and the prefix before them. Only the query carries
+        // pos0 (it is at chunk row tq, global pos0 + tq).
         for (int e = 0; e < 8; ++e) {
-            const int kg = pos0 + base + lrow + e;
+            const int kg = base + lrow + e;
             const float s = (s0[e] + s1[e]) * sl2;
             p[e] = (kg <= qglob) ? s : AW_NEG_INF;
         }
