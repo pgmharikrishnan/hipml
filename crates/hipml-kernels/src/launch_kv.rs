@@ -153,8 +153,16 @@ pub fn launch_ptrs(
     if head_dim % 32 != 0 || head_dim > 256 {
         return Err(format!("head_dim {head_dim}: must be 32..=256, multiple of 32"));
     }
+    // The shipped q8 path at head_dim 256 is the warp kernel: the parity cases
+    // and the engine both take it, so `parity --deep` exercises what runs.
+    // Id 6 keeps the staged kernel reachable for A/B.
+    let dtype = if dtype == 0 && head_dim == 256 && group <= 8 {
+        5
+    } else {
+        dtype
+    };
     let entry = match dtype {
-        0 => "attn_decode_kv_q8",
+        0 | 6 => "attn_decode_kv_q8",
         1 => "attn_decode_kv_q4",
         2 => "attn_decode_kv_q8s",
         3 => "attn_decode_kv_q8g",
@@ -180,7 +188,7 @@ pub fn launch_ptrs(
     let tile = match dtype {
         1 => 8,
         2 => 16,
-        0 | 8..=12 => 4,
+        0 | 6 | 8..=12 => 4,
         _ => 0,
     };
     let row_bytes = (head_dim >> 5) * 34;
