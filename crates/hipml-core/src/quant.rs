@@ -111,7 +111,7 @@ impl TensorType {
             TensorType::F32 => 1,
             TensorType::Q8_0 => Q8_0_VALUES,
             TensorType::Q4K | TensorType::Q5K | TensorType::Q6K => QK_K,
-            TensorType::Unsupported(_) => 0,
+            TensorType::Unsupported(id) => size_only(id).0,
         }
     }
 
@@ -123,7 +123,7 @@ impl TensorType {
             TensorType::Q4K => Q4_K_BYTES,
             TensorType::Q5K => Q5_K_BYTES,
             TensorType::Q6K => Q6_K_BYTES,
-            TensorType::Unsupported(_) => 0,
+            TensorType::Unsupported(id) => size_only(id).1,
         }
     }
 
@@ -136,6 +136,19 @@ impl TensorType {
             return None;
         }
         Some(n_elements / bv * bb)
+    }
+}
+
+/// `(values, bytes)` per block for GGML types that are sized but never
+/// dequantised here, so a file that carries one (an MTP sidecar's Q3_K head)
+/// still parses: F16, Q4_0, Q2_K, Q3_K. `(0, 0)` for anything else.
+fn size_only(id: u32) -> (usize, usize) {
+    match id {
+        1 => (1, 2),
+        2 => (32, 18),
+        10 => (QK_K, 84),
+        11 => (QK_K, 110),
+        _ => (0, 0),
     }
 }
 

@@ -17,6 +17,7 @@ pub mod kv;
 pub mod mat;
 pub mod mmap;
 pub mod model;
+pub mod mtp;
 pub mod ops;
 pub mod parity;
 pub mod parity_kv;

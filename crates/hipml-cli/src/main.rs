@@ -21,6 +21,7 @@ mod gpu_bench_cmd;
 mod gen_cmd;
 mod kv_cmds;
 mod load_cmd;
+mod mtp_cmd;
 mod prefill_cmd;
 #[cfg(feature = "hip")]
 mod profile_cmd;
@@ -72,6 +73,7 @@ fn main() {
         "gdn-parity" => std::process::exit(gdn_parity::run(&args[1..])),
         #[cfg(feature = "hip")]
         "ssm" => std::process::exit(ssm_cmd::ssm(&args[1..])),
+        "mtp-accept" => std::process::exit(mtp_cmd::run(&args[1..])),
         "attn-parity" => std::process::exit(attn_cmd::parity(&args[1..])),
         "attn-bench" => std::process::exit(attn_cmd::bench(&args[1..])),
         "bench-kv" => std::process::exit(kv_cmds::bench_kv(&args[1..])),

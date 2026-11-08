@@ -193,6 +193,14 @@ impl Model {
     /// The last token of a prompt is fed here too, so the logits after the
     /// prompt are the ones that pick the first generated token.
     pub fn forward_token(&self, token: u32, st: &mut State) -> Vec<f32> {
+        let x = self.forward_hidden(token, st);
+        let h = rmsnorm_f32(&x, &self.w.output_norm, self.cfg.eps);
+        self.w.output.gemv(&h)
+    }
+
+    /// [`Model::forward_token`] without the head: the residual stream after
+    /// the last block, before `output_norm`. The MTP drafter reads this.
+    pub fn forward_hidden(&self, token: u32, st: &mut State) -> Vec<f32> {
         let cfg = &self.cfg;
         let pos = st.pos;
         let mut x = self.w.tok_embd.row_f32(token as usize);
@@ -220,8 +228,7 @@ impl Model {
         }
 
         st.pos += 1;
-        let h = rmsnorm_f32(&x, &self.w.output_norm, cfg.eps);
-        self.w.output.gemv(&h)
+        x
     }
 }
 
@@ -240,7 +247,7 @@ pub fn load_attn_layer<R: Read + Seek>(g: &mut Gguf<R>, i: usize) -> io::Result<
     Ok(w)
 }
 
-fn read_f32_vec<R: Read + Seek>(g: &mut Gguf<R>, name: &str) -> io::Result<Vec<f32>> {
+pub(crate) fn read_f32_vec<R: Read + Seek>(g: &mut Gguf<R>, name: &str) -> io::Result<Vec<f32>> {
     let info = g
         .tensor(name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no tensor {name}")))?
