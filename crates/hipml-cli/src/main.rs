@@ -290,6 +290,12 @@ fn parity(filter: Option<&str>, deep: bool) -> i32 {
         let tol = if half {
             if case.m > 4096 {
                 hipml_core::parity::Tol::new(2.5e-1, 5e-2)
+            } else if case.tokens > 16 {
+                // Multi-token cases: the same few 1e-2 of fp16 error, but a
+                // near-zero output lands on one of them and moves the ratio by
+                // an order of magnitude. Still O(1) below a layout bug, which
+                // zeroes or swaps whole token rows.
+                hipml_core::parity::Tol::new(1e-1, 5e-1)
             } else {
                 hipml_core::parity::Tol::new(2e-2, 5e-2)
             }

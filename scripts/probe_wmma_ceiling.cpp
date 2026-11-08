@@ -46,6 +46,7 @@ __global__ void probe(const half8* __restrict__ in, float* __restrict__ out, int
 int main(int argc, char** argv) {
     const int blocks = argc > 1 ? atoi(argv[1]) : 1024;
     const int iters = argc > 2 ? atoi(argv[2]) : 4096;
+    const int threads = argc > 3 ? atoi(argv[3]) : 256;
     half8 in[4];
     for (int i = 0; i < 4; ++i)
         for (int e = 0; e < 8; ++e) in[i][e] = (_Float16)0.001f;
@@ -60,15 +61,15 @@ int main(int argc, char** argv) {
         hipEventCreate(&t0);
         hipEventCreate(&t1);
         hipEventRecord(t0);
-        hipLaunchKernelGGL(probe, dim3(blocks), dim3(256), 0, 0, din, dout, iters);
+        hipLaunchKernelGGL(probe, dim3(blocks), dim3(threads), 0, 0, din, dout, iters);
         hipEventRecord(t1);
         hipEventSynchronize(t1);
         float ms = 0.0f;
         hipEventElapsedTime(&ms, t0, t1);
-        // 8 warps per block, 8 accumulators of 16x16x16 per iteration.
-        const double flops =
-            (double)blocks * 8.0 * (double)iters * NACC * 2.0 * 16.0 * 16.0 * 16.0;
-        printf("blocks %d iters %d: %.3f ms  %.2f TFLOPS\n", blocks, iters, ms,
+        // 8 accumulators of 16x16x16 per warp per iteration.
+        const double flops = (double)blocks * (threads / 32.0) * (double)iters * NACC *
+                             2.0 * 16.0 * 16.0 * 16.0;
+        printf("blocks %d iters %d threads %d: %.3f ms  %.2f TFLOPS\n", blocks, iters, threads, ms,
                flops / (ms * 1e-3) / 1e12);
     }
     return 0;

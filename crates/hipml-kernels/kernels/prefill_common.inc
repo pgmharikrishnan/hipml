@@ -17,6 +17,33 @@
 #define PF_Q6K_BLOCK_BYTES 210
 #define PF_Q8_0_BLOCK_BYTES 34
 
+// Weight bytes are streamed once per prompt tile and must not evict the
+// activation working set, so they can be loaded non-temporally (gfx12:
+// `global_load ... th:TH_LOAD_NT`, evict-first). Off by default; the prefill
+// GEMM turns it on with `PF_NT=1`.
+#ifndef PF_NT
+#define PF_NT 0
+#endif
+
+static __device__ __forceinline__ unsigned char pf_ld8(const unsigned char* p) {
+#if PF_NT
+    return __builtin_nontemporal_load(p);
+#else
+    return *p;
+#endif
+}
+
+static __device__ __forceinline__ __half pf_ldh(const __half* p) {
+#if PF_NT
+    // __builtin_nontemporal_load does not take __half; load the bits as
+    // unsigned short and cast.
+    return __ushort_as_half(
+        __builtin_nontemporal_load(reinterpret_cast<const unsigned short*>(p)));
+#else
+    return *p;
+#endif
+}
+
 static __device__ __forceinline__ void pf_scale_min(int j, const unsigned char* q,
                                                     int* sc, int* mn)
 {
@@ -41,8 +68,8 @@ static __device__ __forceinline__ void pf_dequant8(const unsigned char* __restri
         const int sub = within >> 5;
         const int part = (within & 31) >> 3;
         const unsigned char* b = rp + (size_t)blk * PF_Q4K_BLOCK_BYTES;
-        const float d = __half2float(*reinterpret_cast<const __half*>(b));
-        const float dmin = __half2float(*reinterpret_cast<const __half*>(b + 2));
+        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
+        const float dmin = __half2float(pf_ldh(reinterpret_cast<const __half*>(b + 2)));
         int sc, mn;
         pf_scale_min(sub, b + 4, &sc, &mn);
         const float scale = d * (float)sc;
@@ -51,7 +78,7 @@ static __device__ __forceinline__ void pf_dequant8(const unsigned char* __restri
         const unsigned char* qp = b + 16 + (sub >> 1) * 32 + part * 8;
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
-            const int q = high ? (qp[i] >> 4) : (qp[i] & 0xF);
+            const int q = high ? (pf_ld8(qp + i) >> 4) : (pf_ld8(qp + i) & 0xF);
             out[i] = scale * (float)q - minv;
         }
     } else if (KIND == 1) {
@@ -60,9 +87,9 @@ static __device__ __forceinline__ void pf_dequant8(const unsigned char* __restri
         const int j = within >> 4;
         const int l0 = within & 15;
         const unsigned char* b = rp + (size_t)blk * PF_Q6K_BLOCK_BYTES;
-        const float d = __half2float(*reinterpret_cast<const __half*>(b + 208));
+        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b + 208)));
         const float scale =
-            d * (float)reinterpret_cast<const signed char*>(b + 192)[j];
+            d * (float)(signed char)pf_ld8(b + 192 + j);
         const int half = j >> 3;
         const int s = j & 7;
         const int group = s >> 1;
@@ -73,8 +100,8 @@ static __device__ __forceinline__ void pf_dequant8(const unsigned char* __restri
         const bool high = group >= 2;
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
-            const int qb = b[ql_off + i];
-            const int hb = (b[qh_off + i] >> shift) & 3;
+            const int qb = pf_ld8(b + ql_off + i);
+            const int hb = (pf_ld8(b + qh_off + i) >> shift) & 3;
             const int nib = high ? (qb >> 4) : (qb & 0xF);
             out[i] = scale * (float)((nib | (hb << 4)) - 32);
         }
@@ -82,7 +109,7 @@ static __device__ __forceinline__ void pf_dequant8(const unsigned char* __restri
         const int blk = v >> 5;
         const int part = (v & 31) >> 3;
         const unsigned char* b = rp + (size_t)blk * PF_Q8_0_BLOCK_BYTES;
-        const float d = __half2float(*reinterpret_cast<const __half*>(b));
+        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
         const signed char* qs = reinterpret_cast<const signed char*>(b + 2 + part * 8);
 #pragma unroll
         for (int i = 0; i < 8; ++i) out[i] = d * (float)qs[i];
