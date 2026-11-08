@@ -35,7 +35,114 @@ pub fn gemv_job_tiles(kind: i32, m: usize) -> usize {
     }
 }
 
+/// Batched-GEMV kind ids: the four resident weight formats whose decode
+/// kernels have a `_b` entry (B x rows, one weight pass).
+pub const GEMV_B_Q4K: i32 = 0;
+pub const GEMV_B_Q6K: i32 = 1;
+pub const GEMV_B_Q5K: i32 = 2;
+pub const GEMV_B_Q80: i32 = 3;
+
 impl Launcher {
+    /// `y[b][row] = W[row,:] . x[b][:]` for `batch` rows, one weight pass.
+    ///
+    /// `x` is `[batch][k]`, `y` is `[batch][m]`. The `_b` kernels keep each
+    /// row's accumulation order identical to the single-sequence GEMV, so this
+    /// is a throughput change, not a numerics change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gemv_batched(
+        &self,
+        kind: i32,
+        w: &ByteBuffer,
+        x: &Buffer,
+        y: &Buffer,
+        m: usize,
+        k: usize,
+        batch: usize,
+    ) -> Result<(), String> {
+        if batch == 0 || batch > 8 {
+            return Err(format!("batched GEMV: batch {batch} outside 1..=8"));
+        }
+        let (entry, rows, shared) = match kind {
+            GEMV_B_Q4K => ("gemv_q4_k_b", 16usize, batch * 1024 * 4),
+            GEMV_B_Q6K => ("gemv_q6_k_b", 16, batch * 1024 * 4),
+            GEMV_B_Q5K => ("gemv_q5_k_b", 16, batch * 1024 * 4),
+            GEMV_B_Q80 => ("gemv_q8_0_b", 1, 0),
+            other => return Err(format!("unknown batched GEMV kind {other}")),
+        };
+        let kernel = self.module.kernel(entry)?;
+        let mut p_w = w.as_ptr();
+        let mut p_x = x.as_ptr();
+        let mut p_y = y.as_ptr();
+        let mut v_m = m as i32;
+        let mut v_k = k as i32;
+        let mut v_b = batch as i32;
+        let mut params: [*mut c_void; 6] = [
+            &mut p_w as *mut _ as *mut c_void,
+            &mut p_x as *mut _ as *mut c_void,
+            &mut p_y as *mut _ as *mut c_void,
+            &mut v_m as *mut _ as *mut c_void,
+            &mut v_k as *mut _ as *mut c_void,
+            &mut v_b as *mut _ as *mut c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (m.div_ceil(rows) as u32, 1, 1),
+            block: (256, 1, 1),
+            shared_mem_bytes: shared as u32,
+        };
+        kernel.launch(cfg, &self.stream, &mut params)
+    }
+
+    /// Batched greedy argmax over `rows` logit vectors of `n` values each.
+    /// `best_v`/`best_i` hold `rows * parts` entries, `out` holds `rows` ids.
+    #[allow(clippy::too_many_arguments)]
+    pub fn argmax_batched(
+        &self,
+        x: &Buffer,
+        best_v: &Buffer,
+        best_i: &Buffer,
+        out: &Buffer,
+        n: usize,
+        parts: usize,
+        rows: usize,
+    ) -> Result<(), String> {
+        let part = self.module.kernel("argmax_part_rows_f32")?;
+        let mut p_x = x.as_ptr();
+        let mut p_v = best_v.as_ptr();
+        let mut p_i = best_i.as_ptr();
+        let mut v_n = n as i32;
+        let mut v_parts = parts as i32;
+        let mut params: [*mut c_void; 5] = [
+            &mut p_x as *mut _ as *mut c_void,
+            &mut p_v as *mut _ as *mut c_void,
+            &mut p_i as *mut _ as *mut c_void,
+            &mut v_n as *mut _ as *mut c_void,
+            &mut v_parts as *mut _ as *mut c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (parts as u32, rows as u32, 1),
+            block: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        part.launch(cfg, &self.stream, &mut params)?;
+
+        let fin = self.module.kernel("argmax_final_rows_f32")?;
+        let mut p_v = best_v.as_ptr();
+        let mut p_i = best_i.as_ptr();
+        let mut p_out = out.as_ptr();
+        let mut params: [*mut c_void; 4] = [
+            &mut p_v as *mut _ as *mut c_void,
+            &mut p_i as *mut _ as *mut c_void,
+            &mut p_out as *mut _ as *mut c_void,
+            &mut v_parts as *mut _ as *mut c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (rows as u32, 1, 1),
+            block: (32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        fin.launch(cfg, &self.stream, &mut params)
+    }
+
     /// Split-K Q4_K GEMV: row tiles x splits, then the ordered reduce.
     pub fn gemv_q4_k_split(
         &self,
@@ -157,6 +264,17 @@ impl Launcher {
         self.linear3("residual_add_f32", a, b, y, n)
     }
 
+    /// [`Launcher::residual_buf`] on raw pointers, for one row of a batch.
+    pub fn residual_ptr(
+        &self,
+        a: *mut c_void,
+        b: *mut c_void,
+        y: *mut c_void,
+        n: usize,
+    ) -> Result<(), String> {
+        self.linear3_ptr("residual_add_f32", a, b, y, n)
+    }
+
     /// `y = silu(gate) * up`, one thread per element.
     pub fn silu_mul_buf(
         &self,
@@ -166,6 +284,39 @@ impl Launcher {
         n: usize,
     ) -> Result<(), String> {
         self.linear3("silu_mul_f32", gate, up, y, n)
+    }
+
+    /// [`Launcher::silu_mul_buf`] on raw pointers, for one row of a batch.
+    pub fn silu_mul_ptr(
+        &self,
+        gate: *mut c_void,
+        up: *mut c_void,
+        y: *mut c_void,
+        n: usize,
+    ) -> Result<(), String> {
+        self.linear3_ptr("silu_mul_f32", gate, up, y, n)
+    }
+
+    fn linear3_ptr(
+        &self,
+        name: &str,
+        a: *mut c_void,
+        b: *mut c_void,
+        y: *mut c_void,
+        n: usize,
+    ) -> Result<(), String> {
+        let kernel = self.module.kernel(name)?;
+        let mut p_a = a;
+        let mut p_b = b;
+        let mut p_y = y;
+        let mut v_n = n as i32;
+        let mut params: [*mut c_void; 4] = [
+            &mut p_a as *mut _ as *mut c_void,
+            &mut p_b as *mut _ as *mut c_void,
+            &mut p_y as *mut _ as *mut c_void,
+            &mut v_n as *mut _ as *mut c_void,
+        ];
+        kernel.launch(LaunchConfig::linear(n, 256), &self.stream, &mut params)
     }
 
     /// `out = a * b` elementwise for the two linear kernels above.

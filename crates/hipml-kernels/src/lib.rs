@@ -33,7 +33,47 @@ pub use launch::{gemm_rows_f32, prefill_resident};
 pub use launch::{gemv_job_tiles, GemvJob, ReadJob};
 #[cfg(feature = "hip")]
 pub use launch::{GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80};
+#[cfg(feature = "hip")]
+pub use launch::{GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
 pub use launch::Launcher;
+
+/// The batched-GEMV kind for a resident matrix kind, when one exists.
+#[cfg(feature = "hip")]
+pub fn batch_kind_for(kind: hipml_core::mat::Kind) -> Option<i32> {
+    use hipml_core::mat::Kind;
+    Some(match kind {
+        Kind::Q4K => launch::GEMV_B_Q4K,
+        Kind::Q6K => launch::GEMV_B_Q6K,
+        Kind::Q5K => launch::GEMV_B_Q5K,
+        Kind::Q8_0 => launch::GEMV_B_Q80,
+        Kind::F32 => return None,
+    })
+}
+
+/// Without the `hip` feature no batched kernel exists.
+#[cfg(not(feature = "hip"))]
+pub fn batch_kind_for(_kind: hipml_core::mat::Kind) -> Option<i32> {
+    None
+}
+
+/// The batched-GEMV kind for a resident GEMV entry name.
+#[cfg(feature = "hip")]
+pub fn batch_kind_entry(entry: &str) -> Option<i32> {
+    use launch::{GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
+    Some(match entry {
+        "gemv_q4_k" => GEMV_B_Q4K,
+        "gemv_q6_k" => GEMV_B_Q6K,
+        "gemv_q5_k" => GEMV_B_Q5K,
+        "gemv_q8_0" => GEMV_B_Q80,
+        _ => return None,
+    })
+}
+
+/// Without the `hip` feature no batched kernel exists.
+#[cfg(not(feature = "hip"))]
+pub fn batch_kind_entry(_entry: &str) -> Option<i32> {
+    None
+}
 
 /// How a kernel is gridded.
 #[derive(Clone, Copy, Debug)]

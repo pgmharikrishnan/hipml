@@ -128,6 +128,95 @@ impl Buffer {
         Err("built without the `hip` feature".to_string())
     }
 
+    /// Stream-ordered device-to-device copy: no host synchronisation, so a
+    /// snapshot can sit between two launches on the engine's stream. The
+    /// caller must sync before reading the destination.
+    #[cfg(feature = "hip")]
+    pub fn copy_from_device_on(
+        &self,
+        src: &Buffer,
+        elems: usize,
+        stream: &crate::Stream,
+    ) -> Result<(), String> {
+        if elems > self.len || elems > src.len {
+            return Err(format!(
+                "device copy of {elems} values needs dst {} and src {}",
+                self.len,
+                src.len
+            ));
+        }
+        if elems == 0 {
+            return Ok(());
+        }
+        unsafe {
+            check(
+                ffi::hipMemcpyAsync(
+                    self.ptr,
+                    src.ptr,
+                    elems * std::mem::size_of::<f32>(),
+                    ffi::HIP_MEMCPY_DEVICE_TO_DEVICE,
+                    stream.handle(),
+                ),
+                "hipMemcpyAsync device->device",
+            )
+        }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn copy_from_device_on(
+        &self,
+        _src: &Buffer,
+        _elems: usize,
+        _stream: &crate::Stream,
+    ) -> Result<(), String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
+    /// Stream-ordered copy of `elems` f32 from `src[src_off..]` to the front of
+    /// this buffer.
+    #[cfg(feature = "hip")]
+    pub fn copy_from_device_on_at(
+        &self,
+        src: &Buffer,
+        src_off: usize,
+        elems: usize,
+        stream: &crate::Stream,
+    ) -> Result<(), String> {
+        if src_off + elems > src.len || elems > self.len {
+            return Err(format!(
+                "device copy of {elems} at {src_off} needs src {} and dst {}",
+                src.len, self.len
+            ));
+        }
+        if elems == 0 {
+            return Ok(());
+        }
+        unsafe {
+            let s = (src.ptr as *mut u8).add(src_off * std::mem::size_of::<f32>());
+            check(
+                ffi::hipMemcpyAsync(
+                    self.ptr,
+                    s as *const std::ffi::c_void,
+                    elems * std::mem::size_of::<f32>(),
+                    ffi::HIP_MEMCPY_DEVICE_TO_DEVICE,
+                    stream.handle(),
+                ),
+                "hipMemcpyAsync device->device (offset)",
+            )
+        }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn copy_from_device_on_at(
+        &self,
+        _src: &Buffer,
+        _src_off: usize,
+        _elems: usize,
+        _stream: &crate::Stream,
+    ) -> Result<(), String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
     /// Download into host memory.
     #[cfg(feature = "hip")]
     pub fn to_host(&self) -> Result<Vec<f32>, String> {
