@@ -54,7 +54,15 @@ pub fn probe_kernels(model: &Model, slots: usize) {
                 continue;
             }
         };
-        let single = time(&|| l.run_quant_resident(entry, t.buffer(), &x, &y, m, k)).ok();
+        // The single-sequence entry asserts x is exactly one row.
+        let (x1, y1) = match (Buffer::alloc(k), Buffer::alloc(m)) {
+            (Ok(a), Ok(b)) => (a, b),
+            _ => {
+                println!("  {name}: alloc: failed");
+                continue;
+            }
+        };
+        let single = time(&|| l.run_quant_resident(entry, t.buffer(), &x1, &y1, m, k)).ok();
         let batched = time(&|| l.gemv_batched(kind, t.buffer(), &x, &y, m, k, slots)).ok();
         let gbs = |s: Option<f64>| match s {
             Some(sec) if sec > 0.0 => format!("{:6.0} GB/s", bytes / sec / 1e9),
