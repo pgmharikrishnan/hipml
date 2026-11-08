@@ -305,6 +305,10 @@ impl<'a> BatchEngine<'a> {
         let mut b = 0usize;
         for l in &self.layers {
             b += l.gate.bytes() + l.up.bytes() + l.down.bytes();
+            b += match &l.kind {
+                BatchKind::Full(f) => f.attn.weight_bytes(),
+                BatchKind::Ssm(s) => s.per_slot[0].weight_bytes(),
+            };
         }
         b + self
             .model
