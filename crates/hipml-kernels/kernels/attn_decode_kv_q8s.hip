@@ -66,7 +66,7 @@ extern "C" __global__ void attn_decode_kv_q8s(
     float scale,
     int splits)
 {
-    extern __shared__ __align__(16) unsigned char sh[];
+    extern __shared__ __align__(16) unsigned char q8sh[];
     const int group = n_heads / n_kv;
     const int kvh = blockIdx.x / splits;
     const int split = blockIdx.x - kvh * splits;
@@ -107,8 +107,8 @@ extern "C" __global__ void attn_decode_kv_q8s(
 #pragma unroll
     for (int j = 0; j < 5; ++j) bidx[j] = ((lane ^ (1 << j)) << 2);
 
-    unsigned char* ks = sh;
-    unsigned char* vs = sh + Q8S_TILE * row_bytes;
+    unsigned char* ks = q8sh;
+    unsigned char* vs = q8sh + Q8S_TILE * row_bytes;
     const unsigned char* kbase = (const unsigned char*)k + (size_t)kvh * seq * row_bytes;
     const unsigned char* vbase = (const unsigned char*)v + (size_t)kvh * seq * row_bytes;
     const int chunks = row_bytes >> 4;           // 16 B copies per row
