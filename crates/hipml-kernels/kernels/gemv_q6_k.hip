@@ -234,21 +234,24 @@ static __device__ __forceinline__ void q6k_acc8_b(const unsigned char* __restric
     const int shift = 2 * group;
     const bool high = group >= 2;
 
+    float wv[8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const unsigned int qw = (i < 4) ? qlw0 : qlw1;
+        const unsigned int hw = (i < 4) ? qhw0 : qhw1;
+        const unsigned int qb = (qw >> (8 * (i & 3))) & 0xFFu;
+        const unsigned int hb = (hw >> (8 * (i & 3))) & 0xFFu;
+        const unsigned int nib = high ? (qb >> 4) : (qb & 0xF);
+        const unsigned int hi = (hb >> shift) & 3u;
+        const int v = (int)(nib | (hi << 4)) - 32;
+        wv[i] = scale * (float)v;
+    }
 #pragma unroll
     for (int bi = 0; bi < B; ++bi) {
         const float* xv = sxb + bi * stride;
         float a = acc[bi];
 #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            const unsigned int qw = (i < 4) ? qlw0 : qlw1;
-            const unsigned int hw = (i < 4) ? qhw0 : qhw1;
-            const unsigned int qb = (qw >> (8 * (i & 3))) & 0xFFu;
-            const unsigned int hb = (hw >> (8 * (i & 3))) & 0xFFu;
-            const unsigned int nib = high ? (qb >> 4) : (qb & 0xF);
-            const unsigned int hi = (hb >> shift) & 3u;
-            const int v = (int)(nib | (hi << 4)) - 32;
-            a = fmaf(scale * (float)v, xv[i * 32], a);
-        }
+        for (int i = 0; i < 8; ++i) a = fmaf(wv[i], xv[i * 32], a);
         acc[bi] = a;
     }
 }

@@ -205,17 +205,20 @@ static __device__ __forceinline__ void q5k_acc_b(const unsigned char* __restrict
     qh.w[2] = qhp[2];
     qh.w[3] = qhp[3];
 
+    float wv[Q5K_VPL];
+#pragma unroll
+    for (int i = 0; i < Q5K_VPL; ++i) {
+        const unsigned int byte = qs.b[i];
+        const unsigned int nib = high ? (byte >> 4) : (byte & 0xF);
+        const float q = (float)nib + ((qh.b[i] & bit) ? 16.0f : 0.0f);
+        wv[i] = scale * q - minv;
+    }
 #pragma unroll
     for (int bi = 0; bi < B; ++bi) {
         const float* xv = sxb + bi * stride;
         float a = acc[bi];
 #pragma unroll
-        for (int i = 0; i < Q5K_VPL; ++i) {
-            const unsigned int byte = qs.b[i];
-            const unsigned int nib = high ? (byte >> 4) : (byte & 0xF);
-            const float q = (float)nib + ((qh.b[i] & bit) ? 16.0f : 0.0f);
-            a = fmaf(scale * q - minv, xv[i * 32], a);
-        }
+        for (int i = 0; i < Q5K_VPL; ++i) a = fmaf(wv[i], xv[i * 32], a);
         acc[bi] = a;
     }
 }

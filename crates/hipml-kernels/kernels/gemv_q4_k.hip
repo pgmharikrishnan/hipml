@@ -358,16 +358,20 @@ static __device__ __forceinline__ void q4k_acc_b(const unsigned char* __restrict
     q.w[3] = qp[3];
     const bool high = (sub & 1) != 0;
 
+    // Dequantise the 16 values once; the batch columns then only pay FMAs.
+    float wv[Q4K_VPL];
+#pragma unroll
+    for (int i = 0; i < Q4K_VPL; ++i) {
+        const unsigned int byte = q.b[i];
+        const int v = high ? (int)(byte >> 4) : (int)(byte & 0xF);
+        wv[i] = scale * (float)v - minv;
+    }
 #pragma unroll
     for (int bi = 0; bi < B; ++bi) {
         const float* xv = sxb + bi * stride;
         float a = acc[bi];
 #pragma unroll
-        for (int i = 0; i < Q4K_VPL; ++i) {
-            const unsigned int byte = q.b[i];
-            const int v = high ? (int)(byte >> 4) : (int)(byte & 0xF);
-            a = fmaf(scale * (float)v - minv, xv[i * 32], a);
-        }
+        for (int i = 0; i < Q4K_VPL; ++i) a = fmaf(wv[i], xv[i * 32], a);
         acc[bi] = a;
     }
 }

@@ -96,12 +96,15 @@ static __device__ __forceinline__ void q80_row_b(
         const unsigned char* blk = r + (size_t)b * Q80_BLOCK_BYTES;
         const float d = __half2float(*reinterpret_cast<const __half*>(blk));
         const signed char* q = reinterpret_cast<const signed char*>(blk + 2);
+        float qf[32];
+#pragma unroll
+        for (int l = 0; l < 32; ++l) qf[l] = (float)q[l];
 #pragma unroll
         for (int bi = 0; bi < B; ++bi) {
             const float* xr = x + (size_t)bi * k + (size_t)b * 32;
             float a = 0.0f;
 #pragma unroll
-            for (int l = 0; l < 32; ++l) a += (float)q[l] * xr[l];
+            for (int l = 0; l < 32; ++l) a += qf[l] * xr[l];
             acc[bi] += d * a;
         }
     }
