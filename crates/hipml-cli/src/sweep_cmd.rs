@@ -19,7 +19,9 @@ use hipml_core::quant::TensorType;
 use hipml_hip::{Buffer, ByteBuffer};
 use hipml_model::Model;
 
-use crate::sweep_ab::{event_pass, gemv_pass, merge_pass, pair_pass, report, variant_pass};
+use crate::sweep_ab::{
+    event_pass, gemv_pass, merge_pass, pair_pass, report, split_pass, variant_pass,
+};
 
 pub(crate) struct Weight<'a> {
     pub(crate) buf: &'a ByteBuffer,
@@ -34,6 +36,7 @@ struct Args {
     pair: bool,
     variant: bool,
     merge: bool,
+    split: bool,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -45,6 +48,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         pair: false,
         variant: false,
         merge: false,
+        split: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -80,6 +84,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--merge" => {
                 a.merge = true;
+                i += 1;
+            }
+            "--split" => {
+                a.split = true;
                 i += 1;
             }
             other => return Err(format!("unknown argument {other}")),
@@ -264,6 +272,13 @@ pub fn sweep(args: &[String]) -> i32 {
     if a.merge {
         if let Err(e) = merge_pass(&l, &model) {
             eprintln!("gpu-sweep: merge: {e}");
+            return 1;
+        }
+    }
+
+    if a.split {
+        if let Err(e) = split_pass(&l, &model) {
+            eprintln!("gpu-sweep: split: {e}");
             return 1;
         }
     }

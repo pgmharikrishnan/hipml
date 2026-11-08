@@ -215,3 +215,77 @@ extern "C" __global__ void gemv_q4_k_u4(
     __shared__ __align__(16) float sx[Q4K_K_TILE];
     q4k_tile<1, true>(w, x, y, m, k, sx, blockIdx.x);
 }
+
+// Split-K partial pass: grid (row tiles, splits), each block accumulates a
+// contiguous 512-value-aligned slice of k and writes `part[split][row]`.
+//
+// The probe for the one explanation the measurements keep pointing at: a
+// 5120-row tensor is 640 blocks of 8 warps, and every block streams its rows
+// through a single accumulator chain, so the kernel's in-flight bytes scale with
+// the number of threads, not with the grid. Splitting k gives the same bytes to
+// more threads doing less work each — the shape `gpu-sweep`'s calibration buffer
+// likes (267 GB/s at 4096 blocks, 604 at 16384).
+//
+// This is *not* bit-identical to `gemv_q4_k`: the per-lane accumulation over k
+// is partitioned differently, so the last bits of every output can move. It is
+// measured as an A/B, and adopted only if the greedy tokens survive.
+extern "C" __global__ void gemv_q4_k_split(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ part,
+    int m,
+    int k,
+    int splits)
+{
+    __shared__ __align__(16) float sx[Q4K_K_TILE];
+
+    const int tid = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    const int nblocks = k / Q4K_VALUES;
+    const int row = blockIdx.x * Q4K_WARPS + warp;
+    const int r = min(row, m - 1);
+    const unsigned char* rp = w + (size_t)r * (size_t)nblocks * Q4K_BLOCK_BYTES;
+
+    // 512-value units so every slice starts on a group boundary (the shared
+    // staging and the lane mapping are per 512-value group).
+    const int per = ((k / splits) + Q4K_GROUP - 1) / Q4K_GROUP * Q4K_GROUP;
+    const int begin = blockIdx.y * per;
+    const int end = min(begin + per, k);
+
+    float acc = 0.0f;
+    for (int base = begin; base < end; base += Q4K_K_TILE) {
+        const int n = min(Q4K_K_TILE, end - base);
+        const int nchunks = n / Q4K_VPL;
+        for (int j = tid; j < nchunks; j += Q4K_BLOCK) stage_group(x, sx, base, j);
+        __syncthreads();
+
+        for (int c = lane * Q4K_VPL; c < n; c += Q4K_GROUP) {
+            const int g = c / Q4K_GROUP;
+            const int s = g * Q4K_GROUP + lane;
+            float xv[Q4K_VPL];
+#pragma unroll
+            for (int comp = 0; comp < Q4K_VPL; ++comp) xv[comp] = sx[s + comp * 32];
+            q4k_acc<true>(rp, base + c, xv, &acc);
+        }
+        __syncthreads();
+    }
+
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_down(acc, off);
+    if (lane == 0 && row < m) part[(size_t)blockIdx.y * m + row] = acc;
+}
+
+// `y[row] = sum_s part[s][row]`, one thread per row, splits in order.
+extern "C" __global__ void gemv_split_reduce(
+    const float* __restrict__ part,
+    float* __restrict__ y,
+    int m,
+    int splits)
+{
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= m) return;
+    float a = 0.0f;
+    for (int s = 0; s < splits; ++s) a += part[(size_t)s * m + row];
+    y[row] = a;
+}

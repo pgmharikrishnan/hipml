@@ -36,6 +36,51 @@ pub fn gemv_job_tiles(kind: i32, m: usize) -> usize {
 }
 
 impl Launcher {
+    /// Split-K Q4_K GEMV: row tiles x splits, then the ordered reduce.
+    pub fn gemv_q4_k_split(
+        &self,
+        w: &ByteBuffer,
+        x: &Buffer,
+        part: &Buffer,
+        y: &Buffer,
+        m: usize,
+        k: usize,
+        splits: usize,
+    ) -> Result<(), String> {
+        let kernel = self.module.kernel("gemv_q4_k_split")?;
+        let mut p_w = w.as_ptr();
+        let mut p_x = x.as_ptr();
+        let mut p_part = part.as_ptr();
+        let mut v_m = m as i32;
+        let mut v_k = k as i32;
+        let mut v_splits = splits as i32;
+        let mut params: [*mut c_void; 6] = [
+            &mut p_w as *mut _ as *mut c_void,
+            &mut p_x as *mut _ as *mut c_void,
+            &mut p_part as *mut _ as *mut c_void,
+            &mut v_m as *mut _ as *mut c_void,
+            &mut v_k as *mut _ as *mut c_void,
+            &mut v_splits as *mut _ as *mut c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (((m + 7) / 8) as u32, splits as u32, 1),
+            block: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        kernel.launch(cfg, &self.stream, &mut params)?;
+
+        let reduce = self.module.kernel("gemv_split_reduce")?;
+        let mut p_part = part.as_ptr();
+        let mut p_y = y.as_ptr();
+        let mut params: [*mut c_void; 4] = [
+            &mut p_part as *mut _ as *mut c_void,
+            &mut p_y as *mut _ as *mut c_void,
+            &mut v_m as *mut _ as *mut c_void,
+            &mut v_splits as *mut _ as *mut c_void,
+        ];
+        reduce.launch(LaunchConfig::linear(m, 256), &self.stream, &mut params)
+    }
+
     /// Launch every job in `jobs` with one kernel: grid.y picks the job, grid.x
     /// the row tile inside it. Jobs must be independent of each other.
     pub fn gemv_jobs(&self, jobs: &Buffer, n_jobs: usize, tiles: usize) -> Result<(), String> {

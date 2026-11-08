@@ -523,6 +523,82 @@ fn job_buffer(jobs: &[hipml_kernels::GemvJob]) -> Result<Buffer, String> {
     Ok(buf)
 }
 
+/// Split-K A/B on the tensors the trace calls slow: 5120-row Q4_K projections
+/// (ssm_out, attn_output) and the 17408-row ffn_down.
+///
+/// Same bytes, same kernel body, `splits` times more blocks and a reduce pass.
+/// Reports effective GB/s per split count and whether the outputs still match
+/// the unsplit kernel bit-for-bit (they are not expected to: the accumulation
+/// order over k changes, which is why this is a probe and not a swap).
+pub(crate) fn split_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result<(), String> {
+    for suffix in ["ssm_out", "attn_output", "ffn_down"] {
+        let mut v: Vec<(&ByteBuffer, usize, usize)> = Vec::new();
+        for i in 0..64 {
+            let t = match model.tensor(&format!("blk.{i}.{suffix}.weight")) {
+                Some(t) => t,
+                None => continue,
+            };
+            if t.ty() != TensorType::Q4K {
+                continue;
+            }
+            v.push((t.buffer(), t.shape()[0] as usize, t.shape()[1] as usize));
+        }
+        if v.is_empty() {
+            continue;
+        }
+        let (m_max, k) = (v.iter().map(|t| t.1).max().unwrap_or(1), v[0].2);
+        let bytes: usize = v.iter().map(|t| t.0.len()).sum();
+        let x = Buffer::alloc(k)?;
+        let y = Buffer::alloc(m_max)?;
+        let y2 = Buffer::alloc(m_max)?;
+        let part = Buffer::alloc(m_max * 4)?;
+
+        for splits in [1usize, 2, 4, 8] {
+            if splits > 1 {
+                // Exactness against the unsplit entry for one tensor.
+                let (w, m, _) = v[0];
+                l.run_quant_resident("gemv_q4_k_r1", w, &x, &y, m, k)?;
+                l.synchronize()?;
+                let a = y.download_bytes(0, m * 4)?;
+                l.gemv_q4_k_split(w, &x, &part, &y2, m, k, splits)?;
+                l.synchronize()?;
+                let b = y2.download_bytes(0, m * 4)?;
+                let mut worst = 0.0f32;
+                for (i, (p, q)) in a.chunks(4).zip(b.chunks(4)).enumerate() {
+                    let (fa, fb) = (
+                        f32::from_le_bytes([p[0], p[1], p[2], p[3]]),
+                        f32::from_le_bytes([q[0], q[1], q[2], q[3]]),
+                    );
+                    let _ = i;
+                    worst = worst.max((fa - fb).abs() / fa.abs().max(1e-6));
+                }
+                print!("  splits {splits}: max rel |d| vs r1 = {worst:.3e}  ");
+            } else {
+                print!("  splits 1: ");
+            }
+            l.synchronize()?;
+            let t = Instant::now();
+            for (w, m, kk) in &v {
+                if splits == 1 {
+                    l.run_quant_resident("gemv_q4_k_r1", w, &x, &y, *m, *kk)?;
+                } else {
+                    l.gemv_q4_k_split(w, &x, &part, &y, *m, *kk, splits)?;
+                }
+            }
+            l.synchronize()?;
+            let secs = t.elapsed().as_secs_f64();
+            println!(
+                "{:6.2} GB  {:7.3} ms  {:6.1} GB/s  ({} launches)",
+                bytes as f64 / 1e9,
+                secs * 1e3,
+                bytes as f64 / secs / 1e9,
+                v.len() * if splits == 1 { 1 } else { 2 }
+            );
+        }
+    }
+    Ok(())
+}
+
 /// One line of the sweep table, shared with the driver.
 pub(crate) fn report(label: &str, bytes: usize, launches: usize, secs: f64) {
     println!(

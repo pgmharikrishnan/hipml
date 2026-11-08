@@ -122,6 +122,20 @@ pub const KERNELS: &[KernelSpec] = &[
         },
     },
     KernelSpec {
+        name: "gemv_q4_k_split",
+        entry: "gemv_q4_k_split",
+        // grid.y = splits; the launcher sizes it.
+        kind: KernelKind::RowTile {
+            rows: 8,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "gemv_split_reduce",
+        entry: "gemv_split_reduce",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
         name: "gemv_q4_k_r1",
         entry: "gemv_q4_k_r1",
         // One row per warp: 8 rows per block, twice the grid of the two-row
