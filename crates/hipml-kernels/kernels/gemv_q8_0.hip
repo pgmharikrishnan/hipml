@@ -102,16 +102,9 @@ static __device__ __forceinline__ void q80_row_b(
 #pragma unroll
         for (int bi = 0; bi < B; ++bi) {
             const float* xr = x + (size_t)bi * k + (size_t)b * 32;
-            // Same l order, eight vector loads instead of 32 scalar ones.
             float a = 0.0f;
 #pragma unroll
-            for (int v = 0; v < 8; ++v) {
-                const float4 xv = reinterpret_cast<const float4*>(xr)[v];
-                a += qf[4 * v + 0] * xv.x;
-                a += qf[4 * v + 1] * xv.y;
-                a += qf[4 * v + 2] * xv.z;
-                a += qf[4 * v + 3] * xv.w;
-            }
+            for (int l = 0; l < 32; ++l) a += qf[l] * xr[l];
             acc[bi] += d * a;
         }
     }

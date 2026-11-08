@@ -135,8 +135,8 @@ pub struct BatchEngine<'a> {
     pub trace: bool,
     /// Seconds per stage accumulated by `forward` when `trace` is on.
     pub stages: [f64; 9],
-    /// Split alternating slots across the two streams. `HIPML_BATCH_NOSPLIT`
-    /// disables it for an A/B.
+    /// Split alternating slots across the two streams (off by default: it is
+    /// an A/B behind `HIPML_BATCH_SPLIT`).
     pub overlap: bool,
 }
 
@@ -168,7 +168,7 @@ impl<'a> BatchEngine<'a> {
         }
         let embed = (embed.buffer(), (embed.nbytes() / embed.rows()) as usize);
         let zeros = |count: usize| Buffer::alloc(count);
-        let overlap = std::env::var_os("HIPML_BATCH_NOSPLIT").is_none();
+        let overlap = std::env::var_os("HIPML_BATCH_SPLIT").is_some();
         let mut layers = Vec::with_capacity(cfg.n_layer);
         for i in 0..cfg.n_layer {
             let attn_norm = Buffer::from_host(&model.f32_vec(&format!("blk.{i}.attn_norm.weight"))?)?;
