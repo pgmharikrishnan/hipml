@@ -430,6 +430,26 @@ impl<'a> SsmGpuLayer<'a> {
         Ok((self.conv_state.to_host()?, self.s_state.to_host()?))
     }
 
+    /// Lengths of the two carried buffers: `(conv window, delta-net matrix)`.
+    /// A prefix snapshot copies exactly these many values.
+    pub fn state_lens(&self) -> (usize, usize) {
+        let d = &self.dims;
+        (
+            (d.d_conv - 1) * d.conv_ch,
+            d.n_v * d.head_v * d.head_v,
+        )
+    }
+
+    /// The live conv window buffer (destination for a restore).
+    pub fn conv_state_buf(&self) -> &Buffer {
+        &self.conv_state
+    }
+
+    /// The live delta-net state buffer (destination for a restore).
+    pub fn s_state_buf(&self) -> &Buffer {
+        &self.s_state
+    }
+
     pub fn write_x_slice(&self, x: &[f32]) -> Result<(), String> {
         upload(&self.x, x)
     }

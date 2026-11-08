@@ -21,6 +21,7 @@ pub mod ops;
 pub mod parity;
 pub mod parity_kv;
 pub mod prefill_parity;
+pub mod prefix_cache;
 pub mod quant;
 pub mod quant_parity;
 pub mod rng;

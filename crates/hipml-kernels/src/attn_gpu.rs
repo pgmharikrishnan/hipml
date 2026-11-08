@@ -488,6 +488,15 @@ mod imp {
             &self.out
         }
 
+        /// The position-major KV cache this layer appends to, `[n_ctx][width]`.
+        pub fn kv_k_buf(&self) -> &Buffer {
+            &self.kv_k
+        }
+
+        pub fn kv_v_buf(&self) -> &Buffer {
+            &self.kv_v
+        }
+
         /// Same, with `x` resident on the device. Does not synchronize.
         pub fn forward_buf(&self, l: &Launcher, x: &Buffer, pos: usize) -> Result<(), String> {
             let d = self.dims;

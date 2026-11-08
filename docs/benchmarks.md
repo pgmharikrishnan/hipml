@@ -458,12 +458,66 @@ prompt. Nothing else is faked: the warm pass actually launches those GEMMs.
 
 The cache is 67.1 MB at 512 tokens (16 layers × 2 × 4 KV heads × 512 × 256 × 4 B).
 Warm is 12.444 GB / 16.250 GB = 76.6% of the cold weight stream, i.e. the 48 SSM
-blocks dominate and cap the reuse win at 1.38×. A snapshot of each SSM block's
-recurrent state at the prefix boundary would make a repeated prompt nearly free,
-but that is state caching, not KV prefix caching, and is not implemented here.
-Attention numerics are not measured either: the KV contents in this harness are
-placeholders, and the claim is the prefix match plus the skipped GEMM work, not
-attention correctness (there is no Flash Attention path yet).
+blocks dominate and cap the reuse win at 1.38×. That harness caches only the
+attention KV and re-runs every SSM block, so it is the lower bound, not what the
+engine now does. Attention numerics are not measured in it either: the KV
+contents are placeholders, and the claim is the prefix match plus the skipped
+GEMM work.
+
+### Cached prefill with SSM state (WP22)
+
+The engine now snapshots the *whole* prefix state: the 48 SSM layers' conv window
+and delta-net matrix, plus the 16 f32 attention layers' KV rows, keyed by the exact
+token prefix. `hipml-core/src/prefix_cache.rs` holds the bounded LRU metadata;
+`hipml-model/src/gpu/prefix.rs` copies the state device-to-device. A hit restores
+and prefills only the unshared suffix, so the recurrent half is no longer
+recomputed.
+
+One entry at `N` tokens is **149.6 MiB of SSM state** (48 × 3.27 MB, independent
+of `N`) + **0.125 MiB per token of f32 KV** (16 layers × 2 × 1024 values × 4 B) +
+0.95 MiB logits. At 1,024 tokens that is 278.6 MiB; at 2,048, 406.6 MiB. The
+cache is bounded in entries and bytes and evicts LRU, so the SSM term is what a
+capacity budget is really buying.
+
+`hipml cache-bench --gguf ... --len 2048 --shared 1024 --chunk 512` builds P and Q
+from a real tokenized system prefix and two different questions, and an unrelated
+R. Cold is a fresh state; warm-exact restores P's end snapshot and takes the
+cached logits; warm-shared restores the shared boundary and prefills only Q's
+suffix.
+
+| case | cache | matched | computed | TTFT | vs cold | prefill skipped | ids |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| cold P (2048) | miss | 0 | 2048 | 1801.5 ms | 1.00× | 0% | — |
+| **warm exact P** | hit | 2048 | 0 | **7.6 ms** | **236.7×** | **100%** | identical |
+| cold Q (2048) | miss | 0 | 2048 | 1804.8 ms | 1.00× | 0% | — |
+| **warm shared Q** (S=1024) | hit | 1024 | 1024 | **958.2 ms** | **1.88×** | **50%** | identical |
+| cold R (2048) | miss | 0 | 2048 | 1811.0 ms | 1.00× | 0% | — |
+
+The same pair with a 1,536-token shared prefix (75%):
+
+| case | matched | computed | TTFT | vs cold | prefill skipped |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| cold Q (2048) | 0 | 2048 | 1811.2 ms | 1.00× | 0% |
+| **warm shared Q** | 1536 | 512 | **495.1 ms** | **3.66×** | **75%** |
+
+Restore alone (lookup + 128 device copies + argmax) is **5.3 ms at 512 tokens**
+and **6.4–8.1 ms at 2,048**. The 20 generated ids are identical to the cold path
+in every case; the exact repeat's first id comes from the cached logits, the
+remaining 19 from the restored state. Exact repeat at 512 tokens measured
+5.5 ms against 493.5 ms cold (89×).
+
+The wall-time reduction is 2–3 points below the token fraction (46.9% vs 50%,
+72.7% vs 75%). That is real, not noise: the tiles that remain are the *later*
+tiles, whose causal attention runs over a longer context than the tiles that were
+skipped, and the restore itself costs 6–8 ms. The work reduction is exactly the
+shared fraction: 1,024 of 2,048 tokens are not computed.
+
+The 3-request sequence with a 2-entry / 1 GiB bound: seed P (two entries, 685.1
+MiB) → exact repeat **hit** @2048 → shared Q **hit** @1024 → unrelated R **miss**
+(inserted, **1 eviction**). The evicted entry is P@2048, the LRU victim, so a
+repeat of P afterwards is only a *partial* hit at 1,024 tokens. Counters:
+3 hits, 1 miss, 1 eviction, 0 too-large. The f32 KV rows are the chunked-prefill
+path; q8/q4 decode caches are not snapshot targets yet.
 
 ### Parity
 

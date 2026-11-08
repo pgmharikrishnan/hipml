@@ -92,6 +92,42 @@ impl Buffer {
         Err("built without the `hip` feature".to_string())
     }
 
+    /// Copy `elems` f32 values from another device buffer into the front of
+    /// this one. Used for state snapshots: a snapshot is the prefix of a live
+    /// recurrent/KV buffer, so no host round-trip is needed.
+    ///
+    /// Synchronizes the device afterwards so a following launch on the engine's
+    /// own stream sees the copy, regardless of stream ordering.
+    #[cfg(feature = "hip")]
+    pub fn copy_from_device(&self, src: &Buffer, elems: usize) -> Result<(), String> {
+        if elems > self.len || elems > src.len {
+            return Err(format!(
+                "device copy of {elems} values needs dst {} and src {}",
+                self.len, src.len
+            ));
+        }
+        if elems == 0 {
+            return Ok(());
+        }
+        unsafe {
+            check(
+                ffi::hipMemcpy(
+                    self.ptr,
+                    src.ptr,
+                    elems * std::mem::size_of::<f32>(),
+                    ffi::HIP_MEMCPY_DEVICE_TO_DEVICE,
+                ),
+                "hipMemcpy device->device",
+            )?;
+            check(ffi::hipDeviceSynchronize(), "hipDeviceSynchronize")
+        }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn copy_from_device(&self, _src: &Buffer, _elems: usize) -> Result<(), String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
     /// Download into host memory.
     #[cfg(feature = "hip")]
     pub fn to_host(&self) -> Result<Vec<f32>, String> {
