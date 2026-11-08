@@ -173,8 +173,11 @@ impl<'a> BatchEngine<'a> {
             let down = Proj::of(model, &format!("blk.{i}.ffn_down.weight"))?;
             let kind = if cfg.is_recr[i] {
                 let mut per_slot = Vec::with_capacity(slots);
-                for _ in 0..slots {
-                    per_slot.push(build_ssm(model, l, &cfg, i)?);
+                for b in 0..slots {
+                    // Odd slots launch their recurrence on the side stream, so
+                    // the two halves overlap instead of serialising 8 small
+                    // kernels at a time.
+                    per_slot.push(build_ssm(model, l, &cfg, i, b % 2 == 1)?);
                 }
                 BatchKind::Ssm(SsmBatch {
                     per_slot,
@@ -431,6 +434,7 @@ impl<'a> BatchEngine<'a> {
                     )?;
                     stage!(5);
                     let d = SsmDims::from_config(&cfg);
+                    l.fork()?;
                     for bi in 0..b {
                         let slot = self.active[bi];
                         let inst = &s.per_slot[slot];
