@@ -67,7 +67,10 @@ impl<'a> BatchEngine<'a> {
                         let slot = self.active[bi];
                         let pos = positions[bi];
                         let dk = &f.deep[slot];
-                        let side = bi % 2 == 1;
+                        // Only alternate streams when the step actually forked,
+                        // otherwise odd slots would run unsynchronised on the
+                        // side stream.
+                        let side = split && bi % 2 == 1;
                         if side {
                             l.set_step_side(pos, pos + 1, 0)?;
                             l.kv_encode_ptr_on(
@@ -120,7 +123,6 @@ impl<'a> BatchEngine<'a> {
                     )?;
                     stage!(5);
                     let d = SsmDims::from_config(&cfg);
-                    l.fork()?;
                     for bi in 0..b {
                         let slot = self.active[bi];
                         let inst = &s.per_slot[slot];

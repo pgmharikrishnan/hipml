@@ -152,7 +152,9 @@ pub(super) fn deep_attention_ptr_on(
     launch_kv::launch_ptrs(
         l.module(),
         if side { l.stream2() } else { l.stream() },
-        l.step_buf(),
+        // Each stream carries its own position, so the side stream must read
+        // the side step buffer (the KV append above already used it).
+        if side { l.step_side_buf() } else { l.step_buf() },
         dk.dtype.id(),
         q_ptr,
         &dk.k,
