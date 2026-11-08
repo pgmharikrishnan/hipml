@@ -280,6 +280,25 @@ fn parity_run(l: &Launcher, m: &Loaded) -> i32 {
         }
     }
 
+    // 2c. The same case reading the q8_0 cache directly, dequantizing each KV
+    // tile in the kernel (no f32 mirror).
+    match attn_chunk_parity::run_q8(l, cfg, &m.w) {
+        Ok((ok, st)) => {
+            failed |= !ok;
+            println!(
+                "{:<30} {:>10.2e} {:>10.2e}  {}",
+                "chunk attention q8 37@29",
+                st.max_abs,
+                st.max_rel,
+                if ok { "PASS" } else { "FAIL" }
+            );
+        }
+        Err(e) => {
+            eprintln!("attn: chunk attention q8: {e}");
+            return 1;
+        }
+    }
+
     const DEPTH: usize = 1000;
     let mut rng = Rng::new(0xA77E_0002_0000_0002);
     let xs: Vec<Vec<f32>> = (0..DEPTH)

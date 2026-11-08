@@ -27,6 +27,8 @@ mod imp {
     /// scratch and weight handles).
     #[path = "attn_chunk.rs"]
     mod chunk;
+    #[path = "attn_chunk_kv.rs"]
+    mod chunk_kv;
 
     /// A weight payload that is either owned (the standalone parity path) or
     /// borrowed from the resident loader, so the graph never uploads the same
@@ -755,6 +757,40 @@ impl AttnLayer {
         _out: &hipml_hip::Buffer,
         _pos0: usize,
         _tokens: usize,
+    ) -> Result<(), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn chunk_front(
+        &self,
+        _l: &crate::Launcher,
+        _qg: &hipml_hip::Buffer,
+        _k: &hipml_hip::Buffer,
+        _q: &hipml_hip::Buffer,
+        _gate: &hipml_hip::Buffer,
+        _pos0: usize,
+        _tokens: usize,
+    ) -> Result<(), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    pub fn q8_chunk_supported(&self) -> bool {
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn chunk_attention_q8(
+        &self,
+        _l: &crate::Launcher,
+        _q: &hipml_hip::Buffer,
+        _kc: &hipml_hip::Buffer,
+        _vc: &hipml_hip::Buffer,
+        _out: &hipml_hip::Buffer,
+        _pos0: usize,
+        _tokens: usize,
+        _dtype: usize,
+        _stride: usize,
     ) -> Result<(), String> {
         Err("hipml was built without the `hip` feature".to_string())
     }

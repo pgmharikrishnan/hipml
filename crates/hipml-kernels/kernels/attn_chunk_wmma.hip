@@ -53,6 +53,17 @@
 // accumulator is [query][d] (eight queries per lane), so the epilogue reads
 // the eight running sums from the lanes that hold them (eight shuffles, once).
 //
+// ## KV source: mirror or quantized cache
+//
+// The staging pass can fill those same two shared tiles from either the f32
+// position-major mirror or the q8_0/q4_0 head-major decode cache. A quantized
+// row is 272 B at head_dim 256 instead of 1 KB, and turning a 4-value group
+// into halfs costs one f16 scale load and four multiply-converts, so a deep
+// prompt reads ~3.8x less from global and still feeds the matrix unit the
+// identical f16 operands. That is what lets chunked prefill run at 100K
+// without a 12 GiB mirror; the only difference from the mirror is the 8-bit
+// cache's own rounding, which the decode path already carries.
+//
 // ## Numerics
 //
 // Scores are scaled by `scale * log2(e)` so the softmax is a bare exp2f; max
@@ -90,16 +101,61 @@
 #define AW_QUERIES 32
 #define AW_MAXGROUP 8
 
+// Cache dtypes the staging pass can read: 0 f32, 1 q8_0, 2 q4_0.
+#define AW_DT_F32 0
+#define AW_DT_Q8 1
+#define AW_DT_Q4 2
+
 typedef _Float16 aw_h8 __attribute__((ext_vector_type(8)));
 typedef float aw_f8 __attribute__((ext_vector_type(8)));
 
 #define AW_LOG2E 1.4426950408889634f
 #define AW_NEG_INF (-3.402823466e+38f)
 
+// Four consecutive head components of one cache row, as halfs.
+//
+// `dtype` selects how `row` is addressed: f32 rows are `width` floats wide and
+// `row` points at component 0, while a quantized row is a run of 34 B (q8_0) or
+// 18 B (q4_0) blocks and `d` picks block and offset. The dequantized values go
+// straight to f16 — the matrix unit takes f16 operands either way, so the only
+// difference from the f32 mirror is the 8-bit cache's own rounding.
+static __device__ __forceinline__ void aw_ld4(
+    _Float16* o, const void* row, int d, int dtype)
+{
+    if (dtype == AW_DT_F32) {
+        const float4 a = *reinterpret_cast<const float4*>(
+            reinterpret_cast<const float*>(row) + d);
+        o[0] = __float2half_rn(a.x);
+        o[1] = __float2half_rn(a.y);
+        o[2] = __float2half_rn(a.z);
+        o[3] = __float2half_rn(a.w);
+    } else if (dtype == AW_DT_Q8) {
+        const unsigned char* b =
+            reinterpret_cast<const unsigned char*>(row) + (size_t)(d >> 5) * 34;
+        const float s = __half2float(*reinterpret_cast<const __half*>(b));
+        const unsigned w = *reinterpret_cast<const unsigned*>(b + 2 + (d & 31));
+        o[0] = __float2half_rn(s * (float)((int)(w << 24) >> 24));
+        o[1] = __float2half_rn(s * (float)((int)(w << 16) >> 24));
+        o[2] = __float2half_rn(s * (float)((int)(w << 8) >> 24));
+        o[3] = __float2half_rn(s * (float)((int)w >> 24));
+    } else {
+        // q4_0: value j in the low nibble of byte j, j+16 in the high nibble.
+        const unsigned char* b =
+            reinterpret_cast<const unsigned char*>(row) + (size_t)(d >> 5) * 18;
+        const float s = __half2float(*reinterpret_cast<const __half*>(b));
+        const unsigned w = *reinterpret_cast<const unsigned*>(b + 2 + (d & 15));
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const int q = (int)((w >> (8 * j)) & 0x0f) - 8;
+            o[j] = __float2half_rn(s * (float)q);
+        }
+    }
+}
+
 extern "C" __global__ void attn_chunk_wmma_f16(
     const float* __restrict__ q,
-    const float* __restrict__ k_cache,
-    const float* __restrict__ v_cache,
+    const void* __restrict__ k_cache,
+    const void* __restrict__ v_cache,
     float* __restrict__ out,
     int n_heads,
     int n_kv,
@@ -107,7 +163,9 @@ extern "C" __global__ void attn_chunk_wmma_f16(
     int width,
     int pos0,
     int tokens,
-    float scale)
+    float scale,
+    int kv_dtype,
+    int kv_stride)
 {
     __shared__ __align__(16) _Float16 sk[AW_KT * AW_KST];       // [key][d]
     __shared__ __align__(16) _Float16 sv[AW_DHALF * AW_VST];    // [d][key]
@@ -172,8 +230,20 @@ extern "C" __global__ void attn_chunk_wmma_f16(
 
     const int tid = threadIdx.x;
     const int nthreads = blockDim.x;
-    const float* kb = k_cache + (size_t)kvh * head_dim;
-    const float* vb = v_cache + (size_t)kvh * head_dim + dh * AW_DHALF;
+
+    // One row's byte stride and the gap between KV heads. The f32 mirror is
+    // position-major `[pos][n_kv*head_dim]` with the heads packed inside a row;
+    // the quantized cache is head-major `[kvh][pos][blocks]`, so `kv_stride`
+    // (the cache's per-head row count) is what separates two heads there.
+    const int nblock = head_dim >> 5;
+    const size_t row_bytes = (kv_dtype == AW_DT_F32)
+        ? (size_t)width * 4
+        : (size_t)nblock * (kv_dtype == AW_DT_Q8 ? 34 : 18);
+    const size_t head_gap = (kv_dtype == AW_DT_F32)
+        ? (size_t)head_dim * 4
+        : (size_t)kv_stride * row_bytes;
+    const char* kb = reinterpret_cast<const char*>(k_cache) + (size_t)kvh * head_gap;
+    const char* vb = reinterpret_cast<const char*>(v_cache) + (size_t)kvh * head_gap;
     const int qglob = pos0 + tq + (lane & 15);
 
     for (int base = 0; base < seq_block; base += AW_KT) {
@@ -181,36 +251,32 @@ extern "C" __global__ void attn_chunk_wmma_f16(
 
         __syncthreads();
 
-        // K: full head width, [key][d]. One thread loads four consecutive d
-        // of one key (a float4, coalesced across the warp) and stores a half4.
+        // K: full head width, [key][d]. One thread fetches four consecutive d
+        // of one key (16 B from the f32 mirror, one 4-value group from a q8/q4
+        // block) and stores a half4.
         for (int idx = tid; idx < AW_KT * (AW_HD / 4); idx += nthreads) {
             const int key = idx / (AW_HD / 4);
             const int dq = (idx - key * (AW_HD / 4)) * 4;
             const int rr = (key < rows) ? key : (rows - 1);
-            const float4 a = *reinterpret_cast<const float4*>(
-                kb + (size_t)(base + rr) * width + dq);
-            _Float16* kd = sk + key * AW_KST + dq;
-            kd[0] = __float2half_rn(a.x);
-            kd[1] = __float2half_rn(a.y);
-            kd[2] = __float2half_rn(a.z);
-            kd[3] = __float2half_rn(a.w);
+            aw_ld4(sk + key * AW_KST + dq, kb + (size_t)(base + rr) * row_bytes,
+                   dq, kv_dtype);
         }
         // V: this block's d half, transposed to [d][key] because the PV B
         // operand is row-major by output column with eight keys contiguous.
-        // A lane reads four consecutive d of one key (one coalesced float4 per
-        // eight lanes) and writes four halfs into four d rows; the 18-half
-        // stride walks the banks four ways, which is cheaper than four times
-        // as many scalar loads.
+        // A lane fetches four consecutive d of one key and writes four halfs
+        // into four d rows; the 18-half stride walks the banks four ways, which
+        // is cheaper than four times as many scalar loads.
         for (int idx = tid; idx < AW_KT * (AW_DHALF / 4); idx += nthreads) {
             const int key = idx / (AW_DHALF / 4);
             const int dq = (idx - key * (AW_DHALF / 4)) * 4;
             const int rr = (key < rows) ? key : (rows - 1);
-            const float4 b = *reinterpret_cast<const float4*>(
-                vb + (size_t)(base + rr) * width + dq);
-            sv[(dq + 0) * AW_VST + key] = __float2half_rn(b.x);
-            sv[(dq + 1) * AW_VST + key] = __float2half_rn(b.y);
-            sv[(dq + 2) * AW_VST + key] = __float2half_rn(b.z);
-            sv[(dq + 3) * AW_VST + key] = __float2half_rn(b.w);
+            _Float16 t[4];
+            aw_ld4(t, vb + (size_t)(base + rr) * row_bytes,
+                   dh * AW_DHALF + dq, kv_dtype);
+            sv[(dq + 0) * AW_VST + key] = t[0];
+            sv[(dq + 1) * AW_VST + key] = t[1];
+            sv[(dq + 2) * AW_VST + key] = t[2];
+            sv[(dq + 3) * AW_VST + key] = t[3];
         }
         __syncthreads();
 

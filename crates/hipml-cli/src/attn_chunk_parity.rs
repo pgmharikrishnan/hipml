@@ -8,6 +8,7 @@
 
 use hipml_core::attention::{attn_causal_f32, FullAttnW};
 use hipml_core::config::Config;
+use hipml_core::kv::{self, KvDtype};
 use hipml_core::parity::{compare, Stats, Tol};
 use hipml_core::rng::Rng;
 use hipml_kernels::{AttnLayer, Launcher};
@@ -86,6 +87,92 @@ pub fn run(l: &Launcher, cfg: &Config, w: &FullAttnW) -> Result<(bool, Stats), S
             gpu[at.0 * nhd + at.1 * hd + at.2]
         );
     }
+    Ok(match stats {
+        Ok(st) => (true, st),
+        Err(st) => (false, st),
+    })
+}
+
+/// The same case over a q8_0 cache: the matrix-unit kernel dequantizes each KV
+/// tile from the head-major quantized rows instead of reading an f32 mirror.
+///
+/// The cache is encoded here and both the reference and the kernel read those
+/// bytes, so the comparison isolates accumulation order and the f16 operand
+/// conversion; the 8-bit quantization error is common to both sides.
+pub fn run_q8(l: &Launcher, cfg: &Config, w: &FullAttnW) -> Result<(bool, Stats), String> {
+    const TOK: usize = 37;
+    const POS0: usize = 29;
+    let hd = cfg.head_dim;
+    let nkv = cfg.n_head_kv;
+    let width = nkv * hd;
+    let nhd = cfg.n_head * hd;
+    let seq = POS0 + TOK;
+    if hd % kv::BLOCK != 0 {
+        return Err(format!(
+            "q8 chunk parity: head_dim {hd} is not a block multiple"
+        ));
+    }
+
+    let mut rng = Rng::new(0xC4A0_9876_5432);
+    let qc: Vec<f32> = (0..TOK * nhd).map(|_| rng.normal()).collect();
+    let kc: Vec<f32> = (0..seq * width).map(|_| rng.normal()).collect();
+    let vc: Vec<f32> = (0..seq * width).map(|_| rng.normal()).collect();
+
+    // Re-pack position-major f32 rows into the head-major cache layout, then
+    // quantize. The dequantized result feeds the reference, so both sides read
+    // the same 8-bit values.
+    let mut kh: Vec<f32> = vec![0.0; seq * width];
+    let mut vh: Vec<f32> = vec![0.0; seq * width];
+    for h in 0..nkv {
+        for p in 0..seq {
+            let src = p * width + h * hd;
+            let dst = (h * seq + p) * hd;
+            kh[dst..dst + hd].copy_from_slice(&kc[src..src + hd]);
+            vh[dst..dst + hd].copy_from_slice(&vc[src..src + hd]);
+        }
+    }
+    let kb = kv::quantize(KvDtype::Q8, &kh);
+    let vb = kv::quantize(KvDtype::Q8, &vh);
+    let kd = kv::dequantize(KvDtype::Q8, &kb);
+    let vd = kv::dequantize(KvDtype::Q8, &vb);
+    let mut kq: Vec<f32> = vec![0.0; seq * width];
+    let mut vq: Vec<f32> = vec![0.0; seq * width];
+    for h in 0..nkv {
+        for p in 0..seq {
+            let src = (h * seq + p) * hd;
+            let dst = p * width + h * hd;
+            kq[dst..dst + hd].copy_from_slice(&kd[src..src + hd]);
+            vq[dst..dst + hd].copy_from_slice(&vd[src..src + hd]);
+        }
+    }
+
+    let qb = hipml_hip::Buffer::from_host(&qc)?;
+    let kbb = hipml_hip::Buffer::alloc(kb.len().div_ceil(4))?;
+    let vbb = hipml_hip::Buffer::alloc(vb.len().div_ceil(4))?;
+    kbb.upload_bytes(0, &kb)?;
+    vbb.upload_bytes(0, &vb)?;
+    let ob = hipml_hip::Buffer::alloc(TOK * nhd)?;
+
+    let layer = AttnLayer::new(l, w, cfg, seq + 8)?;
+    layer.chunk_attention_q8(l, &qb, &kbb, &vbb, &ob, POS0, TOK, 1, seq)?;
+    let gpu = ob.to_host()?;
+
+    let scale = 1.0f32 / (hd as f32).sqrt();
+    let mut cpu = vec![0.0f32; TOK * nhd];
+    for t in 0..TOK {
+        let row = attn_causal_f32(
+            &qc[t * nhd..(t + 1) * nhd],
+            &kq,
+            &vq,
+            cfg.n_head,
+            cfg.n_head_kv,
+            hd,
+            POS0 + t + 1,
+            scale,
+        );
+        cpu[t * nhd..(t + 1) * nhd].copy_from_slice(&row);
+    }
+    let stats = compare(&cpu, &gpu, tolerance());
     Ok(match stats {
         Ok(st) => (true, st),
         Err(st) => (false, st),

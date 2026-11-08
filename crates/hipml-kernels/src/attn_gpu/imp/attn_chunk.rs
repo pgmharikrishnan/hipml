@@ -13,15 +13,6 @@
 
 use super::*;
 
-/// Query rows per block in `attn_chunk_wmma_f16` (two warps, 16 each) and the
-/// warps per query head.
-pub const ATTN_WMMA_QUERIES: u32 = 32;
-pub const ATTN_WMMA_WARPS: usize = 2;
-
-/// Query tokens per block in `attn_chunk_tile_f32`. Must match ACQ_TOKENS in
-/// `attn_chunk_f32.hip`, which is also the KV re-read stride.
-pub const ATTN_QUERY_TILE: u32 = 64;
-
 impl AttnLayer<'_> {
     /// Q/K/V projections for `tokens` rows of `x` into chunk buffers
     /// `[tokens][2*n_head*head_dim]`, `[tokens][width]`, `[tokens][width]`.
@@ -66,20 +57,16 @@ impl AttnLayer<'_> {
         hd.is_power_of_two() && hd <= 256 && hd >= 32
     }
 
-    /// The whole chunk's attention chain in four launches: q-gate split, head
-    /// norm + rope, cache append, causal attention. The chunk buffers are
-    /// `[tokens][..]`; rows are appended before attention and the kernel's
-    /// causal bound hides the future ones.
-    #[allow(clippy::too_many_arguments)]
-    pub fn step_chunk(
+    /// The front half of the chunk chain: q|gate split, then the per-head RMS
+    /// norm and RoPE over the whole tile. Shared by the f32-mirror path and the
+    /// quantized-cache path; the caller appends to whichever cache it reads.
+    pub fn chunk_front(
         &self,
         l: &Launcher,
         qg: &Buffer,
         k: &Buffer,
-        v: &Buffer,
         q: &Buffer,
         gate: &Buffer,
-        out: &Buffer,
         pos0: usize,
         tokens: usize,
     ) -> Result<(), String> {
@@ -143,8 +130,29 @@ impl AttnLayer<'_> {
             block: (d.head_dim as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        nr.launch(cfg, &l.stream, &mut params)?;
+        nr.launch(cfg, &l.stream, &mut params)
+    }
 
+    /// The whole chunk's attention chain in four launches: q-gate split, head
+    /// norm + rope, cache append, causal attention. The chunk buffers are
+    /// `[tokens][..]`; rows are appended before attention and the kernel's
+    /// causal bound hides the future ones.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_chunk(
+        &self,
+        l: &Launcher,
+        qg: &Buffer,
+        k: &Buffer,
+        v: &Buffer,
+        q: &Buffer,
+        gate: &Buffer,
+        out: &Buffer,
+        pos0: usize,
+        tokens: usize,
+    ) -> Result<(), String> {
+        self.chunk_front(l, qg, k, q, gate, pos0, tokens)?;
+
+        let d = self.dims;
         let app = self.module_kernel(l, "kv_append_chunk_f32")?;
         let mut p_kc = self.kv_k.as_ptr();
         let mut p_vc = self.kv_v.as_ptr();
@@ -170,93 +178,6 @@ impl AttnLayer<'_> {
 
         // The tiled kernel needs 8 head components per lane (head_dim 256).
         self.chunk_attention(l, q, &self.kv_k, &self.kv_v, out, pos0, tokens)
-    }
-
-    /// Causal chunk attention over explicit q and cache buffers. Split out so
-    /// the parity harness can run it against the CPU reference without going
-    /// through the projection/append chain.
-    pub fn chunk_attention(
-        &self,
-        l: &Launcher,
-        q: &Buffer,
-        kc: &Buffer,
-        vc: &Buffer,
-        out: &Buffer,
-        pos0: usize,
-        tokens: usize,
-    ) -> Result<(), String> {
-        let d = self.dims;
-        let t = tokens as u32;
-        let tiled = d.head_dim == 256;
-        let att = self.module_kernel(
-            l,
-            if tiled { "attn_chunk_tile_f32" } else { "attn_chunk_f32" },
-        )?;
-        let mut p_q = q.as_ptr();
-        let mut p_kc = kc.as_ptr();
-        let mut p_vc = vc.as_ptr();
-        let mut p_out = out.as_ptr();
-        let mut nh = d.n_head as i32;
-        let mut nkv = d.n_kv as i32;
-        let mut hd = d.head_dim as i32;
-        let mut width = d.width as i32;
-        let mut pos = pos0 as i32;
-        let mut nt = tokens as i32;
-        let mut scale = 1.0f32 / (d.head_dim as f32).sqrt();
-        let mut params: [*mut c_void; 11] = [
-            &mut p_q as *mut _ as *mut c_void,
-            &mut p_kc as *mut _ as *mut c_void,
-            &mut p_vc as *mut _ as *mut c_void,
-            &mut p_out as *mut _ as *mut c_void,
-            &mut nh as *mut _ as *mut c_void,
-            &mut nkv as *mut _ as *mut c_void,
-            &mut hd as *mut _ as *mut c_void,
-            &mut width as *mut _ as *mut c_void,
-            &mut pos as *mut _ as *mut c_void,
-            &mut nt as *mut _ as *mut c_void,
-            &mut scale as *mut _ as *mut c_void,
-        ];
-        let warp_heads = d.n_head / d.n_kv;
-        let cfg = if tiled
-            && warp_heads <= 8
-            && std::env::var_os("HIPML_ATTN_F32").is_none()
-        {
-            // Matrix-unit flash attention: one block per (KV head, 16-query
-            // tile); every query head of the GQA group reads the staged K/V
-            // tile once, and each head runs a score warp beside a value warp.
-            // Must match AW_QUERIES / AW_WARPS_PER_HEAD in attn_chunk_wmma.hip.
-            let kernel = self.module_kernel(l, "attn_chunk_wmma_f16")?;
-            let cfg = LaunchConfig {
-                // blockIdx.z picks half of the head width: 8 output
-                // fragments per warp instead of 16 (no register spill).
-                grid: (
-                    d.n_kv as u32,
-                    (t + ATTN_WMMA_QUERIES - 1) / ATTN_WMMA_QUERIES,
-                    2,
-                ),
-                block: ((warp_heads * ATTN_WMMA_WARPS * 32) as u32, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            return kernel.launch(cfg, &l.stream, &mut params);
-        } else if tiled {
-            // Must match ACQ_TOKENS / ACQ_PER_WARP in attn_chunk_f32.hip.
-            LaunchConfig {
-                grid: (
-                    d.n_head as u32,
-                    (tokens as u32 + ATTN_QUERY_TILE - 1) / ATTN_QUERY_TILE,
-                    1,
-                ),
-                block: ((ATTN_QUERY_TILE / 4) * 32, 1, 1),
-                shared_mem_bytes: 0,
-            }
-        } else {
-            LaunchConfig {
-                grid: (d.n_head as u32, t, 1),
-                block: (d.head_dim as u32, 1, 1),
-                shared_mem_bytes: 0,
-            }
-        };
-        att.launch(cfg, &l.stream, &mut params)
     }
 
     /// One token of a chunk: q-gate split, head norm, rope, cache append and
