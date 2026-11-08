@@ -150,20 +150,26 @@ device and CPU argmax both 11751.
 
 ### Acceptance 2 — speed
 
-| measurement | WP13 | WP14 | WP15 |
-| --- | --- | --- | --- |
-| short-context decode, tokens 2..20 | 27.9 tok/s (35.9 ms) | 28.0 tok/s (35.7 ms) | **28.3 tok/s (35.3 ms)** |
-| 512-token prefill | 22.99 s, 22.27 tok/s (token loop) | 5.35 s, 95.8 tok/s (chunk 256) | **0.44 s, 1153.8 tok/s** (chunk 512, matrix unit) |
-| 8,192-token prefill | — | 89.1 s, 91.9 tok/s | **9.93 s, 825.1 tok/s** (chunk 512, matrix unit) |
-| decode at depth 20,000, q8 KV | 21.21 tok/s (47.1 ms) | 26.5 tok/s (37.7 ms) | unchanged |
-| decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | 21.0 tok/s (47.7 ms) | unchanged |
+| measurement | WP13 | WP14 | WP15 | WP17 (index bug) | WP19 (correct) |
+| --- | --- | --- | --- | --- | --- |
+| short-context decode, tokens 2..20 | 27.9 tok/s (35.9 ms) | 28.0 tok/s (35.7 ms) | 28.3 tok/s (35.3 ms) | 28.3 | **28.35 tok/s (35.28 ms)** |
+| 512-token prefill | 22.99 s, 22.27 tok/s (token loop) | 5.35 s, 95.8 tok/s (chunk 256) | 0.44 s, 1153.8 tok/s | 0.42 s, 1226.2 tok/s* | **0.50 s, 995–1021 tok/s** (chunk 512, matrix unit) |
+| 8,192-token prefill | — | 89.1 s, 91.9 tok/s | 9.93 s, 825.1 tok/s | 9.90 s, 827.3 tok/s* | **11.41 s, 717.7 tok/s** (chunk 512, matrix unit) |
+| decode at depth 20,000, q8 KV | 21.21 tok/s (47.1 ms) | 26.5 tok/s (37.7 ms) | unchanged | unchanged | unchanged |
+| decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | 21.0 tok/s (47.7 ms) | unchanged | unchanged | unchanged |
+
+\* measured on the WP17 kernel, which computed half of every GEMM (see
+`docs/benchmarks.md`); not comparable.
 
 llama.cpp HIP on the same box: 31.4 tok/s short context, 21.86 tok/s at a
 97,387-token prompt, pp512 **1256.5 tok/s**, 97K prefill **844.9 tok/s**.
 
 The 20-id acceptance string is unchanged by WP15 (fp16 projections, chunked
-recurrence and chunked attention): `11751 13 198 760 6511 314 14898 369 21047
-13 198 760 6511 314 17163 369 23327 13 198 760`.
+recurrence and chunked attention) and by WP19 (the accumulator-index fix):
+`11751 13 198 760 6511 314 14898 369 21047 13 198 760 6511 314 17163 369 23327
+13 198 760`. That prompt is five tokens, which is why it never exercised the
+WP19 bug; the 512-token bench prompt's last id does — it is back to **489**, the
+pre-WP17 value (the buggy kernel read 122271).
 
 ### Where a short-context token's 35.7 ms goes
 
@@ -203,23 +209,27 @@ that WP13 paid are gone: 56.9 → 47.7 ms).
 | --- | ---: | ---: | ---: | ---: |
 | 512 | 128 | 5.18 s | 98.9 | 10.1 |
 | 512 | 256 | 1.43 s | 357.1 | 2.80 |
-| 512 | 512 | **0.44 s** | **1153.8** | 0.87 |
-| 8,192 | 512 | **9.93 s** | **825.1** | 1.21 |
+| 512 | 512 | **0.50–0.51 s** | **995–1021** | 1.01 |
+| 8,192 | 512 | **11.41 s** | **717.7** | 1.39 |
+
+The 512 and 8,192 rows are WP19: the same kernel as WP17 with the accumulator
+index fixed (WP17 skipped half the MACs, see `docs/benchmarks.md`). WP17 reported
+0.44 s / 1153.8 and 9.93 s / 825.1 for a kernel that produced zeros for the
+second 16 tokens of every 32-token warp span.
 
 The chunk graph is the device default (`--chunk N`, 512 unless overridden;
 `--chunk 0` and `--compare-cpu` keep the token loop). Four changes from WP14,
 the fourth being WP17:
 
-1. **Matrix-unit projections (WP17).** The prefill GEMM runs
+1. **Matrix-unit projections (WP17, corrected in WP19).** The prefill GEMM runs
    `wmma_f32_16x16x16_f16` on the gfx12 matrix unit — 256 tokens x 128 rows per
    block, 512 threads, eight 16x16x16 f32 accumulators per warp, weights
    dequantised into shared as half, f32 epilogue written straight to `y`. The
-   ffn shapes measure 81–109 TFLOPS (85–114% of the quoted 95.7, 44–59% of the
-   185 TFLOPS the instruction itself measures in a register-only probe), and the
-   whole quantized tensor stream runs at 79.74 TFLOPS against 22.91 for the
-   dot2 path. `--prefill-dot2` / `HIPML_PREFILL_DOT2` and `--prefill-f32` /
-   `HIPML_PREFILL_F32` are the no-rebuild A/B switches; the fragment layouts are
-   measured by `scripts/probe_wmma_layout.cpp`.
+   ffn shapes measure 65–80 TFLOPS (68–83% of the quoted 95.7, 35–43% of the
+   175 TFLOPS the instruction itself measures in a register-only probe), against
+   22.9 for the dot2 path. `--prefill-dot2` / `HIPML_PREFILL_DOT2` and
+   `--prefill-f32` / `HIPML_PREFILL_F32` are the no-rebuild A/B switches; the
+   fragment layouts are measured by `scripts/probe_wmma_layout.cpp`.
 2. **fp16 dot2 projections (WP15, previous path).** The tiled GEMM holds half in
    shared and uses `v_dot2_f32_f16` with f32 accumulators: 21–27 TFLOPS against
    15–17 for the f32 kernel, i.e. 44–57% of the quoted fp32 peak and 66% of the
@@ -242,21 +252,21 @@ Launch count per 512-token prompt:
 | everything else | ~1 launch/token/op | count in `PrefillReport` |
 | **total** | **≈ 237,600 (464/token)** | **≈ 1,700 (3.3/token)** |
 
-Where a 512-token, chunk-512 prompt's 0.44 s goes (`gpu-bench --prefill-split`):
+Where a 512-token, chunk-512 prompt's 0.51 s goes (`gpu-bench --prefill-split`):
 
 | stage | ms | note |
 | --- | ---: | --- |
-| ffn GEMMs + SwiGLU | 200 | 17.5 TFLOP at ~88 TFLOPS |
-| ssm GEMMs | 46 | qkv/gate/out, 5.7 TFLOP |
-| attention GEMMs | 17 | q/k/v/o |
-| elementwise | 15 | norms, residuals |
-| sequential GDN | 113 | 48 layers × 6 launches, state in registers |
-| sequential attention | 38 | 16 layers × 4 launches + output |
-| final head | 2 | lm_head on the last row |
+| ffn GEMMs + SwiGLU | 250.6 | 17.5 TFLOP at ~70 TFLOPS |
+| ssm GEMMs | 56.2 | qkv/gate/out, 5.7 TFLOP |
+| attention GEMMs | 20.5 | q/k/v/o |
+| elementwise | 12.5 | norms, residuals |
+| sequential GDN | 119.4 | 48 layers × 6 launches, state in registers |
+| sequential attention | 40.8 | 16 layers × 4 launches + output |
+| embed + final head | 2.7 | embedding rows, lm_head on the last row |
 
-At 8K the same breakdown is attention 3.58 s, ffn 3.22 s, GDN 1.82 s, ssm GEMMs
-0.74 s. The GEMM terms moved 3.5×; the sequential ones did not, and attention is
-now the largest single term at 36%.
+At 8K the same breakdown is attention 3.78 s, ffn 4.09 s, GDN 1.97 s, ssm GEMMs
+0.93 s, attention GEMMs 0.34 s, elementwise 0.25 s. The GEMM terms moved 3.6×;
+the sequential ones did not, and attention is now the largest single term at 33%.
 
 ## What runs where
 
@@ -305,13 +315,20 @@ Nothing on the decode path round-trips to the host except the 4-byte id.
   64-dim slice), S reduced through shared, P in shared as half, V stored
   transposed (dim-major) for the P·V operand, online max/sum per query row. That
   is the next kernel and it is not implemented.
-- **The GEMM's remaining gap** to its 185 TFLOPS instruction ceiling (79.74
-  whole-model, 43%) is the dequant (~12% of the instruction count), LDS tile
-  traffic, and grid tails: at 512 tokens `ffn_gate` launches 80 blocks on 64 CUs
-  and loses ~25%.
-- **Next step, in order of size:** (1) the flash-shaped WMMA attention above
-  (8K: expect 4.3 s → ~0.6 s, i.e. ~1150 tok/s); (2) an 8-queries-per-warp or
-  split-K variant of the prefill GEMM for shapes with fewer than ~2 waves;
-  (3) a fused layer kernel or two-stream scheduling to remove the 6.4 ms of DRAM
-  ramp from 1,299 short decode kernels, still what stands between 35.3 ms and
-  llama.cpp's 31.8 ms.
+- **The GEMM's remaining gap** (WP19) is **not** the dequant (removing it entirely
+  is worth 2%), LDS fragment traffic (worth 0%) or occupancy (the register-only
+  probe hits 174–176 TFLOPS at 4–32 warps per block). It is that the k loop is
+  two serialized phases: staging 42% of the time (global loads + dequant +
+  shared stores) and the multiply 58%, with two `__syncthreads` per k-tile
+  aligning all 16 warps so neither phase can fill the other's stalls. Pure
+  matrix work with the same structure measures 131.5 TFLOPS, so that is this
+  shape's ceiling; the 175 TFLOPS instruction rate needs the staging loads in
+  flight in registers one tile ahead, which costs 20–40 VGPRs the 512-thread,
+  8-accumulator shape does not have (126 of 128 used). Grid tails are the
+  remaining 5–19%: at 512 tokens `ffn_gate` launches 80 blocks on 64 CUs.
+- **Next step, in order of size:** (1) a 6-accumulator / 384-thread shape that
+  frees 16 VGPRs for the register-prefetch pipeline (measured: attempts at the
+  current shape land at 143–169 VGPR and do not launch); (2) the flash-shaped
+  WMMA attention above (8K: expect 3.78 s → ~0.6 s); (3) split-K for shapes with
+  fewer than ~2 waves; (4) a fused layer kernel or two-stream scheduling to
+  remove the 6.4 ms of DRAM ramp from 1,299 short decode kernels.
