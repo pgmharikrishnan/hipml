@@ -169,14 +169,32 @@ impl AttnLayer<'_> {
         )?;
 
         // The tiled kernel needs 8 head components per lane (head_dim 256).
+        self.chunk_attention(l, q, &self.kv_k, &self.kv_v, out, pos0, tokens)
+    }
+
+    /// Causal chunk attention over explicit q and cache buffers. Split out so
+    /// the parity harness can run it against the CPU reference without going
+    /// through the projection/append chain.
+    pub fn chunk_attention(
+        &self,
+        l: &Launcher,
+        q: &Buffer,
+        kc: &Buffer,
+        vc: &Buffer,
+        out: &Buffer,
+        pos0: usize,
+        tokens: usize,
+    ) -> Result<(), String> {
+        let d = self.dims;
+        let t = tokens as u32;
         let tiled = d.head_dim == 256;
         let att = self.module_kernel(
             l,
             if tiled { "attn_chunk_tile_f32" } else { "attn_chunk_f32" },
         )?;
         let mut p_q = q.as_ptr();
-        let mut p_kc = self.kv_k.as_ptr();
-        let mut p_vc = self.kv_v.as_ptr();
+        let mut p_kc = kc.as_ptr();
+        let mut p_vc = vc.as_ptr();
         let mut p_out = out.as_ptr();
         let mut nh = d.n_head as i32;
         let mut nkv = d.n_kv as i32;
