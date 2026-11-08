@@ -156,16 +156,11 @@ device and CPU argmax both 11751.
 | measurement | WP13 | WP14 | WP15 | WP20 |
 | --- | --- | --- | --- | --- |
 | short-context decode, tokens 2..20 | 27.9 tok/s (35.9 ms) | 28.0 tok/s (35.7 ms) | 28.3 tok/s (35.3 ms) | **28.3** |
-| 512-token prefill | 22.99 s, 22.27 tok/s (token loop) | 5.35 s, 95.8 tok/s (chunk 256) | 0.44 s, 1153.8 tok/s | 0.41 s, 1239 tok/s (pre-fix run) |
+| 512-token prefill | 22.99 s, 22.27 tok/s (token loop) | 5.35 s, 95.8 tok/s (chunk 256) | 0.44 s, 1153.8 tok/s | 0.40 s, 1266 tok/s |
 | 8,192-token prefill | — | 89.1 s, 91.9 tok/s | 9.93 s, 825.1 tok/s | **6.82 s, 1201.0 tok/s** |
 | decode at depth 20,000, q8 KV | 21.21 tok/s (47.1 ms) | 26.5 tok/s (37.7 ms) | 21.0 tok/s (47.7 ms) | unchanged |
-| decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | 21.0 tok/s (47.7 ms) | 21.0 tok/s (47.7 ms) | 20.7 tok/s (48.4 ms), re-measured |
+| decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | 21.0 tok/s (47.7 ms) | 21.0 tok/s (47.7 ms) | 21.1 tok/s (47.5 ms), re-measured |
 | decode at depth 32,768, q8 / q4 KV | — | — | — | 25.4 / 25.0 tok/s |
-
-The 512-token figure in the WP20 column is the pre-fix kernel (one
-`gpu-bench --prefill 512` run, before the causal-mask and P-layout fixes); it is
-kept because the 512-token tile is where the fix matters least, but it should be
-re-run before being quoted as a WP20 number.
 
 llama.cpp HIP on the same box: 31.4 tok/s short context, 21.86 tok/s at a
 97,387-token prompt, pp512 **1256.5 tok/s**, 97K prefill **844.9 tok/s**.
