@@ -322,10 +322,12 @@ extern "C" __global__ void gemv_split_reduce(
 //
 // Each row keeps its own accumulator and walks k in exactly the order
 // `gemv_q4_k` does, so row b here is bit-identical to a single-sequence launch
-// on x[b]. K_TILE is 512 (one 512-value group); only the tile boundary moves.
+// on x[b]. The k-tile is 1024 when B<=4 and 512 above that, so the shared
+// x staging stays under 32 KB; only the tile boundary moves.
 // ---------------------------------------------------------------------------
 
-#define Q4KB_K_TILE 1024
+#define Q4KB_K_TILE_BIG 1024
+#define Q4KB_K_TILE_SMALL 512
 #define Q4KB_ROWS_PER_WARP 2
 
 // Dequantise this lane's 16 values of one row into `wv`.
@@ -364,7 +366,7 @@ static __device__ __forceinline__ void q4k_load(const unsigned char* __restrict_
     }
 }
 
-template <int B, int RPW>
+template <int B, int RPW, int TILE>
 static __device__ __forceinline__ void q4k_tile_b(
     const unsigned char* __restrict__ w,
     const float* __restrict__ x,
@@ -393,13 +395,13 @@ static __device__ __forceinline__ void q4k_tile_b(
         for (int bi = 0; bi < B; ++bi) acc[rr][bi] = 0.0f;
     }
 
-    for (int base = 0; base < k; base += Q4KB_K_TILE) {
-        const int n = min(Q4KB_K_TILE, k - base);
+    for (int base = 0; base < k; base += TILE) {
+        const int n = min(TILE, k - base);
         const int nchunks = n / Q4K_VPL;
         for (int j = tid; j < nchunks; j += Q4K_BLOCK) {
 #pragma unroll
             for (int bi = 0; bi < B; ++bi)
-                stage_group(x + (size_t)bi * k, sx + bi * Q4KB_K_TILE, base, j);
+                stage_group(x + (size_t)bi * k, sx + bi * TILE, base, j);
         }
         __syncthreads();
 
@@ -412,7 +414,7 @@ static __device__ __forceinline__ void q4k_tile_b(
             for (int rr = 0; rr < RPW; ++rr) q4k_load(rp[rr], p, wv[rr]);
 #pragma unroll
             for (int bi = 0; bi < B; ++bi) {
-                const float* src = sx + bi * Q4KB_K_TILE + s;
+                const float* src = sx + bi * TILE + s;
                 float xv[Q4K_VPL];
 #pragma unroll
                 for (int i = 0; i < Q4K_VPL; ++i) xv[i] = src[i * 32];
@@ -440,7 +442,7 @@ static __device__ __forceinline__ void q4k_tile_b(
     }
 }
 
-template <int B>
+template <int B, int TILE>
 static __device__ __forceinline__ void q4k_entry_b(
     const unsigned char* __restrict__ w,
     const float* __restrict__ x,
@@ -449,7 +451,7 @@ static __device__ __forceinline__ void q4k_entry_b(
     int k)
 {
     extern __shared__ __align__(16) float hipml_sx_b[];
-    q4k_tile_b<B, Q4KB_ROWS_PER_WARP>(w, x, y, m, k, hipml_sx_b, blockIdx.x);
+    q4k_tile_b<B, Q4KB_ROWS_PER_WARP, TILE>(w, x, y, m, k, hipml_sx_b, blockIdx.x);
 }
 
 extern "C" __global__ void gemv_q4_k_b(
@@ -460,14 +462,19 @@ extern "C" __global__ void gemv_q4_k_b(
     int k,
     int batch)
 {
-    switch (batch) {
-    case 1: q4k_entry_b<1>(w, x, y, m, k); break;
-    case 2: q4k_entry_b<2>(w, x, y, m, k); break;
-    case 3: q4k_entry_b<3>(w, x, y, m, k); break;
-    case 4: q4k_entry_b<4>(w, x, y, m, k); break;
-    case 5: q4k_entry_b<5>(w, x, y, m, k); break;
-    case 6: q4k_entry_b<6>(w, x, y, m, k); break;
-    case 7: q4k_entry_b<7>(w, x, y, m, k); break;
-    default: q4k_entry_b<8>(w, x, y, m, k); break;
+    if (batch <= 4) {
+        switch (batch) {
+        case 1: q4k_entry_b<1, Q4KB_K_TILE_BIG>(w, x, y, m, k); break;
+        case 2: q4k_entry_b<2, Q4KB_K_TILE_BIG>(w, x, y, m, k); break;
+        case 3: q4k_entry_b<3, Q4KB_K_TILE_BIG>(w, x, y, m, k); break;
+        case 4: q4k_entry_b<4, Q4KB_K_TILE_BIG>(w, x, y, m, k); break;
+        }
+    } else {
+        switch (batch) {
+        case 5: q4k_entry_b<5, Q4KB_K_TILE_SMALL>(w, x, y, m, k); break;
+        case 6: q4k_entry_b<6, Q4KB_K_TILE_SMALL>(w, x, y, m, k); break;
+        case 7: q4k_entry_b<7, Q4KB_K_TILE_SMALL>(w, x, y, m, k); break;
+        default: q4k_entry_b<8, Q4KB_K_TILE_SMALL>(w, x, y, m, k); break;
+        }
     }
 }

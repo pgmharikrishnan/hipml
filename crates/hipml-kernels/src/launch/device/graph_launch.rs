@@ -62,13 +62,14 @@ impl Launcher {
         if batch == 0 || batch > 8 {
             return Err(format!("batched GEMV: batch {batch} outside 1..=8"));
         }
-        let (entry, rows, shared) = match kind {
-            GEMV_B_Q4K => ("gemv_q4_k_b", 16usize, batch * 1024 * 4),
-            GEMV_B_Q6K => ("gemv_q6_k_b", 16, batch * 1024 * 4),
-            GEMV_B_Q5K => ("gemv_q5_k_b", 16, batch * 1024 * 4),
+        let (entry, rows, tile) = match kind {
+            GEMV_B_Q4K => ("gemv_q4_k_b", 16usize, if batch <= 4 { 1024 } else { 512 }),
+            GEMV_B_Q6K => ("gemv_q6_k_b", 16, if batch <= 4 { 1024 } else { 512 }),
+            GEMV_B_Q5K => ("gemv_q5_k_b", 16, if batch <= 4 { 1024 } else { 512 }),
             GEMV_B_Q80 => ("gemv_q8_0_b", 1, 0),
             other => return Err(format!("unknown batched GEMV kind {other}")),
         };
+        let shared = batch * tile * 4;
         let kernel = self.module.kernel(entry)?;
         let mut p_w = w.as_ptr();
         let mut p_x = x.as_ptr();
