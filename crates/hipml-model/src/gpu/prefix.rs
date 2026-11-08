@@ -121,13 +121,13 @@ impl<'a> GpuEngine<'a> {
                 BlockKind::Ssm(s) => {
                     let (cl, sl) = s.state_lens();
                     let conv = Buffer::alloc(cl.max(1))?;
-                    let st = Buffer::alloc(sl.max(1))?;
+                    let s_buf = Buffer::alloc(sl.max(1))?;
                     conv.copy_from_device(s.conv_state_buf(), cl)?;
-                    st.copy_from_device(s.s_state_buf(), sl)?;
+                    s_buf.copy_from_device(s.s_state_buf(), sl)?;
                     bytes += (cl + sl) * 4;
                     ssm.push(Some(SsmBufs {
                         conv,
-                        s,
+                        s: s_buf,
                         conv_len: cl,
                         s_len: sl,
                     }));
