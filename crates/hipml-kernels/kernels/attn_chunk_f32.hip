@@ -129,7 +129,9 @@ extern "C" __global__ void kv_append_chunk_f32(
 // register budget sets the ceiling: 4 queries x 8 components x 2 (q and acc)
 // f32 per lane is ~80 VGPRs, so 512 threads is one block per CU.
 #define ACQ_TOKENS 64
-#define ACQ_PER_WARP 4
+#ifndef ACQ_PER_WARP
+#define ACQ_PER_WARP 8
+#endif
 #define ACQ_D 8
 #define ACQ_THREADS ((ACQ_TOKENS / ACQ_PER_WARP) * 32)
 
@@ -153,16 +155,14 @@ extern "C" __global__ void attn_chunk_tile_f32(
     const int group = n_heads / n_kv;
     const int kvh = h / group;
 
-    const int tq[ACQ_PER_WARP] = {
-        tile + warp * ACQ_PER_WARP + 0,
-        tile + warp * ACQ_PER_WARP + 1,
-        tile + warp * ACQ_PER_WARP + 2,
-        tile + warp * ACQ_PER_WARP + 3,
-    };
-    if (tq[0] >= tokens) return;
-    const bool live[ACQ_PER_WARP] = {
-        tq[0] < tokens, tq[1] < tokens, tq[2] < tokens, tq[3] < tokens,
-    };
+    int tq[ACQ_PER_WARP];
+    bool live[ACQ_PER_WARP];
+#pragma unroll
+    for (int i = 0; i < ACQ_PER_WARP; ++i) {
+        tq[i] = tile + warp * ACQ_PER_WARP + i;
+        live[i] = tq[i] < tokens;
+    }
+    if (!live[0]) return;
 
     // lane*8 .. lane*8+7 of each query head, and the same slice of the
     // accumulator.
@@ -178,9 +178,13 @@ extern "C" __global__ void attn_chunk_tile_f32(
         }
     }
 
-    float run_max[ACQ_PER_WARP] = {-3.402823466e+38f, -3.402823466e+38f,
-                                   -3.402823466e+38f, -3.402823466e+38f};
-    float run_sum[ACQ_PER_WARP] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float run_max[ACQ_PER_WARP];
+    float run_sum[ACQ_PER_WARP];
+#pragma unroll
+    for (int i = 0; i < ACQ_PER_WARP; ++i) {
+        run_max[i] = -3.402823466e+38f;
+        run_sum[i] = 0.0f;
+    }
 
     // Rows up to the last query of this warp; earlier queries mask the tail.
     int seq_max = pos0 + tq[ACQ_PER_WARP - 1] + 1;
