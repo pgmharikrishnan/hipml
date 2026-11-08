@@ -394,31 +394,49 @@ impl<'a> SsmGpuLayer<'a> {
         rows: usize,
     ) -> Result<(), String> {
         match w {
+            // `alpha`/`beta` are F32 payloads stored in the Quant variant with
+            // entry `gemv_f32`; they are 48x5120 and stay per row.
+            SsmWeight::Quant(b, entry) if *entry == "gemv_f32" => {
+                self.f32_rows(b.as_ptr(), x, y, m, k, rows, l)
+            }
             SsmWeight::Quant(b, entry) => {
                 let kind = batch_kind_for_entry(entry)
                     .ok_or_else(|| format!("{entry}: no batched GEMV"))?;
                 l.gemv_batched(kind, b, x, y, m, k, rows)
             }
-            SsmWeight::F32(b) => {
-                for r in 0..rows {
-                    let mut p_w = b.as_ptr();
-                    let mut p_x = row_ptr(x, r, k);
-                    let mut p_y = row_ptr(y, r, m);
-                    let mut v_m = m as i32;
-                    let mut v_k = k as i32;
-                    let mut params: [*mut c_void; 5] = [
-                        &mut p_w as *mut _ as *mut c_void,
-                        &mut p_x as *mut _ as *mut c_void,
-                        &mut p_y as *mut _ as *mut c_void,
-                        &mut v_m as *mut _ as *mut c_void,
-                        &mut v_k as *mut _ as *mut c_void,
-                    ];
-                    self.k_gemv
-                        .launch(LaunchConfig::per_row(m, 256), l.stream(), &mut params)?;
-                }
-                Ok(())
-            }
+            SsmWeight::F32(b) => self.f32_rows(b.as_ptr(), x, y, m, k, rows, l),
         }
+    }
+
+    /// Per-row f32 GEMV for the small wide-and-short projections.
+    #[allow(clippy::too_many_arguments)]
+    fn f32_rows(
+        &self,
+        w: *mut c_void,
+        x: &Buffer,
+        y: &Buffer,
+        m: usize,
+        k: usize,
+        rows: usize,
+        l: &Launcher,
+    ) -> Result<(), String> {
+        for r in 0..rows {
+            let mut p_w = w;
+            let mut p_x = row_ptr(x, r, k);
+            let mut p_y = row_ptr(y, r, m);
+            let mut v_m = m as i32;
+            let mut v_k = k as i32;
+            let mut params: [*mut c_void; 5] = [
+                &mut p_w as *mut _ as *mut c_void,
+                &mut p_x as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut v_m as *mut _ as *mut c_void,
+                &mut v_k as *mut _ as *mut c_void,
+            ];
+            self.k_gemv
+                .launch(LaunchConfig::per_row(m, 256), l.stream(), &mut params)?;
+        }
+        Ok(())
     }
 
     /// Everything after the projections for slot `row` of the batched scratch:
