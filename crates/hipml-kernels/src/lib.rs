@@ -24,12 +24,11 @@ mod ssm_chunk;
 pub use attn_gpu::AttnLayer;
 #[cfg(feature = "hip")]
 pub mod launch_kv;
-#[cfg(feature = "hip")]
-pub use launch::{gemm_rows_f32, prefill_half, prefill_resident, set_prefill_half};
-#[cfg(not(feature = "hip"))]
 pub use launch::{
     prefill_entry_for, prefill_half, prefill_path, set_prefill_half, set_prefill_path, PrefillPath,
 };
+#[cfg(feature = "hip")]
+pub use launch::{gemm_rows_f32, prefill_resident};
 pub use launch::Launcher;
 
 /// How a kernel is gridded.
