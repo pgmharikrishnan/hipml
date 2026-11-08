@@ -161,9 +161,10 @@ const ARGMAX_PARTS: usize = 64;
 /// Up to this context, a quantized-KV engine also carries the f32 KV mirror so
 /// prefill can run the matrix-unit chunk attention. The mirror is
 /// `2 * n_ctx * width * 4` bytes per attention layer, 16 layers: 0.54 GiB at
-/// 8K and 2.1 GiB at 32K. At 100K it would be 6.5 GiB, so deeper prompts keep
-/// the row-at-a-time quantized path.
-const F32_PREFILL_MAX: usize = 32768;
+/// 8K and 4.0 GiB at 32K. At 100K it would be 12.2 GiB, which does not fit
+/// beside the weights and the q8 cache, so deeper prompts keep the
+/// row-at-a-time quantized path.
+const F32_PREFILL_MAX: usize = 65536;
 
 impl<'a> GpuEngine<'a> {
     /// Build every resident layer, borrowing the loader's weight payloads.
