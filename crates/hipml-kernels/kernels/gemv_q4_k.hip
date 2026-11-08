@@ -315,23 +315,22 @@ extern "C" __global__ void gemv_split_reduce(
 //
 //   y[b][row] = dequant_q4k(W[row,:]) . x[b][:]
 //
-// The weight block is decoded once per row and applied to all B x rows, so the
-// decode step's 17 GB weight stream serves B tokens. Each row keeps its own
-// accumulator and walks k in exactly the order `gemv_q4_k` does, so row b here
-// is bit-identical to a single-sequence launch on x[b].
+// Two reuse axes: a decoded weight value feeds all B x rows, and one shared x
+// read feeds Q4KB_ROWS_PER_WARP weight rows. The x tile is therefore read from
+// shared B/RPW times per weight value instead of B times, which is what keeps
+// the kernel DRAM-bound at B=8 (shared bandwidth was the ceiling at B=4).
 //
-// K_TILE drops to 512 (one 512-value group) so the shared x tile is B*512 f32:
-// 16 KB at B=8. The c order is unchanged, only the tile boundary moves.
+// Each row keeps its own accumulator and walks k in exactly the order
+// `gemv_q4_k` does, so row b here is bit-identical to a single-sequence launch
+// on x[b]. K_TILE is 512 (one 512-value group); only the tile boundary moves.
 // ---------------------------------------------------------------------------
 
 #define Q4KB_K_TILE 512
+#define Q4KB_ROWS_PER_WARP 4
 
-// Same decode as q4k_acc, applied to B x rows. `sxb` points at this lane's
-// de-interleaved x slot for b=0; row b is `sxb + b*stride`.
-template <int B>
-static __device__ __forceinline__ void q4k_acc_b(const unsigned char* __restrict__ rp,
-                                                 int p, const float* __restrict__ sxb,
-                                                 int stride, float* acc)
+// Dequantise this lane's 16 values of one row into `wv`.
+static __device__ __forceinline__ void q4k_load(const unsigned char* __restrict__ rp,
+                                                int p, float* wv)
 {
     const int blk = p >> 8;
     const int within = p & 255;
@@ -357,22 +356,11 @@ static __device__ __forceinline__ void q4k_acc_b(const unsigned char* __restrict
     q.w[2] = qp[2];
     q.w[3] = qp[3];
     const bool high = (sub & 1) != 0;
-
-    // Dequantise the 16 values once; the batch columns then only pay FMAs.
-    float wv[Q4K_VPL];
 #pragma unroll
     for (int i = 0; i < Q4K_VPL; ++i) {
         const unsigned int byte = q.b[i];
         const int v = high ? (int)(byte >> 4) : (int)(byte & 0xF);
         wv[i] = scale * (float)v - minv;
-    }
-#pragma unroll
-    for (int bi = 0; bi < B; ++bi) {
-        const float* xv = sxb + bi * stride;
-        float a = acc[bi];
-#pragma unroll
-        for (int i = 0; i < Q4K_VPL; ++i) a = fmaf(wv[i], xv[i * 32], a);
-        acc[bi] = a;
     }
 }
 
@@ -419,9 +407,23 @@ static __device__ __forceinline__ void q4k_tile_b(
             const int g = c / Q4K_GROUP;
             const int s = g * Q4K_GROUP + lane;
             const int p = base + c;
+            float wv[RPW][Q4K_VPL];
 #pragma unroll
-            for (int rr = 0; rr < RPW; ++rr)
-                q4k_acc_b<B>(rp[rr], p, sx + s, Q4KB_K_TILE, acc[rr]);
+            for (int rr = 0; rr < RPW; ++rr) q4k_load(rp[rr], p, wv[rr]);
+#pragma unroll
+            for (int bi = 0; bi < B; ++bi) {
+                const float* src = sx + bi * Q4KB_K_TILE + s;
+                float xv[Q4K_VPL];
+#pragma unroll
+                for (int i = 0; i < Q4K_VPL; ++i) xv[i] = src[i * 32];
+#pragma unroll
+                for (int rr = 0; rr < RPW; ++rr) {
+                    float a = acc[rr][bi];
+#pragma unroll
+                    for (int i = 0; i < Q4K_VPL; ++i) a = fmaf(wv[rr][i], xv[i], a);
+                    acc[rr][bi] = a;
+                }
+            }
         }
         __syncthreads();
     }
@@ -447,7 +449,7 @@ static __device__ __forceinline__ void q4k_entry_b(
     int k)
 {
     extern __shared__ __align__(16) float hipml_sx_b[];
-    q4k_tile_b<B, Q4K_ROWS_PER_WARP>(w, x, y, m, k, hipml_sx_b, blockIdx.x);
+    q4k_tile_b<B, Q4KB_ROWS_PER_WARP>(w, x, y, m, k, hipml_sx_b, blockIdx.x);
 }
 
 extern "C" __global__ void gemv_q4_k_b(

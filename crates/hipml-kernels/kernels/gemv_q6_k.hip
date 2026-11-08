@@ -190,18 +190,17 @@ extern "C" __global__ void gemv_q6_k_r1(
 }
 
 // ---------------------------------------------------------------------------
-// Batched variant: B token rows share one weight pass (see gemv_q4_k.hip).
-// Each row keeps its own accumulator and the same k order, so row b is
-// bit-identical to gemv_q6_k on x[b]. K_TILE is 512 (two 256-value groups) so
-// the shared x tile is B*512 f32.
+// Batched variant: B x rows share one weight pass, and one shared x read feeds
+// Q6KB_ROWS_PER_WARP rows (see gemv_q4_k.hip for why both reuse axes matter).
+// Each row keeps its own accumulator in the same k order, so row b is
+// bit-identical to gemv_q6_k on x[b]. K_TILE is 512 (two 256-value groups).
 // ---------------------------------------------------------------------------
 
 #define Q6KB_K_TILE 512
+#define Q6KB_ROWS_PER_WARP 4
 
-template <int B>
-static __device__ __forceinline__ void q6k_acc8_b(const unsigned char* __restrict__ rp,
-                                                  int p, const float* __restrict__ sxb,
-                                                  int stride, float* acc)
+static __device__ __forceinline__ void q6k_load(const unsigned char* __restrict__ rp,
+                                                int p, float* wv)
 {
     const int blk = p >> 8;
     const int within = p & 255;
@@ -233,8 +232,6 @@ static __device__ __forceinline__ void q6k_acc8_b(const unsigned char* __restric
 
     const int shift = 2 * group;
     const bool high = group >= 2;
-
-    float wv[8];
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
         const unsigned int qw = (i < 4) ? qlw0 : qlw1;
@@ -245,14 +242,6 @@ static __device__ __forceinline__ void q6k_acc8_b(const unsigned char* __restric
         const unsigned int hi = (hb >> shift) & 3u;
         const int v = (int)(nib | (hi << 4)) - 32;
         wv[i] = scale * (float)v;
-    }
-#pragma unroll
-    for (int bi = 0; bi < B; ++bi) {
-        const float* xv = sxb + bi * stride;
-        float a = acc[bi];
-#pragma unroll
-        for (int i = 0; i < 8; ++i) a = fmaf(wv[i], xv[i * 32], a);
-        acc[bi] = a;
     }
 }
 
@@ -299,9 +288,23 @@ static __device__ __forceinline__ void q6k_tile_b(
             const int g = c >> 8;
             const int s = g * 256 + lane;
             const int p = base + c;
+            float wv[RPW][8];
 #pragma unroll
-            for (int rr = 0; rr < RPW; ++rr)
-                q6k_acc8_b<B>(rp[rr], p, sx + s, Q6KB_K_TILE, acc[rr]);
+            for (int rr = 0; rr < RPW; ++rr) q6k_load(rp[rr], p, wv[rr]);
+#pragma unroll
+            for (int bi = 0; bi < B; ++bi) {
+                const float* src = sx + bi * Q6KB_K_TILE + s;
+                float xv[8];
+#pragma unroll
+                for (int i = 0; i < 8; ++i) xv[i] = src[i * 32];
+#pragma unroll
+                for (int rr = 0; rr < RPW; ++rr) {
+                    float a = acc[rr][bi];
+#pragma unroll
+                    for (int i = 0; i < 8; ++i) a = fmaf(wv[rr][i], xv[i], a);
+                    acc[rr][bi] = a;
+                }
+            }
         }
         __syncthreads();
     }
@@ -327,7 +330,7 @@ static __device__ __forceinline__ void q6k_entry_b(
     int k)
 {
     extern __shared__ __align__(16) float hipml_sx_b[];
-    q6k_tile_b<B, Q6K_ROWS_PER_WARP>(w, x, y, m, k, hipml_sx_b, blockIdx.x);
+    q6k_tile_b<B, Q6KB_ROWS_PER_WARP>(w, x, y, m, k, hipml_sx_b, blockIdx.x);
 }
 
 extern "C" __global__ void gemv_q6_k_b(

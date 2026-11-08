@@ -166,14 +166,15 @@ extern "C" __global__ void gemv_q5_k(
     q5k_rows(w, x, y, m, k, sx, blockIdx.x);
 }
 
-// Batched variant (see gemv_q4_k.hip): B x rows share one weight pass, each row
-// keeping its own accumulator in the same k order. K_TILE is 512 (one group).
+// Batched variant (see gemv_q4_k.hip): B x rows share one weight pass, and one
+// shared x read feeds Q5KB_ROWS_PER_WARP rows. Each row keeps its own
+// accumulator in the same k order (bit-identical to gemv_q5_k on x[b]).
+// K_TILE is 512 (one group).
 #define Q5KB_K_TILE 512
+#define Q5KB_ROWS_PER_WARP 4
 
-template <int B>
-static __device__ __forceinline__ void q5k_acc_b(const unsigned char* __restrict__ rp,
-                                                 int p, const float* __restrict__ sxb,
-                                                 int stride, float* acc)
+static __device__ __forceinline__ void q5k_load(const unsigned char* __restrict__ rp,
+                                                int p, float* wv)
 {
     const int blk = p >> 8;
     const int within = p & 255;
@@ -205,7 +206,6 @@ static __device__ __forceinline__ void q5k_acc_b(const unsigned char* __restrict
     qh.w[2] = qhp[2];
     qh.w[3] = qhp[3];
 
-    float wv[Q5K_VPL];
 #pragma unroll
     for (int i = 0; i < Q5K_VPL; ++i) {
         const unsigned int byte = qs.b[i];
@@ -213,37 +213,36 @@ static __device__ __forceinline__ void q5k_acc_b(const unsigned char* __restrict
         const float q = (float)nib + ((qh.b[i] & bit) ? 16.0f : 0.0f);
         wv[i] = scale * q - minv;
     }
-#pragma unroll
-    for (int bi = 0; bi < B; ++bi) {
-        const float* xv = sxb + bi * stride;
-        float a = acc[bi];
-#pragma unroll
-        for (int i = 0; i < Q5K_VPL; ++i) a = fmaf(wv[i], xv[i * 32], a);
-        acc[bi] = a;
-    }
 }
 
-template <int B>
-static __device__ __forceinline__ void q5k_entry_b(
+template <int B, int RPW>
+static __device__ __forceinline__ void q5k_tile_b(
     const unsigned char* __restrict__ w,
     const float* __restrict__ x,
     float* __restrict__ y,
     int m,
-    int k)
+    int k,
+    float* __restrict__ sx,
+    int tile)
 {
-    extern __shared__ __align__(16) float hipml_sx_b[];
-    float* sx = hipml_sx_b;
     const int tid = threadIdx.x;
     const int lane = tid & 31;
     const int warp = tid >> 5;
     const int nblocks = k / Q5K_VALUES;
+    const int row_tile = Q5K_WARPS * RPW;
 
-    const int row = blockIdx.x * Q5K_ROW_TILE + warp;
-    const int r = min(row, m - 1);
-    const unsigned char* rp = w + (size_t)r * (size_t)nblocks * Q5K_BLOCK_BYTES;
-    float acc[B];
+    int row[RPW];
+    int r[RPW];
+    const unsigned char* rp[RPW];
+    float acc[RPW][B];
 #pragma unroll
-    for (int bi = 0; bi < B; ++bi) acc[bi] = 0.0f;
+    for (int rr = 0; rr < RPW; ++rr) {
+        row[rr] = tile * row_tile + warp * RPW + rr;
+        r[rr] = min(row[rr], m - 1);
+        rp[rr] = w + (size_t)r[rr] * (size_t)nblocks * Q5K_BLOCK_BYTES;
+#pragma unroll
+        for (int bi = 0; bi < B; ++bi) acc[rr][bi] = 0.0f;
+    }
 
     for (int base = 0; base < k; base += Q5KB_K_TILE) {
         const int n = min(Q5KB_K_TILE, k - base);
@@ -258,18 +257,50 @@ static __device__ __forceinline__ void q5k_entry_b(
         for (int c = lane * Q5K_VPL; c < n; c += Q5K_GROUP) {
             const int g = c / Q5K_GROUP;
             const int s = g * Q5K_GROUP + lane;
-            q5k_acc_b<B>(rp, base + c, sx + s, Q5KB_K_TILE, acc);
+            const int p = base + c;
+            float wv[RPW][Q5K_VPL];
+#pragma unroll
+            for (int rr = 0; rr < RPW; ++rr) q5k_load(rp[rr], p, wv[rr]);
+#pragma unroll
+            for (int bi = 0; bi < B; ++bi) {
+                const float* src = sx + bi * Q5KB_K_TILE + s;
+                float xv[Q5K_VPL];
+#pragma unroll
+                for (int i = 0; i < Q5K_VPL; ++i) xv[i] = src[i * 32];
+#pragma unroll
+                for (int rr = 0; rr < RPW; ++rr) {
+                    float a = acc[rr][bi];
+#pragma unroll
+                    for (int i = 0; i < Q5K_VPL; ++i) a = fmaf(wv[rr][i], xv[i], a);
+                    acc[rr][bi] = a;
+                }
+            }
         }
         __syncthreads();
     }
 
 #pragma unroll
-    for (int bi = 0; bi < B; ++bi) {
-        float a = acc[bi];
+    for (int rr = 0; rr < RPW; ++rr) {
 #pragma unroll
-        for (int off = 16; off > 0; off >>= 1) a += __shfl_down(a, off);
-        if (lane == 0 && row < m) y[(size_t)bi * m + row] = a;
+        for (int bi = 0; bi < B; ++bi) {
+            float a = acc[rr][bi];
+#pragma unroll
+            for (int off = 16; off > 0; off >>= 1) a += __shfl_down(a, off);
+            if (lane == 0 && row[rr] < m) y[(size_t)bi * m + row[rr]] = a;
+        }
     }
+}
+
+template <int B>
+static __device__ __forceinline__ void q5k_entry_b(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k)
+{
+    extern __shared__ __align__(16) float hipml_sx_b[];
+    q5k_tile_b<B, Q5KB_ROWS_PER_WARP>(w, x, y, m, k, hipml_sx_b, blockIdx.x);
 }
 
 extern "C" __global__ void gemv_q5_k_b(
