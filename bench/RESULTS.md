@@ -150,7 +150,7 @@ The two real regressions were **graphs** (it replaced attn-mma's fp16 Q5_K prefi
 | `feat/wmma2` | full-GEMM accumulator fix | correctness: 512/8K last ids 489/292. It is the ~17% prefill gap to the old inflated numbers |
 | `feat/stream` | 1-row-per-warp GEMV, Q5_K GEMV | contained in graphs; part of the decode gain |
 | `feat/cache` | SSM+KV prefix snapshots | not in a cold bench; exact-repeat TTFT 1801 -> 7.6 ms, shared prefix 1.88-3.66x |
-| `feat/bench` | q8/q4 chunked prefill + bench CLI | its per-row q8 prefill was the 57% regression; the mirror covers <=40K and the chunk kernel reads the q8 cache above that |
+| `feat/bench` | q8/q4 chunked prefill + bench CLI | its per-row q8 prefill was the 57% regression; WP25's chunk kernel reads the q8 cache in place, so no mirror is needed |
 
 ## Validation
 

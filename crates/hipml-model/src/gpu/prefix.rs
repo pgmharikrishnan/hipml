@@ -11,9 +11,9 @@
 //! host except the (optional) next-token logits, which are already on the host
 //! side of a prefill and make an exact repeat a restore plus an argmax.
 //!
-//! The chunked prefill path requires `--kv f32`, so this covers the f32 KV
-//! cache. The quantized q8/q4 decode caches are not snapshot targets yet; a
-//! capture against one returns an error rather than copying the wrong layout.
+//! Only `--kv f32` engines are snapshot targets: the quantized q8/q4 caches
+//! have a head-major layout this cache does not copy yet, so a capture against
+//! one returns an error rather than copying the wrong bytes.
 
 use super::*;
 use hipml_core::prefix_cache::{CacheStats, InsertOutcome, PrefixCache};

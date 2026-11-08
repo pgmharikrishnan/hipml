@@ -415,8 +415,8 @@ Nothing on the decode path round-trips to the host except the 4-byte id.
   reference at `s=100000`; `hipml parity kv_encode` verifies the encoder is
   bit-exact. The graph's short-context tokens verify the rest.
 - Chunked prefill runs on f32, q8 or q4 KV. The matrix-unit kernel stages each
-  tile from whichever cache the engine carries (`aw_ld4`), so the f32 mirror is
-  only a <=40K convenience and the q8/q4 caches are the prefill path above it.
+  tile from whichever cache the engine carries (`aw_ld4`). Quantized engines
+  allocate no f32 mirror: the q8 path is as fast at 32K and faster at 8K.
 - **Prefix snapshots cover the f32 KV path only.** `cache-bench` restores the
   SSM state plus f32 KV rows; the q8/q4 decode caches are not snapshot targets.
   Token parity for the cached path is asserted only against the cold *GPU* path
