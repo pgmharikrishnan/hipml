@@ -47,6 +47,9 @@ pub(crate) mod device {
         /// graph replayable. The last four are the M-RoPE section positions
         /// (all the token position for text), read as `step + 16 bytes`.
         pub(crate) step: Buffer,
+        /// The side stream's copy of the step scalars, so per-slot KV appends
+        /// on the two streams do not race on one position buffer.
+        pub(crate) step_side: Buffer,
         pub device_name: String,
     }
 
@@ -61,6 +64,7 @@ pub(crate) mod device {
             let ev_in = Event::new()?;
             let ev_out = Event::new()?;
             let step = Buffer::alloc(8)?;
+            let step_side = Buffer::alloc(8)?;
             Ok(Launcher {
                 module,
                 stream,
@@ -68,6 +72,7 @@ pub(crate) mod device {
                 ev_in,
                 ev_out,
                 step,
+                step_side,
                 device_name: device.name().to_string(),
             })
         }
@@ -86,6 +91,20 @@ pub(crate) mod device {
         /// The device buffer the position-aware kernels read.
         pub fn step_buf(&self) -> &Buffer {
             &self.step
+        }
+
+        /// Same `[pos, seq, token, 0, p0..p3]` write for the side stream.
+        pub fn set_step_side(&self, pos: usize, seq: usize, token: usize) -> Result<(), String> {
+            let p = pos as i32;
+            let mut bytes = [0u8; 32];
+            for (i, v) in [p, seq as i32, token as i32, 0, p, p, p, p].iter().enumerate() {
+                bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            self.step_side.upload_bytes_async(0, &bytes, &self.side)
+        }
+
+        pub fn step_side_buf(&self) -> &Buffer {
+            &self.step_side
         }
 
         /// The M-RoPE section positions: the four ints after `[pos, seq, token]`.

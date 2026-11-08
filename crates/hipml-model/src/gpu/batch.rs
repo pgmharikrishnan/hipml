@@ -398,30 +398,53 @@ impl<'a> BatchEngine<'a> {
                     stage!(2);
                     let width = cfg.n_head_kv * cfg.head_dim;
                     let qw = cfg.n_head * cfg.head_dim;
+                    // Slot parity picks the stream (see the SSM split): the
+                    // side stream has its own step buffer so the KV appends do
+                    // not race on one position.
+                    l.fork()?;
                     for bi in 0..b {
                         let slot = self.active[bi];
                         let pos = positions[bi];
                         let dk = &f.deep[slot];
-                        l.set_step(pos, pos + 1, 0)?;
-                        l.kv_encode_ptr(
-                            dk.dtype.id(),
-                            row_ptr(&f.k, bi, width),
-                            row_ptr(&f.v, bi, width),
-                            &dk.k,
-                            &dk.v,
-                            cfg.n_head_kv,
-                            cfg.head_dim,
-                            dk.seq,
-                        )?;
-                        super::attn_tile::deep_attention_ptr(
+                        let side = bi % 2 == 1;
+                        if side {
+                            l.set_step_side(pos, pos + 1, 0)?;
+                            l.kv_encode_ptr_on(
+                                l.stream2(),
+                                l.step_side_buf(),
+                                dk.dtype.id(),
+                                row_ptr(&f.k, bi, width),
+                                row_ptr(&f.v, bi, width),
+                                &dk.k,
+                                &dk.v,
+                                cfg.n_head_kv,
+                                cfg.head_dim,
+                                dk.seq,
+                            )?;
+                        } else {
+                            l.set_step(pos, pos + 1, 0)?;
+                            l.kv_encode_ptr(
+                                dk.dtype.id(),
+                                row_ptr(&f.k, bi, width),
+                                row_ptr(&f.v, bi, width),
+                                &dk.k,
+                                &dk.v,
+                                cfg.n_head_kv,
+                                cfg.head_dim,
+                                dk.seq,
+                            )?;
+                        }
+                        super::attn_tile::deep_attention_ptr_on(
                             l,
                             &cfg,
                             dk,
                             pos,
                             row_ptr(&f.q, bi, qw),
                             row_ptr(&f.out, bi, qw),
+                            side,
                         )?;
                     }
+                    l.join()?;
                     stage!(3);
                     f.attn.out_rows(l, &f.out, &f.gate, &f.y, b)?;
                     stage!(7);

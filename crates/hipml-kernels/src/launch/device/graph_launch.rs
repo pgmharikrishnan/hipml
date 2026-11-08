@@ -468,6 +468,26 @@ impl Launcher {
         head_dim: usize,
         stride: usize,
     ) -> Result<(), String> {
+        self.kv_encode_ptr_on(&self.stream, &self.step, dtype, k_ptr, v_ptr, k_cache, v_cache,
+                              n_kv, head_dim, stride)
+    }
+
+    /// Same append on a chosen stream with a chosen step buffer: the two-stream
+    /// batch path gives each stream its own position.
+    #[allow(clippy::too_many_arguments)]
+    pub fn kv_encode_ptr_on(
+        &self,
+        stream: &Stream,
+        step: &Buffer,
+        dtype: usize,
+        k_ptr: *mut std::ffi::c_void,
+        v_ptr: *mut std::ffi::c_void,
+        k_cache: &Buffer,
+        v_cache: &Buffer,
+        n_kv: usize,
+        head_dim: usize,
+        stride: usize,
+    ) -> Result<(), String> {
         let entry = match dtype {
             0 => "kv_encode_q8",
             1 => "kv_encode_q4",
@@ -480,7 +500,7 @@ impl Launcher {
         let mut p_vc = v_cache.as_ptr();
         let mut v_hd = head_dim as i32;
         let mut v_stride = stride as i32;
-        let mut p_step = self.step.as_ptr();
+        let mut p_step = step.as_ptr();
         let mut params: [*mut c_void; 7] = [
             &mut p_k as *mut _ as *mut c_void,
             &mut p_v as *mut _ as *mut c_void,
@@ -495,7 +515,7 @@ impl Launcher {
             block: (head_dim.max(32) as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        kernel.launch(cfg, &self.stream, &mut params)
+        kernel.launch(cfg, stream, &mut params)
     }
 
     /// Quantize `rows` positions of a position-major f32 buffer into the

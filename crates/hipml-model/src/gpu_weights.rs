@@ -39,6 +39,11 @@ pub(crate) fn batch_kind(entry: &str) -> Option<i32> {
     })
 }
 
+/// The batched-GEMV kind for a tensor type, for kernel probes.
+pub fn batch_kind_tensor(ty: TensorType) -> Option<i32> {
+    batch_kind(gemv_entry(ty).ok()?)
+}
+
 /// The tiled GEMM entry for a quantized GEMV entry; the two families share the
 /// block format.
 fn prefill_entry(gemv: &str) -> Result<&'static str, String> {
