@@ -69,6 +69,7 @@ pub fn bench_kv(args: &[String]) -> i32 {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(3)
         .max(1);
+
     let splits = args
         .iter()
         .position(|a| a == "--splits")
@@ -99,8 +100,8 @@ pub fn bench_kv(args: &[String]) -> i32 {
         );
         println!("cache bytes are synthetic but format-valid; 100K correctness is `hipml parity --deep`\n");
         println!(
-            "{:<5} {:<5} {:>5} {:>6} {:>7} {:>6} {:>11} {:>9} {:>8} {:>8} {:>7}",
-            "dtype", "entry", "heads", "layers", "depth", "splits", "us", "KV_GiB", "GB/s", "share", "tok/s"
+            "{:<5} {:>5} {:>6} {:>7} {:>6} {:>11} {:>9} {:>8} {:>8} {:>7}",
+            "dtype", "heads", "layers", "depth", "splits", "us", "KV_GiB", "GB/s", "share", "tok/s"
         );
         for r in &report.rows {
             let step = report.weights_us + r.us;
@@ -113,9 +114,8 @@ pub fn bench_kv(args: &[String]) -> i32 {
                 ("-".to_string(), "-".to_string())
             };
             println!(
-                "{:<5} {:<5} {:>5} {:>6} {:>7} {:>6} {:>11.1} {:>9.3} {:>8.1} {:>8} {:>7}",
+                "{:<5} {:>5} {:>6} {:>7} {:>6} {:>11.1} {:>9.3} {:>8.1} {:>8} {:>7}",
                 r.dtype.name(),
-                r.variant,
                 r.heads,
                 r.layers,
                 r.seq,

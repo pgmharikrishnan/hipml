@@ -18,12 +18,14 @@ pub struct DeepKv {
     pub(super) part_ml: Buffer,
 }
 
-/// Same bound as `attn_gpu`; the partial buffers are sized once.
+/// The split count sets the grid: `n_kv * splits` blocks of
+/// `32 * n_head/n_kv` threads.
 ///
-/// The split count sets the grid: `n_kv * splits` blocks. At 100K a 64-split
-/// grid is 256 blocks, four waves on this card, and each block walks 1,562
-/// rows. Doubling and quadrupling that (measured) is slower: the partials grow
-/// faster than the parallelism helps.
+/// 64 is measured best at 100K (12.34 ms for 3.24 GiB, 282 GB/s). The grid is
+/// 256 blocks of 192 threads, which looks under-occupied, but more blocks do not
+/// help: 32 splits gives 14.3 ms, 128 gives 12.98, 256 gives 12.49 and 512 gives
+/// 12.58 (`bench-kv --splits N`). The kernel is limited by its own per-row work,
+/// not by block count.
 pub(super) const MAX_SPLITS: usize = 64;
 
 impl DeepKv {

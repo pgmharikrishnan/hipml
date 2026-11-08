@@ -29,6 +29,10 @@ pub use launch::{
 };
 #[cfg(feature = "hip")]
 pub use launch::{gemm_rows_f32, prefill_resident};
+#[cfg(feature = "hip")]
+pub use launch::{gemv_job_tiles, GemvJob, ReadJob};
+#[cfg(feature = "hip")]
+pub use launch::{GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80};
 pub use launch::Launcher;
 
 /// How a kernel is gridded.
@@ -97,6 +101,67 @@ pub const KERNELS: &[KernelSpec] = &[
         // has more quant bytes per value than Q4_K), K_TILE 2048 in shared.
         kind: KernelKind::RowTile {
             rows: 16,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "gemv_q5_k",
+        entry: "gemv_q5_k",
+        // One row per warp, like gemv_q4_k_r1: Q5_K only appears as a
+        // 5120-row ffn_down, and 320 blocks leaves the machine under-occupied.
+        kind: KernelKind::RowTile {
+            rows: 8,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "gemv_q4_k_u4",
+        entry: "gemv_q4_k_u4",
+        // Same geometry as _r1, one 128-bit load per 16 values instead of four
+        // dwords. A/B entry for the load-issue hypothesis.
+        kind: KernelKind::RowTile {
+            rows: 8,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "gemv_q4_k_nt",
+        entry: "gemv_q4_k_nt",
+        // `_r1` geometry with a streaming (sc1) 128-bit payload load.
+        kind: KernelKind::RowTile {
+            rows: 8,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "gemv_q4_k_split",
+        entry: "gemv_q4_k_split",
+        // grid.y = splits; the launcher sizes it.
+        kind: KernelKind::RowTile {
+            rows: 8,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "gemv_split_reduce",
+        entry: "gemv_split_reduce",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "gemv_q4_k_r1",
+        entry: "gemv_q4_k_r1",
+        // One row per warp: 8 rows per block, twice the grid of the two-row
+        // entry and the same arithmetic.
+        kind: KernelKind::RowTile {
+            rows: 8,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "gemv_q6_k_r1",
+        entry: "gemv_q6_k_r1",
+        kind: KernelKind::RowTile {
+            rows: 8,
             block: 256,
         },
     },
@@ -226,6 +291,16 @@ pub const KERNELS: &[KernelSpec] = &[
     KernelSpec {
         name: "gemm_rows_f32",
         entry: "gemm_rows_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "stream_read",
+        entry: "stream_read",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "stream_read_jobs",
+        entry: "stream_read_jobs",
         kind: KernelKind::Linear { block: 256 },
     },
     KernelSpec {
@@ -447,6 +522,21 @@ const fn kv_case(name: &'static str, entry: &'static str) -> KernelSpec {
         name,
         entry,
         kind: KernelKind::KvSplit,
+    }
+}
+
+/// The decode-path variant of a row-tile GEMV.
+///
+/// One row per warp instead of two: the lane owns the same columns and the
+/// reduction tree is unchanged, so the result is bit-identical, but a block
+/// covers 8 rows instead of 16 and the grid doubles. Shapes whose row count
+/// leaves the machine under-occupied (5120 rows = 320 blocks) stream 14%
+/// faster; 17408-row shapes gain ~3%.
+pub fn stream_entry(name: &'static str) -> &'static str {
+    match name {
+        "gemv_q4_k" => "gemv_q4_k_r1",
+        "gemv_q6_k" => "gemv_q6_k_r1",
+        other => other,
     }
 }
 

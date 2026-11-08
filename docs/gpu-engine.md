@@ -16,7 +16,7 @@ for layer 0..63:
     t  = rmsnorm(x1, post_attention_norm)     rmsnorm_f32
     g  = W_gate t,  u = W_up t                gemv_q4_k / gemv_q6_k / gemv_q8_0
     a  = silu(g) * u                          silu_mul_f32
-    x  = x1 + W_down a                        gemv (Q5_K rows: f32 fallback)
+    x  = x1 + W_down a                        gemv_q4_k / _q6_k / _q5_k
 logits = W_output rmsnorm(x, output_norm)    gemv_q6_k
 id = argmax(logits)                           argmax_f32: two launches, one u32 back
 ```
@@ -25,11 +25,10 @@ Layers 3, 7, …, 63 are full attention; the other 48 are gated delta net. That
 dispatch is `Config::is_recr`, the same mask the CPU reference reads.
 
 Every weight matvec streams the loader's resident `DeviceTensor` bytes through
-the quantized GEMV. Nothing is dequantized on the host and no tensor is uploaded
-twice. The only exception is Q5_K: Qwen3.8-27B stores `blk.51.ffn_down` and
-`blk.55.ffn_down` as Q5_K, which has a dequant reference but no GEMV kernel, so
-those two matrices are dequantized once at graph build into f32 and served by
-`gemv_f32` (about 0.5 GiB extra VRAM).
+the quantized GEMV, one entry per block format: Q4_K, Q6_K, Q8_0 and Q5_K.
+Nothing is dequantized on the host and no tensor is uploaded twice. `blk.51/55.
+ffn_down` are the two Q5_K tensors; they used to be dequantized once into f32
+(712 MB a token instead of 123 MB) and WP16 gave them `gemv_q5_k`.
 
 Launches are chained on one stream and synchronized once per token, before the
 sampled id is read back. The two host steps WP13 shipped — the embedding row and
@@ -128,6 +127,12 @@ hipml gpu-bench --gguf ... --depth 20000  --kv q8 --tokens 8
 hipml gpu-bench --gguf ... --depth 100000 --kv q8 --tokens 8
 # where the non-weight time goes
 hipml gpu-profile --gguf ... --reps 4000
+hipml gpu-profile --gguf ... --trace        # per-stage GPU time and GB/s
+# launch cost vs per-byte cost, and the A/Bs
+hipml gpu-sweep --gguf ... --gemv           # real GEMV spans, per dtype
+hipml gpu-sweep --gguf ... --pair           # two-stream overlap
+hipml gpu-sweep --gguf ... --variant        # 1-row vs 2-row warps, bit-exact
+hipml bench-kv --depths 100000 --splits 128 # KV split count
 ```
 
 ## Measured, AMD Radeon AI PRO R9700 (gfx1201)
@@ -153,14 +158,21 @@ device and CPU argmax both 11751.
 
 ### Acceptance 2 — speed
 
-| measurement | WP13 | WP14 | WP15 | WP20 |
-| --- | --- | --- | --- | --- |
-| short-context decode, tokens 2..20 | 27.9 tok/s (35.9 ms) | 28.0 tok/s (35.7 ms) | 28.3 tok/s (35.3 ms) | **28.3** |
-| 512-token prefill | 22.99 s, 22.27 tok/s (token loop) | 5.35 s, 95.8 tok/s (chunk 256) | 0.44 s, 1153.8 tok/s | 0.40 s, 1266 tok/s |
-| 8,192-token prefill | — | 89.1 s, 91.9 tok/s | 9.93 s, 825.1 tok/s | **6.82 s, 1201.0 tok/s** |
-| decode at depth 20,000, q8 KV | 21.21 tok/s (47.1 ms) | 26.5 tok/s (37.7 ms) | 21.0 tok/s (47.7 ms) | unchanged |
-| decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | 21.0 tok/s (47.7 ms) | 21.0 tok/s (47.7 ms) | 21.1 tok/s (47.5 ms), re-measured |
-| decode at depth 32,768, q8 / q4 KV | — | — | — | 25.4 / 25.0 tok/s |
+| measurement | WP13 | WP14 | WP16 | WP20 | WP21 |
+| --- | --- | --- | --- | --- | --- |
+| short-context decode, tokens 2..20 | 27.9 tok/s (35.9 ms) | 28.0 tok/s (35.7 ms) | 29.9 tok/s (33.5 ms) | 28.3 tok/s | **30.0 tok/s (33.4 ms)** |
+| 512-token prefill | 22.99 s, 22.27 tok/s (token loop) | 5.35 s, 95.8 tok/s (chunk 256) | 5.35 s | **0.40 s, 1266 tok/s** | — |
+| 8,192-token prefill | — | 89.1 s, 91.9 tok/s | 9.93 s, 825.1 tok/s | **6.82 s, 1201.0 tok/s** | — |
+| decode at depth 20,000, q8 KV | 21.21 tok/s (47.1 ms) | 26.5 tok/s (37.7 ms) | **28.0 tok/s (35.7 ms)** | unchanged | — |
+| decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | 21.0 tok/s (47.7 ms) | 21.8 tok/s (45.9 ms) | 21.1 tok/s (47.5 ms) | 21.5 tok/s (46.5 ms) |
+| decode at depth 32,768, q8 / q4 KV | — | — | — | 25.4 / 25.0 tok/s | — |
+
+WP16 measured every stage of a token with HIP events (`gpu-profile --trace`)
+instead of attributing the remainder to "DRAM ramp". It found that the gap is
+*inside* the kernels, not between launches, and that it scales with how much
+parallelism each kernel can put in flight — so the two changes that moved the
+number were a wider grid (one row per warp) and 6x fewer bytes for the Q5_K
+fallback. Two streaks did not pay and are recorded below so they are not retried.
 
 llama.cpp HIP on the same box: 31.4 tok/s short context, 21.86 tok/s at a
 97,387-token prompt, pp512 **1256.5 tok/s**, 97K prefill **844.9 tok/s**.
@@ -169,37 +181,141 @@ The 20-id acceptance string is unchanged by WP15 (fp16 projections, chunked
 recurrence and chunked attention): `11751 13 198 760 6511 314 14898 369 21047
 13 198 760 6511 314 17163 369 23327 13 198 760`.
 
-### Where a short-context token's 35.7 ms goes
+### Where a short-context token's 33.5 ms goes
 
-Measured with `hipml gpu-profile` (4,000-rep launch loop, 274-tensor stream test,
-and the graph itself):
+WP14 attributed the remainder to "DRAM ramp" from a launch-loop measurement.
+WP16 timed the graph itself instead: `gpu-profile --trace` records a HIP event at
+every stage boundary, synchronizes once, and folds the spans (plus the streamed
+bytes each stage owns). Summed over four tokens:
 
-| component | ms | note |
-| --- | ---: | --- |
-| weight bytes at the card's 632 GB/s | 27.00 | 15.89 GiB, the roofline |
-| launch submit | 2.06 | 1,299 launches at 1.59 us (handle cached) |
-| host steps | 0.20 | embedding 0.15, id readback < 0.05 |
-| DRAM utilisation loss | 6.4 | 1,299 short dependent kernels, not one sweep |
+| stage | ms/token | weight GB | GB/s |
+| --- | ---: | ---: | ---: |
+| ffn_gate (Q4_K) | 5.61 | 3.23 | 576 |
+| ffn_up (Q6_K) | 6.62 | 3.62 | 547 |
+| silu + ffn_down (Q4_K + 2x Q5_K) | 6.62 | 3.30 | 498 |
+| GDN input projections (qkv, gate, alpha, beta) | 5.69 | 2.65 | 466 |
+| GDN output projection | 3.46 | 1.33 | 385 |
+| 16 full-attention blocks | 2.97 | 1.30 | 436 |
+| lm_head (Q6_K) | 1.68 | 1.04 | 622 |
+| GDN recurrent chain (7 kernels x 48 layers) | 1.15 | — | — |
+| residual/norm/embed/argmax | 0.25 | — | — |
+| **total** | **34.06** | **16.47** | **504** |
 
-The last row is the whole remaining gap and it is measured, not inferred: the
-same resident tensors streamed back to back, one launch each, reach **411 GB/s**
-(11.92 GB in 28.998 ms over 274 GEMVs), while the same kernels repeated over a
-resident 64 MiB chunk reach 605 GB/s (`decode-bench --reps 11`). Each kernel's
-ramp and tail costs a few microseconds and there are 1,299 of them. Note also
-that the entry-point lookup is free now (0.010 us, cached in `Module`) — an
-earlier 4.0 us/launch reading was the first-launch code-object residency, not
-the lookup, which is why caching handles bought 0.1 ms and not 3 ms.
+(The trace's own event recording costs about 0.5 ms a token, which is why the
+sum is 34.06 and `generate` measures 33.5.)
 
-At depth the same 35.7 ms base applies, plus the KV stream:
+What that says, and what it rules out:
+
+- **The loss is inside the kernels.** In the same 399-tensor stream, the sum of
+  event-measured kernel spans is 33.4 ms of a 34.6 ms wall — 1.26 ms of idle
+  between launches (3 us each), not the 6.4 ms an empty-kernel loop predicted.
+  A pure stream-read over the same bytes shows the same shape: 477 GB/s with one
+  launch per tensor, **636 GB/s** with the same bytes in one launch, and only
+  1.26 ms of inter-launch idle. So there is nothing to win by submitting faster;
+  the ramp is the first and last few microseconds of each kernel's own memory
+  pipeline, and it is proportional to how much work each thread has queued.
+- **Concurrency loses.** Two independent weight streams on two HIP streams is
+  0.74x (`gpu-sweep --pair`: 500 GB/s sequential, 370 GB/s overlapped). Their
+  access patterns evict each other's DRAM pages. This kills both the
+  prefetch-stream and two-stream-pipelining ideas on this card.
+- **Parallelism helps, up to a point.** ffn_down is 5120 rows = 320 blocks at 16
+  rows/block, and it streamed at 498 GB/s while lm_head (248,320 rows = 15,520
+  blocks) streamed at 622. One row per warp doubles the grid with identical
+  arithmetic: down 498 -> 565, gate 566 -> 585, up 570 -> 581. That is the whole
+  of the row-grain change.
+- **Bytes are the other lever.** The two Q5_K `ffn_down` tensors were served
+  from an f32 copy: 712 MB a token at ~350 GB/s, the slowest bytes in the
+  stream. `gemv_q5_k` reads the blocks directly, so the same stage now moves
+  3.30 GB instead of 3.89 GB and takes 6.62 ms instead of 7.51 (498 GB/s over
+  the smaller byte count; -0.9 ms).
+
+Roofline check: at lm_head's 622 GB/s every weight stage would take
+16.47/0.622 = 26.5 ms, plus 1.15 ms of recurrence and 0.25 ms of elementwise =
+**27.9 ms, 35.8 tok/s**. The 33.5 ms actually measured is that ceiling plus the
+per-kernel ramp on fifteen separate weight streams.
+
+At depth the same base applies, plus the KV stream:
 
 | depth | KV bytes/token | at 632 GB/s | measured attention | total |
 | --- | ---: | ---: | ---: | ---: |
-| 20,000 | 0.696 GB | 1.1 ms | 2.1 ms | 37.7 ms |
-| 100,000 | 3.48 GB | 5.5 ms | 12.1 ms | 47.7 ms |
+| 20,000 | 0.696 GB | 1.1 ms | 2.2 ms | 35.7 ms |
+| 100,000 | 3.48 GB | 5.5 ms | 12.5 ms | 45.9 ms |
 
-So at 100K the quantized-KV attention kernel runs at ~280 GB/s of a 632 GB/s
-roofline; that, not the host, is the remaining depth gap (the 16 host round-trips
-that WP13 paid are gone: 56.9 → 47.7 ms).
+The quantized-KV attention kernel runs at 282 GB/s and is not block-limited:
+`bench-kv --splits` measures 14.3 ms at 32 splits, 12.34 at 64, 12.98 at 128,
+12.49 at 256 and 12.58 at 512 for the same 3.24 GiB. It is the per-row work
+(stage to shared, one dot per query head, one rescale per tile) that sets its
+pace, so the remaining 12 ms at 100K needs a different kernel, not a wider grid.
+
+### Driver-level submission (WP21)
+
+The previous section attributed the 33.5 ms to "per-kernel memory ramp across
+fifteen separate weight streams" and implied that submitting faster would
+reclaim it. WP21 tested that directly, with the runtime rather than the kernels:
+stream capture into a HIP graph, one kernel over a device-side job list, a
+second stream, split-K, and cache hints on the weight loads.
+
+The capture experiment needs one thing from the graph before it is reusable: the
+step scalars. `pos`, `seq`, the token id and the four M-RoPE positions moved into
+a 32-byte device buffer (`Launcher::step`), and `mrope_f32`, `kv_append_f32`,
+`attn_decode_f32`, `attn_decode_split_f32`, `attn_decode_kv` and `kv_encode` read
+them there. The split count is fixed per layer from `n_ctx` instead of per step,
+because the grid is part of a captured graph. With that, one graph decodes every
+step: `hipml generate --device --graph` prints the same twenty ids as the eager
+path, and `gpu-bench --graph` the same argmax, at depth 0 and at 100K.
+
+| approach | effective GB/s | ms/token | tok/s | submit |
+| --- | ---: | ---: | ---: | ---: |
+| eager, 1,299 launches | 494 | 33.37 | 29.97 | 2.35 ms of launch API (1.81 us/launch) |
+| capture + `hipGraphLaunch` | 494 | 33.39 | 29.95 | 1 call |
+| one kernel over an ffn gate+up job list | 562 vs 568 | — | — | 64 vs 128 launches |
+| split-K x2 / x4 / x8 on ffn_down | 546 / 551 / 531 vs 559 | — | — | 120 vs 60 launches |
+| sc1 streaming loads (`nontemporal`) | 491 vs 559 | — | — | — |
+| two weight streams (`gpu-sweep --pair`, WP16) | 370 vs 500 | — | — | — |
+| `hipMemAdvise` / `hipMemPrefetchAsync` | not applicable | | | |
+
+**Submission is not on the critical path.** 1,299 launches at 1.81 us are 2.35 ms
+of API time against 33.3 ms of GPU work. In the real loop the host cannot run
+ahead anyway: it needs the sampled id back before it can issue the next token, so
+it only ever has one step queued, the command queue fills, and the driver
+throttles the issuing thread to the device's own pace (`gpu-bench --graph-probe`
+sees 31.3 ms of blocked host per token, graph or not). A graph launch therefore
+changes the wall clock by nothing (0.99-1.00x), and the 1.6 ms of "idle between
+launches" the event pass reports is GPU-side drain at each kernel boundary, which
+capture does not remove.
+
+**The fifteen weight streams are not paying for being fifteen.** The same 6.85 GB
+of ffn gate+up bytes stream at 568 GB/s as 128 launches and 562 GB/s as 64
+launches of one job-list kernel — and 561 GB/s as a single launch over all 96
+jobs, which is not schedulable but bounds the idea. Splitting k to widen the
+grid (546/551/531 GB/s at 2/4/8 splits, plus an ordered reduce) and marking the
+payload loads streaming (491 vs 559, sc1 costs 12% — the L2 was helping) are both
+worse. The equivalent change that did pay earlier was row-grain, not launch-grain.
+
+That leaves the honest attribution of a 33.3 ms short-context token:
+
+| component | ms | note |
+| --- | ---: | --- |
+| weight roofline at lm_head's 622 GB/s | 26.5 | 16.47 GB |
+| the other fourteen shapes at 556 GB/s average | +3.1 | 493-577 GB/s per share, insensitive to launch count, grid shape, split-K, load width and cache policy |
+| GDN recurrent chain + elementwise + attention compute | +1.7 | 1.18 + 0.25 + ~0.3 |
+| kernel-boundary drain that survives capture | +2.0 | residual |
+| **measured** | **33.4** | 30.0 tok/s |
+
+At depth the same 33.3 ms is the base: 46.5 = 33.3 + 5.5 KV roofline + 6.9
+attention excess + 0.8. Run-to-run scatter on the decode numbers is ±0.2%.
+
+Instruments, all on the resident weights: `gpu-sweep --merge` (job-list kernel,
+three launch shapes over the same ffn bytes, with the merged rows checked against
+the standalone entries), `gpu-sweep --split` (r1 vs sc1 vs 1/2/4/8 k-splits, with
+the relative difference against the unsplit kernel), `gpu-sweep --pair` (two
+streams) and `gpu-bench --graph-probe` (eager vs captured step).
+
+Two bugs fell out of the capture work and are fixed: the quantized-KV decode
+passed the position count where the cache stride belongs, so every KV head but
+the first read rows at the wrong offset whenever `n_ctx > pos + 1` (invisible to
+`parity --deep`, which uses `seq == stride`); and a capture warm-up token must
+not run, because it appends to every layer's cache at the current position.
 
 ### Prefill
 
@@ -280,6 +396,9 @@ Nothing on the decode path round-trips to the host except the 4-byte id.
 
 ## Unverified / next
 
+- Two-stream overlap, a prefetch stream, and splitting more than 64 KV splits
+  were measured and rejected (see above); they are recorded here so they are
+  not re-attempted.
 - Deep-path **token** parity is not asserted: q8 KV changes the attention values
   by design. `hipml parity --deep` verifies the kernel itself against the
   reference at `s=100000`; `hipml parity kv_encode` verifies the encoder is
@@ -317,3 +436,23 @@ Nothing on the decode path round-trips to the host except the 4-byte id.
   (3) a fused layer kernel or two-stream scheduling to remove the 6.4 ms of DRAM
   ramp from 1,299 short decode kernels, still what stands between 35.3 ms and
   llama.cpp's 31.8 ms.
+  (extrapolated: 100K × 10.9 ms ≈ 18 minutes at chunk 256).
+- The 1-row-per-warp entries are only used by the decode path; `bench` and the
+  parity cases still exercise the 2-row entry, and `gpu-sweep --variant`
+  checks that the two write identical bytes.
+- No fp16 KV path.
+- **Not launch-bound, not graph-bound, not grid-bound.** Measured in WP21 and
+  left here so they are not re-attempted: stream capture (0.998x), a job-list
+  kernel over the independent projections (561 vs 568 GB/s), split-K to widen
+  the grid (546-551 vs 559), sc1/streaming weight loads (491 vs 559), two
+  streams (0.74x, WP16). Reusable capture does work and is kept behind
+  `--graph`; it is worth 0.06 ms, not 3 ms.
+- **Next step, in order of size:** (1) the quantized-KV attention kernel at
+  282 GB/s of 632, worth ~5 ms at 100K — it needs the stage/dot/rescale work
+  reorganized (more than one query head's worth of rows per staged tile, or
+  f32 scores over a shorter row), not more blocks; (2) the GDN output
+  projection at 385 GB/s and the GDN input projections at 466 — both are Q8_0,
+  whose per-row kernel has 5.2 KB per block and a two-stage reduction, so it is
+  the last format without a row-tile entry and worth ~1 ms of the 3.1;
+  (3) chunk variants of the conv/GDN kernels so a prefill tile runs one kernel
+  per layer instead of 464 launches (the 10.4 ms/token prefill floor).

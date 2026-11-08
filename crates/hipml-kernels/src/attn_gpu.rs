@@ -87,13 +87,13 @@ mod imp {
         }
 
         fn entry(&self) -> Result<&'static str, String> {
-            Ok(match self.kind {
+            Ok(crate::stream_entry(match self.kind {
                 Kind::F32 => "gemv_f32",
                 Kind::Q4K => "gemv_q4_k",
                 Kind::Q6K => "gemv_q6_k",
                 Kind::Q8_0 => "gemv_q8_0",
                 Kind::Q5K => return Err("attention weight is Q5_K: no GEMV kernel".to_string()),
-            })
+            }))
         }
 
         fn data_bytes(&self) -> &ByteBuffer {
@@ -315,12 +315,13 @@ mod imp {
         ) -> Result<(Vec<f32>, Vec<f32>), String> {
             self.q.write(q_raw)?;
             self.k.write(k_raw)?;
-            self.norm_and_rope(l, pos)?;
+            l.set_step(pos, pos + 1, 0)?;
+            self.norm_and_rope(l)?;
             Ok((self.q.to_host()?, self.k.to_host()?))
         }
 
-        fn norm_and_rope(&self, l: &Launcher, pos: usize) -> Result<(), String> {
-            self.norm_rope_at(l, self.q.as_ptr(), self.k.as_ptr(), pos)
+        fn norm_and_rope(&self, l: &Launcher) -> Result<(), String> {
+            self.norm_rope_at(l, self.q.as_ptr(), self.k.as_ptr())
         }
 
         /// Head RMS norm and M-RoPE on explicit q/k pointers, so the prefill
@@ -330,7 +331,6 @@ mod imp {
             l: &Launcher,
             q: *mut c_void,
             k: *mut c_void,
-            pos: usize,
         ) -> Result<(), String> {
             let d = self.dims;
             let norm = self.module_kernel(l, "head_rmsnorm_f32")?;
@@ -367,8 +367,8 @@ mod imp {
             ];
             norm.launch(LaunchConfig::per_row(d.n_kv, 256), &l.stream, &mut params)?;
 
-            self.rope_launch(l, q, d.n_head, pos)?;
-            self.rope_launch(l, k, d.n_kv, pos)
+            self.rope_launch(l, q, d.n_head)?;
+            self.rope_launch(l, k, d.n_kv)
         }
 
         fn rope_launch(
@@ -376,7 +376,6 @@ mod imp {
             l: &Launcher,
             x: *mut c_void,
             n_heads: usize,
-            pos: usize,
         ) -> Result<(), String> {
             let d = self.dims;
             let rope = self.module_kernel(l, "mrope_f32")?;
@@ -389,9 +388,11 @@ mod imp {
             let mut s1 = d.sections[1] as i32;
             let mut s2 = d.sections[2] as i32;
             let mut s3 = d.sections[3] as i32;
-            let mut p0 = pos as i32;
             let mut base = d.rope_base;
-            let mut params: [*mut c_void; 14] = [
+            // All four position ids are the token position for text; the array
+            // lives in the step buffer so the launch survives capture.
+            let mut p_pos = l.mrope_pos();
+            let mut params: [*mut c_void; 11] = [
                 &mut p_in as *mut _ as *mut c_void,
                 &mut p_out as *mut _ as *mut c_void,
                 &mut nh as *mut _ as *mut c_void,
@@ -401,10 +402,7 @@ mod imp {
                 &mut s1 as *mut _ as *mut c_void,
                 &mut s2 as *mut _ as *mut c_void,
                 &mut s3 as *mut _ as *mut c_void,
-                &mut p0 as *mut _ as *mut c_void,
-                &mut p0 as *mut _ as *mut c_void,
-                &mut p0 as *mut _ as *mut c_void,
-                &mut p0 as *mut _ as *mut c_void,
+                &mut p_pos as *mut _ as *mut c_void,
                 &mut base as *mut _ as *mut c_void,
             ];
             let cfg = LaunchConfig {
@@ -426,7 +424,7 @@ mod imp {
         /// Q/K/V projections, q-gate split, head norm and rope. Leaves `q` and
         /// the K/V rows in their buffers; attention and the cache append are the
         /// caller's choice.
-        pub fn prepare_qkv(&self, l: &Launcher, x: &Buffer, pos: usize) -> Result<(), String> {
+        pub fn prepare_qkv(&self, l: &Launcher, x: &Buffer) -> Result<(), String> {
             let d = self.dims;
             self.gemv(l, &self.wq, x, &self.qg, 2 * d.n_head * d.head_dim)?;
             self.gemv(l, &self.wk, x, &self.k, d.width)?;
@@ -451,7 +449,7 @@ mod imp {
                 shared_mem_bytes: 0,
             };
             split.launch(cfg, &l.stream, &mut params)?;
-            self.norm_and_rope(l, pos)
+            self.norm_and_rope(l)
         }
 
         /// `out = W_o (attn_out * gate)` — the tail shared by both KV paths.
@@ -496,21 +494,21 @@ mod imp {
             if pos >= d.n_ctx {
                 return Err(format!("position {pos} beyond KV cache {}", d.n_ctx));
             }
-            self.prepare_qkv(l, x, pos)?;
+            self.prepare_qkv(l, x)?;
 
             let append = self.module_kernel(l, "kv_append_f32")?;
             let mut p_kc = self.kv_k.as_ptr();
             let mut p_vc = self.kv_v.as_ptr();
             let mut p_k = self.k.as_ptr();
             let mut p_v = self.v.as_ptr();
-            let mut off = pos as i32;
+            let mut p_step = l.step_buf().as_ptr();
             let mut width = d.width as i32;
             let mut params: [*mut c_void; 6] = [
                 &mut p_kc as *mut _ as *mut c_void,
                 &mut p_vc as *mut _ as *mut c_void,
                 &mut p_k as *mut _ as *mut c_void,
                 &mut p_v as *mut _ as *mut c_void,
-                &mut off as *mut _ as *mut c_void,
+                &mut p_step as *mut _ as *mut c_void,
                 &mut width as *mut _ as *mut c_void,
             ];
             append.launch(
@@ -519,14 +517,14 @@ mod imp {
                 &mut params,
             )?;
 
-            self.attention(l, pos)?;
+            self.attention(l)?;
             self.apply_output(l)
         }
 
         /// Causal attention for this token. Uses the split-K kernel when the
         /// head shape allows it, otherwise the one-block-per-head kernel.
-        fn attention(&self, l: &Launcher, pos: usize) -> Result<(), String> {
-            self.attention_at(l, self.q.as_ptr(), self.out.as_ptr(), pos + 1)
+        fn attention(&self, l: &Launcher) -> Result<(), String> {
+            self.attention_at(l, self.q.as_ptr(), self.out.as_ptr())
         }
 
         /// Same launch over explicit q/out rows and a given sequence length, so
@@ -536,7 +534,6 @@ mod imp {
             l: &Launcher,
             q: *mut c_void,
             out: *mut c_void,
-            seq: usize,
         ) -> Result<(), String> {
             let d = self.dims;
             let group = d.n_head / d.n_kv;
@@ -548,7 +545,10 @@ mod imp {
                 && shared <= 64 * 1024;
 
             if split_ok {
-                let splits = (seq / 128).clamp(1, MAX_SPLITS);
+                // Fixed per layer, not per step: the grid is part of the
+                // captured graph. Sized for the whole cache, so it covers every
+                // position (empty splits write zeros and reduce to nothing).
+                let splits = (d.n_ctx / 128).clamp(1, MAX_SPLITS);
                 let mut p_q = q;
                 let mut p_k = self.kv_k.as_ptr();
                 let mut p_v = self.kv_v.as_ptr();
@@ -557,7 +557,7 @@ mod imp {
                 let mut n_heads = d.n_head as i32;
                 let mut n_kv = d.n_kv as i32;
                 let mut hd = d.head_dim as i32;
-                let mut v_seq = seq as i32;
+                let mut p_step = l.step_buf().as_ptr();
                 let mut scale = 1.0f32 / (d.head_dim as f32).sqrt();
                 let mut v_splits = splits as i32;
                 let mut width = d.width as i32;
@@ -570,7 +570,7 @@ mod imp {
                     &mut n_heads as *mut _ as *mut c_void,
                     &mut n_kv as *mut _ as *mut c_void,
                     &mut hd as *mut _ as *mut c_void,
-                    &mut v_seq as *mut _ as *mut c_void,
+                    &mut p_step as *mut _ as *mut c_void,
                     &mut scale as *mut _ as *mut c_void,
                     &mut v_splits as *mut _ as *mut c_void,
                     &mut width as *mut _ as *mut c_void,
@@ -610,7 +610,7 @@ mod imp {
             let mut n_heads = d.n_head as i32;
             let mut n_kv = d.n_kv as i32;
             let mut hd = d.head_dim as i32;
-            let mut v_seq = seq as i32;
+            let mut p_step = l.step_buf().as_ptr();
             let mut scale = 1.0f32 / (d.head_dim as f32).sqrt();
             let mut head_stride = d.head_dim as i32;
             let mut row_stride = d.width as i32;
@@ -622,7 +622,7 @@ mod imp {
                 &mut n_heads as *mut _ as *mut c_void,
                 &mut n_kv as *mut _ as *mut c_void,
                 &mut hd as *mut _ as *mut c_void,
-                &mut v_seq as *mut _ as *mut c_void,
+                &mut p_step as *mut _ as *mut c_void,
                 &mut scale as *mut _ as *mut c_void,
                 &mut head_stride as *mut _ as *mut c_void,
                 &mut row_stride as *mut _ as *mut c_void,
@@ -728,7 +728,6 @@ impl AttnLayer {
         &self,
         _l: &crate::Launcher,
         _x: &hipml_hip::Buffer,
-        _pos: usize,
     ) -> Result<(), String> {
         Err("hipml was built without the `hip` feature".to_string())
     }

@@ -23,6 +23,7 @@ struct Args {
     compare_cpu: bool,
     kv: KvMode,
     chunk: Option<usize>,
+    graph: bool,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -35,6 +36,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         compare_cpu: false,
         kv: KvMode::F32,
         chunk: None,
+        graph: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -78,6 +80,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--chunk" => {
                 a.chunk = Some(need(i)?.parse().map_err(|e| format!("bad --chunk: {e}"))?);
                 i += 2;
+            }
+            "--graph" => {
+                a.graph = true;
+                i += 1;
             }
             other => return Err(format!("unknown argument {other}")),
         }
@@ -219,6 +225,15 @@ pub fn generate(args: &[String]) -> i32 {
         }
     }
 
+    if a.graph {
+        match engine.build_token_graph() {
+            Ok(()) => println!("decode graph: captured (one hipGraphLaunch per token)"),
+            Err(e) => {
+                eprintln!("generate: capture: {e}");
+                return 1;
+            }
+        }
+    }
     let mut ids = Vec::with_capacity(a.tokens);
     let mut decode_s = 0.0f64;
     let mut next = match first_id {
@@ -230,7 +245,12 @@ pub fn generate(args: &[String]) -> i32 {
         ids.push(next);
         if i + 1 < a.tokens {
             let t = Instant::now();
-            next = match engine.forward_token_id(next, &mut st) {
+            let got = if a.graph {
+                engine.graph_token(next, &mut st)
+            } else {
+                engine.forward_token_id(next, &mut st)
+            };
+            next = match got {
                 Ok(v) => v,
                 Err(e) => {
                     eprintln!("generate: decode: {e}");

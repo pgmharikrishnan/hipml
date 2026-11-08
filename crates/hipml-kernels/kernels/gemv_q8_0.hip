@@ -10,14 +10,16 @@
 #define Q80_VALUES 32
 #define Q80_BLOCK_BYTES 34
 
-extern "C" __global__ void gemv_q8_0(
+// One row, whole block. External linkage so gemv_jobs can call it: there the
+// caller walks `row = tile, tile + gridDim.x, ...` inside its own job grid.
+__device__ __forceinline__ void q80_row(
     const unsigned char* __restrict__ w,
     const float* __restrict__ x,
     float* __restrict__ y,
     int m,
-    int k)
+    int k,
+    int row)
 {
-    const int row = blockIdx.x;
     if (row >= m) return;
 
     const int nblocks = k / Q80_VALUES;
@@ -49,4 +51,14 @@ extern "C" __global__ void gemv_q8_0(
         for (int off = 4; off > 0; off >>= 1) v += __shfl_down(v, off);
         if (threadIdx.x == 0) y[row] = v;
     }
+}
+
+extern "C" __global__ void gemv_q8_0(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k)
+{
+    q80_row(w, x, y, m, k, blockIdx.x);
 }

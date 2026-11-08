@@ -48,9 +48,14 @@ pub fn launches_per_token(n_layer: usize, is_recr: &[bool]) -> usize {
 pub fn profile(args: &[String]) -> i32 {
     let mut gguf = String::new();
     let mut reps = 2000usize;
+    let mut trace = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--trace" => {
+                trace = true;
+                i += 1;
+            }
             "--gguf" => {
                 gguf = args.get(i + 1).cloned().unwrap_or_default();
                 i += 2;
@@ -188,6 +193,67 @@ pub fn profile(args: &[String]) -> i32 {
         "overhead:          {:.3} ms",
         (full - engine.weight_bytes() as f64 / 632e9) * 1e3
     );
+
+    if trace {
+        let mut st = engine.new_state();
+        for _ in 0..2 {
+            let _ = engine.forward_token_id(1, &mut st);
+        }
+        let n = 4;
+        engine.trace = Some(hipml_model::gpu::Trace::default());
+        for _ in 0..n {
+            if let Err(e) = engine.forward_token_id(1, &mut st) {
+                eprintln!("gpu-profile: trace: {e}");
+                return 1;
+            }
+        }
+        if let Err(e) = engine.model().launcher().synchronize() {
+            eprintln!("gpu-profile: trace sync: {e}");
+            return 1;
+        }
+        // The name on a span is the boundary it starts at, so weight bytes are
+        // attributed one stage earlier: `post_norm` is the gate GEMV, `gate` is
+        // up, `up` is silu+down, `out_norm` is lm_head, `ssm_in` is the four
+        // GDN input projections, `ssm_rec` is the GDN output projection,
+        // `attn_in` is a whole full-attention block.
+        let spans = engine.trace.as_mut().map(|t| t.fold()).unwrap_or_default();
+        let bytes: std::collections::HashMap<&str, usize> = engine
+            .stage_bytes()
+            .into_iter()
+            .map(|(n, b)| (n, b))
+            .collect();
+        let attr = |name: &str| -> usize {
+            match name {
+                "post_norm" => bytes["gate"],
+                "gate" => bytes["up"],
+                "up" => bytes["down"],
+                "attn_in" => bytes["attn"],
+                "ssm_in" => bytes["ssm_proj"],
+                "ssm_rec" => bytes["ssm_step"],
+                "out_norm" => bytes["lm_head"],
+                _ => 0,
+            }
+        };
+        let total: f64 = spans.iter().map(|(_, u)| u).sum();
+        println!("trace per token ({n} tokens, ranked by GPU time):");
+        for (name, us) in &spans {
+            let b = attr(name);
+            let ms = us / 1e3 / n as f64;
+            // `us` is summed over the traced tokens; weight bytes are per token.
+            let gbs = if b > 0 && ms > 0.0 {
+                format!("{:6.1} GB/s", b as f64 * n as f64 / (us / 1e6) / 1e9)
+            } else {
+                String::new()
+            };
+            println!(
+                "  {name:<12} {:7.3} ms/token  {:5.1}%  {b:>11} B  {gbs}",
+                ms,
+                us / total * 100.0,
+                b = b
+            );
+        }
+        println!("  {:<12} {:7.3} ms/token", "sum", total / 1e3 / n as f64);
+    }
     0
 }
 

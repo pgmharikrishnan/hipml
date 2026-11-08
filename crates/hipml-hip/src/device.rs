@@ -153,9 +153,124 @@ impl Stream {
         }
     }
 
+    /// Raw handle, for the async copy in `memory.rs`.
+    #[cfg(feature = "hip")]
+    pub(crate) fn handle(&self) -> ffi::HipStream {
+        self.handle
+    }
+
+    /// Block this stream until `event` has completed. Ordering only: the work
+    /// is not copied or flushed.
+    #[cfg(feature = "hip")]
+    pub fn wait(&self, event: &Event) -> Result<(), String> {
+        unsafe {
+            check(
+                ffi::hipStreamWaitEvent(self.handle, event.handle, 0),
+                "hipStreamWaitEvent",
+            )
+        }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn wait(&self, _event: &Event) -> Result<(), String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
     #[cfg(not(feature = "hip"))]
     pub fn synchronize(&self) -> Result<(), String> {
         Err("built without the `hip` feature".to_string())
+    }
+
+    /// Start recording every launch on this stream into a graph instead of
+    /// executing it. Nothing runs until the graph is launched.
+    #[cfg(feature = "hip")]
+    pub fn begin_capture(&self) -> Result<(), String> {
+        unsafe {
+            check(
+                ffi::hipStreamBeginCapture(self.handle, HIP_CAPTURE_MODE_GLOBAL),
+                "hipStreamBeginCapture",
+            )
+        }
+    }
+
+    /// Stop recording and hand back the executable graph.
+    #[cfg(feature = "hip")]
+    pub fn end_capture(&self) -> Result<Graph, String> {
+        unsafe {
+            let mut graph: ffi::HipGraph = std::ptr::null_mut();
+            check(
+                ffi::hipStreamEndCapture(self.handle, &mut graph),
+                "hipStreamEndCapture",
+            )?;
+            let mut exec: ffi::HipGraphExec = std::ptr::null_mut();
+            check(
+                ffi::hipGraphInstantiate(&mut exec, graph, std::ptr::null_mut(), std::ptr::null_mut(), 0),
+                "hipGraphInstantiate",
+            )?;
+            Ok(Graph {
+                handle: graph,
+                exec,
+            })
+        }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn begin_capture(&self) -> Result<(), String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn end_capture(&self) -> Result<Graph, String> {
+        Err("built without the `hip` feature".to_string())
+    }
+}
+
+/// `hipStreamCaptureModeGlobal`: no other thread may break the capture.
+#[cfg(feature = "hip")]
+const HIP_CAPTURE_MODE_GLOBAL: i32 = 0;
+
+/// An executable graph: what a captured stream of launches becomes, so one
+/// `hipGraphLaunch` submits the whole token instead of one call per kernel.
+pub struct Graph {
+    #[cfg(feature = "hip")]
+    handle: ffi::HipGraph,
+    #[cfg(feature = "hip")]
+    exec: ffi::HipGraphExec,
+}
+
+impl Graph {
+    /// Submit the whole graph. The nodes keep the arguments they were captured
+    /// with, so anything that changes per step has to live in device memory.
+    #[cfg(feature = "hip")]
+    pub fn launch(&self, stream: &Stream) -> Result<(), String> {
+        unsafe { check(ffi::hipGraphLaunch(self.exec, stream.handle), "hipGraphLaunch") }
+    }
+
+    /// Build the device-side launch state ahead of time; the first `launch`
+    /// then does not stall on upload.
+    #[cfg(feature = "hip")]
+    pub fn upload(&self, stream: &Stream) -> Result<(), String> {
+        unsafe { check(ffi::hipGraphUpload(self.exec, stream.handle), "hipGraphUpload") }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn launch(&self, _stream: &Stream) -> Result<(), String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn upload(&self, _stream: &Stream) -> Result<(), String> {
+        Err("built without the `hip` feature".to_string())
+    }
+}
+
+#[cfg(feature = "hip")]
+impl Drop for Graph {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ffi::hipGraphExecDestroy(self.exec);
+            let _ = ffi::hipGraphDestroy(self.handle);
+        }
     }
 }
 
@@ -164,6 +279,66 @@ impl Drop for Stream {
     fn drop(&mut self) {
         unsafe {
             let _ = ffi::hipStreamDestroy(self.handle);
+        }
+    }
+}
+
+/// A timing event. Recorded on a stream and read back after a synchronize, so
+/// a caller can say whether time went inside a kernel or between launches.
+pub struct Event {
+    #[cfg(feature = "hip")]
+    handle: ffi::HipEvent,
+}
+
+impl Event {
+    #[cfg(feature = "hip")]
+    pub fn new() -> Result<Event, String> {
+        unsafe {
+            let mut handle: ffi::HipEvent = std::ptr::null_mut();
+            check(ffi::hipEventCreate(&mut handle), "hipEventCreate")?;
+            Ok(Event { handle })
+        }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn new() -> Result<Event, String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
+    #[cfg(feature = "hip")]
+    pub fn record(&self, stream: &Stream) -> Result<(), String> {
+        unsafe { check(ffi::hipEventRecord(self.handle, stream.handle), "hipEventRecord") }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn record(&self, _stream: &Stream) -> Result<(), String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
+    /// Milliseconds from `self` (recorded earlier) to `stop`, in ms.
+    #[cfg(feature = "hip")]
+    pub fn since(&self, stop: &Event) -> Result<f32, String> {
+        let mut ms = 0.0f32;
+        unsafe {
+            check(
+                ffi::hipEventElapsedTime(&mut ms, self.handle, stop.handle),
+                "hipEventElapsedTime",
+            )?;
+        }
+        Ok(ms)
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn since(&self, _stop: &Event) -> Result<f32, String> {
+        Err("built without the `hip` feature".to_string())
+    }
+}
+
+#[cfg(feature = "hip")]
+impl Drop for Event {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ffi::hipEventDestroy(self.handle);
         }
     }
 }

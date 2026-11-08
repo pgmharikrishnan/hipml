@@ -67,6 +67,12 @@ static __device__ __forceinline__ void stage_group(const float* __restrict__ x,
 }
 
 // Sixteen-column contribution of one Q4_K row to `acc`.
+//
+// WIDE loads the 16 quant bytes as one 128-bit `buffer_load_dwordx4` instead of
+// four dwords. The payload is 16-byte aligned inside the block (offset 16 plus a
+// multiple of 16), so this is the same bytes and the same arithmetic; it is an
+// A/B switch because the kernel may be load-issue-bound rather than DRAM-bound.
+template <bool WIDE, bool STREAM = false>
 static __device__ __forceinline__ void q4k_acc(const unsigned char* __restrict__ rp,
                                                int p, const float* xv, float* acc)
 {
@@ -89,10 +95,25 @@ static __device__ __forceinline__ void q4k_acc(const unsigned char* __restrict__
         unsigned int w[4];
         unsigned char b[16];
     } q;
-    q.w[0] = qp[0];
-    q.w[1] = qp[1];
-    q.w[2] = qp[2];
-    q.w[3] = qp[3];
+    if (WIDE && STREAM) {
+        // sc1 (streaming): the 17 GB stream is read once per token and never
+        // reused, so it should not be kept in L2. Same bytes, same arithmetic.
+        // `__builtin_nontemporal_load` does not take HIP vector types, so this
+        // is four dword loads carrying the streaming cache policy.
+#pragma unroll
+        for (int i = 0; i < 4; ++i) q.w[i] = __builtin_nontemporal_load(qp + i);
+    } else if (WIDE) {
+        const uint4 wide = *reinterpret_cast<const uint4*>(qp);
+        q.w[0] = wide.x;
+        q.w[1] = wide.y;
+        q.w[2] = wide.z;
+        q.w[3] = wide.w;
+    } else {
+        q.w[0] = qp[0];
+        q.w[1] = qp[1];
+        q.w[2] = qp[2];
+        q.w[3] = qp[3];
+    }
     const bool high = (sub & 1) != 0;
 
     float a = *acc;
@@ -105,27 +126,35 @@ static __device__ __forceinline__ void q4k_acc(const unsigned char* __restrict__
     *acc = a;
 }
 
-extern "C" __global__ void gemv_q4_k(
+// One row/warp when RPW is 1, two when it is Q4K_ROWS_PER_WARP. The lane owns
+// the same columns either way, so the per-row accumulation order and the warp
+// reduction tree are unchanged: the two entries are bit-identical, and the
+// 1-row grid is twice as long, which is what a 5120-row tensor needs.
+// `tile` is blockIdx.x in the standalone entry points and blockIdx.x of the
+// job's own grid in gemv_jobs. External linkage so the job kernel can call it.
+template <int RPW, bool WIDE, bool STREAM = false>
+__device__ __forceinline__ void q4k_tile(
     const unsigned char* __restrict__ w,
     const float* __restrict__ x,
     float* __restrict__ y,
     int m,
-    int k)
+    int k,
+    float* __restrict__ sx,
+    int tile)
 {
-    __shared__ __align__(16) float sx[Q4K_K_TILE];
-
     const int tid = threadIdx.x;
     const int lane = tid & 31;
     const int warp = tid >> 5;
     const int nblocks = k / Q4K_VALUES;
+    const int row_tile = Q4K_WARPS * RPW;
 
-    int row[Q4K_ROWS_PER_WARP];
-    int r[Q4K_ROWS_PER_WARP];
-    const unsigned char* rp[Q4K_ROWS_PER_WARP];
-    float acc[Q4K_ROWS_PER_WARP];
+    int row[RPW];
+    int r[RPW];
+    const unsigned char* rp[RPW];
+    float acc[RPW];
 #pragma unroll
-    for (int rr = 0; rr < Q4K_ROWS_PER_WARP; ++rr) {
-        row[rr] = blockIdx.x * Q4K_ROW_TILE + warp * Q4K_ROWS_PER_WARP + rr;
+    for (int rr = 0; rr < RPW; ++rr) {
+        row[rr] = tile * row_tile + warp * RPW + rr;
         r[rr] = min(row[rr], m - 1);
         rp[rr] = w + (size_t)r[rr] * (size_t)nblocks * Q4K_BLOCK_BYTES;
         acc[rr] = 0.0f;
@@ -145,16 +174,138 @@ extern "C" __global__ void gemv_q4_k(
             for (int comp = 0; comp < Q4K_VPL; ++comp) xv[comp] = sx[s + comp * 32];
             const int p = base + c;
 #pragma unroll
-            for (int rr = 0; rr < Q4K_ROWS_PER_WARP; ++rr) q4k_acc(rp[rr], p, xv, &acc[rr]);
+            for (int rr = 0; rr < RPW; ++rr) q4k_acc<WIDE, STREAM>(rp[rr], p, xv, &acc[rr]);
         }
         __syncthreads();
     }
 
 #pragma unroll
-    for (int rr = 0; rr < Q4K_ROWS_PER_WARP; ++rr) {
+    for (int rr = 0; rr < RPW; ++rr) {
         float a = acc[rr];
 #pragma unroll
         for (int off = 16; off > 0; off >>= 1) a += __shfl_down(a, off);
         if (lane == 0 && row[rr] < m) y[row[rr]] = a;
     }
+}
+
+extern "C" __global__ void gemv_q4_k(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k)
+{
+    __shared__ __align__(16) float sx[Q4K_K_TILE];
+    q4k_tile<Q4K_ROWS_PER_WARP, false>(w, x, y, m, k, sx, blockIdx.x);
+}
+
+extern "C" __global__ void gemv_q4_k_r1(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k)
+{
+    __shared__ __align__(16) float sx[Q4K_K_TILE];
+    q4k_tile<1, false>(w, x, y, m, k, sx, blockIdx.x);
+}
+
+// One row per warp, one 128-bit load per 16 values: the A/B entry for the
+// load-issue hypothesis. Bit-identical to `gemv_q4_k_r1`.
+extern "C" __global__ void gemv_q4_k_u4(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k)
+{
+    __shared__ __align__(16) float sx[Q4K_K_TILE];
+    q4k_tile<1, true>(w, x, y, m, k, sx, blockIdx.x);
+}
+
+// Streaming-load A/B: `gemv_q4_k_r1` with `buffer_load_dwordx4` + sc1 on the
+// weight payload (the brief's cache-hint item).
+extern "C" __global__ void gemv_q4_k_nt(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k)
+{
+    __shared__ __align__(16) float sx[Q4K_K_TILE];
+    q4k_tile<1, true, true>(w, x, y, m, k, sx, blockIdx.x);
+}
+
+// Split-K partial pass: grid (row tiles, splits), each block accumulates a
+// contiguous 512-value-aligned slice of k and writes `part[split][row]`.
+//
+// The probe for the one explanation the measurements keep pointing at: a
+// 5120-row tensor is 640 blocks of 8 warps, and every block streams its rows
+// through a single accumulator chain, so the kernel's in-flight bytes scale with
+// the number of threads, not with the grid. Splitting k gives the same bytes to
+// more threads doing less work each — the shape `gpu-sweep`'s calibration buffer
+// likes (267 GB/s at 4096 blocks, 604 at 16384).
+//
+// This is *not* bit-identical to `gemv_q4_k`: the per-lane accumulation over k
+// is partitioned differently, so the last bits of every output can move. It is
+// measured as an A/B, and adopted only if the greedy tokens survive.
+extern "C" __global__ void gemv_q4_k_split(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ part,
+    int m,
+    int k,
+    int splits)
+{
+    __shared__ __align__(16) float sx[Q4K_K_TILE];
+
+    const int tid = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    const int nblocks = k / Q4K_VALUES;
+    const int row = blockIdx.x * Q4K_WARPS + warp;
+    const int r = min(row, m - 1);
+    const unsigned char* rp = w + (size_t)r * (size_t)nblocks * Q4K_BLOCK_BYTES;
+
+    // 512-value units so every slice starts on a group boundary (the shared
+    // staging and the lane mapping are per 512-value group).
+    const int per = ((k / splits) + Q4K_GROUP - 1) / Q4K_GROUP * Q4K_GROUP;
+    const int begin = blockIdx.y * per;
+    const int end = min(begin + per, k);
+
+    float acc = 0.0f;
+    for (int base = begin; base < end; base += Q4K_K_TILE) {
+        const int n = min(Q4K_K_TILE, end - base);
+        const int nchunks = n / Q4K_VPL;
+        for (int j = tid; j < nchunks; j += Q4K_BLOCK) stage_group(x, sx, base, j);
+        __syncthreads();
+
+        for (int c = lane * Q4K_VPL; c < n; c += Q4K_GROUP) {
+            const int g = c / Q4K_GROUP;
+            const int s = g * Q4K_GROUP + lane;
+            float xv[Q4K_VPL];
+#pragma unroll
+            for (int comp = 0; comp < Q4K_VPL; ++comp) xv[comp] = sx[s + comp * 32];
+            q4k_acc<true>(rp, base + c, xv, &acc);
+        }
+        __syncthreads();
+    }
+
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_down(acc, off);
+    if (lane == 0 && row < m) part[(size_t)blockIdx.y * m + row] = acc;
+}
+
+// `y[row] = sum_s part[s][row]`, one thread per row, splits in order.
+extern "C" __global__ void gemv_split_reduce(
+    const float* __restrict__ part,
+    float* __restrict__ y,
+    int m,
+    int splits)
+{
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= m) return;
+    float a = 0.0f;
+    for (int s = 0; s < splits; ++s) a += part[(size_t)s * m + row];
+    y[row] = a;
 }

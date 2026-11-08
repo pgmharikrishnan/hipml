@@ -62,8 +62,8 @@ extern "C" __global__ void kv_encode_q8(
     unsigned char* __restrict__ kc,
     unsigned char* __restrict__ vc,
     int head_dim,
-    int seq,
-    int pos)
+    int stride,
+    const int* __restrict__ step)
 {
     const int h = blockIdx.x;
     const int chunk = threadIdx.x >> 5;
@@ -72,7 +72,9 @@ extern "C" __global__ void kv_encode_q8(
     if (chunk >= nchunk) return;
 
     const int i = h * head_dim + chunk * KVQ_BLOCK + lane;
-    const size_t off = ((size_t)h * seq + pos) * nchunk * KVQ_Q8_BYTES
+    // `stride` is the cache's per-head row count (fixed); `step[0]` is the
+    // position, in device memory so a captured graph is reusable.
+    const size_t off = ((size_t)h * stride + step[0]) * nchunk * KVQ_Q8_BYTES
                      + (size_t)chunk * KVQ_Q8_BYTES;
 
     const float xk = k[i];
@@ -99,8 +101,8 @@ extern "C" __global__ void kv_encode_q4(
     unsigned char* __restrict__ kc,
     unsigned char* __restrict__ vc,
     int head_dim,
-    int seq,
-    int pos)
+    int stride,
+    const int* __restrict__ step)
 {
     const int h = blockIdx.x;
     const int chunk = threadIdx.x >> 5;
@@ -109,7 +111,7 @@ extern "C" __global__ void kv_encode_q4(
     if (chunk >= nchunk) return;
 
     const int i = h * head_dim + chunk * KVQ_BLOCK + lane;
-    const size_t off = ((size_t)h * seq + pos) * nchunk * KVQ_Q4_BYTES
+    const size_t off = ((size_t)h * stride + step[0]) * nchunk * KVQ_Q4_BYTES
                      + (size_t)chunk * KVQ_Q4_BYTES;
 
     const float xk = k[i];

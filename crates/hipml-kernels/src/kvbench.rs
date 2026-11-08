@@ -25,8 +25,6 @@ pub const WEIGHTS_BYTES: f64 = 17.19e9;
 /// One line of the report.
 pub struct Row {
     pub dtype: KvDtype,
-    /// Kernel entry that produced the row (`q8`, `q8s`, `q8g`, `q4`).
-    pub variant: &'static str,
     pub heads: usize,
     pub layers: usize,
     pub seq: usize,
@@ -50,8 +48,7 @@ pub struct Report {
 }
 
 /// `depths` in tokens; `reps` is the minimum number of timed passes.
-/// `splits_override` forces a split count (the full-stack path clamps to 64).
-pub fn run(depths: &[usize], reps_min: usize, splits_override: Option<usize>) -> Result<Report, String> {
+pub fn run(depths: &[usize], reps_min: usize, max_splits: Option<usize>) -> Result<Report, String> {
     let head_dim = 256usize;
     let scale = 1.0f32 / (head_dim as f32).sqrt();
 
@@ -60,6 +57,8 @@ pub fn run(depths: &[usize], reps_min: usize, splits_override: Option<usize>) ->
     let device = Device::first()?;
     let module = Module::load(&dir.join("hipml.co"))?;
     let stream = Stream::new()?;
+    // The position-aware kernels read `[pos, seq, token]` from device memory.
+    let step = Buffer::alloc(8)?;
     let (free0, total) = device.mem_info()?;
 
     // Measure the weight stream first: a second of 838 MB gemv also brings the
@@ -68,19 +67,14 @@ pub fn run(depths: &[usize], reps_min: usize, splits_override: Option<usize>) ->
     let (weights_gbs, weights_us) = gemv_bandwidth(&module, &stream)?;
 
     let mut rows = Vec::new();
-    for (dtype, variant, entry) in [
-        (KvDtype::Q8, "q8", 0usize),
-        (KvDtype::Q8, "q8s", 2),
-        (KvDtype::Q8, "q8g", 3),
-        (KvDtype::Q4, "q4", 1),
-    ] {
+    for dtype in [KvDtype::Q8, KvDtype::Q4] {
         let row_bytes = dtype.row_bytes(head_dim);
         for (heads, n_kv, layers) in [(1usize, 1usize, 1usize), (24, 4, 16)] {
             for &seq in depths {
                 // Enough blocks to fill the card, but at least 64 rows per split
                 // so the fp32 partials stay small against the cache read.
-                let splits = splits_override
-                    .unwrap_or_else(|| (seq / 64).clamp(1, (256 / n_kv).max(1)));
+                let cap = max_splits.unwrap_or(256 / n_kv).max(1);
+                let splits = (seq / 64).clamp(1, cap);
                 let layer_bytes = n_kv * seq * row_bytes;
                 let k = Buffer::alloc((layer_bytes * layers).div_ceil(4))?;
                 let v = Buffer::alloc((layer_bytes * layers).div_ceil(4))?;
@@ -94,6 +88,13 @@ pub fn run(depths: &[usize], reps_min: usize, splits_override: Option<usize>) ->
                 let part_acc = Buffer::alloc(heads * splits * head_dim)?;
                 let part_ml = Buffer::alloc(heads * splits * 2)?;
 
+                // The bench decodes one position at `seq`, cache stride `seq`.
+                let mut step_bytes = [0u8; 32];
+                for (i, v) in [0i32, seq as i32, 0, 0, 0, 0, 0, 0].iter().enumerate() {
+                    step_bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+                }
+                step.upload_bytes(0, &step_bytes)?;
+
                 let pass = |n: usize| -> Result<f64, String> {
                     let t0 = Instant::now();
                     for _ in 0..n {
@@ -101,7 +102,8 @@ pub fn run(depths: &[usize], reps_min: usize, splits_override: Option<usize>) ->
                             launch(
                                 &module,
                                 &stream,
-                                entry,
+                                &step,
+                                dtype.id(),
                                 &q,
                                 &k,
                                 &v,
@@ -130,7 +132,6 @@ pub fn run(depths: &[usize], reps_min: usize, splits_override: Option<usize>) ->
                 let bytes = 2 * layer_bytes * layers;
                 rows.push(Row {
                     dtype,
-                    variant,
                     heads,
                     layers,
                     seq,

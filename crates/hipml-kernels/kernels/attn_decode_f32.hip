@@ -26,11 +26,14 @@ extern "C" __global__ void attn_decode_f32(
     int n_heads,
     int n_kv,
     int head_dim,
-    int seq,
+    const int* __restrict__ step,
     float scale,
     int head_stride,
     int row_stride)
 {
+    // `step[1]` is the sequence length: device memory so a captured graph can be
+    // replayed as the context grows.
+    const int seq = step[1];
     const int h = blockIdx.x;
     const int t = threadIdx.x;
     const int group = n_heads / n_kv;

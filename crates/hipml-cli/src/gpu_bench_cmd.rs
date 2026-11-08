@@ -19,6 +19,8 @@ struct BenchArgs {
     chunk: Option<usize>,
     /// Report the prefill stage breakdown (adds a sync per stage).
     split: bool,
+    graph_probe: bool,
+    graph: bool,
 }
 
 fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
@@ -31,6 +33,8 @@ fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
         prefill: None,
         chunk: None,
         split: false,
+        graph_probe: false,
+        graph: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -75,6 +79,14 @@ fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
             }
             "--prefill-dot2" => {
                 ::hipml_kernels::set_prefill_path(::hipml_kernels::PrefillPath::Dot2);
+                i += 1;
+            }
+            "--graph-probe" => {
+                a.graph_probe = true;
+                i += 1;
+            }
+            "--graph" => {
+                a.graph = true;
                 i += 1;
             }
             other => return Err(format!("unknown argument {other}")),
@@ -214,10 +226,44 @@ pub fn bench(args: &[String]) -> i32 {
             }
         }
     }
+    if a.graph_probe {
+        match engine.graph_probe(1, &mut st, 16) {
+            Ok(g) => {
+                println!(
+                    "graph probe ({} launches): eager {:7.3} ms/token (submit {:6.3}) | graph {:7.3} ms/token (submit {:6.3}) | graph speedup {:.2}x",
+                    g.launches,
+                    g.eager_ms,
+                    g.eager_submit_ms,
+                    g.graph_ms,
+                    g.graph_submit_ms,
+                    g.eager_ms / g.graph_ms
+                );
+            }
+            Err(e) => {
+                eprintln!("gpu-bench: graph probe: {e}");
+                return 1;
+            }
+        }
+        return 0;
+    }
+
     let n = a.tokens.max(2);
+    let mut path = "eager";
+    if a.graph {
+        if let Err(e) = engine.build_token_graph() {
+            eprintln!("gpu-bench: capture: {e}");
+            return 1;
+        }
+        path = "graph";
+    }
     let t = Instant::now();
     for _ in 0..n {
-        match engine.forward_token_id(1, &mut st) {
+        let got = if a.graph {
+            engine.graph_token(1, &mut st)
+        } else {
+            engine.forward_token_id(1, &mut st)
+        };
+        match got {
             Ok(l) => last = l,
             Err(e) => {
                 eprintln!("gpu-bench: decode: {e}");
@@ -227,7 +273,7 @@ pub fn bench(args: &[String]) -> i32 {
     }
     let s = t.elapsed().as_secs_f64();
     println!(
-        "decode at {}: {} tokens in {:.3}s ({:.3} ms/token, {:.2} tok/s) [argmax {}]",
+        "decode at {} [{path}]: {} tokens in {:.3}s ({:.3} ms/token, {:.2} tok/s) [argmax {}]",
         a.depth,
         n,
         s,

@@ -6,7 +6,99 @@
 
 use super::*;
 
+/// One entry of the `gemv_jobs` device job list. Mirrors `HipmlGemvJob` in
+/// `gemv_jobs.hip`; pointers are device addresses.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GemvJob {
+    pub w: usize,
+    pub x: usize,
+    pub y: usize,
+    pub m: i32,
+    pub k: i32,
+    pub kind: i32,
+    pub pad: i32,
+}
+
+/// `kind` values the job kernel dispatches on.
+pub const GEMV_JOB_Q4K: i32 = 0;
+pub const GEMV_JOB_Q6K: i32 = 1;
+pub const GEMV_JOB_Q5K: i32 = 2;
+pub const GEMV_JOB_Q80: i32 = 3;
+
+/// Tiles a job occupies (8 rows per tile for the K-quants, one row for Q8_0).
+pub fn gemv_job_tiles(kind: i32, m: usize) -> usize {
+    if kind == GEMV_JOB_Q80 {
+        m
+    } else {
+        (m + 7) / 8
+    }
+}
+
 impl Launcher {
+    /// Split-K Q4_K GEMV: row tiles x splits, then the ordered reduce.
+    pub fn gemv_q4_k_split(
+        &self,
+        w: &ByteBuffer,
+        x: &Buffer,
+        part: &Buffer,
+        y: &Buffer,
+        m: usize,
+        k: usize,
+        splits: usize,
+    ) -> Result<(), String> {
+        let kernel = self.module.kernel("gemv_q4_k_split")?;
+        let mut p_w = w.as_ptr();
+        let mut p_x = x.as_ptr();
+        let mut p_part = part.as_ptr();
+        let mut v_m = m as i32;
+        let mut v_k = k as i32;
+        let mut v_splits = splits as i32;
+        let mut params: [*mut c_void; 6] = [
+            &mut p_w as *mut _ as *mut c_void,
+            &mut p_x as *mut _ as *mut c_void,
+            &mut p_part as *mut _ as *mut c_void,
+            &mut v_m as *mut _ as *mut c_void,
+            &mut v_k as *mut _ as *mut c_void,
+            &mut v_splits as *mut _ as *mut c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (((m + 7) / 8) as u32, splits as u32, 1),
+            block: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        kernel.launch(cfg, &self.stream, &mut params)?;
+
+        let reduce = self.module.kernel("gemv_split_reduce")?;
+        let mut p_part = part.as_ptr();
+        let mut p_y = y.as_ptr();
+        let mut params: [*mut c_void; 4] = [
+            &mut p_part as *mut _ as *mut c_void,
+            &mut p_y as *mut _ as *mut c_void,
+            &mut v_m as *mut _ as *mut c_void,
+            &mut v_splits as *mut _ as *mut c_void,
+        ];
+        reduce.launch(LaunchConfig::linear(m, 256), &self.stream, &mut params)
+    }
+
+    /// Launch every job in `jobs` with one kernel: grid.y picks the job, grid.x
+    /// the row tile inside it. Jobs must be independent of each other.
+    pub fn gemv_jobs(&self, jobs: &Buffer, n_jobs: usize, tiles: usize) -> Result<(), String> {
+        let kernel = self.module.kernel("gemv_jobs")?;
+        let mut p_jobs = jobs.as_ptr();
+        let mut v_n = n_jobs as i32;
+        let mut params: [*mut c_void; 2] = [
+            &mut p_jobs as *mut _ as *mut c_void,
+            &mut v_n as *mut _ as *mut c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (tiles.max(1) as u32, n_jobs.max(1) as u32, 1),
+            block: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        kernel.launch(cfg, &self.stream, &mut params)
+    }
+
     /// `y = x / sqrt(mean(x^2) + eps) * w`, one block per row (row count 1 here).
     pub fn rmsnorm_buf(
         &self,
@@ -97,6 +189,37 @@ impl Launcher {
             &mut v_n as *mut _ as *mut c_void,
         ];
         kernel.launch(LaunchConfig::linear(n, 256), &self.stream, &mut params)
+    }
+
+    /// Dequantise the embedding row named by `step[2]` into `out`: the step's
+    /// token id, so a captured graph is replayed for a new token without
+    /// re-capturing.
+    pub fn embed_row_q4_k_dev(
+        &self,
+        w: &ByteBuffer,
+        row_bytes: usize,
+        out: &Buffer,
+        n_embd: usize,
+    ) -> Result<(), String> {
+        let nblocks = n_embd / hipml_core::quant::QK_K;
+        let kernel = self.module.kernel("embed_q4_k_row")?;
+        let mut p_w = w.as_ptr();
+        let mut p_out = out.as_ptr();
+        let mut v_blocks = nblocks as i32;
+        let mut v_row_bytes = row_bytes as i32;
+        let mut p_step = self.step.as_ptr();
+        let mut params: [*mut c_void; 5] = [
+            &mut p_w as *mut _ as *mut c_void,
+            &mut p_out as *mut _ as *mut c_void,
+            &mut v_blocks as *mut _ as *mut c_void,
+            &mut v_row_bytes as *mut _ as *mut c_void,
+            &mut p_step as *mut _ as *mut c_void,
+        ];
+        kernel.launch(
+            LaunchConfig::per_row(nblocks, 256),
+            &self.stream,
+            &mut params,
+        )
     }
 
     /// Dequantise one embedding row of a resident Q4_K tensor into `out`, on the
@@ -194,10 +317,12 @@ impl Launcher {
         fin.launch(cfg, &self.stream, &mut params)
     }
 
-    /// Quantize one token's K and V rows into the cache at `pos` on the device.
+    /// Quantize one token's K and V rows into the cache at `step[0]`.
     ///
     /// One launch per layer replaces a readback, a host quantize and eight
-    /// uploads. `dtype` is `KvDtype::id()`: 0 q8_0, 1 q4_0.
+    /// uploads. `dtype` is `KvDtype::id()`: 0 q8_0, 1 q4_0. `stride` is the
+    /// cache's rows per KV head and stays fixed; the position comes from the
+    /// step buffer so a captured graph replays at every step.
     #[allow(clippy::too_many_arguments)]
     pub fn kv_encode(
         &self,
@@ -208,8 +333,7 @@ impl Launcher {
         v_cache: &Buffer,
         n_kv: usize,
         head_dim: usize,
-        seq: usize,
-        pos: usize,
+        stride: usize,
     ) -> Result<(), String> {
         let entry = match dtype {
             0 => "kv_encode_q8",
@@ -222,16 +346,16 @@ impl Launcher {
         let mut p_kc = k_cache.as_ptr();
         let mut p_vc = v_cache.as_ptr();
         let mut v_hd = head_dim as i32;
-        let mut v_seq = seq as i32;
-        let mut v_pos = pos as i32;
+        let mut v_stride = stride as i32;
+        let mut p_step = self.step.as_ptr();
         let mut params: [*mut c_void; 7] = [
             &mut p_k as *mut _ as *mut c_void,
             &mut p_v as *mut _ as *mut c_void,
             &mut p_kc as *mut _ as *mut c_void,
             &mut p_vc as *mut _ as *mut c_void,
             &mut v_hd as *mut _ as *mut c_void,
-            &mut v_seq as *mut _ as *mut c_void,
-            &mut v_pos as *mut _ as *mut c_void,
+            &mut v_stride as *mut _ as *mut c_void,
+            &mut p_step as *mut _ as *mut c_void,
         ];
         let cfg = LaunchConfig {
             grid: (n_kv as u32, 1, 1),

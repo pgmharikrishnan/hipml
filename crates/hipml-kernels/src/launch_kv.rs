@@ -12,6 +12,7 @@ use hipml_hip::{Buffer, LaunchConfig, Module, Stream};
 pub fn run(
     module: &Module,
     stream: &Stream,
+    step: &Buffer,
     case: &OpCase,
     inputs: &[Tensor],
     reps: usize,
@@ -30,11 +31,19 @@ pub fn run(
             let out = Buffer::alloc(n_heads * head_dim)?;
             let part_acc = Buffer::alloc(n_heads * splits * head_dim)?;
             let part_ml = Buffer::alloc(n_heads * splits * 2)?;
+            // The kernel reads the position count from `step`; this arm decodes
+            // `seq` positions against a cache of `seq` rows.
+            let mut step_bytes = [0u8; 32];
+            for (i, v) in [0i32, seq as i32, 0, 0, 0, 0, 0, 0].iter().enumerate() {
+                step_bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            step.upload_bytes(0, &step_bytes)?;
 
             for _ in 0..reps {
                 launch(
                     module,
                     stream,
+                    step,
                     dtype,
                     &q,
                     &k,
@@ -67,6 +76,7 @@ pub fn run(
 pub fn launch(
     module: &Module,
     stream: &Stream,
+    step: &Buffer,
     dtype: usize,
     q: &Buffer,
     k: &Buffer,
@@ -83,6 +93,9 @@ pub fn launch(
     k_off: usize,
     v_off: usize,
 ) -> Result<(), String> {
+    // `seq` is both the number of valid positions and the cache's per-head row
+    // stride; the count comes from the step buffer at run time and the stride is
+    // baked here, so one captured graph serves every step.
     if n_kv == 0 || n_heads % n_kv != 0 {
         return Err(format!("n_heads {n_heads} is not a multiple of n_kv {n_kv}"));
     }
@@ -126,10 +139,11 @@ pub fn launch(
     let mut v_heads = n_heads as i32;
     let mut v_kv = n_kv as i32;
     let mut v_dim = head_dim as i32;
-    let mut v_seq = seq as i32;
+    let mut p_step = step.as_ptr();
+    let mut v_stride = seq as i32;
     let mut v_scale = scale;
     let mut v_splits = splits as i32;
-    let mut params: [*mut std::ffi::c_void; 11] = [
+    let mut params: [*mut std::ffi::c_void; 12] = [
         &mut p_q as *mut _ as *mut std::ffi::c_void,
         &mut p_k as *mut _ as *mut std::ffi::c_void,
         &mut p_v as *mut _ as *mut std::ffi::c_void,
@@ -138,7 +152,8 @@ pub fn launch(
         &mut v_heads as *mut _ as *mut std::ffi::c_void,
         &mut v_kv as *mut _ as *mut std::ffi::c_void,
         &mut v_dim as *mut _ as *mut std::ffi::c_void,
-        &mut v_seq as *mut _ as *mut std::ffi::c_void,
+        &mut p_step as *mut _ as *mut std::ffi::c_void,
+        &mut v_stride as *mut _ as *mut std::ffi::c_void,
         &mut v_scale as *mut _ as *mut std::ffi::c_void,
         &mut v_splits as *mut _ as *mut std::ffi::c_void,
     ];

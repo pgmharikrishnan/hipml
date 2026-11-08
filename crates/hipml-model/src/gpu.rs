@@ -28,7 +28,7 @@ use hipml_core::config::Config;
 use hipml_core::gguf::Gguf;
 use hipml_core::kv::{self, KvDtype};
 use hipml_core::mat::Kind;
-use hipml_hip::{Buffer, ByteBuffer};
+use hipml_hip::{Buffer, ByteBuffer, Event};
 use hipml_kernels::launch_kv;
 use hipml_kernels::ssm::{SsmDims, SsmGpuLayer, SsmResidentRefs};
 use hipml_kernels::{AttnLayer, Launcher};
@@ -44,12 +44,20 @@ mod prefill;
 mod deep_kv;
 #[path = "gpu/layers.rs"]
 mod layers;
+#[path = "gpu/trace.rs"]
+mod trace;
+
+#[path = "gpu/graph.rs"]
+mod graph;
+pub use graph::{launches_per_token, GraphTiming};
 
 use layers::{build_attn, build_ssm};
+use trace::mark;
 
 pub use prefill::PrefillReport;
 
 pub use deep_kv::DeepKv;
+pub use trace::Trace;
 use deep_kv::MAX_SPLITS;
 
 struct Block<'a> {
@@ -134,6 +142,11 @@ pub struct GpuEngine<'a> {
     arg_out: Buffer,
     /// Chunked-prefill scratch, allocated on first use and reused after.
     chunk: Option<(usize, prefill::Chunk)>,
+    /// The captured token graph, built on first use: one `hipGraphLaunch`
+    /// submits the whole step instead of ~1,300 kernel launches.
+    graph: Option<hipml_hip::Graph>,
+    /// Stage timing; `None` unless the caller asked for a trace.
+    pub trace: Option<Trace>,
 }
 
 /// Blocks the device argmax reduces over before the one-block fold. 64 blocks
@@ -218,6 +231,8 @@ impl<'a> GpuEngine<'a> {
             arg_i: zeros(ARGMAX_PARTS)?,
             arg_out: zeros(1)?,
             chunk: None,
+            graph: None,
+            trace: None,
         })
     }
 
@@ -240,7 +255,7 @@ impl<'a> GpuEngine<'a> {
 
     /// One token through the whole graph; returns the `n_vocab` logits.
     pub fn forward_token(&mut self, token: u32, st: &mut GpuState) -> Result<Vec<f32>, String> {
-        self.run_token(token, st)?;
+        self.run_token(token, st, true)?;
         self.model.launcher().synchronize()?;
         self.logits.to_host()
     }
@@ -249,7 +264,7 @@ impl<'a> GpuEngine<'a> {
     /// back. This is the decode loop; `forward_token` stays for the oracle
     /// comparison, which needs the whole logit vector.
     pub fn forward_token_id(&mut self, token: u32, st: &mut GpuState) -> Result<u32, String> {
-        self.run_token(token, st)?;
+        self.run_token(token, st, true)?;
         let l = self.model.launcher();
         l.argmax_buf(
             &self.logits,
@@ -265,29 +280,47 @@ impl<'a> GpuEngine<'a> {
     }
 
     /// Everything up to and including `lm_head`; no synchronize.
-    fn run_token(&mut self, token: u32, st: &mut GpuState) -> Result<(), String> {
+    ///
+    /// `set_step` writes `[pos, seq, token]` into the launcher's device step
+    /// buffer. It is false inside a capture: the graph reads that buffer at
+    /// launch time, so the host writes it once per token instead and the captured
+    /// launch has no host arguments left.
+    fn run_token(&mut self, token: u32, st: &mut GpuState, set_step: bool) -> Result<(), String> {
         let l = self.model.launcher();
         let cfg = &self.cfg;
         let pos = st.pos;
+        if set_step {
+            l.set_step(pos, pos + 1, token as usize)?;
+        }
 
-        l.embed_row_q4_k(self.embed.0, token as usize, self.embed.1, &self.x)?;
+        l.embed_row_q4_k_dev(self.embed.0, self.embed.1, &self.x, cfg.n_embd)?;
+        mark(&mut self.trace, l, "embed")?;
 
         for i in 0..self.layers.len() {
             let block = &self.layers[i];
             let block_out: &Buffer = match &block.kind {
                 BlockKind::Ssm(s) => {
                     l.rmsnorm_buf(&self.x, &block.attn_norm, s.input(), cfg.n_embd, cfg.eps)?;
-                    s.step()?;
+                    mark(&mut self.trace, l, "ssm_in")?;
+                    s.gemvs()?;
+                    mark(&mut self.trace, l, "ssm_proj")?;
+                    s.recurrent()?;
+                    mark(&mut self.trace, l, "ssm_rec")?;
+                    s.output_gemv()?;
+                    mark(&mut self.trace, l, "ssm_step")?;
                     s.output()
                 }
                 BlockKind::Full { attn, deep: None } => {
                     l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
+                    mark(&mut self.trace, l, "attn_in")?;
                     attn.forward_buf(l, &self.t, pos)?;
+                    mark(&mut self.trace, l, "block")?;
                     attn.output()
                 }
                 BlockKind::Full { attn, deep: Some(dk) } => {
                     l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
-                    attn.prepare_qkv(l, &self.t, pos)?;
+                    mark(&mut self.trace, l, "attn_in")?;
+                    attn.prepare_qkv(l, &self.t)?;
                     // Quantize and append the new K/V row on the device: one
                     // launch instead of a readback and eight uploads.
                     l.kv_encode(
@@ -299,25 +332,30 @@ impl<'a> GpuEngine<'a> {
                         cfg.n_head_kv,
                         cfg.head_dim,
                         dk.seq,
-                        pos,
                     )?;
                     deep_attention(l, cfg, attn, dk, pos)?;
                     attn.apply_output(l)?;
+                    mark(&mut self.trace, l, "block")?;
                     attn.output()
                 }
             };
             l.residual_buf(&self.x, block_out, &self.x1, cfg.n_embd)?;
             l.rmsnorm_buf(&self.x1, &block.post_norm, &self.t, cfg.n_embd, cfg.eps)?;
+            mark(&mut self.trace, l, "post_norm")?;
 
             block.gate.gemv(l, &self.t, &self.gate)?;
+            mark(&mut self.trace, l, "gate")?;
             block.up.gemv(l, &self.t, &self.up)?;
+            mark(&mut self.trace, l, "up")?;
             l.silu_mul_buf(&self.gate, &self.up, &self.act, cfg.n_ff)?;
             block.down.gemv(l, &self.act, &self.down)?;
+            mark(&mut self.trace, l, "down")?;
             l.residual_buf(&self.down, &self.x1, &self.x, cfg.n_embd)?;
         }
 
         st.pos += 1;
         l.rmsnorm_buf(&self.x, &self.output_norm, &self.final_h, cfg.n_embd, cfg.eps)?;
+        mark(&mut self.trace, l, "out_norm")?;
         let out = self
             .model
             .tensor(crate::OUTPUT)
@@ -329,7 +367,8 @@ impl<'a> GpuEngine<'a> {
             &self.logits,
             cfg.n_vocab,
             cfg.n_embd,
-        )
+        )?;
+        mark(&mut self.trace, l, "lm_head")
     }
 
     pub fn model(&self) -> &Model {
@@ -382,10 +421,14 @@ fn deep_attention(
     if seq > dk.seq {
         return Err(format!("position {pos} beyond quantized cache {}", dk.seq));
     }
-    let splits = (seq / 64).clamp(1, MAX_SPLITS);
+    // Fixed for the whole cache, not per step: the grid is part of the captured
+    // graph. At depth this is the same count the per-step formula picked (64 at
+    // 100K), and shallow positions just leave the later splits empty.
+    let splits = (dk.seq / 64).clamp(1, MAX_SPLITS);
     launch_kv::launch(
         l.module(),
         l.stream(),
+        l.step_buf(),
         dk.dtype.id(),
         attn.q_buf(),
         &dk.k,
@@ -396,7 +439,11 @@ fn deep_attention(
         cfg.n_head,
         cfg.n_head_kv,
         cfg.head_dim,
-        seq,
+        // The cache's per-head row count, not `seq`: the kernel reads `seq`
+        // positions starting at row 0 of a `dk.seq`-stride layout. Passing the
+        // position count here made every decode step above position 0 read the
+        // wrong rows for every KV head but the first.
+        dk.seq,
         1.0f32 / (cfg.head_dim as f32).sqrt(),
         splits,
         0,

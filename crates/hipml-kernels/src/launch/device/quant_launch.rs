@@ -87,6 +87,26 @@ impl Launcher {
             m: usize,
             k: usize,
         ) -> Result<(), String> {
+            self.run_quant_resident_on("stream", name, w, x, y, m, k)
+        }
+
+        /// The same launch on a chosen stream: the side-stream half of a
+        /// parallel section (see `Launcher::fork`).
+        pub fn run_quant_resident_on(
+            &self,
+            which: &str,
+            name: &str,
+            w: &ByteBuffer,
+            x: &Buffer,
+            y: &Buffer,
+            m: usize,
+            k: usize,
+        ) -> Result<(), String> {
+            let stream = if which == "side" {
+                &self.side
+            } else {
+                &self.stream
+            };
             assert_eq!(x.len(), k, "x must be k");
             assert_eq!(y.len(), m, "y must be m");
             let spec = crate::spec(name).ok_or_else(|| format!("{name} is not in the manifest"))?;
@@ -108,7 +128,7 @@ impl Launcher {
                 crate::KernelKind::PerRow { block } => LaunchConfig::per_row(m, block),
                 _ => return Err(format!("{name}: unsupported quantized grid")),
             };
-            kernel.launch(cfg, &self.stream, &mut params)
+            kernel.launch(cfg, stream, &mut params)
         }
 
         /// `gemm_f32` with the weight already resident: the multi-row f32
@@ -196,6 +216,24 @@ impl Launcher {
             m: usize,
             k: usize,
         ) -> Result<(), String> {
+            self.run_f32_resident_on("stream", w, x, y, m, k)
+        }
+
+        /// `gemv_f32` on a chosen stream.
+        pub fn run_f32_resident_on(
+            &self,
+            which: &str,
+            w: &Buffer,
+            x: &Buffer,
+            y: &Buffer,
+            m: usize,
+            k: usize,
+        ) -> Result<(), String> {
+            let stream = if which == "side" {
+                &self.side
+            } else {
+                &self.stream
+            };
             let kernel = self.module.kernel("gemv_f32")?;
             let mut p_w = w.as_ptr();
             let mut p_x = x.as_ptr();
@@ -209,7 +247,7 @@ impl Launcher {
                 &mut v_m as *mut _ as *mut c_void,
                 &mut v_k as *mut _ as *mut c_void,
             ];
-            kernel.launch(LaunchConfig::per_row(m, 256), &self.stream, &mut params)
+            kernel.launch(LaunchConfig::per_row(m, 256), stream, &mut params)
         }
 
         /// Frozen-weight variant of `run_quant_reps`: `w` is already resident in

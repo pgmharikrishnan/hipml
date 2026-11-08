@@ -20,6 +20,12 @@ mod load_cmd;
 mod prefill_cmd;
 #[cfg(feature = "hip")]
 mod profile_cmd;
+#[cfg(feature = "hip")]
+mod sweep_ab;
+#[cfg(feature = "hip")]
+mod sweep_merge;
+#[cfg(feature = "hip")]
+mod sweep_cmd;
 mod quant_cmd;
 #[cfg(feature = "hip")]
 mod ssm_cmd;
@@ -60,6 +66,15 @@ fn main() {
             #[cfg(not(feature = "hip"))]
             {
                 eprintln!("gpu-bench needs a build with `--features hip`");
+                std::process::exit(2);
+            }
+        }
+        "gpu-sweep" => {
+            #[cfg(feature = "hip")]
+            std::process::exit(sweep_cmd::sweep(&args[1..]));
+            #[cfg(not(feature = "hip"))]
+            {
+                eprintln!("gpu-sweep needs a build with `--features hip`");
                 std::process::exit(2);
             }
         }

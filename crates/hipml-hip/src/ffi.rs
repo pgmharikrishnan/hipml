@@ -13,6 +13,10 @@ pub type HipDevice = c_int;
 pub type HipStream = *mut c_void;
 pub type HipModule = *mut c_void;
 pub type HipFunction = *mut c_void;
+pub type HipEvent = *mut c_void;
+pub type HipGraph = *mut c_void;
+pub type HipGraphExec = *mut c_void;
+pub type HipGraphNode = *mut c_void;
 
 pub const HIP_SUCCESS: HipError = 0;
 
@@ -43,9 +47,39 @@ extern "C" {
     pub fn hipMemcpy(dst: *mut c_void, src: *const c_void, size: usize, kind: c_int) -> HipError;
     pub fn hipDeviceSynchronize() -> HipError;
 
+    pub fn hipEventCreate(event: *mut HipEvent) -> HipError;
+    pub fn hipEventDestroy(event: HipEvent) -> HipError;
+    pub fn hipEventRecord(event: HipEvent, stream: HipStream) -> HipError;
+    pub fn hipEventSynchronize(event: HipEvent) -> HipError;
+    pub fn hipEventElapsedTime(ms: *mut f32, start: HipEvent, stop: HipEvent) -> HipError;
+
     pub fn hipStreamCreate(stream: *mut HipStream) -> HipError;
     pub fn hipStreamDestroy(stream: HipStream) -> HipError;
     pub fn hipStreamSynchronize(stream: HipStream) -> HipError;
+    pub fn hipStreamWaitEvent(stream: HipStream, event: HipEvent, flags: u32) -> HipError;
+
+    // Stream capture and the executable graph it produces. `hipGraphInstantiate`
+    // takes (exec, graph, error node, log buffer, log size) in HIP.
+    pub fn hipStreamBeginCapture(stream: HipStream, mode: c_int) -> HipError;
+    pub fn hipStreamEndCapture(stream: HipStream, graph: *mut HipGraph) -> HipError;
+    pub fn hipGraphInstantiate(
+        exec: *mut HipGraphExec,
+        graph: HipGraph,
+        error_node: *mut HipGraphNode,
+        log_buffer: *mut c_char,
+        log_size: usize,
+    ) -> HipError;
+    pub fn hipGraphLaunch(exec: HipGraphExec, stream: HipStream) -> HipError;
+    pub fn hipGraphUpload(exec: HipGraphExec, stream: HipStream) -> HipError;
+    pub fn hipGraphDestroy(graph: HipGraph) -> HipError;
+    pub fn hipGraphExecDestroy(exec: HipGraphExec) -> HipError;
+    pub fn hipMemcpyAsync(
+        dst: *mut c_void,
+        src: *const c_void,
+        size: usize,
+        kind: c_int,
+        stream: HipStream,
+    ) -> HipError;
 
     pub fn hipModuleLoad(module: *mut HipModule, file: *const c_char) -> HipError;
     pub fn hipModuleUnload(module: HipModule) -> HipError;
