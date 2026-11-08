@@ -249,19 +249,23 @@ path, and `gpu-bench --graph` the same argmax, at depth 0 and at 100K.
 
 | approach | effective GB/s | ms/token | tok/s | submit |
 | --- | ---: | ---: | ---: | ---: |
-| eager, 1,299 launches | 494 | 33.32 | 30.01 | 2.35 ms/token host, overlapped |
-| capture + `hipGraphLaunch` | 494 | 33.27 | 30.06 | 0.006 ms/token host |
+| eager, 1,299 launches | 494 | 33.32 | 30.01 | 2.35 ms of launch API (1.81 us/launch) |
+| capture + `hipGraphLaunch` | 494 | 33.27 | 30.06 | 1 call |
 | one kernel over an ffn gate+up job list | 562 vs 568 | — | — | 64 vs 128 launches |
 | split-K x2 / x4 / x8 on ffn_down | 546 / 551 / 531 vs 559 | — | — | 120 vs 60 launches |
 | sc1 streaming loads (`nontemporal`) | 491 vs 559 | — | — | — |
 | two weight streams (`gpu-sweep --pair`, WP16) | 370 vs 500 | — | — | — |
 | `hipMemAdvise` / `hipMemPrefetchAsync` | not applicable | | | |
 
-**Submission is not on the critical path.** 1,299 launches at 1.81 us are
-2.35 ms of host time against 33.3 ms of GPU work, so the host finishes a token
-eight times over before the device does; a graph launch at 6 us changes nothing
-(0.998x). The 1.6 ms of "idle between launches" the event pass reports is
-GPU-side drain at each kernel boundary, and capture does not remove it.
+**Submission is not on the critical path.** 1,299 launches at 1.81 us are 2.35 ms
+of API time against 33.3 ms of GPU work. In the real loop the host cannot run
+ahead anyway: it needs the sampled id back before it can issue the next token, so
+it only ever has one step queued, the command queue fills, and the driver
+throttles the issuing thread to the device's own pace (`gpu-bench --graph-probe`
+sees 31.3 ms of blocked host per token, graph or not). A graph launch therefore
+changes the wall clock by nothing (0.99-1.00x), and the 1.6 ms of "idle between
+launches" the event pass reports is GPU-side drain at each kernel boundary, which
+capture does not remove.
 
 **The fifteen weight streams are not paying for being fifteen.** The same 6.85 GB
 of ffn gate+up bytes stream at 568 GB/s as 128 launches and 562 GB/s as 64
