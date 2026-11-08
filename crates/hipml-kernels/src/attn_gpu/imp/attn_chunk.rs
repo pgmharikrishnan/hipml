@@ -16,8 +16,6 @@ use super::*;
 /// Query tokens per block in `attn_chunk_tile_f32`. Must match ACQ_TOKENS in
 /// `attn_chunk_f32.hip`, which is also the KV re-read stride.
 pub const ATTN_QUERY_TILE: u32 = 64;
-/// Queries per warp; `block` is `(ATTN_QUERY_TILE / ATTN_QUERIES_PER_WARP) * 32`.
-pub const ATTN_QUERIES_PER_WARP: u32 = 8;
 
 impl AttnLayer<'_> {
     /// Q/K/V projections for `tokens` rows of `x` into chunk buffers
@@ -203,7 +201,7 @@ impl AttnLayer<'_> {
                     (tokens as u32 + ATTN_QUERY_TILE - 1) / ATTN_QUERY_TILE,
                     1,
                 ),
-                block: ((ATTN_QUERY_TILE / ATTN_QUERIES_PER_WARP) * 32, 1, 1),
+                block: ((ATTN_QUERY_TILE / 4) * 32, 1, 1),
                 shared_mem_bytes: 0,
             }
         } else {
