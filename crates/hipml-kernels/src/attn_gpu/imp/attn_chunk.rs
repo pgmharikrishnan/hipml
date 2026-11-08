@@ -13,9 +13,9 @@
 
 use super::*;
 
-/// Query rows per block in `attn_chunk_wmma_f16` and the warps per query
-/// head (one score warp, one value warp).
-pub const ATTN_WMMA_QUERIES: u32 = 16;
+/// Query rows per block in `attn_chunk_wmma_f16` (two warps, 16 each) and the
+/// warps per query head.
+pub const ATTN_WMMA_QUERIES: u32 = 32;
 pub const ATTN_WMMA_WARPS: usize = 2;
 
 /// Query tokens per block in `attn_chunk_tile_f32`. Must match ACQ_TOKENS in
@@ -227,10 +227,12 @@ impl AttnLayer<'_> {
             // Must match AW_QUERIES / AW_WARPS_PER_HEAD in attn_chunk_wmma.hip.
             let kernel = self.module_kernel(l, "attn_chunk_wmma_f16")?;
             let cfg = LaunchConfig {
+                // blockIdx.z picks half of the head width: 8 output
+                // fragments per warp instead of 16 (no register spill).
                 grid: (
                     d.n_kv as u32,
                     (t + ATTN_WMMA_QUERIES - 1) / ATTN_WMMA_QUERIES,
-                    1,
+                    2,
                 ),
                 block: ((warp_heads * ATTN_WMMA_WARPS * 32) as u32, 1, 1),
                 shared_mem_bytes: 0,
