@@ -21,14 +21,16 @@ MODEL="${HIPML_BENCH_MODEL:-C:\\models\\Qwen3.8-27B-Q4_K_M.gguf}"
 LLAMA_SERVER="${HIPML_BENCH_LLAMA_SERVER:-C:\\llama.cpp\\rocm-gfx120x\\llama-server.exe}"
 DEPTHS="0,8192,32768,100000"
 ENGINES="hipml,llama"
-REPS=5
+REPS=3
 REPS_100K=1
+REPS_DEEP=1
 FORCE=0
 SYNC=1
 BUILD=1
 REFRESH_FIXTURE=0
 STAGE=1
-LLAMA_KV="${HIPML_BENCH_LLAMA_KV:-f16}"
+LLAMA_KV="${HIPML_BENCH_LLAMA_KV:-q8_0}"
+HIPML_KV="${HIPML_BENCH_HIPML_KV:-q8}"
 PROMPTS=""
 
 usage() {
@@ -39,14 +41,16 @@ Options:
   --depth LIST        comma-separated depths (default: 0,8192,32768,100000)
   --engine LIST       comma-separated engines: hipml,llama (default: both)
   --prompt LIST       comma-separated prompt labels (default: all five)
-  --reps N            cold reps for depths below 100000 (default: 5)
-  --reps-100k N       cold reps at 100000 (default: 1, marked explicitly)
+  --reps N            cold reps for depths 0 and 8192 (default: 3)
+  --reps-deep N       cold reps for depths 32768 and 100000 (default: 1)
+  --reps-100k N       alias for the 100000 rep count (default: 1)
   --force             rerun cells even if a result file exists
   --no-sync           use the tree already at C:\hipml-bench
   --skip-build        do not run cargo build on the host
   --refresh-fixture   regenerate bench/fixtures/prompts.json from the host
   --no-stage          skip the hipml prefill stage breakdown at depth 0
-  --llama-kv TYPE     f32 or f16 (default: f32, matching hipml's chunked path)
+  --llama-kv TYPE     f32, f16 or q8_0 (default: q8_0)
+  --hipml-kv TYPE     f32, q8 or q4 (default: q8; same class as llama q8_0)
   --host NAME         ssh host (default: rtx, or $RTX_HOST)
   -h, --help          this text
 EOF
@@ -60,6 +64,7 @@ while [ $# -gt 0 ]; do
     --engine) ENGINES="$2"; shift 2 ;;
     --prompt) PROMPTS="$2"; shift 2 ;;
     --reps) REPS="$2"; shift 2 ;;
+    --reps-deep) REPS_DEEP="$2"; shift 2 ;;
     --reps-100k) REPS_100K="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --no-sync) SYNC=0; shift ;;
@@ -67,6 +72,7 @@ while [ $# -gt 0 ]; do
     --refresh-fixture) REFRESH_FIXTURE=1; shift ;;
     --no-stage) STAGE=0; shift ;;
     --llama-kv) LLAMA_KV="$2"; shift 2 ;;
+    --hipml-kv) HIPML_KV="$2"; shift 2 ;;
     --host) HOST="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument $1 (try --help)" ;;
@@ -146,16 +152,20 @@ fi
 # Group cells so one lock acquisition covers several short runs, while every
 # group stays comfortably under 20 minutes. 100K is always one cell per hold.
 for depth in "${DEPTH_ARR[@]}"; do
+  if [ "$depth" -ge 32768 ] && [ -z "$PROMPTS" ]; then
+    DEPTH_PROMPTS=(code_edit)
+  else
+    DEPTH_PROMPTS=("${PROMPT_ARR[@]}")
+  fi
   case "$depth" in
-    32768) group_size=2 ;;
-    100000) group_size=1 ;;
-    *) group_size=${#PROMPT_ARR[@]} ;;
+    32768|100000) group_size=1 ;;
+    *) group_size=${#DEPTH_PROMPTS[@]} ;;
   esac
   for engine in "${ENGINE_ARR[@]}"; do
     case "$engine" in hipml|llama) ;; *) die "unknown engine $engine" ;; esac
     i=0
-    while [ "$i" -lt "${#PROMPT_ARR[@]}" ]; do
-      group=("${PROMPT_ARR[@]:i:group_size}")
+    while [ "$i" -lt "${#DEPTH_PROMPTS[@]}" ]; do
+      group=("${DEPTH_PROMPTS[@]:i:group_size}")
       need=0
       for prompt in "${group[@]}"; do
         out="bench/out/jobs/${engine}_${prompt}_${depth}/result.json"
@@ -185,6 +195,7 @@ for depth in "${DEPTH_ARR[@]}"; do
           continue
         fi
         reps="$REPS"
+        [ "$depth" -ge 32768 ] && reps="$REPS_DEEP"
         [ "$depth" -ge 100000 ] && reps="$REPS_100K"
         extra=""
         if [ "$engine" = hipml ] && [ "$STAGE" = 1 ] && [ "$depth" = 0 ]; then
@@ -193,7 +204,7 @@ for depth in "${DEPTH_ARR[@]}"; do
 
         echo "== run $engine $prompt@$depth reps=$reps"
         start=$(date +%s)
-        ssh "$HOST" "$REMOTE_DIR\\bench\\remote\\with-env.cmd python bench\\job.py --engine $engine --prompt $prompt --depth $depth --reps $reps --model $MODEL --llama-server $LLAMA_SERVER --llama-kv $LLAMA_KV --fixture bench\\fixtures\\prompts.json --out-dir bench\\out\\jobs --tmp bench\\out\\tmp $extra"
+        ssh "$HOST" "$REMOTE_DIR\\bench\\remote\\with-env.cmd python bench\\job.py --engine $engine --prompt $prompt --depth $depth --reps $reps --model $MODEL --llama-server $LLAMA_SERVER --llama-kv $LLAMA_KV --hipml-kv $HIPML_KV --fixture bench\\fixtures\\prompts.json --out-dir bench\\out\\jobs --tmp bench\\out\\tmp $extra"
         rc=$?
         elapsed=$(( $(date +%s) - start ))
         echo "   ${elapsed}s, exit $rc"
@@ -231,8 +242,8 @@ mkdir -p bench/out
 HIPML_COMMIT="$HIPML_COMMIT" HIPML_DIRTY="$HIPML_DIRTY" HIPML_SHA="$HIPML_SHA" \
 LLAMA_VERSION="$LLAMA_VERSION" LLAMA_BUILD="$LLAMA_BUILD" LLAMA_COMMIT="$LLAMA_COMMIT" \
 GPU_INFO="$GPU_INFO" OS_INFO="$OS_INFO" HOST_NAME="$HOST" LLAMA_KV="$LLAMA_KV" \
-MODEL_PATH="$MODEL" LLAMA_SERVER_PATH="$LLAMA_SERVER" \
-DEPTHS="$DEPTHS" REPS="$REPS" REPS_100K="$REPS_100K" \
+HIPML_KV="$HIPML_KV" MODEL_PATH="$MODEL" LLAMA_SERVER_PATH="$LLAMA_SERVER" \
+DEPTHS="$DEPTHS" REPS="$REPS" REPS_DEEP="$REPS_DEEP" REPS_100K="$REPS_100K" \
 python3 - <<'PY'
 import json, os
 meta = {
@@ -246,10 +257,12 @@ meta = {
     "llama_build": os.environ.get("LLAMA_BUILD"),
     "llama_commit": os.environ.get("LLAMA_COMMIT"),
     "llama_kv": os.environ.get("LLAMA_KV"),
+    "hipml_kv": os.environ.get("HIPML_KV"),
     "model_path": os.environ.get("MODEL_PATH"),
     "llama_server_path": os.environ.get("LLAMA_SERVER_PATH"),
     "depths": os.environ.get("DEPTHS"),
     "reps": os.environ.get("REPS"),
+    "reps_deep": os.environ.get("REPS_DEEP"),
     "reps_100k": os.environ.get("REPS_100K"),
 }
 with open("bench/out/meta.json", "w", encoding="utf-8") as f:

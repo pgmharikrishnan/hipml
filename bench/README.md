@@ -7,11 +7,13 @@ This bench removes both differences:
 - five prompt classes, tokenised once by `hipml tokenize`;
 - one JSON fixture (`fixtures/prompts.json`) holds the exact token ids;
 - both engines receive those ids, so neither retokenises at run time;
-- depths 0 / 8192 / 32768 / 100000 are built by prefixing real document text
-  and truncating to the exact token count;
+- depths 0 and 8192 cover all five prompts at 3 reps; 32768 and 100000 use
+  `code_edit` at 1 rep and are marked;
+- both engines use q8-class KV at every depth (hipml `q8`, llama
+  `-ctk q8_0 -ctv q8_0`), so the head-to-head is same-precision;
 - hipml uses `generate --device`; llama.cpp uses `llama-server` on **8092**;
 - each cell is its own row, with cold TTFT, prefill tok/s, decode tok/s over
-  tokens 2..33, peak VRAM, and median/min/max over reps.
+  tokens 2..33, peak VRAM, KV type, spill status, and median/min/max over reps.
 
 ## Rerun
 
@@ -50,7 +52,8 @@ PATH=C:\rocm-sdk\_rocm_sdk_core\bin;%PATH%
 | prefill tok/s | prompt tokens / prefill time | `timings.prompt_per_second` |
 | decode tok/s | 32 `forward_token_id` calls / their sum | `timings.predicted_per_second` (generation loop) |
 | peak VRAM | WDDM `GPU Process Memory \ Dedicated Usage` sampler | same |
-| reps | 5 cold `GpuEngine`s in one process (zeroed KV/state) | 5 `cache_prompt=false` requests |
+| KV | `q8` | `q8_0` |
+| reps | 3 at 0/8192, 1 at 32768/100000; fresh `GpuEngine` each rep | same rep counts, `cache_prompt=false` |
 
 llama.cpp also gets one extra `cache_prompt=true` request after the cold reps.
 That is a cache-hit TTFT, reported separately; it is not a prefill number.
@@ -84,12 +87,12 @@ bench/
 
 - GPU clocks and thermals drift; runs are sequential, but not
   temperature-controlled beyond the lock.
-- hipml's chunked-prefill path requires f32 KV, so hipml runs f32. llama.cpp
-  runs its default f16 KV. The dtype is recorded in every result. This is an
-  as-shipped comparison, not a same-KV-dtype one: at 100K the f32 KV path costs
-  llama.cpp most of its decode rate (the harness measured 6.36 tok/s with f32
-  versus the ~22 tok/s the project's own f16 measurement reports). Run
-  `--llama-kv f32` for the same-dtype sensitivity.
+- hipml and llama.cpp both run q8-class KV (`q8` vs `q8_0`). The formats are
+  the same 8-bit class but not byte-identical, so this is a same-precision
+  comparison. The f32/f16 sensitivity runs are kept under `bench/sensitivity/`.
+- At 100K, q8 KV is ~3.2 GiB (hipml) and ~3.5 GiB (llama.cpp). `RESULTS.md`
+  reports peak VRAM and a spill flag; `spilled=no` means the server logged no
+  allocation failure or CPU offload and peak stayed below 24 GiB.
 - llama-server adds HTTP handling to TTFT (small on localhost, not zero).
 - hipml's TTFT includes the first-token argmax; llama's prompt timing does not.
 - A 100K cell marked `1` rep was too slow to repeat inside the lock window.

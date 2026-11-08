@@ -92,6 +92,9 @@ def engine_summary(j):
         "duration_s": j.get("duration_s"),
         "kv_type": j.get("kv_type"),
         "kv_mode": j.get("kv_mode"),
+        "kv": j.get("kv_type") or j.get("kv_mode"),
+        "hipml_kv": j.get("hipml_kv"),
+        "spilled": j.get("spilled"),
         "warm": j.get("warm"),
         "stage": j.get("stage"),
         "server_version": j.get("server_version"),
@@ -113,6 +116,8 @@ def main():
     ap.add_argument("--meta", default=os.path.join(HERE, "out", "meta.json"))
     ap.add_argument("--results", default=os.path.join(HERE, "results.json"))
     ap.add_argument("--markdown", default=os.path.join(HERE, "RESULTS.md"))
+    ap.add_argument("--deep-prompt", default="code_edit",
+                    help="only this prompt is run at depths >= 32768")
     args = ap.parse_args()
 
     with open(args.fixture, "r", encoding="utf-8") as f:
@@ -142,6 +147,8 @@ def main():
             meta["llama_commit"] = c.group(1)
     cells = []
     for c in fixture["cells"]:
+        if c["depth"] >= 32768 and c["prompt"] != args.deep_prompt:
+            continue
         h = engine_summary(jobs.get(("hipml", c["prompt"], c["depth"])))
         l = engine_summary(jobs.get(("llama", c["prompt"], c["depth"])))
         row = dict(c)
@@ -251,7 +258,9 @@ def write_markdown(report, path):
         "neither retokenises at run time. Depth 0 is the prompt as-is. Deeper "
         "cells are `BOS + real document prefix + prompt`, truncated to the exact "
         "token count. Every numeric cell is `median (min-max)` over cold reps; "
-        "decode is measured over tokens 2..33.\n"
+        "decode is measured over tokens 2..33. Depths 0 and 8192 cover all five "
+        "prompts at 3 reps; 32768 and 100000 use `code_edit` at 1 rep, marked in "
+        "the reps column. Both engines use q8-class KV at every depth.\n"
     )
     lines.append("| field | value |")
     lines.append("| --- | --- |")
@@ -270,6 +279,7 @@ def write_markdown(report, path):
     if meta.get("llama_build"):
         lines.append(f"| llama.cpp build | `{meta['llama_build']}` commit `{meta.get('llama_commit', '?')}` |")
     lines.append(f"| llama KV type | {meta.get('llama_kv', '?')} |")
+    lines.append(f"| hipml KV type | {meta.get('hipml_kv', '?')} |")
     lines.append(f"| generated | {report['generated']} |")
     lines.append("")
 
@@ -279,25 +289,28 @@ def write_markdown(report, path):
         "`Peak` is the process's peak dedicated GPU memory (WDDM counter); it is "
         "one number for the whole cell, not per rep.\n"
     )
-    lines.append("| prompt | depth | tokens | engine | reps | TTFT ms | prefill tok/s | decode tok/s | peak GiB |")
-    lines.append("| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |")
+    lines.append("| prompt | depth | tokens | engine | KV | reps | TTFT ms | prefill tok/s | decode tok/s | peak GiB | spilled |")
+    lines.append("| --- | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |")
     for c in report["cells"]:
         for eng in ("hipml", "llama"):
             e = c[eng]
             if not e.get("available"):
                 lines.append(
-                    f"| {c['prompt']} | {c['depth']} | {c['total']} | {eng} | 0 | "
-                    f"ERROR: {e.get('error', 'missing')} | - | - | - |")
+                    f"| {c['prompt']} | {c['depth']} | {c['total']} | {eng} | - | 0 | "
+                    f"ERROR: {e.get('error', 'missing')} | - | - | - | - |")
                 continue
             peak = e.get("peak_vram_mib")
             peak_gib = f"{peak / 1024.0:.2f}" if peak else "-"
+            kv = e.get("kv") or "-"
+            spill = e.get("spilled")
+            spill_s = "-" if eng == "hipml" else ("YES" if spill is True else ("no" if spill is False else "?"))
             lines.append(
-                f"| {c['prompt']} | {c['depth']} | {c['total']} | {eng} | "
+                f"| {c['prompt']} | {c['depth']} | {c['total']} | {eng} | {kv} | "
                 f"{e.get('reps', 0)} | "
                 f"{cell_block(e.get('ttft_ms'))} | "
                 f"{cell_block(e.get('prefill_tok_s'))} | "
                 f"{cell_block(e.get('decode_tok_s'))} | "
-                f"{peak_gib} |")
+                f"{peak_gib} | {spill_s} |")
     lines.append("")
 
     lines.append("## Gap (hipml minus llama.cpp)\n")
@@ -387,6 +400,25 @@ def write_markdown(report, path):
                 " | ".join(fmt(s.get(k), 0) for k in keys) + " |")
         lines.append("")
 
+    lines.append("## Completeness\n")
+    missing = [c for c in report["cells"]
+               if not c["hipml"].get("available") or not c["llama"].get("available")]
+    if not missing:
+        lines.append(
+            "All planned cells are present: 5 prompts x depths 0 and 8192 at 3 reps, "
+            "and `code_edit` x depths 32768 and 100000 at 1 rep. No ERROR rows.")
+    else:
+        lines.append("| prompt | depth | missing engine | reason |")
+        lines.append("| --- | ---: | --- | --- |")
+        for c in missing:
+            for eng in ("hipml", "llama"):
+                e = c[eng]
+                if not e.get("available"):
+                    lines.append(
+                        f"| {c['prompt']} | {c['depth']} | {eng} | "
+                        f"{e.get('error', 'missing')} |")
+    lines.append("")
+
     lines.append("## Reps and caveats\n")
     one_rep = [c for c in report["cells"]
                if (c["hipml"].get("available") and c["hipml"].get("reps", 0) == 1) or
@@ -406,11 +438,17 @@ def write_markdown(report, path):
             "a cold rep: " + ", ".join(f"`{c['prompt']}@{c['depth']}`" for c in bad_cold) + "."
         )
     lines.append(
-        "- Same model file, same box, sequential engine runs. The two engines do "
-        "not share a KV dtype: hipml's chunked path requires f32, while llama.cpp "
-        "runs its default f16. The dtype is recorded per run; it is an as-shipped "
-        "comparison, not a same-KV-dtype one. At 100K the difference is large: "
-        "llama.cpp's f32 path measured 6.36 tok/s decode where f16 is ~22.")
+        "- Same model file, same box, sequential engine runs. Both engines use "
+        "quantized KV at every depth: hipml `q8` and llama.cpp `-ctk q8_0 -ctv q8_0`. "
+        "The formats are the same 8-bit class but not byte-identical, so this is a "
+        "same-precision-class comparison, not a same-format one.")
+    lines.append(
+        "- At 100K the q8 KV is about 3.2 GiB for hipml and 3.5 GiB for llama.cpp. "
+        "The 100K rows report peak VRAM and whether llama.cpp spilled; the run is "
+        "only accepted if the server logged no allocation failure or CPU offload.")
+    lines.append(
+        "- The earlier f16/f32 sensitivity runs are preserved under `bench/sensitivity/` "
+        "and are not part of the head-to-head.")
     lines.append(
         "- 100K cells are real cold prefill. If a cell shows `1` rep, the run was "
         "too slow to repeat inside the lock window; it is not cache-prefilled.")

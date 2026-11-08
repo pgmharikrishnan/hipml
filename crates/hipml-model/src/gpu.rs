@@ -375,6 +375,27 @@ fn deep_attention(
     dk: &DeepKv,
     pos: usize,
 ) -> Result<(), String> {
+    deep_attention_ptr(
+        l,
+        cfg,
+        dk,
+        pos,
+        attn.q_buf().as_ptr(),
+        attn.attn_out().as_ptr(),
+    )
+}
+
+/// Same decode-attention pair, but reading the query row and writing the
+/// output row through raw pointers. Used by the chunked q8 prefill, whose q and
+/// attention-out rows live inside the chunk scratch.
+fn deep_attention_ptr(
+    l: &Launcher,
+    cfg: &Config,
+    dk: &DeepKv,
+    pos: usize,
+    q_ptr: *mut std::ffi::c_void,
+    out_ptr: *mut std::ffi::c_void,
+) -> Result<(), String> {
     if dk.dtype == KvDtype::Q4 && cfg.head_dim > 256 {
         return Err("q4 KV: head_dim above 256 is not covered".to_string());
     }
@@ -383,16 +404,16 @@ fn deep_attention(
         return Err(format!("position {pos} beyond quantized cache {}", dk.seq));
     }
     let splits = (seq / 64).clamp(1, MAX_SPLITS);
-    launch_kv::launch(
+    launch_kv::launch_ptrs(
         l.module(),
         l.stream(),
         dk.dtype.id(),
-        attn.q_buf(),
+        q_ptr,
         &dk.k,
         &dk.v,
         &dk.part_acc,
         &dk.part_ml,
-        attn.attn_out(),
+        out_ptr,
         cfg.n_head,
         cfg.n_head_kv,
         cfg.head_dim,

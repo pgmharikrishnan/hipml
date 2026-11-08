@@ -211,14 +211,41 @@ impl Launcher {
         seq: usize,
         pos: usize,
     ) -> Result<(), String> {
+        self.kv_encode_ptr(
+            dtype,
+            k_in.as_ptr(),
+            v_in.as_ptr(),
+            k_cache,
+            v_cache,
+            n_kv,
+            head_dim,
+            seq,
+            pos,
+        )
+    }
+
+    /// Quantize and append one K/V row whose source pointer is a row inside a
+    /// larger chunk buffer. Used by the chunked q8 prefill.
+    pub fn kv_encode_ptr(
+        &self,
+        dtype: usize,
+        k_ptr: *mut std::ffi::c_void,
+        v_ptr: *mut std::ffi::c_void,
+        k_cache: &Buffer,
+        v_cache: &Buffer,
+        n_kv: usize,
+        head_dim: usize,
+        seq: usize,
+        pos: usize,
+    ) -> Result<(), String> {
         let entry = match dtype {
             0 => "kv_encode_q8",
             1 => "kv_encode_q4",
             other => return Err(format!("unknown KV dtype {other}")),
         };
         let kernel = self.module.kernel(entry)?;
-        let mut p_k = k_in.as_ptr();
-        let mut p_v = v_in.as_ptr();
+        let mut p_k = k_ptr;
+        let mut p_v = v_ptr;
         let mut p_kc = k_cache.as_ptr();
         let mut p_vc = v_cache.as_ptr();
         let mut v_hd = head_dim as i32;

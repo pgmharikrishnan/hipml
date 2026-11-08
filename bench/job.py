@@ -100,7 +100,8 @@ def run_hipml(args, fixture, cell, ids, out):
 
     cmd = [args.hipml, "generate", "--device", "--gguf", args.model,
            "--ids-file", ids_path, "--tokens", str(GEN_TOKENS),
-           "--ctx", str(len(ids) + 64), "--reps", str(args.reps), "--json"]
+           "--ctx", str(len(ids) + 64), "--reps", str(args.reps), "--json",
+           "--kv", args.hipml_kv]
     if args.stage_report:
         cmd.append("--stage-report")
 
@@ -138,6 +139,7 @@ def run_hipml(args, fixture, cell, ids, out):
         "prompt_tokens_reported": payload.get("prompt_tokens"),
         "n_ctx": payload.get("n_ctx"),
         "kv_mode": payload.get("kv_mode"),
+        "hipml_kv": args.hipml_kv,
         "weights_bytes": payload.get("weights_bytes"),
         "kv_bytes": payload.get("kv_bytes"),
         "model_load_s": payload.get("model_load_s"),
@@ -286,6 +288,20 @@ def run_llama(args, fixture, cell, ids, out):
     except subprocess.TimeoutExpired:
         sampler.kill()
 
+    peak = read_peak(peak_path)
+    spilled = None
+    try:
+        log_text = open(log_path, "r", encoding="utf-8", errors="replace").read().lower()
+        if ("failed to allocate" in log_text or "out of memory" in log_text
+                or "to cpu" in log_text or "cpu buffer" in log_text):
+            spilled = True
+        elif peak is not None and peak < 24 * 1024:
+            # All weights and the q8 KV fit; llama-server would have logged an
+            # allocation failure or a CPU offload before running this low.
+            spilled = False
+    except Exception:
+        pass
+
     result = {
         "engine": "llama",
         "prompt": cell["prompt"],
@@ -296,8 +312,9 @@ def run_llama(args, fixture, cell, ids, out):
         "warm": warm,
         "ctx": ctx,
         "kv_type": args.llama_kv,
+        "spilled": spilled,
         "server_version": llama_version(args.llama_server),
-        "peak_vram_mib": read_peak(peak_path),
+        "peak_vram_mib": peak,
         "command": cmd,
         "duration_s": duration,
         "started": started,
@@ -317,7 +334,8 @@ def main():
     ap.add_argument("--llama-server",
                     default=r"C:\llama.cpp\rocm-gfx120x\llama-server.exe")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
-    ap.add_argument("--llama-kv", default="f32", choices=["f32", "f16"])
+    ap.add_argument("--llama-kv", default="q8_0", choices=["f32", "f16", "q8_0"])
+    ap.add_argument("--hipml-kv", default="q8", choices=["f32", "q8", "q4"])
     ap.add_argument("--stage-report", action="store_true")
     ap.add_argument("--timeout", type=int, default=1080,
                     help="hipml per-cell wall timeout (keeps the lock under 20 min)")
