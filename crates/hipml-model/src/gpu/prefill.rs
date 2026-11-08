@@ -294,7 +294,8 @@ impl<'a> GpuEngine<'a> {
                     // cache directly, with every KV tile dequantized inside the
                     // matrix-unit kernel. The row-at-a-time path remains the
                     // escape hatch (HIPML_TOKEN_STEPS) and the cover for shapes
-                    // the matrix-unit kernel does not handle.
+                    // the matrix-unit kernel does not handle; HIPML_Q8_CHUNK
+                    // forces the quantized chunk path for A/B at shallow depth.
                     attn.project_chunk(l, &c.t, &c.qg, &c.k, &c.v, n_tok)?;
                     if let Some(r) = rep.as_mut() {
                         r.lap(l, |r| &mut r.attn_gemm_ms);
@@ -307,7 +308,7 @@ impl<'a> GpuEngine<'a> {
                                 l, &c.qg, &c.k, &c.v, &c.q, &c.aq_gate, &c.aout, t, pos0 + t,
                             )?;
                         }
-                    } else if dk.mirror {
+                    } else if dk.mirror && std::env::var_os("HIPML_Q8_CHUNK").is_none() {
                         attn.step_chunk(
                             l,
                             &c.qg,
