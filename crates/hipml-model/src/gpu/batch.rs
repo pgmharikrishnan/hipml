@@ -135,6 +135,9 @@ pub struct BatchEngine<'a> {
     pub trace: bool,
     /// Seconds per stage accumulated by `forward` when `trace` is on.
     pub stages: [f64; 9],
+    /// Split alternating slots across the two streams. `HIPML_BATCH_NOSPLIT`
+    /// disables it for an A/B.
+    pub overlap: bool,
 }
 
 impl<'a> BatchEngine<'a> {
@@ -165,6 +168,7 @@ impl<'a> BatchEngine<'a> {
         }
         let embed = (embed.buffer(), (embed.nbytes() / embed.rows()) as usize);
         let zeros = |count: usize| Buffer::alloc(count);
+        let overlap = std::env::var_os("HIPML_BATCH_NOSPLIT").is_none();
         let mut layers = Vec::with_capacity(cfg.n_layer);
         for i in 0..cfg.n_layer {
             let attn_norm = Buffer::from_host(&model.f32_vec(&format!("blk.{i}.attn_norm.weight"))?)?;
@@ -179,7 +183,7 @@ impl<'a> BatchEngine<'a> {
                     // Odd slots launch their recurrence on the side stream, so
                     // the two halves overlap instead of serialising 8 small
                     // kernels at a time.
-                    per_slot.push(build_ssm(model, l, &cfg, i, b % 2 == 1)?);
+                    per_slot.push(build_ssm(model, l, &cfg, i, overlap && b % 2 == 1)?);
                 }
                 BatchKind::Ssm(SsmBatch {
                     per_slot,
@@ -249,6 +253,7 @@ impl<'a> BatchEngine<'a> {
             active: Vec::new(),
             trace: false,
             stages: [0.0; 9],
+            overlap,
         })
     }
 

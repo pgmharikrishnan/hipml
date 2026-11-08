@@ -59,7 +59,7 @@ impl<'a> BatchEngine<'a> {
                     // Slot parity picks the stream (see the SSM split): the
                     // side stream has its own step buffer so the KV appends do
                     // not race on one position.
-                    let split = b > 1;
+                    let split = self.overlap && b > 1;
                     if split {
                         l.fork()?;
                     }
@@ -105,7 +105,7 @@ impl<'a> BatchEngine<'a> {
                             side,
                         )?;
                     }
-                    if b > 1 {
+                    if self.overlap && b > 1 {
                         l.join()?;
                     }
                     stage!(3);
