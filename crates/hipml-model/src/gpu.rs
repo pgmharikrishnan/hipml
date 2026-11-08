@@ -42,6 +42,8 @@ use crate::Model;
 mod prefill;
 #[path = "gpu/deep_kv.rs"]
 mod deep_kv;
+#[path = "gpu/attn_tile.rs"]
+mod attn_tile;
 #[path = "gpu/layers.rs"]
 mod layers;
 #[path = "gpu/trace.rs"]
@@ -61,7 +63,7 @@ pub use prefix::PrefixHit;
 
 pub use deep_kv::DeepKv;
 pub use trace::Trace;
-use deep_kv::MAX_SPLITS;
+
 
 struct Block<'a> {
     attn_norm: Buffer,
@@ -456,60 +458,12 @@ fn deep_attention(
     dk: &DeepKv,
     pos: usize,
 ) -> Result<(), String> {
-    deep_attention_ptr(
+    attn_tile::deep_attention_ptr(
         l,
         cfg,
         dk,
         pos,
         attn.q_buf().as_ptr(),
         attn.attn_out().as_ptr(),
-    )
-}
-
-/// Same decode-attention pair, but reading the query row and writing the
-/// output row through raw pointers. Used by the chunked q8 prefill, whose q and
-/// attention-out rows live inside the chunk scratch.
-fn deep_attention_ptr(
-    l: &Launcher,
-    cfg: &Config,
-    dk: &DeepKv,
-    pos: usize,
-    q_ptr: *mut std::ffi::c_void,
-    out_ptr: *mut std::ffi::c_void,
-) -> Result<(), String> {
-    if dk.dtype == KvDtype::Q4 && cfg.head_dim > 256 {
-        return Err("q4 KV: head_dim above 256 is not covered".to_string());
-    }
-    let seq = pos + 1;
-    if seq > dk.seq {
-        return Err(format!("position {pos} beyond quantized cache {}", dk.seq));
-    }
-    // Chunked prefill is not graph-captured, so size the grid to the positions
-    // that exist. The fixed `dk.seq` split count is only needed when the grid
-    // becomes part of a captured graph (the decode path).
-    let splits = (seq / 64).clamp(1, MAX_SPLITS);
-    launch_kv::launch_ptrs(
-        l.module(),
-        l.stream(),
-        l.step_buf(),
-        dk.dtype.id(),
-        q_ptr,
-        &dk.k,
-        &dk.v,
-        &dk.part_acc,
-        &dk.part_ml,
-        out_ptr,
-        cfg.n_head,
-        cfg.n_head_kv,
-        cfg.head_dim,
-        // The cache's per-head row count, not `seq`: the kernel reads `seq`
-        // positions starting at row 0 of a `dk.seq`-stride layout. Passing the
-        // position count here made every decode step above position 0 read the
-        // wrong rows for every KV head but the first.
-        dk.seq,
-        1.0f32 / (cfg.head_dim as f32).sqrt(),
-        splits,
-        0,
-        0,
     )
 }

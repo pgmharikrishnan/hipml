@@ -104,11 +104,6 @@ pub(crate) struct Chunk {
     pub y: Buffer,
 }
 
-/// Device pointer of row `t` of a `[tokens][width]` f32 buffer.
-fn row_ptr(buf: &Buffer, t: usize, width: usize) -> *mut std::ffi::c_void {
-    unsafe { (buf.as_ptr() as *mut u8).add(t * width * 4) as *mut std::ffi::c_void }
-}
-
 impl Chunk {
     fn new(cfg: &hipml_core::config::Config, tokens: usize) -> Result<Chunk, String> {
         let n = cfg.n_embd;
@@ -254,145 +249,23 @@ impl<'a> GpuEngine<'a> {
                     }
                     &c.ssm.out
                 }
-                BlockKind::Full { attn, deep: None } => {
+                BlockKind::Full { attn, deep } => {
+                    // One batched GEMM per chunk for q/k/v, then the cache-
+                    // dependent attention tile (f32 mirror, q8/q4 read in
+                    // place, or the row-at-a-time fallback).
                     attn.project_chunk(l, &c.t, &c.qg, &c.k, &c.v, n_tok)?;
                     if let Some(r) = rep.as_mut() {
                         r.lap(l, |r| &mut r.attn_gemm_ms);
                     }
-                    if std::env::var_os("HIPML_TOKEN_STEPS").is_some()
-                        || !attn.chunk_supported()
-                    {
-                        for t in 0..n_tok {
-                            attn.step_chunk_row(
-                                l, &c.qg, &c.k, &c.v, &c.q, &c.aq_gate, &c.aout, t, pos0 + t,
-                            )?;
-                        }
-                    } else {
-                        attn.step_chunk(
-                            l,
-                            &c.qg,
-                            &c.k,
-                            &c.v,
-                            &c.q,
-                            &c.aq_gate,
-                            &c.aout,
-                            pos0,
-                            n_tok,
-                        )?;
-                    }
-                    attn.apply_output_chunk(l, &c.aout, &c.aq_gate, &c.y, n_tok)?;
-                    if let Some(r) = rep.as_mut() {
-                        r.lap(l, |r| &mut r.attn_seq_ms);
-                    }
-                    &c.y
-                }
-                BlockKind::Full { attn, deep: Some(dk) } => {
-                    // The projections are still one batched GEMM per chunk. The
-                    // attention reads whichever KV cache the engine carries: the
-                    // bounded f32 mirror while it exists (at most
-                    // F32_PREFILL_MAX positions), otherwise the q8/q4 decode
-                    // cache directly, with every KV tile dequantized inside the
-                    // matrix-unit kernel. The row-at-a-time path remains the
-                    // escape hatch (HIPML_TOKEN_STEPS) and the cover for shapes
-                    // the matrix-unit kernel does not handle. HIPML_Q8_CHUNK
-                    // forces the quantized chunk path at shallow depth and
-                    // HIPML_Q8_ROW forces the row path, both for A/B.
-                    attn.project_chunk(l, &c.t, &c.qg, &c.k, &c.v, n_tok)?;
-                    if let Some(r) = rep.as_mut() {
-                        r.lap(l, |r| &mut r.attn_gemm_ms);
-                    }
-                    if std::env::var_os("HIPML_TOKEN_STEPS").is_some()
-                        || !attn.chunk_supported()
-                    {
-                        for t in 0..n_tok {
-                            attn.step_chunk_row(
-                                l, &c.qg, &c.k, &c.v, &c.q, &c.aq_gate, &c.aout, t, pos0 + t,
-                            )?;
-                        }
-                    } else if dk.mirror
-                        && std::env::var_os("HIPML_Q8_CHUNK").is_none()
-                        && std::env::var_os("HIPML_Q8_ROW").is_none()
-                    {
-                        attn.step_chunk(
-                            l,
-                            &c.qg,
-                            &c.k,
-                            &c.v,
-                            &c.q,
-                            &c.aq_gate,
-                            &c.aout,
-                            pos0,
-                            n_tok,
-                        )?;
-                        l.kv_encode_bulk(
-                            dk.dtype.id(),
-                            attn.kv_k_buf(),
-                            attn.kv_v_buf(),
-                            &dk.k,
-                            &dk.v,
-                            cfg.n_head_kv,
-                            cfg.head_dim,
-                            dk.seq,
-                            pos0,
-                            pos0,
-                            n_tok,
-                        )?;
-                    } else if attn.q8_chunk_supported()
-                        && std::env::var_os("HIPML_Q8_ROW").is_none()
-                    {
-                        // Quantize the tile straight into the decode cache, then
-                        // run the same matrix-unit attention over it.
-                        attn.chunk_front(l, &c.qg, &c.k, &c.q, &c.aq_gate, pos0, n_tok)?;
-                        l.kv_encode_bulk(
-                            dk.dtype.id(),
-                            &c.k,
-                            &c.v,
-                            &dk.k,
-                            &dk.v,
-                            cfg.n_head_kv,
-                            cfg.head_dim,
-                            dk.seq,
-                            pos0,
-                            0,
-                            n_tok,
-                        )?;
-                        attn.chunk_attention_q8(
-                            l,
-                            &c.q,
-                            &dk.k,
-                            &dk.v,
-                            &c.aout,
-                            pos0,
-                            n_tok,
-                            dk.dtype.id() + 1,
-                            dk.seq,
-                        )?;
-                    } else {
-                        let width = cfg.n_head_kv * cfg.head_dim;
-                        let q_width = cfg.n_head * cfg.head_dim;
-                        for t in 0..n_tok {
-                            let pos = pos0 + t;
-                            attn.prep_chunk_row(l, &c.qg, &c.k, &c.q, &c.aq_gate, t, pos)?;
-                            l.kv_encode_ptr(
-                                dk.dtype.id(),
-                                row_ptr(&c.k, t, width),
-                                row_ptr(&c.v, t, width),
-                                &dk.k,
-                                &dk.v,
-                                cfg.n_head_kv,
-                                cfg.head_dim,
-                                dk.seq,
-                            )?;
-                            deep_attention_ptr(
-                                l,
-                                &cfg,
-                                dk,
-                                pos,
-                                row_ptr(&c.q, t, q_width),
-                                row_ptr(&c.aout, t, q_width),
-                            )?;
-                        }
-                    }
+                    attn_tile::attention_tile(
+                        l,
+                        &cfg,
+                        attn,
+                        deep.as_ref(),
+                        c,
+                        pos0,
+                        n_tok,
+                    )?;
                     attn.apply_output_chunk(l, &c.aout, &c.aq_gate, &c.y, n_tok)?;
                     if let Some(r) = rep.as_mut() {
                         r.lap(l, |r| &mut r.attn_seq_ms);
