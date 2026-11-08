@@ -76,9 +76,17 @@ pub fn bench_kv(args: &[String]) -> i32 {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<usize>().ok());
 
+    // `--kernels 0,4,5`: which entry points to time (see `kvbench::VARIANTS`).
+    #[cfg_attr(not(feature = "hip"), allow(unused_variables))]
+    let kernels: Option<Vec<usize>> = args
+        .iter()
+        .position(|a| a == "--kernels")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect());
+
     #[cfg(feature = "hip")]
     {
-        let report = match hipml_kernels::kvbench::run(&depths, reps, splits) {
+        let report = match hipml_kernels::kvbench::run(&depths, reps, splits, kernels.as_deref()) {
             Ok(r) => r,
             Err(e) => {
                 println!("bench-kv failed: {e}");
@@ -101,7 +109,7 @@ pub fn bench_kv(args: &[String]) -> i32 {
         println!("cache bytes are synthetic but format-valid; 100K correctness is `hipml parity --deep`\n");
         println!(
             "{:<5} {:>5} {:>6} {:>7} {:>6} {:>11} {:>9} {:>8} {:>8} {:>7}",
-            "dtype", "heads", "layers", "depth", "splits", "us", "KV_GiB", "GB/s", "share", "tok/s"
+            "kern", "heads", "layers", "depth", "splits", "us", "KV_GiB", "GB/s", "share", "tok/s"
         );
         for r in &report.rows {
             let step = report.weights_us + r.us;
@@ -115,7 +123,7 @@ pub fn bench_kv(args: &[String]) -> i32 {
             };
             println!(
                 "{:<5} {:>5} {:>6} {:>7} {:>6} {:>11.1} {:>9.3} {:>8.1} {:>8} {:>7}",
-                r.dtype.name(),
+                r.label,
                 r.heads,
                 r.layers,
                 r.seq,

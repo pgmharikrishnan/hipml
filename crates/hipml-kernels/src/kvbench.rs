@@ -24,6 +24,8 @@ pub const WEIGHTS_BYTES: f64 = 17.19e9;
 
 /// One line of the report.
 pub struct Row {
+    /// Entry-point label: `q8`, `q4`, or the experimental variant's name.
+    pub label: &'static str,
     pub dtype: KvDtype,
     pub heads: usize,
     pub layers: usize,
@@ -35,6 +37,15 @@ pub struct Row {
     pub bytes: usize,
     pub gbs: f64,
 }
+
+/// Kernel ids the bench can time: the shipped staged kernels plus the
+/// warp-per-KV-head variants. `(id, cache dtype, label)`.
+const VARIANTS: &[(usize, KvDtype, &str)] = &[
+    (0, KvDtype::Q8, "q8"),
+    (1, KvDtype::Q4, "q4"),
+    (4, KvDtype::Q8, "q8w2"),
+    (5, KvDtype::Q8, "q8w4"),
+];
 
 pub struct Report {
     pub device: String,
@@ -48,7 +59,12 @@ pub struct Report {
 }
 
 /// `depths` in tokens; `reps` is the minimum number of timed passes.
-pub fn run(depths: &[usize], reps_min: usize, max_splits: Option<usize>) -> Result<Report, String> {
+pub fn run(
+    depths: &[usize],
+    reps_min: usize,
+    max_splits: Option<usize>,
+    kernels: Option<&[usize]>,
+) -> Result<Report, String> {
     let head_dim = 256usize;
     let scale = 1.0f32 / (head_dim as f32).sqrt();
 
@@ -67,12 +83,18 @@ pub fn run(depths: &[usize], reps_min: usize, max_splits: Option<usize>) -> Resu
     let (weights_gbs, weights_us) = gemv_bandwidth(&module, &stream)?;
 
     let mut rows = Vec::new();
-    for dtype in [KvDtype::Q8, KvDtype::Q4] {
+    for &(kid, dtype, label) in VARIANTS {
+        if let Some(sel) = kernels {
+            if !sel.contains(&kid) {
+                continue;
+            }
+        }
         let row_bytes = dtype.row_bytes(head_dim);
         for (heads, n_kv, layers) in [(1usize, 1usize, 1usize), (24, 4, 16)] {
             for &seq in depths {
                 // Enough blocks to fill the card, but at least 64 rows per split
-                // so the fp32 partials stay small against the cache read.
+                // so the fp32 partials stay small against the cache read. The
+                // warp kernel is one warp per task, so it wants more splits.
                 let cap = max_splits.unwrap_or(256 / n_kv).max(1);
                 let splits = (seq / 64).clamp(1, cap);
                 let layer_bytes = n_kv * seq * row_bytes;
@@ -103,7 +125,7 @@ pub fn run(depths: &[usize], reps_min: usize, max_splits: Option<usize>) -> Resu
                                 &module,
                                 &stream,
                                 &step,
-                                dtype.id(),
+                                kid,
                                 &q,
                                 &k,
                                 &v,
@@ -131,6 +153,7 @@ pub fn run(depths: &[usize], reps_min: usize, max_splits: Option<usize>) -> Resu
                 let secs = pass(reps)? / reps as f64;
                 let bytes = 2 * layer_bytes * layers;
                 rows.push(Row {
+                    label,
                     dtype,
                     heads,
                     layers,

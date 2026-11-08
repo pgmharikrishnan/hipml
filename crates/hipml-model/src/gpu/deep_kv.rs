@@ -10,6 +10,9 @@ use super::*;
 pub struct DeepKv {
     pub dtype: KvDtype,
     pub seq: usize,
+    /// Decode-attention entry id: 4/5 are the warp-per-KV-head variants
+    /// (`attn_decode_kv_w2`/`w4`), 0/1 the staged kernels.
+    pub kernel: usize,
     n_kv: usize,
     head_dim: usize,
     pub(super) k: Buffer,
@@ -18,24 +21,35 @@ pub struct DeepKv {
     pub(super) part_ml: Buffer,
 }
 
-/// The split count sets the grid: `n_kv * splits` blocks of
-/// `32 * n_head/n_kv` threads.
+/// Split-count ceiling. The scratch is sized for the largest of the two
+/// policies below, so one allocation serves both.
 ///
-/// 64 is measured best at 100K (12.34 ms for 3.24 GiB, 282 GB/s). The grid is
-/// 256 blocks of 192 threads, which looks under-occupied, but more blocks do not
-/// help: 32 splits gives 14.3 ms, 128 gives 12.98, 256 gives 12.49 and 512 gives
-/// 12.58 (`bench-kv --splits N`). The kernel is limited by its own per-row work,
-/// not by block count.
-pub(super) const MAX_SPLITS: usize = 64;
+/// The staged kernel is measured best at 64 splits (12.34 ms for 3.24 GiB,
+/// 282 GB/s); more blocks do not help it because it is limited by its own
+/// per-row work. The warp kernel is one warp per (KV head, split), so it wants
+/// four times as many tasks to put 16 warps on each CU, and its partials are
+/// small against the cache read (128 splits add ~0.16 ms of reduce traffic).
+pub(super) const MAX_SPLITS: usize = 256;
+const STAGED_SPLITS: usize = 64;
+const WARP_SPLITS: usize = 256;
 
 impl DeepKv {
     pub(super) fn new(cfg: &Config, seq: usize, dtype: KvDtype) -> Result<DeepKv, String> {
         let row = dtype.row_bytes(cfg.head_dim);
         let bytes = cfg.n_head_kv * seq * row;
         let f32s = bytes.div_ceil(4);
+        // head_dim 256 and a GQA group of at most 8 is exactly the shape the
+        // warp kernel's lane map covers; every other case keeps the staged one.
+        let group = cfg.n_head / cfg.n_head_kv;
+        let kernel = if dtype == KvDtype::Q8 && cfg.head_dim == 256 && group <= 8 {
+            5
+        } else {
+            dtype.id()
+        };
         Ok(DeepKv {
             dtype,
             seq,
+            kernel,
             n_kv: cfg.n_head_kv,
             head_dim: cfg.head_dim,
             k: Buffer::alloc(f32s)?,
@@ -43,6 +57,15 @@ impl DeepKv {
             part_acc: Buffer::alloc(cfg.n_head * MAX_SPLITS * cfg.head_dim)?,
             part_ml: Buffer::alloc(cfg.n_head * MAX_SPLITS * 2)?,
         })
+    }
+
+    /// Split count for one decode at `seq` positions. Fixed at graph build.
+    pub(super) fn splits(&self, seq: usize) -> usize {
+        if self.kernel >= 4 {
+            (seq / 256).clamp(1, WARP_SPLITS)
+        } else {
+            (seq / 64).clamp(1, STAGED_SPLITS)
+        }
     }
 
     fn row(&self) -> usize {

@@ -158,10 +158,17 @@ pub fn launch_ptrs(
         1 => "attn_decode_kv_q4",
         2 => "attn_decode_kv_q8s",
         3 => "attn_decode_kv_q8g",
+        4 => "attn_decode_kv_w2",
+        5 => "attn_decode_kv_w4",
         other => return Err(format!("unknown KV dtype {other}")),
     };
-    if dtype >= 2 && head_dim % 128 != 0 {
+    if dtype >= 2 && dtype <= 3 && head_dim % 128 != 0 {
         return Err(format!("head_dim {head_dim}: this variant needs a multiple of 128"));
+    }
+    // The warp-per-KV-head kernel owns eight components per lane, so it is
+    // head_dim 256 only; other widths keep the staged kernel.
+    if dtype >= 4 && head_dim != 256 {
+        return Err(format!("head_dim {head_dim}: the warp kernel is head_dim 256 only"));
     }
     // Same constants as KV_TILE_Q8 / KV_TILE_Q4 in attn_decode_kv.hip and
     // Q8S_TILE in attn_decode_kv_q8s.hip.
@@ -174,6 +181,7 @@ pub fn launch_ptrs(
     let row_bytes = (head_dim >> 5) * 34;
     let shared = match dtype {
         2 => 2 * tile * row_bytes,
+        4 | 5 => 0,
         _ => 2 * tile * head_dim * 4,
     };
 
@@ -204,9 +212,19 @@ pub fn launch_ptrs(
         &mut v_scale as *mut _ as *mut std::ffi::c_void,
         &mut v_splits as *mut _ as *mut std::ffi::c_void,
     ];
+    // The warp kernel launches one warp per (KV head, split) task, four to a
+    // block; the staged kernels launch one block per task.
+    let warps = if dtype >= 4 { 4 } else { 0 };
+    let tasks = n_kv * splits;
+    let grid = if warps > 0 {
+        tasks.div_ceil(warps) as u32
+    } else {
+        tasks as u32
+    };
+    let block = if warps > 0 { 32 * warps } else { 32 * group };
     let cfg = LaunchConfig {
-        grid: ((n_kv * splits) as u32, 1, 1),
-        block: ((32 * group) as u32, 1, 1),
+        grid: (grid, 1, 1),
+        block: (block as u32, 1, 1),
         // KV_TILE rows of K and of V. The f32-staging kernels stage
         // dequantized rows (q8: 4 rows = 8 KB; q4: 8 rows = 16 KB); q8s stages
         // the 272 B quantized rows (16 rows = 8.7 KB); q8g uses none. Must

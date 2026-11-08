@@ -8,7 +8,6 @@
 //! carries.
 
 use super::*;
-use super::deep_kv::MAX_SPLITS;
 
 /// Fill `c.aout` for `n_tok` rows of the chunk starting at `pos0`.
 ///
@@ -133,12 +132,12 @@ pub(super) fn deep_attention_ptr(
     // Chunked prefill is not graph-captured, so size the grid to the positions
     // that exist. The fixed `dk.seq` split count is only needed when the grid
     // becomes part of a captured graph (the decode path).
-    let splits = (seq / 64).clamp(1, MAX_SPLITS);
+    let splits = dk.splits(seq);
     launch_kv::launch_ptrs(
         l.module(),
         l.stream(),
         l.step_buf(),
-        dk.dtype.id(),
+        dk.kernel,
         q_ptr,
         &dk.k,
         &dk.v,
