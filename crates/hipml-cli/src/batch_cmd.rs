@@ -256,52 +256,71 @@ pub fn run(args: &[String]) -> i32 {
         a.slots
     );
 
-    // Ids for the parity check: same start position, same token stream. The
-    // timing warm-up moved the position, so rewind first.
-    if let Err(e) = single.reset_state() {
-        eprintln!("batch-bench: single reset: {e}");
-        return 1;
-    }
-    let mut st = single.state_at(a.depths[0]);
-    let mut single_ids = Vec::with_capacity(n);
-    for _ in 0..n {
-        match single.forward_token_id(1, &mut st) {
-            Ok(id) => single_ids.push(id),
-            Err(e) => {
-                eprintln!("batch-bench: single ids: {e}");
-                return 1;
-            }
-        }
-    }
-    let _ = &single_ids;
-
     if a.check {
         if a.depths.iter().any(|d| *d != 0) {
             println!("check: token parity is only defined at depth 0 here (synthetic KV seeds differ)");
-        }
-        let mut ok = true;
-        for (b, ids) in last.iter().enumerate() {
-            let same = *ids == single_ids[n - 1];
-            if !same {
-                ok = false;
+        } else {
+            // Replay a token stream that differs per slot and per step, then
+            // run each slot's stream through a single-sequence engine. This
+            // catches state bleeding between slots, which a shared token would
+            // hide (all slots would then be identical by construction).
+            let vocab = eng.cfg.n_vocab as u32;
+            let stream = |b: usize, step: usize| (7 + b as u32 * 97 + step as u32 * 13) % vocab;
+            let mut batch_ids = vec![Vec::with_capacity(n); a.slots];
+            if let Err(e) = eng.reset_state().and_then(|_| eng.set_positions(&a.depths)) {
+                eprintln!("batch-bench: check reset: {e}");
+                return 1;
+            }
+            for step in 0..n {
+                let toks: Vec<u32> = (0..a.slots).map(|b| stream(b, step)).collect();
+                match eng.forward(&toks) {
+                    Ok(ids) => {
+                        for (b, id) in ids.into_iter().enumerate() {
+                            batch_ids[b].push(id);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("batch-bench: check decode: {e}");
+                        return 1;
+                    }
+                }
+            }
+            let mut ok = true;
+            for b in 0..a.slots {
+                if let Err(e) = single.reset_state() {
+                    eprintln!("batch-bench: check single reset: {e}");
+                    return 1;
+                }
+                let mut st = single.state_at(a.depths[0]);
+                for (step, want) in batch_ids[b].iter().enumerate() {
+                    match single.forward_token_id(stream(b, step), &mut st) {
+                        Ok(id) if id == *want => {}
+                        Ok(id) => {
+                            ok = false;
+                            println!("check slot {b} step {step}: batch {want} vs single {id} -> MISMATCH");
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("batch-bench: check single: {e}");
+                            return 1;
+                        }
+                    }
+                }
+                if ok {
+                    println!("check slot {b}: {n}/{n} ids match the B=1 path");
+                }
             }
             println!(
-                "check slot {b}: last id batch {} vs single {} -> {}",
-                ids,
-                single_ids[n - 1],
-                if same { "match" } else { "MISMATCH" }
+                "check: {}",
+                if ok {
+                    "all slots reproduce the B=1 path over the full stream"
+                } else {
+                    "TOKENS DIFFER"
+                }
             );
-        }
-        println!(
-            "check: {}",
-            if ok {
-                "all slots reproduce the B=1 path"
-            } else {
-                "TOKENS DIFFER"
+            if !ok {
+                return 1;
             }
-        );
-        if !ok {
-            return 1;
         }
     }
 
