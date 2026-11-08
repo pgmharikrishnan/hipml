@@ -218,11 +218,39 @@ two arithmetic ceilings for this card are:
 | fp16 FMA (dense) | 95.7 TFLOPS | **1779 tok/s** | 70.6% |
 
 `llama.cpp` HIP measures pp512 **1256.5 tok/s**, which needs 67.6 TFLOPS. That
-is above the fp32 peak, so an fp32 prefill cannot match it by construction. Every
-number below is against the **fp32** ceiling; the fp16 column is shown for the
-same reason, not as an excuse.
+is above the fp32 peak, so an fp32 prefill cannot match it by construction, and
+it needs the matrix unit — which is what WP17 added (below, and measured against
+the instruction's own ceiling as well as the two vendor numbers).
 
-### Kernel: fp16 shared tile, dot2 accumulate
+### Kernel: fp16 shared tile, matrix unit (WP17)
+
+The shipped prefill kernel now runs the inner product on the **matrix unit**:
+`wmma_f32_16x16x16_f16` (the gfx12 wave32 form exposed by
+`__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12`). One block owns **256 prompt
+tokens × 128 output rows**, 512 threads, eight 16x16x16 accumulators per warp
+(each warp: 32 tokens × 64 rows). The weight tile is dequantised into shared as
+half exactly as before, the accumulator is f32, and the epilogue writes f32
+straight to `y` — no shared transpose.
+
+The fragment layouts were **measured, not assumed** (`scripts/probe_wmma_layout.cpp`
+reads the accumulator back for A×I, for A = row indices and for B = column
+indices; `scripts/probe_wmma_ceiling.cpp` is the register-only rate probe):
+
+```
+operands A/B: lane l, element e -> index l % 16, k = 8*(l / 16) + e
+accumulator:  lane l, element e -> col l % 16, row 8*(l / 16) + e
+```
+
+The natural guess — adjacent lane pairs per row — is wrong for both operands and
+for the accumulator, and a one-warp probe read through an assumed accumulator map
+appeared to confirm it; that cost the first working GEMM its 15 TFLOPS. The tile
+geometry is the other half of the win: with 32 tokens per block the shared weight
+tile is dequantised once per 32 prompt tokens and the k loop is a chain of
+dependent global loads, which measured 10–15 TFLOPS. 256 tokens per block makes
+the dequant 8x cheaper per FLOP. A sweep over (tokens/block, rows/block,
+tokens/warp, rows/warp) at the ffn shapes is what picked 256×128.
+
+### Kernel: fp16 shared tile, dot2 accumulate (previous path)
 
 One block owns **256 prompt tokens × 128 output rows**. The weight tile is
 dequantised ONCE into shared memory (Q4_K/Q6_K/Q8_0, 32-value k-tiles) and
@@ -261,27 +289,44 @@ A register-only throughput probe on this card — 8 independent accumulators,
 | `v_fma_f32` | 17.5 TFLOPS | 37% of 47.8 |
 | `v_dot2_f32_f16` | 41.4 TFLOPS | 43% of 95.7 |
 | `v_pk_fma_f16` | 41.1 TFLOPS | 43% of 95.7 |
+| `wmma_f32_16x16x16_f16` | **171–188 TFLOPS** | 180–196% of 95.7 |
 
-So **41.4 TFLOPS is the VALU ceiling for this inner loop on this card**, and the
-GEMM at 27.3 TFLOPS is at **66% of it**. Reaching the quoted 95.7 needs the WMMA
-matrix path, which is a different kernel family and is not implemented.
+So **41.4 TFLOPS is the VALU ceiling** for the dot2 inner loop on this card, and
+the dot2 GEMM at 27.3 TFLOPS was at **66% of it**. The matrix unit is a different
+device entirely: the same probe shape (8 independent accumulators, 256-thread
+blocks, no shared memory, 1024–4096 blocks) measures **171–188 TFLOPS** for
+`wmma_f32_16x16x16_f16`, roughly twice the 95.7 TFLOPS the vendor quotes for
+dense fp16. The quoted number is therefore not this instruction's ceiling, and a
+GEMM cannot be scored against it as if it were. The ceilings this work is
+measured against are:
+
+| Ceiling | TFLOPS | how |
+| --- | ---: | --- |
+| quoted vendor fp16 dense | 95.7 | vendor spec, exceeded by the instruction itself |
+| measured `v_dot2_f32_f16` VALU | 41.4 | register-only probe, WP15 |
+| measured `wmma` matrix unit | 171–188 | register-only probe, `scripts/probe_wmma_ceiling.cpp` |
 
 ### Qwen3.8-27B ffn shapes
 
 `hipml prefill-bench --reps 5`, 5 launches averaged per row after one warm-up.
 Default is the fp16 kernels; `--f32` measures the previous path.
 
-| Weight | Shape `[m,k]` | Type | M | fp16 us | fp16 TFLOPS | f32 TFLOPS | % fp32 (47.8) | % fp16 (95.7) |
+| Weight | Shape `[m,k]` | Type | M | wmma us | wmma TFLOPS | % 95.7 | % 185 (measured) | dot2 TFLOPS |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| ffn_up | 17408×5120 | Q6_K | 512 | 3610.8 | 25.28 | 16.36 | 52.9% | 26.4% |
-| ffn_up | 17408×5120 | Q6_K | 2048 | 13473.1 | 27.10 | 16.84 | 56.7% | 28.3% |
-| ffn_gate | 5120×17408 | Q4_K | 512 | 4301.8 | 21.22 | 15.14 | 44.4% | 22.2% |
-| ffn_gate | 5120×17408 | Q4_K | 2048 | 13555.2 | 26.93 | 16.94 | 56.3% | 28.1% |
-| ffn_down | 17408×5120 | Q6_K | 512 | 3608.6 | 25.29 | 16.08 | 52.9% | 26.4% |
-| ffn_down | 17408×5120 | Q6_K | 2048 | 13367.8 | 27.31 | 16.86 | 57.1% | 28.5% |
+| ffn_up | 17408×5120 | Q6_K | 512 | 1016.4 | 89.80 | 93.8% | 48.5% | 25.28 |
+| ffn_up | 17408×5120 | Q6_K | 2048 | 4102.9 | 88.98 | 93.0% | 48.1% | 27.10 |
+| ffn_gate | 5120×17408 | Q4_K | 512 | 1121.1 | 81.41 | 85.1% | 44.0% | 21.22 |
+| ffn_gate | 5120×17408 | Q4_K | 2048 | 3359.7 | 108.66 | 113.5% | 58.7% | 26.93 |
+| ffn_down | 17408×5120 | Q6_K | 512 | 1015.7 | 89.86 | 93.9% | 48.6% | 25.29 |
+| ffn_down | 17408×5120 | Q6_K | 2048 | 4170.5 | 87.54 | 91.5% | 47.3% | 27.31 |
+
+3.2–4.0× the dot2 GEMM. The M=512 `ffn_gate` row is the weak one: at 512 tokens
+it is 2 token tiles × 40 row tiles = 80 blocks, which is one wave on 64 CUs, so
+the tail costs ~25%. The 2048 row (320 blocks) is what the same kernel does with
+a full grid, and it is the only row above the quoted 95.7.
 
 `tok/s-eq` (omitted) is M tokens through that one tensor per second; it is not
-comparable to the whole-model ceilings. The percentage columns are.
+comparable to the whole-model ceilings. `--dot2` and `--f32` rerun the A/B paths.
 
 ### Whole model, one M=512 chunk
 
@@ -293,16 +338,23 @@ not a GEMM. The two Q5_K `ffn_down` tensors are excluded from this harness (its
 filter is Q4_K/Q6_K/Q8_0); in the graph they stream from a half copy made at
 load time (`prefill_halfw_h`), described below.
 
-| Pass | Tensors | Bytes | ms | TFLOP | TFLOPS | implied tok/s | % fp32 | % fp16 |
+| Pass | Tensors | Bytes | ms | TFLOP | TFLOPS | implied tok/s | % 95.7 | % 185 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| cold (all blocks) | 399 | 16.250 GB | 1136.2 | 26.0 | 22.91 | **450.6** | 47.9% | 23.9% |
-| warm (16 attention blocks skipped) | 289 | 12.444 GB | 877.6 | 20.1 | 22.92 | **583.4** | 47.9% | 23.9% |
+| cold (all blocks) | 399 | 16.250 GB | 326.4 | 26.0 | 79.74 | **1568.5** | 83.3% | 43.1% |
+| warm (16 attention blocks skipped) | 289 | 12.444 GB | 250.0 | 20.1 | 80.46 | **2048.2** | 84.1% | 43.5% |
 
-The whole-model TFLOPS is below the single-tensor 21–27 because a 64 MiB chunk
+3.5× the dot2 whole-model rate (22.91 TFLOPS) and 51 points above the 41.4
+VALU ceiling: the matrix path is real on the tensor stream, not just in a probe.
+The gap to the 185 TFLOPS instruction ceiling is the dequant (12% of the
+instruction budget by count), the shared-tile LDS traffic, and the 80–680 block
+grids: the chunk is 512 tokens, so each weight tile is read 2× and small
+projections launch fewer blocks than a wave.
+
+The whole-model TFLOPS is below the single-tensor 80–109 because a 64 MiB chunk
 is a few hundred blocks, not a full tensor, so launch and tail effects show up.
 
-**The sum is compute-bound, not weight-read-bound.** 26.0 TFLOP at 13.78 TFLOPS
-takes 1.89 s; reading the same 16.25 GB at the measured 631 GB/s takes 25.8 ms.
+**The sum is compute-bound, not weight-read-bound.** 26.0 TFLOP at 79.74 TFLOPS
+takes 326 ms; reading the same 16.25 GB at the measured 631 GB/s takes 25.8 ms.
 Arithmetic intensity is 1602 FLOP/byte against an fp32 balance point of 76
 FLOP/byte, so the weight stream is 21× from being the limit at M=512; at M=2048
 it is 84×.
@@ -325,8 +377,8 @@ prompt. Nothing else is faked: the warm pass actually launches those GEMMs.
 
 | Scenario | Cached tokens | TTFT | Implied tok/s | Speed-up |
 | --- | ---: | ---: | ---: | ---: |
-| cold, cache empty | 0 | 1889.6 ms | 271.0 | 1.00× |
-| warm, same 512-token prompt | 512 | 1367.2 ms | 374.5 | **1.38×** |
+| cold, cache empty | 0 | 326.4 ms | 1568.5 | 1.00× |
+| warm, same 512-token prompt | 512 | 250.0 ms | 2048.2 | **1.31×** |
 
 The cache is 67.1 MB at 512 tokens (16 layers × 2 × 4 KV heads × 512 × 256 × 4 B).
 Warm is 12.444 GB / 16.250 GB = 76.6% of the cold weight stream, i.e. the 48 SSM
