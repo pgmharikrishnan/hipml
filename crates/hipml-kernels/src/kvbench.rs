@@ -45,6 +45,11 @@ const VARIANTS: &[(usize, KvDtype, &str)] = &[
     (1, KvDtype::Q4, "q4"),
     (4, KvDtype::Q8, "q8w2"),
     (5, KvDtype::Q8, "q8w4"),
+    (8, KvDtype::Q8, "lab_full"),
+    (9, KvDtype::Q8, "lab_nov"),
+    (10, KvDtype::Q8, "lab_nok"),
+    (11, KvDtype::Q8, "lab_stage"),
+    (12, KvDtype::Q8, "lab_nostg"),
 ];
 
 pub struct Report {
