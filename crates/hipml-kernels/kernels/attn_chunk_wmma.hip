@@ -199,14 +199,20 @@ extern "C" __global__ void attn_chunk_wmma_f16(
         }
         // V: this block's d half, transposed to [d][key] because the PV B
         // operand is row-major by output column with eight keys contiguous.
-        // Consecutive lanes take consecutive d of one key, so the global read
-        // is coalesced and the transposed store walks every bank.
-        for (int idx = tid; idx < AW_DHALF * AW_KT; idx += nthreads) {
-            const int d = idx % AW_DHALF;
-            const int key = idx / AW_DHALF;
+        // A lane reads four consecutive d of one key (one coalesced float4 per
+        // eight lanes) and writes four halfs into four d rows; the 18-half
+        // stride walks the banks four ways, which is cheaper than four times
+        // as many scalar loads.
+        for (int idx = tid; idx < AW_KT * (AW_DHALF / 4); idx += nthreads) {
+            const int key = idx / (AW_DHALF / 4);
+            const int dq = (idx - key * (AW_DHALF / 4)) * 4;
             const int rr = (key < rows) ? key : (rows - 1);
-            sv[d * AW_VST + key] =
-                __float2half_rn(vb[(size_t)(base + rr) * width + d]);
+            const float4 b = *reinterpret_cast<const float4*>(
+                vb + (size_t)(base + rr) * width + dq);
+            sv[(dq + 0) * AW_VST + key] = __float2half_rn(b.x);
+            sv[(dq + 1) * AW_VST + key] = __float2half_rn(b.y);
+            sv[(dq + 2) * AW_VST + key] = __float2half_rn(b.z);
+            sv[(dq + 3) * AW_VST + key] = __float2half_rn(b.w);
         }
         __syncthreads();
 
