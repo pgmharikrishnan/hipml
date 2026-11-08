@@ -222,9 +222,84 @@ is above the fp32 peak, so an fp32 prefill cannot match it by construction, and
 it needs the matrix unit — which is what WP17 added (below, and measured against
 the instruction's own ceiling as well as the two vendor numbers).
 
+### WP19: the accumulator index, and what the loop actually costs
+
+The WP17 kernel was computing **half of every GEMM**. The multiply wrote
+`acc[i * PWW_ACC + j]` while the epilogue read `acc[i * PWW_NRG + j]`; with two
+token tiles (16 tokens) and four row tiles per warp those disagree for `i = 1`,
+the out-of-range stores were dead-code eliminated (`private_segment_fixed_size`
+stayed 0, and the loop body assembled **8** `v_wmma` per k-tile instead of 16),
+and every warp produced tokens 0–15 of its 32 and left 16–31 at zero. Parity
+could not see it: every case used at most four tokens. The acceptance prompt is
+five tokens, so it could not see it either.
+
+The tell was the arithmetic: fixing the index doubles the MACs and the ffn
+kernels got **only 19% slower** (1002.8 → 1204 µs at 17408×5120, M=512), i.e.
+the extra 50% of matrix work hid entirely inside stalls. Two consequences:
+
+- the WP17 figures were inflated. "91 TFLOPS" at M=512 was **45 real TFLOPS**,
+  and the whole-model "79.74 TFLOPS / 1568 tok/s" was measured on a kernel that
+  skipped half the MACs and wrote zeros for half the activation rows.
+- the first-token id of the synthetic 512-token prompt returns to **489**, the
+  value documented before WP17 (it read 122271 with the bug). The 20-id
+  acceptance string is unchanged, because that prompt is five tokens.
+
+`prefill_q4_k` and `prefill_q6_k` now have a **t=40** parity case (multi-token
+coverage; a zeroed token row is O(1) and caught) and the suite is green.
+
+#### Where the loop's time goes (Q6_K 17408×5120, M=512)
+
+Probe switches in the kernel (`PWW_PROBE_NO_STAGE`, `PWW_PROBE_NO_FRAG`,
+`PWW_PROBE_NO_COMPUTE`) split the k loop into its phases, via
+`scripts/probe_wmma_gemm.cpp` (the kernel source, no engine, 20 launches):
+
+| variant | µs | TFLOPS | what it says |
+| --- | ---: | ---: | --- |
+| base (index fixed) | 1204 | 75.8 | reference |
+| no staging (WMMA + barriers only) | 694 | **131.5** | ceiling of this structure |
+| fragments read once, staging kept | 1213 | 75.2 | LDS fragment reads are free |
+| no matrix work | 92 | — | staging alone, ~8% (mostly DCE'd) |
+| already-half weights (no dequant) | 1182 | 77.2 | the dequant ALU is ~2% |
+
+So **time = staging + compute, serialized**: 510 µs of staging (42%) sits in a
+phase that cannot overlap the multiply because the two `__syncthreads` per k-tile
+align all 16 warps. The staging phase is not bytes-bound: halving the x stream
+(x already fp16) changes nothing at M=512, and removing the dequant ALU changes
+nothing. It is the load latency of a phase in which every warp of the only
+resident block waits.
+
+#### Levers tried, each measured alone
+
+Same shape, M=512 unless noted; a lever is only kept if it beats the base:
+
+| lever | µs | TFLOPS | verdict |
+| --- | ---: | ---: | --- |
+| K-tile 64 (half the barriers, 54 KB LDS) | 1433 | 63.7 | −16%, rejected |
+| double buffer, stage-then-compute, 1 barrier | 1322 | 69.0 | −9%, rejected |
+| touch-prefetch the next tile into L2 (1 load/thread) | 1674 | 54.5 | −28%, rejected |
+| non-temporal weight loads (`TH_LOAD_NT`) | 3359 | 27.2 | −64%, rejected (per-byte NT kills coalescing) |
+| 256 threads, 128×128 block | 1951 | 46.8 | −38%, rejected |
+| 384 threads, 384×64 block | 2027 | 45.0 | −41%, rejected |
+| 128×256 block (256 rows per dequant) | 1851 | 49.3 | −35%, rejected |
+| x already fp16, M=512 | 1209 | 75.5 | neutral |
+| x already fp16, M=2048 | 4102 | 89.0 | **+13%** |
+| x already fp16, Q4_K M=2048 | 4120 | 88.6 | **+13%** (78.0 base) |
+| x already fp16, Q8_0 M=2048 | 3774 | 96.7 | best measured |
+
+The x-fp16 variant (`prefill_*_wh` + `prefill_xhalf`) halves the activation
+re-read (`tokens × k × 4 × m/RT` bytes, 1.43 GB per launch at M=512) and gains
+13% at M=2048; it is neutral at M=512, which is what the engine runs, so it is
+not the default. The last two failures have one cause: overlapping staging with
+the multiply needs the next tile's loads in flight in registers, and the
+512-thread/8-accumulator shape has 126 of its 128 usable VGPRs already
+committed. Register-prefetch builds land at 143–169 VGPR and do not launch.
+
+The register-only instruction probe now also sweeps block size: 174–176 TFLOPS
+at 4, 8, 16 and 32 warps per block, so occupancy is not the remaining gap either.
+
 ### Kernel: fp16 shared tile, matrix unit (WP17)
 
-The shipped prefill kernel now runs the inner product on the **matrix unit**:
+The shipped prefill kernel runs the inner product on the **matrix unit**:
 `wmma_f32_16x16x16_f16` (the gfx12 wave32 form exposed by
 `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12`). One block owns **256 prompt
 tokens × 128 output rows**, 512 threads, eight 16x16x16 accumulators per warp
@@ -311,19 +386,19 @@ measured against are:
 `hipml prefill-bench --reps 5`, 5 launches averaged per row after one warm-up.
 Default is the fp16 kernels; `--f32` measures the previous path.
 
-| Weight | Shape `[m,k]` | Type | M | wmma us | wmma TFLOPS | % 95.7 | % 185 (measured) | dot2 TFLOPS |
+| Weight | Shape `[m,k]` | Type | M | wmma us | TFLOPS | % 95.7 | % 185 (measured) | WP17 (index bug) TFLOPS |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| ffn_up | 17408×5120 | Q6_K | 512 | 1016.4 | 89.80 | 93.8% | 48.5% | 25.28 |
-| ffn_up | 17408×5120 | Q6_K | 2048 | 4102.9 | 88.98 | 93.0% | 48.1% | 27.10 |
-| ffn_gate | 5120×17408 | Q4_K | 512 | 1121.1 | 81.41 | 85.1% | 44.0% | 21.22 |
-| ffn_gate | 5120×17408 | Q4_K | 2048 | 3359.7 | 108.66 | 113.5% | 58.7% | 26.93 |
-| ffn_down | 17408×5120 | Q6_K | 512 | 1015.7 | 89.86 | 93.9% | 48.6% | 25.29 |
-| ffn_down | 17408×5120 | Q6_K | 2048 | 4170.5 | 87.54 | 91.5% | 47.3% | 27.31 |
+| ffn_up | 17408×5120 | Q6_K | 512 | 1280.0 | 71.30 | 74.5% | 38.5% | 89.80 |
+| ffn_up | 17408×5120 | Q6_K | 2048 | 4585.8 | 79.61 | 83.2% | 43.0% | 88.98 |
+| ffn_gate | 5120×17408 | Q4_K | 512 | 1403.1 | 65.05 | 68.0% | 35.2% | 81.41 |
+| ffn_gate | 5120×17408 | Q4_K | 2048 | 4666.6 | 78.23 | 81.7% | 42.3% | 108.66 |
+| ffn_down | 17408×5120 | Q6_K | 512 | 1283.3 | 71.12 | 74.3% | 38.4% | 89.86 |
+| ffn_down | 17408×5120 | Q6_K | 2048 | 4579.0 | 79.73 | 83.3% | 43.1% | 87.54 |
 
-3.2–4.0× the dot2 GEMM. The M=512 `ffn_gate` row is the weak one: at 512 tokens
-it is 2 token tiles × 40 row tiles = 80 blocks, which is one wave on 64 CUs, so
-the tail costs ~25%. The 2048 row (320 blocks) is what the same kernel does with
-a full grid, and it is the only row above the quoted 95.7.
+The last column is the same kernel before the WP19 index fix, i.e. doing half the
+MACs: every row was inflated ~2×, and the ffn shapes are really 65–80 TFLOPS.
+The M=512 `ffn_gate` row is the weakest: 2 token tiles × 40 row tiles = 80
+blocks is 1.25 waves on 64 CUs, so the tail costs ~19% (65.05 vs 78.23 at 2048).
 
 `tok/s-eq` (omitted) is M tokens through that one tensor per second; it is not
 comparable to the whole-model ceilings. `--dot2` and `--f32` rerun the A/B paths.
@@ -340,15 +415,15 @@ load time (`prefill_halfw_h`), described below.
 
 | Pass | Tensors | Bytes | ms | TFLOP | TFLOPS | implied tok/s | % 95.7 | % 185 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| cold (all blocks) | 399 | 16.250 GB | 326.4 | 26.0 | 79.74 | **1568.5** | 83.3% | 43.1% |
-| warm (16 attention blocks skipped) | 289 | 12.444 GB | 250.0 | 20.1 | 80.46 | **2048.2** | 84.1% | 43.5% |
+| cold (all blocks) | 399 | 16.250 GB | 419.2 | 26.0 | 62.10 | **1221.4** | 64.9% | 33.6% |
+| warm (16 attention blocks skipped) | 289 | 12.444 GB | 313.3 | 20.1 | 64.20 | **1634.1** | 67.1% | 34.7% |
 
-3.5× the dot2 whole-model rate (22.91 TFLOPS) and 51 points above the 41.4
-VALU ceiling: the matrix path is real on the tensor stream, not just in a probe.
-The gap to the 185 TFLOPS instruction ceiling is the dequant (12% of the
-instruction budget by count), the shared-tile LDS traffic, and the 80–680 block
-grids: the chunk is 512 tokens, so each weight tile is read 2× and small
-projections launch fewer blocks than a wave.
+(WP17 measured 79.74 / 80.46 TFLOPS here, on a kernel that skipped half the
+MACs; the 2.7× over the dot2 whole-model rate 22.91 is the honest multiple.)
+The gap to the 175 TFLOPS instruction ceiling is the serialized staging phase
+(see WP19 above), the dequant and the 80–680 block grids: the chunk is 512
+tokens, so each weight tile is read 2× and small projections launch fewer blocks
+than a wave.
 
 The whole-model TFLOPS is below the single-tensor 80–109 because a 64 MiB chunk
 is a few hundred blocks, not a full tensor, so launch and tail effects show up.
@@ -395,19 +470,26 @@ attention correctness (there is no Flash Attention path yet).
 Reference is `ops::gemm_q4_k/q6_k/q8_0` (dequantise a row, dot every token, same
 k order as the kernel). `hipml parity` now compares the **shipped fp16 kernels**
 (`HIPML_PREFILL_F32=1` switches back to the f32 rows). fp16 operands cost ~1e-3
-relative: 2e-2 abs / 5e-2 rel for the small cases and 2.5e-1 abs / 5e-2 rel at
-17408×5120, where a near-zero output from 5120 products can move by ~0.1 (still
-1e-3 of the output scale). Both budgets are far below a layout bug, which moves
-values by O(1) on O(100) outputs.
+relative: 2e-2 abs / 5e-2 rel for the single-tile cases, 1e-1 abs / 5e-1 rel for
+the multi-token case (a near-zero output lands on one of 2,560 values and moves
+the ratio by an order of magnitude) and 2.5e-1 abs / 5e-2 rel at 17408×5120,
+where a near-zero output from 5120 products can move by ~0.1 (still 1e-3 of the
+output scale). Every budget is far below a layout bug, which moves values by
+O(1) on O(100) outputs.
 
 | Case (fp16) | max_abs | max_rel |
 | --- | ---: | ---: |
-| `prefill_q4_k` 64×512, t=4 | 4.44e-3 | 1.02e-1 |
+| `prefill_q4_k` 64×512, t=4 | 4.45e-3 | 1.02e-1 |
 | `prefill_q6_k` 64×512, t=4 | 3.15e-2 | 4.44e-2 |
 | `prefill_q8_0` 64×512, t=4 | 1.24e-3 | 7.23e-2 |
-| `prefill_q6_k` 17408×5120, t=2 | 1.12e-1 | 2.36e1 |
+| `prefill_q4_k` 64×512, t=40 | 5.73e-3 | 4.51e-1 |
+| `prefill_q6_k` 64×512, t=40 | 3.09e-2 | 1.28e-1 |
+| `prefill_q6_k` 17408×5120, t=2 | 1.12e-1 | 2.40e1 |
 
-`hipml parity` → `43 passed, 0 failed, 1 skipped` (the host-only top-p case).
+The t=40 cases are the WP19 regression test: with the accumulator index wrong
+they read O(1) maxima because 24 of the 40 token rows come back zero.
+
+`hipml parity` → `46 passed, 0 failed, 1 skipped` (the host-only top-p case).
 The f32 cases still pass at their original budgets when `HIPML_PREFILL_F32=1`.
 
 ### Commands
