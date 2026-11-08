@@ -389,6 +389,7 @@ impl<'a> BatchEngine<'a> {
             l.rmsnorm_rows(&self.x, &block.attn_norm, &self.t, n, cfg.eps, b)?;
             let block_out: &Buffer = match &block.kind {
                 BatchKind::Full(f) => {
+                    stage!(1);
                     f.attn.qkv_rows(l, &self.t, &f.qg, &f.k, &f.v, b)?;
                     f.attn.split_rope_rows(l, &f.qg, &f.k, &f.q, &f.gate, &positions)?;
                     stage!(2);

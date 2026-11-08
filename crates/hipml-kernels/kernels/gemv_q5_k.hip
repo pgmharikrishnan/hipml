@@ -171,7 +171,7 @@ extern "C" __global__ void gemv_q5_k(
 // accumulator in the same k order (bit-identical to gemv_q5_k on x[b]).
 // K_TILE is 512 (one group).
 #define Q5KB_K_TILE 512
-#define Q5KB_ROWS_PER_WARP 4
+#define Q5KB_ROWS_PER_WARP 2
 
 static __device__ __forceinline__ void q5k_load(const unsigned char* __restrict__ rp,
                                                 int p, float* wv)

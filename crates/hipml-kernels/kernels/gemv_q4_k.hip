@@ -326,7 +326,7 @@ extern "C" __global__ void gemv_split_reduce(
 // ---------------------------------------------------------------------------
 
 #define Q4KB_K_TILE 512
-#define Q4KB_ROWS_PER_WARP 4
+#define Q4KB_ROWS_PER_WARP 2
 
 // Dequantise this lane's 16 values of one row into `wv`.
 static __device__ __forceinline__ void q4k_load(const unsigned char* __restrict__ rp,
