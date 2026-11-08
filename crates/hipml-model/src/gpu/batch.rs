@@ -401,7 +401,10 @@ impl<'a> BatchEngine<'a> {
                     // Slot parity picks the stream (see the SSM split): the
                     // side stream has its own step buffer so the KV appends do
                     // not race on one position.
-                    l.fork()?;
+                    let split = b > 1;
+                    if split {
+                        l.fork()?;
+                    }
                     for bi in 0..b {
                         let slot = self.active[bi];
                         let pos = positions[bi];
@@ -444,7 +447,9 @@ impl<'a> BatchEngine<'a> {
                             side,
                         )?;
                     }
-                    l.join()?;
+                    if b > 1 {
+                        l.join()?;
+                    }
                     stage!(3);
                     f.attn.out_rows(l, &f.out, &f.gate, &f.y, b)?;
                     stage!(7);
