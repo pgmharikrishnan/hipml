@@ -295,7 +295,7 @@ Nothing on the decode path round-trips to the host except the 4-byte id.
 - **Attention is now the 8K limit.** 4.32 s of 10.67 s, ~3 TFLOPS: the tile
   kernel reduces each (query, key) score with a 5-step 32-lane shuffle chain and
   carries f32, so it is latency-bound, not FLOP-bound. Doubling the query tile
-  (32 → 64 tokens) to halve the KV re-reads changed nothing (4316 → 4316 ms), and
+  (32 → 64 tokens) to halve the KV re-reads changed nothing (4294 → 4316 ms), and
   8 queries per warp (more ILP, ~160 VGPR) made it worse (5098 ms), which rules
   out both KV bandwidth and ILP as the lever. The lever is the matrix unit: 16
   queries x 16 keys per `wmma` puts the score in registers with no cross-lane
