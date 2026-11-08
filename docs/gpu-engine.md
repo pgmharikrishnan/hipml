@@ -148,11 +148,11 @@ device and CPU argmax both 11751.
 
 | measurement | WP13 | WP14 | WP16 | WP21 |
 | --- | --- | --- | --- | --- |
-| short-context decode, tokens 2..20 | 27.9 tok/s (35.9 ms) | 28.0 tok/s (35.7 ms) | **29.9 tok/s (33.5 ms)** | 30.0 tok/s (33.3 ms) |
+| short-context decode, tokens 2..20 | 27.9 tok/s (35.9 ms) | 28.0 tok/s (35.7 ms) | **29.9 tok/s (33.5 ms)** | 30.0 tok/s (33.4 ms) |
 | 512-token prefill | 22.99 s, 22.27 tok/s (token loop) | **5.35 s, 95.8 tok/s** (chunk 256) | 5.35 s |
 | 8,192-token prefill | — | **89.1 s, 91.9 tok/s** | unchanged |
 | decode at depth 20,000, q8 KV | 21.21 tok/s (47.1 ms) | 26.5 tok/s (37.7 ms) | **28.0 tok/s (35.7 ms)** |
-| decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | 21.0 tok/s (47.7 ms) | 21.8 tok/s (45.9 ms) | 21.6 tok/s (46.4 ms) |
+| decode at depth 100,000, q8 KV | 17.58 tok/s (56.9 ms) | 21.0 tok/s (47.7 ms) | 21.8 tok/s (45.9 ms) | 21.5 tok/s (46.5 ms) |
 
 WP16 measured every stage of a token with HIP events (`gpu-profile --trace`)
 instead of attributing the remainder to "DRAM ramp". It found that the gap is
@@ -249,8 +249,8 @@ path, and `gpu-bench --graph` the same argmax, at depth 0 and at 100K.
 
 | approach | effective GB/s | ms/token | tok/s | submit |
 | --- | ---: | ---: | ---: | ---: |
-| eager, 1,299 launches | 494 | 33.32 | 30.01 | 2.35 ms of launch API (1.81 us/launch) |
-| capture + `hipGraphLaunch` | 494 | 33.27 | 30.06 | 1 call |
+| eager, 1,299 launches | 494 | 33.37 | 29.97 | 2.35 ms of launch API (1.81 us/launch) |
+| capture + `hipGraphLaunch` | 494 | 33.39 | 29.95 | 1 call |
 | one kernel over an ffn gate+up job list | 562 vs 568 | — | — | 64 vs 128 launches |
 | split-K x2 / x4 / x8 on ffn_down | 546 / 551 / 531 vs 559 | — | — | 120 vs 60 launches |
 | sc1 streaming loads (`nontemporal`) | 491 vs 559 | — | — | — |
@@ -283,10 +283,10 @@ That leaves the honest attribution of a 33.3 ms short-context token:
 | the other fourteen shapes at 556 GB/s average | +3.1 | 493-577 GB/s per share, insensitive to launch count, grid shape, split-K, load width and cache policy |
 | GDN recurrent chain + elementwise + attention compute | +1.7 | 1.18 + 0.25 + ~0.3 |
 | kernel-boundary drain that survives capture | +2.0 | residual |
-| **measured** | **33.3** | 30.0 tok/s |
+| **measured** | **33.4** | 30.0 tok/s |
 
-At depth the same 33.3 ms is the base: 46.4 = 33.3 + 5.5 KV roofline + 6.9
-attention excess + 0.7.
+At depth the same 33.3 ms is the base: 46.5 = 33.3 + 5.5 KV roofline + 6.9
+attention excess + 0.8. Run-to-run scatter on the decode numbers is ±0.2%.
 
 Instruments, all on the resident weights: `gpu-sweep --merge` (job-list kernel,
 three launch shapes over the same ffn bytes, with the merged rows checked against
