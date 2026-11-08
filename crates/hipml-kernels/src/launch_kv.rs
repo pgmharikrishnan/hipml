@@ -96,10 +96,26 @@ pub fn launch(
     let entry = match dtype {
         0 => "attn_decode_kv_q8",
         1 => "attn_decode_kv_q4",
+        2 => "attn_decode_kv_q8s",
+        3 => "attn_decode_kv_q8g",
         other => return Err(format!("unknown KV dtype {other}")),
     };
-    // Same constants as KV_TILE_Q8 / KV_TILE_Q4 in attn_decode_kv.hip.
-    let tile = if dtype == 0 { 4 } else { 8 };
+    if dtype >= 2 && head_dim % 128 != 0 {
+        return Err(format!("head_dim {head_dim}: this variant needs a multiple of 128"));
+    }
+    // Same constants as KV_TILE_Q8 / KV_TILE_Q4 in attn_decode_kv.hip and
+    // Q8S_TILE in attn_decode_kv_q8s.hip.
+    let tile = match dtype {
+        1 => 8,
+        2 => 16,
+        0 => 4,
+        _ => 0,
+    };
+    let row_bytes = (head_dim >> 5) * 34;
+    let shared = match dtype {
+        2 => 2 * tile * row_bytes,
+        _ => 2 * tile * head_dim * 4,
+    };
 
     let kernel = module.kernel(entry)?;
     let mut p_q = q.as_ptr();
@@ -129,11 +145,11 @@ pub fn launch(
     let cfg = LaunchConfig {
         grid: ((n_kv * splits) as u32, 1, 1),
         block: ((32 * group) as u32, 1, 1),
-        // KV_TILE rows of K and of V, dequantized to f32. q8 stages twice the
-        // bytes per row, so it runs a 4-row tile (8 KB per block, 8 blocks in
-        // the 64 KB of LDS per CU); q4 runs an 8-row tile (16 KB, 4 blocks) for
-        // half the barriers. Must match KV_TILE_Q8 / KV_TILE_Q4 in the kernel.
-        shared_mem_bytes: (2 * tile * head_dim * 4) as u32,
+        // KV_TILE rows of K and of V. The f32-staging kernels stage
+        // dequantized rows (q8: 4 rows = 8 KB; q4: 8 rows = 16 KB); q8s stages
+        // the 272 B quantized rows (16 rows = 8.7 KB); q8g uses none. Must
+        // match the constants in the kernel.
+        shared_mem_bytes: shared as u32,
     };
     kernel.launch(cfg, stream, &mut params)?;
 

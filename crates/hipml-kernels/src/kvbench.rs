@@ -25,6 +25,8 @@ pub const WEIGHTS_BYTES: f64 = 17.19e9;
 /// One line of the report.
 pub struct Row {
     pub dtype: KvDtype,
+    /// Kernel entry that produced the row (`q8`, `q8s`, `q8g`, `q4`).
+    pub variant: &'static str,
     pub heads: usize,
     pub layers: usize,
     pub seq: usize,
@@ -48,7 +50,8 @@ pub struct Report {
 }
 
 /// `depths` in tokens; `reps` is the minimum number of timed passes.
-pub fn run(depths: &[usize], reps_min: usize) -> Result<Report, String> {
+/// `splits_override` forces a split count (the full-stack path clamps to 64).
+pub fn run(depths: &[usize], reps_min: usize, splits_override: Option<usize>) -> Result<Report, String> {
     let head_dim = 256usize;
     let scale = 1.0f32 / (head_dim as f32).sqrt();
 
@@ -65,13 +68,19 @@ pub fn run(depths: &[usize], reps_min: usize) -> Result<Report, String> {
     let (weights_gbs, weights_us) = gemv_bandwidth(&module, &stream)?;
 
     let mut rows = Vec::new();
-    for dtype in [KvDtype::Q8, KvDtype::Q4] {
+    for (dtype, variant, entry) in [
+        (KvDtype::Q8, "q8", 0usize),
+        (KvDtype::Q8, "q8s", 2),
+        (KvDtype::Q8, "q8g", 3),
+        (KvDtype::Q4, "q4", 1),
+    ] {
         let row_bytes = dtype.row_bytes(head_dim);
         for (heads, n_kv, layers) in [(1usize, 1usize, 1usize), (24, 4, 16)] {
             for &seq in depths {
                 // Enough blocks to fill the card, but at least 64 rows per split
                 // so the fp32 partials stay small against the cache read.
-                let splits = (seq / 64).clamp(1, (256 / n_kv).max(1));
+                let splits = splits_override
+                    .unwrap_or_else(|| (seq / 64).clamp(1, (256 / n_kv).max(1)));
                 let layer_bytes = n_kv * seq * row_bytes;
                 let k = Buffer::alloc((layer_bytes * layers).div_ceil(4))?;
                 let v = Buffer::alloc((layer_bytes * layers).div_ceil(4))?;
@@ -92,7 +101,7 @@ pub fn run(depths: &[usize], reps_min: usize) -> Result<Report, String> {
                             launch(
                                 &module,
                                 &stream,
-                                dtype.id(),
+                                entry,
                                 &q,
                                 &k,
                                 &v,
@@ -121,6 +130,7 @@ pub fn run(depths: &[usize], reps_min: usize) -> Result<Report, String> {
                 let bytes = 2 * layer_bytes * layers;
                 rows.push(Row {
                     dtype,
+                    variant,
                     heads,
                     layers,
                     seq,
