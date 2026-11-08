@@ -464,10 +464,10 @@ fn deep_attention_ptr(
     if seq > dk.seq {
         return Err(format!("position {pos} beyond quantized cache {}", dk.seq));
     }
-    // Fixed for the whole cache, not per step: the grid is part of the captured
-    // graph. At depth this is the same count the per-step formula picked (64 at
-    // 100K), and shallow positions just leave the later splits empty.
-    let splits = (dk.seq / 64).clamp(1, MAX_SPLITS);
+    // Chunked prefill is not graph-captured, so size the grid to the positions
+    // that exist. The fixed `dk.seq` split count is only needed when the grid
+    // becomes part of a captured graph (the decode path).
+    let splits = (seq / 64).clamp(1, MAX_SPLITS);
     launch_kv::launch_ptrs(
         l.module(),
         l.stream(),
