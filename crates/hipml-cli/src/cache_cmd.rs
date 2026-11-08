@@ -226,7 +226,7 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
     let mut st = engine.new_state();
     let t = Instant::now();
     let hit = engine.prefix_lookup(&p).ok_or("exact lookup missed")?;
-    let cached = engine
+    let _cached = engine
         .prefix_restore(hit, &mut st)?
         .ok_or("end snapshot has no cached logits")?;
     let restore_ms = t.elapsed().as_secs_f64() * 1e3;
