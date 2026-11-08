@@ -117,15 +117,21 @@ extern "C" __global__ void kv_append_chunk_f32(
     }
 }
 
-// Tiled causal attention: one block per (query head, 32-token query tile).
-// Eight warps, four consecutive queries per warp, and each lane holds 8 of the
-// 256 head components. A KV row is loaded once per warp and reused by its four
-// queries; the only reductions are 5-step shuffles. This is the kernel that
-// makes an 8K prompt affordable: the block-per-token form above re-reads each
-// KV row once per query tile and pays a 256-thread barrier per row.
-#define ACQ_TOKENS 32
+// Tiled causal attention: one block per (query head, 64-token query tile).
+// Sixteen warps, four consecutive queries per warp, and each lane holds 8 of
+// the 256 head components. A KV row is loaded once per warp and reused by its
+// four queries; the only reductions are 5-step shuffles.
+//
+// The tile length is the whole cost model: every block streams the KV prefix
+// once, so the layer's KV traffic is (tokens / tile) x prefix x 8 B per head.
+// At 8K with a 32-token tile that is 1.6 TB per prompt and the chain measured
+// 4.3 s — 384 GB/s of re-reads, not arithmetic. 64 tokens halves it, and the
+// register budget sets the ceiling: 4 queries x 8 components x 2 (q and acc)
+// f32 per lane is ~80 VGPRs, so 512 threads is one block per CU.
+#define ACQ_TOKENS 64
 #define ACQ_PER_WARP 4
 #define ACQ_D 8
+#define ACQ_THREADS ((ACQ_TOKENS / ACQ_PER_WARP) * 32)
 
 extern "C" __global__ void attn_chunk_tile_f32(
     const float* __restrict__ q,
