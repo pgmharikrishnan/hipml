@@ -25,6 +25,20 @@ pub fn gemv_entry(ty: TensorType) -> Result<&'static str, String> {
     })
 }
 
+/// The batched-GEMV kind for a resident GEMV entry. Only the four block
+/// formats with a `_b` kernel are batchable; F32 projections are small and stay
+/// per-slot.
+pub(crate) fn batch_kind(entry: &str) -> Option<i32> {
+    use hipml_kernels::{GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
+    Some(match entry {
+        "gemv_q4_k" => GEMV_B_Q4K,
+        "gemv_q6_k" => GEMV_B_Q6K,
+        "gemv_q5_k" => GEMV_B_Q5K,
+        "gemv_q8_0" => GEMV_B_Q80,
+        _ => return None,
+    })
+}
+
 /// The tiled GEMM entry for a quantized GEMV entry; the two families share the
 /// block format.
 fn prefill_entry(gemv: &str) -> Result<&'static str, String> {
@@ -111,6 +125,21 @@ impl<'a> Proj<'a> {
             self.rows,
             self.cols,
         )
+    }
+
+    /// The same projection over `rows` x-vectors (`[rows][cols]`) with one
+    /// pass over the weights: the batched decode step.
+    pub(crate) fn gemm_batched(
+        &self,
+        l: &Launcher,
+        x: &Buffer,
+        y: &Buffer,
+        rows: usize,
+    ) -> Result<(), String> {
+        let kind = batch_kind(self.entry).ok_or_else(|| {
+            format!("{}: no batched GEMV (F32 weights stay per-slot)", self.entry)
+        })?;
+        l.gemv_batched(kind, self.w, x, y, self.rows, self.cols, rows)
     }
 
     /// The same projection over `tokens` rows of `x` (`[tokens][cols]`), one

@@ -11,6 +11,7 @@
 
 use crate::ssm::{SsmGpuLayer, SsmWeight};
 use hipml_hip::{Buffer, LaunchConfig};
+use crate::Launcher;
 use std::ffi::c_void;
 use std::time::Instant;
 
@@ -322,4 +323,131 @@ impl<'a> SsmGpuLayer<'a> {
 /// Device pointer advanced by `floats` f32s, for the q|k|v slices.
 fn offset(p: *mut c_void, floats: usize) -> *mut c_void {
     unsafe { (p as *mut u8).add(floats * 4) as *mut c_void }
+}
+
+// ---------------------------------------------------------------------------
+// Batched decode: one weight pass for B sequences.
+//
+// The projections read the same resident weights as the single path; only the
+// x/y buffers become `[B][..]`. Everything that touches recurrent state stays
+// per slot (one `SsmGpuLayer` per slot owns its conv window and delta-net
+// matrix), driven by `recurrent_at` over row `b` of the shared scratch.
+// ---------------------------------------------------------------------------
+
+/// The batched-GEMV kind for a resident projection entry.
+pub(crate) fn batch_kind_for_entry(entry: &str) -> Option<i32> {
+    use crate::launch::{GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
+    Some(match entry {
+        "gemv_q4_k" => GEMV_B_Q4K,
+        "gemv_q6_k" => GEMV_B_Q6K,
+        "gemv_q5_k" => GEMV_B_Q5K,
+        "gemv_q8_0" => GEMV_B_Q80,
+        _ => return None,
+    })
+}
+
+impl<'a> SsmGpuLayer<'a> {
+    /// The four input projections for `rows` x-vectors: Q8_0/Q6_K/Q5_K/Q4_K
+    /// run one batched pass, the tiny F32 alpha/beta run per slot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gemvs_batched(
+        &self,
+        l: &Launcher,
+        x: &Buffer,
+        qkv: &Buffer,
+        z: &Buffer,
+        alpha: &Buffer,
+        beta: &Buffer,
+        rows: usize,
+    ) -> Result<(), String> {
+        let d = &self.dims;
+        self.proj_rows(l, &self.wqkv, x, qkv, d.conv_ch, d.n_embd, rows)?;
+        self.proj_rows(l, &self.wgate, x, z, d.inner(), d.n_embd, rows)?;
+        self.proj_rows(l, &self.alpha_w, x, alpha, d.n_v, d.n_embd, rows)?;
+        self.proj_rows(l, &self.beta_w, x, beta, d.n_v, d.n_embd, rows)
+    }
+
+    /// `out = W_out gated` for `rows` rows.
+    pub fn output_gemv_batched(
+        &self,
+        l: &Launcher,
+        gated: &Buffer,
+        out: &Buffer,
+        rows: usize,
+    ) -> Result<(), String> {
+        let d = &self.dims;
+        self.proj_rows(l, &self.wout, gated, out, d.n_embd, d.inner(), rows)
+    }
+
+    /// One projection over `rows` rows of `x` (`[rows][k]`) into `y`
+    /// (`[rows][m]`). Quantized weights use the batched kernel; the F32
+    /// alpha/beta vectors are small enough to run per row.
+    #[allow(clippy::too_many_arguments)]
+    fn proj_rows(
+        &self,
+        l: &Launcher,
+        w: &SsmWeight<'_>,
+        x: &Buffer,
+        y: &Buffer,
+        m: usize,
+        k: usize,
+        rows: usize,
+    ) -> Result<(), String> {
+        match w {
+            SsmWeight::Quant(b, entry) => {
+                let kind = batch_kind_for_entry(entry)
+                    .ok_or_else(|| format!("{entry}: no batched GEMV"))?;
+                l.gemv_batched(kind, b, x, y, m, k, rows)
+            }
+            SsmWeight::F32(b) => {
+                for r in 0..rows {
+                    let mut p_w = b.as_ptr();
+                    let mut p_x = row_ptr(x, r, k);
+                    let mut p_y = row_ptr(y, r, m);
+                    let mut v_m = m as i32;
+                    let mut v_k = k as i32;
+                    let mut params: [*mut c_void; 5] = [
+                        &mut p_w as *mut _ as *mut c_void,
+                        &mut p_x as *mut _ as *mut c_void,
+                        &mut p_y as *mut _ as *mut c_void,
+                        &mut v_m as *mut _ as *mut c_void,
+                        &mut v_k as *mut _ as *mut c_void,
+                    ];
+                    self.k_gemv
+                        .launch(LaunchConfig::per_row(m, 256), l.stream(), &mut params)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Everything after the projections for slot `row` of the batched scratch:
+    /// gates, conv, l2norm, the delta-net recurrence and the gated RMS norm.
+    /// This instance's `conv_state`/`s_state` are that slot's recurrent state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn recurrent_at(
+        &self,
+        qkv: *mut c_void,
+        z: *mut c_void,
+        alpha: *mut c_void,
+        beta: *mut c_void,
+        g: *mut c_void,
+        beta_sig: *mut c_void,
+        conv: *mut c_void,
+        o: *mut c_void,
+        gated: *mut c_void,
+    ) -> Result<(), String> {
+        let d = &self.dims;
+        self.gates_at(alpha, beta, g, beta_sig)?;
+        self.conv_at(qkv, conv)?;
+        self.l2norm_at_ptr(conv, 0, d.n_k, d.head_k)?;
+        self.l2norm_at_ptr(conv, d.key_dim(), d.n_k, d.head_k)?;
+        self.gdn_at(conv, g, beta_sig, o)?;
+        self.gate_norm_at(o, z, gated)
+    }
+}
+
+/// Device pointer of row `row` of a `[rows][width]` f32 buffer.
+fn row_ptr(buf: &Buffer, row: usize, width: usize) -> *mut c_void {
+    unsafe { (buf.as_ptr() as *mut u8).add(row * width * 4) as *mut c_void }
 }

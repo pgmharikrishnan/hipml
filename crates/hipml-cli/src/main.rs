@@ -13,6 +13,8 @@ mod attn_cmd;
 #[cfg(feature = "hip")]
 mod cache_cmd;
 #[cfg(feature = "hip")]
+mod batch_cmd;
+#[cfg(feature = "hip")]
 mod device_cmd;
 #[cfg(feature = "hip")]
 mod gpu_bench_cmd;
@@ -71,6 +73,15 @@ fn main() {
         "attn-parity" => std::process::exit(attn_cmd::parity(&args[1..])),
         "attn-bench" => std::process::exit(attn_cmd::bench(&args[1..])),
         "bench-kv" => std::process::exit(kv_cmds::bench_kv(&args[1..])),
+        "batch-bench" => {
+            #[cfg(feature = "hip")]
+            std::process::exit(batch_cmd::run(&args[1..]));
+            #[cfg(not(feature = "hip"))]
+            {
+                eprintln!("batch-bench needs a build with `--features hip`");
+                std::process::exit(2);
+            }
+        }
         "gpu-bench" => {
             #[cfg(feature = "hip")]
             std::process::exit(gpu_bench_cmd::bench(&args[1..]));

@@ -165,3 +165,126 @@ extern "C" __global__ void gemv_q5_k(
     __shared__ __align__(16) float sx[Q5K_K_TILE];
     q5k_rows(w, x, y, m, k, sx, blockIdx.x);
 }
+
+// Batched variant (see gemv_q4_k.hip): B x rows share one weight pass, each row
+// keeping its own accumulator in the same k order. K_TILE is 512 (one group).
+#define Q5KB_K_TILE 512
+
+template <int B>
+static __device__ __forceinline__ void q5k_acc_b(const unsigned char* __restrict__ rp,
+                                                 int p, const float* __restrict__ sxb,
+                                                 int stride, float* acc)
+{
+    const int blk = p >> 8;
+    const int within = p & 255;
+    const int sub = within >> 5;
+    const int g = within >> 6;
+    const bool high = (within & 32) != 0;
+
+    const unsigned char* b = rp + (size_t)blk * Q5K_BLOCK_BYTES;
+    const float d = __half2float(*reinterpret_cast<const __half*>(b));
+    const float dmin = __half2float(*reinterpret_cast<const __half*>(b + 2));
+    int sc, mn;
+    q5k_scale_min(sub, b + 4, &sc, &mn);
+    const float scale = d * (float)sc;
+    const float minv = dmin * (float)mn;
+    const unsigned int bit = high ? (2u << (2 * g)) : (1u << (2 * g));
+
+    const unsigned int* qsp = reinterpret_cast<const unsigned int*>(b + 48 + g * 32 + (within & 31));
+    const unsigned int* qhp = reinterpret_cast<const unsigned int*>(b + 16 + (within & 31));
+    union Q5kBytesB {
+        unsigned int w[4];
+        unsigned char b[16];
+    } qs, qh;
+    qs.w[0] = qsp[0];
+    qs.w[1] = qsp[1];
+    qs.w[2] = qsp[2];
+    qs.w[3] = qsp[3];
+    qh.w[0] = qhp[0];
+    qh.w[1] = qhp[1];
+    qh.w[2] = qhp[2];
+    qh.w[3] = qhp[3];
+
+#pragma unroll
+    for (int bi = 0; bi < B; ++bi) {
+        const float* xv = sxb + bi * stride;
+        float a = acc[bi];
+#pragma unroll
+        for (int i = 0; i < Q5K_VPL; ++i) {
+            const unsigned int byte = qs.b[i];
+            const unsigned int nib = high ? (byte >> 4) : (byte & 0xF);
+            const float q = (float)nib + ((qh.b[i] & bit) ? 16.0f : 0.0f);
+            a = fmaf(scale * q - minv, xv[i * 32], a);
+        }
+        acc[bi] = a;
+    }
+}
+
+template <int B>
+static __device__ __forceinline__ void q5k_entry_b(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k)
+{
+    extern __shared__ __align__(16) float hipml_sx_b[];
+    float* sx = hipml_sx_b;
+    const int tid = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    const int nblocks = k / Q5K_VALUES;
+
+    const int row = blockIdx.x * Q5K_ROW_TILE + warp;
+    const int r = min(row, m - 1);
+    const unsigned char* rp = w + (size_t)r * (size_t)nblocks * Q5K_BLOCK_BYTES;
+    float acc[B];
+#pragma unroll
+    for (int bi = 0; bi < B; ++bi) acc[bi] = 0.0f;
+
+    for (int base = 0; base < k; base += Q5KB_K_TILE) {
+        const int n = min(Q5KB_K_TILE, k - base);
+        const int nchunks = n / Q5K_VPL;
+        for (int j = tid; j < nchunks; j += Q5K_BLOCK) {
+#pragma unroll
+            for (int bi = 0; bi < B; ++bi)
+                q5k_stage_group(x + (size_t)bi * k, sx + bi * Q5KB_K_TILE, base, j);
+        }
+        __syncthreads();
+
+        for (int c = lane * Q5K_VPL; c < n; c += Q5K_GROUP) {
+            const int g = c / Q5K_GROUP;
+            const int s = g * Q5K_GROUP + lane;
+            q5k_acc_b<B>(rp, base + c, sx + s, Q5KB_K_TILE, acc);
+        }
+        __syncthreads();
+    }
+
+#pragma unroll
+    for (int bi = 0; bi < B; ++bi) {
+        float a = acc[bi];
+#pragma unroll
+        for (int off = 16; off > 0; off >>= 1) a += __shfl_down(a, off);
+        if (lane == 0 && row < m) y[(size_t)bi * m + row] = a;
+    }
+}
+
+extern "C" __global__ void gemv_q5_k_b(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k,
+    int batch)
+{
+    switch (batch) {
+    case 1: q5k_entry_b<1>(w, x, y, m, k); break;
+    case 2: q5k_entry_b<2>(w, x, y, m, k); break;
+    case 3: q5k_entry_b<3>(w, x, y, m, k); break;
+    case 4: q5k_entry_b<4>(w, x, y, m, k); break;
+    case 5: q5k_entry_b<5>(w, x, y, m, k); break;
+    case 6: q5k_entry_b<6>(w, x, y, m, k); break;
+    case 7: q5k_entry_b<7>(w, x, y, m, k); break;
+    default: q5k_entry_b<8>(w, x, y, m, k); break;
+    }
+}
