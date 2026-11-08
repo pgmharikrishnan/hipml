@@ -95,9 +95,9 @@ if [ "$SYNC" = 1 ]; then
   echo "== sync HEAD to $HOST"
   git archive HEAD -o /tmp/hipml-bench.tar || die "git archive failed"
   scp -q /tmp/hipml-bench.tar "$HOST":x.tar || die "scp failed"
-  ssh "$HOST" 'if exist C:\hipml-bench rmdir /s /q C:\hipml-bench' || true
-  ssh "$HOST" 'mkdir C:\hipml-bench' || die "remote mkdir failed"
-  ssh "$HOST" 'tar -xf %USERPROFILE%\x.tar -C C:\hipml-bench' || die "remote extract failed"
+  ssh "$HOST" 'cmd /c "if exist C:\hipml-bench rmdir /s /q C:\hipml-bench"' || true
+  ssh "$HOST" 'cmd /c "mkdir C:\hipml-bench"' || die "remote mkdir failed"
+  ssh "$HOST" 'cmd /c "tar -xf %USERPROFILE%\x.tar -C C:\hipml-bench"' || die "remote extract failed"
 fi
 
 if [ "$BUILD" = 1 ]; then
@@ -304,7 +304,7 @@ PY
 echo "== pull raw results"
 mkdir -p bench/out
 rm -rf bench/out/jobs
-ssh "$HOST" 'cd /d C:\hipml-bench\bench\out && tar -cf jobs.tar jobs' \
+ssh "$HOST" 'cmd /c "cd /d C:\hipml-bench\bench\out && tar -cf jobs.tar jobs"' \
   || die "failed to archive job results"
 scp -q "$HOST":'C:/hipml-bench/bench/out/jobs.tar' /tmp/hipml-bench-jobs.tar \
   || die "failed to pull job results"
