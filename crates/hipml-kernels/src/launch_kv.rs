@@ -31,6 +31,13 @@ pub fn run(
             let out = Buffer::alloc(n_heads * head_dim)?;
             let part_acc = Buffer::alloc(n_heads * splits * head_dim)?;
             let part_ml = Buffer::alloc(n_heads * splits * 2)?;
+            // The kernel reads the position count from `step`; this arm decodes
+            // `seq` positions against a cache of `seq` rows.
+            let mut step_bytes = [0u8; 32];
+            for (i, v) in [0i32, seq as i32, 0, 0, 0, 0, 0, 0].iter().enumerate() {
+                step_bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            step.upload_bytes(0, &step_bytes)?;
 
             for _ in 0..reps {
                 launch(
