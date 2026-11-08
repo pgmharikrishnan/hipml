@@ -390,4 +390,55 @@ impl Launcher {
         };
         kernel.launch(cfg, &self.stream, &mut params)
     }
+
+    /// Quantize `rows` positions of the position-major f32 cache into the
+    /// head-major q8/q4 cache. The chunked prefill runs its attention on the
+    /// f32 mirror, then hands each chunk's new rows to decode in one launch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn kv_encode_bulk(
+        &self,
+        dtype: usize,
+        k_f32: &Buffer,
+        v_f32: &Buffer,
+        k_cache: &Buffer,
+        v_cache: &Buffer,
+        n_kv: usize,
+        head_dim: usize,
+        stride: usize,
+        start: usize,
+        rows: usize,
+    ) -> Result<(), String> {
+        let entry = match dtype {
+            0 => "kv_encode_bulk_q8",
+            1 => "kv_encode_bulk_q4",
+            other => return Err(format!("unknown KV dtype {other}")),
+        };
+        let kernel = self.module.kernel(entry)?;
+        let mut p_k = k_f32.as_ptr();
+        let mut p_v = v_f32.as_ptr();
+        let mut p_kc = k_cache.as_ptr();
+        let mut p_vc = v_cache.as_ptr();
+        let mut v_nkv = n_kv as i32;
+        let mut v_hd = head_dim as i32;
+        let mut v_stride = stride as i32;
+        let mut v_start = start as i32;
+        let mut v_rows = rows as i32;
+        let mut params: [*mut c_void; 9] = [
+            &mut p_k as *mut _ as *mut c_void,
+            &mut p_v as *mut _ as *mut c_void,
+            &mut p_kc as *mut _ as *mut c_void,
+            &mut p_vc as *mut _ as *mut c_void,
+            &mut v_nkv as *mut _ as *mut c_void,
+            &mut v_hd as *mut _ as *mut c_void,
+            &mut v_stride as *mut _ as *mut c_void,
+            &mut v_start as *mut _ as *mut c_void,
+            &mut v_rows as *mut _ as *mut c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: ((n_kv * rows) as u32, 1, 1),
+            block: (head_dim.max(32) as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        kernel.launch(cfg, &self.stream, &mut params)
+    }
 }

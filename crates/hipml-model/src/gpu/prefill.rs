@@ -296,29 +296,69 @@ impl<'a> GpuEngine<'a> {
                     if let Some(r) = rep.as_mut() {
                         r.lap(l, |r| &mut r.attn_gemm_ms);
                     }
-                    let width = cfg.n_head_kv * cfg.head_dim;
-                    let q_width = cfg.n_head * cfg.head_dim;
-                    for t in 0..n_tok {
-                        let pos = pos0 + t;
-                        attn.prep_chunk_row(l, &c.qg, &c.k, &c.q, &c.aq_gate, t, pos)?;
-                        l.kv_encode_ptr(
+                    if attn.dims.n_ctx > 1 {
+                        // The engine carries the f32 KV mirror at this depth, so
+                        // prefill uses the matrix-unit chunk attention and only
+                        // the handoff to the q8 decode cache is quantized.
+                        if std::env::var_os("HIPML_TOKEN_STEPS").is_some()
+                            || !attn.chunk_supported()
+                        {
+                            for t in 0..n_tok {
+                                attn.step_chunk_row(
+                                    l, &c.qg, &c.k, &c.v, &c.q, &c.aq_gate, &c.aout, t,
+                                    pos0 + t,
+                                )?;
+                            }
+                        } else {
+                            attn.step_chunk(
+                                l,
+                                &c.qg,
+                                &c.k,
+                                &c.v,
+                                &c.q,
+                                &c.aq_gate,
+                                &c.aout,
+                                pos0,
+                                n_tok,
+                            )?;
+                        }
+                        l.kv_encode_bulk(
                             dk.dtype.id(),
-                            row_ptr(&c.k, t, width),
-                            row_ptr(&c.v, t, width),
+                            attn.kv_k_buf(),
+                            attn.kv_v_buf(),
                             &dk.k,
                             &dk.v,
                             cfg.n_head_kv,
                             cfg.head_dim,
                             dk.seq,
+                            pos0,
+                            n_tok,
                         )?;
-                        deep_attention_ptr(
-                            l,
-                            &cfg,
-                            dk,
-                            pos,
-                            row_ptr(&c.q, t, q_width),
-                            row_ptr(&c.aout, t, q_width),
-                        )?;
+                    } else {
+                        let width = cfg.n_head_kv * cfg.head_dim;
+                        let q_width = cfg.n_head * cfg.head_dim;
+                        for t in 0..n_tok {
+                            let pos = pos0 + t;
+                            attn.prep_chunk_row(l, &c.qg, &c.k, &c.q, &c.aq_gate, t, pos)?;
+                            l.kv_encode_ptr(
+                                dk.dtype.id(),
+                                row_ptr(&c.k, t, width),
+                                row_ptr(&c.v, t, width),
+                                &dk.k,
+                                &dk.v,
+                                cfg.n_head_kv,
+                                cfg.head_dim,
+                                dk.seq,
+                            )?;
+                            deep_attention_ptr(
+                                l,
+                                &cfg,
+                                dk,
+                                pos,
+                                row_ptr(&c.q, t, q_width),
+                                row_ptr(&c.aout, t, q_width),
+                            )?;
+                        }
                     }
                     attn.apply_output_chunk(l, &c.aout, &c.aq_gate, &c.y, n_tok)?;
                     if let Some(r) = rep.as_mut() {

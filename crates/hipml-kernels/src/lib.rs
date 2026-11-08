@@ -476,6 +476,16 @@ pub const KERNELS: &[KernelSpec] = &[
         entry: "kv_encode_q4",
         kind: KernelKind::PerRow { block: 256 },
     },
+    KernelSpec {
+        name: "kv_encode_bulk_q8",
+        entry: "kv_encode_bulk_q8",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "kv_encode_bulk_q4",
+        entry: "kv_encode_bulk_q4",
+        kind: KernelKind::Linear { block: 256 },
+    },
     // One row per case: the op is the pair (partial pass, final fold), and the
     // parity case compares the single index it produces.
     KernelSpec {

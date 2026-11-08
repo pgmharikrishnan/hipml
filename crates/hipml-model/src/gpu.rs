@@ -158,6 +158,13 @@ pub struct GpuEngine<'a> {
 /// is one wave on this card and turns the 993 KB logit pass into a single sweep.
 const ARGMAX_PARTS: usize = 64;
 
+/// Up to this context, a quantized-KV engine also carries the f32 KV mirror so
+/// prefill can run the matrix-unit chunk attention. The mirror is
+/// `2 * n_ctx * width * 4` bytes per attention layer, 16 layers: 0.54 GiB at
+/// 8K and 2.1 GiB at 32K. At 100K it would be 6.5 GiB, so deeper prompts keep
+/// the row-at-a-time quantized path.
+const F32_PREFILL_MAX: usize = 32768;
+
 impl<'a> GpuEngine<'a> {
     /// Build every resident layer, borrowing the loader's weight payloads.
     pub fn new(
@@ -194,8 +201,9 @@ impl<'a> GpuEngine<'a> {
             let kind = if cfg.is_recr[i] {
                 BlockKind::Ssm(build_ssm(model, l, &cfg, i)?)
             } else if let Some(dtype) = kv_mode.dtype() {
+                let f32_mirror = if n_ctx <= F32_PREFILL_MAX { n_ctx } else { 1 };
                 BlockKind::Full {
-                    attn: build_attn(model, l, &cfg, i, 1)?,
+                    attn: build_attn(model, l, &cfg, i, f32_mirror)?,
                     deep: Some(DeepKv::new(&cfg, n_ctx, dtype)?),
                 }
             } else {
@@ -403,7 +411,9 @@ impl<'a> GpuEngine<'a> {
             .iter()
             .map(|b| match &b.kind {
                 BlockKind::Full { attn, deep: None } => 2 * depth * attn.dims.width * 4,
-                BlockKind::Full { deep: Some(d), .. } => d.bytes(),
+                BlockKind::Full { attn, deep: Some(d) } => {
+                    d.bytes() + 2 * depth * attn.dims.width * 4 * usize::from(attn.dims.n_ctx > 1)
+                }
                 BlockKind::Ssm(_) => 0,
             })
             .sum()
