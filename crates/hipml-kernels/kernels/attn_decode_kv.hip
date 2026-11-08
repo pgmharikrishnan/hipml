@@ -344,6 +344,10 @@ __device__ __forceinline__ void kv_decode_body(
         for (int d = 0; d < DPL; ++d) acc[d] *= corr;
         #pragma unroll
         for (int t = 0; t < TILE; ++t) {
+            // A short final tile leaves shared rows >= `rows` uninitialized.
+            // Their score is -INFINITY (p == 0), but 0 * uninitialized can be
+            // NaN, so do not read them at all.
+            if (t >= rows) break;
             const float p = exp2f(s[t] - mt);
             l += p;
             float vd[DPL];
