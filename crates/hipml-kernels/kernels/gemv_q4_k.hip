@@ -325,7 +325,7 @@ extern "C" __global__ void gemv_split_reduce(
 // on x[b]. K_TILE is 512 (one 512-value group); only the tile boundary moves.
 // ---------------------------------------------------------------------------
 
-#define Q4KB_K_TILE 512
+#define Q4KB_K_TILE 1024
 #define Q4KB_ROWS_PER_WARP 2
 
 // Dequantise this lane's 16 values of one row into `wv`.

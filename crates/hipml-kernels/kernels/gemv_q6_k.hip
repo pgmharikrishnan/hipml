@@ -196,7 +196,7 @@ extern "C" __global__ void gemv_q6_k_r1(
 // bit-identical to gemv_q6_k on x[b]. K_TILE is 512 (two 256-value groups).
 // ---------------------------------------------------------------------------
 
-#define Q6KB_K_TILE 512
+#define Q6KB_K_TILE 1024
 #define Q6KB_ROWS_PER_WARP 2
 
 static __device__ __forceinline__ void q6k_load(const unsigned char* __restrict__ rp,

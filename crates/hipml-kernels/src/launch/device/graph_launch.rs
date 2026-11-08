@@ -63,9 +63,9 @@ impl Launcher {
             return Err(format!("batched GEMV: batch {batch} outside 1..=8"));
         }
         let (entry, rows, shared) = match kind {
-            GEMV_B_Q4K => ("gemv_q4_k_b", 16usize, batch * 512 * 4),
-            GEMV_B_Q6K => ("gemv_q6_k_b", 16, batch * 512 * 4),
-            GEMV_B_Q5K => ("gemv_q5_k_b", 16, batch * 512 * 4),
+            GEMV_B_Q4K => ("gemv_q4_k_b", 16usize, batch * 1024 * 4),
+            GEMV_B_Q6K => ("gemv_q6_k_b", 16, batch * 1024 * 4),
+            GEMV_B_Q5K => ("gemv_q5_k_b", 16, batch * 1024 * 4),
             GEMV_B_Q80 => ("gemv_q8_0_b", 1, 0),
             other => return Err(format!("unknown batched GEMV kind {other}")),
         };
