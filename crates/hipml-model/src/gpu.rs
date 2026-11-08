@@ -460,38 +460,43 @@ impl<'a> GpuEngine<'a> {
         )
     }
 
-    /// Eager versus captured step, both through the public per-token calls.
+    /// Eager versus captured step, with the host submit measured on its own.
     ///
-    /// `graph_token` writes the step scalars, launches, syncs and reads the id,
-    /// which is exactly what `forward_token_id` does with ~1,300 launches, so the
-    /// difference is submission and the queue gaps between kernels.
+    /// `submit` is the time the host spends issuing one token's work with no
+    /// synchronize, so it is the cost a graph replaces. `ms` is wall time over
+    /// `reps` tokens, one synchronize at the end, so it is what the token costs.
     pub fn graph_probe(
         &mut self,
         token: u32,
         st: &mut GpuState,
         reps: usize,
     ) -> Result<GraphTiming, String> {
+        let l = self.model.launcher();
         let mut work = GpuState { pos: st.pos };
+
         let mut submit = 0.0f64;
         let t = std::time::Instant::now();
         for _ in 0..reps {
             let h = std::time::Instant::now();
-            self.forward_token_id(token, &mut work)?;
+            self.run_token(token, &mut work, true)?;
             submit += h.elapsed().as_secs_f64();
         }
+        l.synchronize()?;
         let eager_s = t.elapsed().as_secs_f64();
 
         self.build_token_graph()?;
         let mut submit_g = 0.0f64;
+        let graph = self.graph.as_ref().expect("just captured");
         let t = std::time::Instant::now();
-        let mut last = 0u32;
         for _ in 0..reps {
             let h = std::time::Instant::now();
-            last = self.graph_token(token, &mut work)?;
+            l.set_step(work.pos, work.pos + 1, token as usize)?;
+            graph.launch(l.stream())?;
+            work.pos += 1;
             submit_g += h.elapsed().as_secs_f64();
         }
+        l.synchronize()?;
         let graph_s = t.elapsed().as_secs_f64();
-        let _ = last;
 
         Ok(GraphTiming {
             eager_ms: eager_s * 1e3 / reps as f64,
