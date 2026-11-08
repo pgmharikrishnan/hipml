@@ -240,11 +240,32 @@ pub fn matbench(args: &[String]) -> i32 {
     0
 }
 
-/// `hipml tokenize --gguf PATH --text "..."`: print ids and the round-tripped
-/// text. Useful for diffing against llama-server's `/tokenize`.
+/// Escape a string for the tiny JSON writer below. The bench only emits ASCII
+/// prompts, but escaping the full set keeps the output valid.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// `hipml tokenize --gguf PATH (--text STR | --text-file PATH) [--json] [--out PATH]`:
+/// print ids and the round-tripped text. Useful for diffing against
+/// llama-server's `/tokenize`, and for building the bench fixture.
 pub fn tokenize(args: &[String]) -> i32 {
     let mut gguf = None;
-    let mut text = String::new();
+    let mut text = None;
+    let mut json = false;
+    let mut out_path = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -253,7 +274,32 @@ pub fn tokenize(args: &[String]) -> i32 {
                 i += 2;
             }
             "--text" => {
-                text = args.get(i + 1).cloned().unwrap_or_default();
+                text = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--text-file" => {
+                let path = match args.get(i + 1) {
+                    Some(p) => p,
+                    None => {
+                        eprintln!("tokenize: --text-file needs a path");
+                        return 2;
+                    }
+                };
+                match std::fs::read_to_string(path) {
+                    Ok(s) => text = Some(s),
+                    Err(e) => {
+                        eprintln!("tokenize: read {path}: {e}");
+                        return 1;
+                    }
+                }
+                i += 2;
+            }
+            "--json" => {
+                json = true;
+                i += 1;
+            }
+            "--out" => {
+                out_path = args.get(i + 1).cloned();
                 i += 2;
             }
             other => {
@@ -280,8 +326,32 @@ pub fn tokenize(args: &[String]) -> i32 {
             return 1;
         }
     };
+    let text = match text {
+        Some(t) => t,
+        None => {
+            eprintln!("tokenize: need --text or --text-file");
+            return 2;
+        }
+    };
     let ids = tok.encode(&text);
-    println!("ids:  {ids:?}");
-    println!("text: {}", tok.decode(&ids));
+    let rendered = if json {
+        format!(
+            "{{\"ids\":{:?},\"text\":\"{}\",\"add_bos\":{},\"bos_id\":{}}}",
+            ids,
+            json_escape(&tok.decode(&ids)),
+            tok.add_bos,
+            tok.bos_id
+        )
+    } else {
+        format!("ids:  {ids:?}\ntext: {}", tok.decode(&ids))
+    };
+    if let Some(path) = out_path {
+        if let Err(e) = std::fs::write(&path, &rendered) {
+            eprintln!("tokenize: write {path}: {e}");
+            return 1;
+        }
+    } else {
+        println!("{rendered}");
+    }
     0
 }
