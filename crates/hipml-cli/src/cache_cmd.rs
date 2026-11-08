@@ -333,7 +333,7 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
         restore_ms, p.len()
     );
     println!(
-        "first 20 ids: cold P {:?}\n              warm exact {} (equal: {})\n              warm shared Q {:?} (equal to cold: {})",
+        "first 20 ids: cold P {:?}\n              warm exact {:?} (equal: {})\n              warm shared Q {:?} (equal to cold: {})",
         &ids_p[..ids_p.len().min(20)],
         &ids_exact[..ids_exact.len().min(20)],
         ids_p == ids_exact,

@@ -45,7 +45,6 @@ pub struct Snapshot {
     pub ssm: Vec<Option<SsmBufs>>,
     /// Indexed by layer, `Some` for the 16 f32 attention layers.
     pub kv: Vec<Option<KvBufs>>,
-    pub bytes: usize,
 }
 
 /// A cache hit as the engine sees it: where to restore from and whether the
@@ -160,7 +159,6 @@ impl<'a> GpuEngine<'a> {
             logits: logits.map(|l| l.to_vec()),
             ssm,
             kv,
-            bytes,
         };
         Ok(self
             .prefix
