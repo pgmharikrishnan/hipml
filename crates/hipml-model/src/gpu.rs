@@ -107,6 +107,28 @@ enum BlockKind<'a> {
     Ssm(SsmGpuLayer<'a>),
 }
 
+/// One measured graph-vs-eager comparison for a token.
+#[derive(Clone, Copy, Debug)]
+pub struct GraphTiming {
+    pub eager_ms: f64,
+    pub eager_submit_ms: f64,
+    pub graph_ms: f64,
+    pub graph_submit_ms: f64,
+    pub launches: usize,
+}
+
+/// Launches one token issues, from the graph's structure (kept here so the
+/// probe and `gpu-profile` cannot disagree).
+pub fn launches_per_token(n_layer: usize, is_recr: &[bool]) -> usize {
+    let mut n = 1; // embedding dequant
+    for &recr in is_recr.iter().take(n_layer) {
+        n += 1; // attn_norm rmsnorm
+        n += if recr { 12 } else { 13 };
+        n += 7;
+    }
+    n + 2
+}
+
 /// Per-sequence state: position and the per-layer caches held by the blocks.
 pub struct GpuState {
     pub pos: usize,
@@ -356,6 +378,63 @@ impl<'a> GpuEngine<'a> {
 
     pub fn model(&self) -> &Model {
         self.model
+    }
+
+    /// Capture one token as a HIP graph and time it against the eager stream.
+    ///
+    /// The arguments are baked into the graph, including the position and the
+    /// token id, so repeated launches decode the *same* step: this measures what
+    /// submission costs and what a graph saves, not a correct sequence. The
+    /// reusable-per-step version needs the step scalars in device memory, which
+    /// `StepScalars` does.
+    pub fn graph_probe(
+        &mut self,
+        token: u32,
+        st: &mut GpuState,
+        reps: usize,
+    ) -> Result<GraphTiming, String> {
+        let l = self.model.launcher();
+        let mut work = GpuState { pos: st.pos };
+        // Warm: code objects, clocks, and the eager launch path.
+        self.run_token(token, &mut work)?;
+        l.synchronize()?;
+
+        let mut timed = |reps: usize| -> Result<(f64, f64), String> {
+            let mut submit = 0.0f64;
+            let t = std::time::Instant::now();
+            for _ in 0..reps {
+                let h = std::time::Instant::now();
+                self.run_token(token, &mut work)?;
+                submit += h.elapsed().as_secs_f64();
+            }
+            l.synchronize()?;
+            Ok((t.elapsed().as_secs_f64(), submit))
+        };
+        let (eager_s, eager_submit) = timed(reps)?;
+
+        l.stream().begin_capture()?;
+        self.run_token(token, &mut work)?;
+        let graph = l.stream().end_capture()?;
+        graph.upload(l.stream())?;
+        l.synchronize()?;
+
+        let mut submit = 0.0f64;
+        let t = std::time::Instant::now();
+        for _ in 0..reps {
+            let h = std::time::Instant::now();
+            graph.launch(l.stream())?;
+            submit += h.elapsed().as_secs_f64();
+        }
+        l.synchronize()?;
+        let graph_s = t.elapsed().as_secs_f64();
+
+        Ok(GraphTiming {
+            eager_ms: eager_s * 1e3 / reps as f64,
+            eager_submit_ms: eager_submit * 1e3 / reps as f64,
+            graph_ms: graph_s * 1e3 / reps as f64,
+            graph_submit_ms: submit * 1e3 / reps as f64,
+            launches: launches_per_token(self.cfg.n_layer, &self.cfg.is_recr),
+        })
     }
 
     /// Resident attention-cache bytes at the configured depth.

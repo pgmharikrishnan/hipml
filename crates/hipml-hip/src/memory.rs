@@ -152,6 +152,48 @@ impl Buffer {
         Err("built without the `hip` feature".to_string())
     }
 
+    /// Copy `data` in on `stream` without blocking the host: the decode loop
+    /// writes the step scalars (token id, position, sequence length) this way so
+    /// they are ordered ahead of the graph launch and never flush the queue.
+    #[cfg(feature = "hip")]
+    pub fn upload_bytes_async(
+        &self,
+        offset: usize,
+        data: &[u8],
+        stream: &crate::Stream,
+    ) -> Result<(), String> {
+        if offset + data.len() > self.len * 4 {
+            return Err(format!(
+                "upload of {} bytes at {offset} exceeds {} bytes",
+                data.len(),
+                self.len * 4
+            ));
+        }
+        unsafe {
+            let dst = (self.ptr as *mut u8).add(offset) as *mut std::ffi::c_void;
+            check(
+                ffi::hipMemcpyAsync(
+                    dst,
+                    data.as_ptr() as *const std::ffi::c_void,
+                    data.len(),
+                    ffi::HIP_MEMCPY_HOST_TO_DEVICE,
+                    stream.handle(),
+                ),
+                "hipMemcpyAsync host->device (bytes)",
+            )
+        }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn upload_bytes_async(
+        &self,
+        _offset: usize,
+        _data: &[u8],
+        _stream: &crate::Stream,
+    ) -> Result<(), String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
     /// Copy `len` bytes at byte `offset` back to host memory (the one-word
     /// readback the device argmax needs).
     #[cfg(feature = "hip")]

@@ -10,7 +10,7 @@ pub mod memory;
 #[cfg(feature = "hip")]
 pub mod ffi;
 
-pub use device::{Device, Event, Kernel, LaunchConfig, Module, Stream};
+pub use device::{Device, Event, Graph, Kernel, LaunchConfig, Module, Stream};
 pub use memory::{Buffer, ByteBuffer};
 
 /// True when this build can talk to a GPU.

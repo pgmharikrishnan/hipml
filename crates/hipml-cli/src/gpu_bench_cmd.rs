@@ -17,6 +17,7 @@ struct BenchArgs {
     kv_set: bool,
     prefill: Option<usize>,
     chunk: Option<usize>,
+    graph_probe: bool,
 }
 
 fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
@@ -28,6 +29,7 @@ fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
         kv_set: false,
         prefill: None,
         chunk: None,
+        graph_probe: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -61,6 +63,10 @@ fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
             "--chunk" => {
                 a.chunk = Some(need(i)?.parse().map_err(|e| format!("bad --chunk: {e}"))?);
                 i += 2;
+            }
+            "--graph-probe" => {
+                a.graph_probe = true;
+                i += 1;
             }
             other => return Err(format!("unknown argument {other}")),
         }
@@ -170,6 +176,27 @@ pub fn bench(args: &[String]) -> i32 {
             }
         }
     }
+    if a.graph_probe {
+        match engine.graph_probe(1, &mut st, 16) {
+            Ok(g) => {
+                println!(
+                    "graph probe ({} launches): eager {:7.3} ms/token (submit {:6.3}) | graph {:7.3} ms/token (submit {:6.3}) | graph speedup {:.2}x",
+                    g.launches,
+                    g.eager_ms,
+                    g.eager_submit_ms,
+                    g.graph_ms,
+                    g.graph_submit_ms,
+                    g.eager_ms / g.graph_ms
+                );
+            }
+            Err(e) => {
+                eprintln!("gpu-bench: graph probe: {e}");
+                return 1;
+            }
+        }
+        return 0;
+    }
+
     let n = a.tokens.max(2);
     let t = Instant::now();
     for _ in 0..n {
