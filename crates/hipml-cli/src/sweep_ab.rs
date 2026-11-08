@@ -531,7 +531,7 @@ fn job_buffer(jobs: &[hipml_kernels::GemvJob]) -> Result<Buffer, String> {
 /// the unsplit kernel bit-for-bit (they are not expected to: the accumulation
 /// order over k changes, which is why this is a probe and not a swap).
 pub(crate) fn split_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result<(), String> {
-    for suffix in ["ssm_out", "attn_output", "ffn_down"] {
+    for suffix in ["ssm_out", "attn_output", "attn_qkv", "attn_gate", "ffn_down"] {
         let mut v: Vec<(&ByteBuffer, usize, usize)> = Vec::new();
         for i in 0..64 {
             let t = match model.tensor(&format!("blk.{i}.{suffix}.weight")) {
@@ -549,9 +549,31 @@ pub(crate) fn split_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result<(
         let (m_max, k) = (v.iter().map(|t| t.1).max().unwrap_or(1), v[0].2);
         let bytes: usize = v.iter().map(|t| t.0.len()).sum();
         let x = Buffer::alloc(k)?;
+        // A real pattern: with an uninitialised (zero) x every output is zero
+        // and any exactness comparison below would pass vacuously.
+        let xf: Vec<f32> = (0..k).map(|i| ((i * 37) % 101) as f32 * 0.01 - 0.5).collect();
+        x.upload_bytes(0, unsafe {
+            std::slice::from_raw_parts(xf.as_ptr() as *const u8, k * 4)
+        })?;
         let y = Buffer::alloc(m_max)?;
         let y2 = Buffer::alloc(m_max)?;
         let part = Buffer::alloc(m_max * 4)?;
+
+        // Streaming-load variant over the same bytes.
+        l.synchronize()?;
+        let t = Instant::now();
+        for (w, m, kk) in &v {
+            l.run_quant_resident("gemv_q4_k_nt", w, &x, &y, *m, *kk)?;
+        }
+        l.synchronize()?;
+        let secs = t.elapsed().as_secs_f64();
+        println!(
+            "  sc1        {:6.2} GB  {:7.3} ms  {:6.1} GB/s  ({} launches)",
+            bytes as f64 / 1e9,
+            secs * 1e3,
+            bytes as f64 / secs / 1e9,
+            v.len()
+        );
 
         for splits in [1usize, 2, 4, 8] {
             if splits > 1 {

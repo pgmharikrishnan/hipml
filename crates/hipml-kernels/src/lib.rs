@@ -122,6 +122,15 @@ pub const KERNELS: &[KernelSpec] = &[
         },
     },
     KernelSpec {
+        name: "gemv_q4_k_nt",
+        entry: "gemv_q4_k_nt",
+        // `_r1` geometry with a streaming (sc1) 128-bit payload load.
+        kind: KernelKind::RowTile {
+            rows: 8,
+            block: 256,
+        },
+    },
+    KernelSpec {
         name: "gemv_q4_k_split",
         entry: "gemv_q4_k_split",
         // grid.y = splits; the launcher sizes it.

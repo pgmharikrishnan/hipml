@@ -72,7 +72,7 @@ static __device__ __forceinline__ void stage_group(const float* __restrict__ x,
 // four dwords. The payload is 16-byte aligned inside the block (offset 16 plus a
 // multiple of 16), so this is the same bytes and the same arithmetic; it is an
 // A/B switch because the kernel may be load-issue-bound rather than DRAM-bound.
-template <bool WIDE>
+template <bool WIDE, bool STREAM = false>
 static __device__ __forceinline__ void q4k_acc(const unsigned char* __restrict__ rp,
                                                int p, const float* xv, float* acc)
 {
@@ -95,7 +95,16 @@ static __device__ __forceinline__ void q4k_acc(const unsigned char* __restrict__
         unsigned int w[4];
         unsigned char b[16];
     } q;
-    if (WIDE) {
+    if (WIDE && STREAM) {
+        // sc1 (streaming): the 17 GB stream is read once per token and never
+        // reused, so it should not be kept in L2. Same bytes, same arithmetic.
+        const uint4 wide = __builtin_nontemporal_load(
+            reinterpret_cast<const uint4*>(qp));
+        q.w[0] = wide.x;
+        q.w[1] = wide.y;
+        q.w[2] = wide.z;
+        q.w[3] = wide.w;
+    } else if (WIDE) {
         const uint4 wide = *reinterpret_cast<const uint4*>(qp);
         q.w[0] = wide.x;
         q.w[1] = wide.y;
@@ -125,7 +134,7 @@ static __device__ __forceinline__ void q4k_acc(const unsigned char* __restrict__
 // 1-row grid is twice as long, which is what a 5120-row tensor needs.
 // `tile` is blockIdx.x in the standalone entry points and blockIdx.x of the
 // job's own grid in gemv_jobs. External linkage so the job kernel can call it.
-template <int RPW, bool WIDE>
+template <int RPW, bool WIDE, bool STREAM = false>
 __device__ __forceinline__ void q4k_tile(
     const unsigned char* __restrict__ w,
     const float* __restrict__ x,
@@ -167,7 +176,7 @@ __device__ __forceinline__ void q4k_tile(
             for (int comp = 0; comp < Q4K_VPL; ++comp) xv[comp] = sx[s + comp * 32];
             const int p = base + c;
 #pragma unroll
-            for (int rr = 0; rr < RPW; ++rr) q4k_acc<WIDE>(rp[rr], p, xv, &acc[rr]);
+            for (int rr = 0; rr < RPW; ++rr) q4k_acc<WIDE, STREAM>(rp[rr], p, xv, &acc[rr]);
         }
         __syncthreads();
     }
@@ -214,6 +223,19 @@ extern "C" __global__ void gemv_q4_k_u4(
 {
     __shared__ __align__(16) float sx[Q4K_K_TILE];
     q4k_tile<1, true>(w, x, y, m, k, sx, blockIdx.x);
+}
+
+// Streaming-load A/B: `gemv_q4_k_r1` with `buffer_load_dwordx4` + sc1 on the
+// weight payload (the brief's cache-hint item).
+extern "C" __global__ void gemv_q4_k_nt(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k)
+{
+    __shared__ __align__(16) float sx[Q4K_K_TILE];
+    q4k_tile<1, true, true>(w, x, y, m, k, sx, blockIdx.x);
 }
 
 // Split-K partial pass: grid (row tiles, splits), each block accumulates a
