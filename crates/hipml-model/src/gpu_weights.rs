@@ -137,7 +137,10 @@ impl<'a> Proj<'a> {
         rows: usize,
     ) -> Result<(), String> {
         let kind = batch_kind(self.entry).ok_or_else(|| {
-            format!("{}: no batched GEMV (F32 weights stay per-slot)", self.entry)
+            format!(
+                "{} ({}x{}): no batched GEMV (F32 weights stay per-slot)",
+                self.entry, self.rows, self.cols
+            )
         })?;
         l.gemv_batched(kind, self.w, x, y, self.rows, self.cols, rows)
     }
