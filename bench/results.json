@@ -1,0 +1,565 @@
+{
+  "format": "hipml-bench-results/1",
+  "generated": "2026-11-08T09:19:11.363100+00:00",
+  "meta": {
+    "host": "rtx",
+    "os": "Microsoft Windows 11 Pro",
+    "gpu": "AMD Radeon AI PRO R9700 32.0.32015.7029 ",
+    "hipml_commit": "0781a63437432386b995ea67101fef5596ddee33",
+    "hipml_dirty": true,
+    "hipml_binary_sha256": "95e3a5fa7e6166c4e056188a02f72df24c2958df340ed083d9203949f9b29c74",
+    "llama_version": "",
+    "llama_build": "",
+    "llama_commit": "",
+    "llama_kv": "f32",
+    "model_path": "C:\\models\\Qwen3.8-27B-Q4_K_M.gguf",
+    "llama_server_path": "C:\\llama.cpp\\rocm-gfx120x\\llama-server.exe",
+    "depths": "0",
+    "reps": "1",
+    "reps_100k": "1"
+  },
+  "fixture": {
+    "path": "/Users/harikrishnan/Documents/GitHub/hipml-bench/bench/fixtures/prompts.json",
+    "model": {
+      "path": "C:\\models\\Qwen3.8-27B-Q4_K_M.gguf",
+      "bytes": 17203416064
+    },
+    "tokenizer": {
+      "add_bos": false,
+      "bos_id": 248044
+    },
+    "depths": [
+      0,
+      8192,
+      32768,
+      100000
+    ],
+    "document_tokens": 100000,
+    "prompts": [
+      {
+        "label": "code_edit",
+        "tokens": 672
+      },
+      {
+        "label": "json_tool_call",
+        "tokens": 300
+      },
+      {
+        "label": "prose_explanation",
+        "tokens": 373
+      },
+      {
+        "label": "longdoc_qa",
+        "tokens": 7694
+      },
+      {
+        "label": "copy_200_words",
+        "tokens": 285
+      }
+    ]
+  },
+  "protocol": {
+    "prompt": "token ids from the fixture, identical for both engines",
+    "depth0": "prompt exactly as tokenised",
+    "depth_gt_0": "BOS + real document prefix + prompt, truncated to exact depth",
+    "gen_tokens": 33,
+    "decode_window": "tokens 2..33 (32 intervals)",
+    "reps": "cold prefill per rep; median/min/max reported",
+    "llama": {
+      "server": "llama-server",
+      "port": 8092,
+      "temperature": 0,
+      "ignore_eos": true,
+      "cold": "cache_prompt=false",
+      "warm": "one extra request with cache_prompt=true"
+    },
+    "hipml": {
+      "path": "generate --device",
+      "reps": "fresh GpuEngine per rep (zeroed KV/recurrent state)",
+      "kv": "f32",
+      "stage_report": "separate synchronised breakdown, not the TTFT"
+    }
+  },
+  "cells": [
+    {
+      "id": "code_edit@0",
+      "prompt": "code_edit",
+      "depth": 0,
+      "total": 672,
+      "prompt_len": 672,
+      "prefix_len": 0,
+      "ids_sha256": "74d7c8dda4bfca93",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "code_edit@8192",
+      "prompt": "code_edit",
+      "depth": 8192,
+      "total": 8192,
+      "prompt_len": 672,
+      "prefix_len": 7520,
+      "ids_sha256": "174e399918f887c9",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "code_edit@32768",
+      "prompt": "code_edit",
+      "depth": 32768,
+      "total": 32768,
+      "prompt_len": 672,
+      "prefix_len": 32096,
+      "ids_sha256": "6e651e6a616ee17a",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "code_edit@100000",
+      "prompt": "code_edit",
+      "depth": 100000,
+      "total": 100000,
+      "prompt_len": 672,
+      "prefix_len": 99328,
+      "ids_sha256": "cb26954bfb3ef5c0",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "json_tool_call@0",
+      "prompt": "json_tool_call",
+      "depth": 0,
+      "total": 300,
+      "prompt_len": 300,
+      "prefix_len": 0,
+      "ids_sha256": "9907f6aa055d6e58",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "json_tool_call@8192",
+      "prompt": "json_tool_call",
+      "depth": 8192,
+      "total": 8192,
+      "prompt_len": 300,
+      "prefix_len": 7892,
+      "ids_sha256": "bfd1595322691223",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "json_tool_call@32768",
+      "prompt": "json_tool_call",
+      "depth": 32768,
+      "total": 32768,
+      "prompt_len": 300,
+      "prefix_len": 32468,
+      "ids_sha256": "df46171887fbcef7",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "json_tool_call@100000",
+      "prompt": "json_tool_call",
+      "depth": 100000,
+      "total": 100000,
+      "prompt_len": 300,
+      "prefix_len": 99700,
+      "ids_sha256": "9664855a8c196cbc",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "prose_explanation@0",
+      "prompt": "prose_explanation",
+      "depth": 0,
+      "total": 373,
+      "prompt_len": 373,
+      "prefix_len": 0,
+      "ids_sha256": "bc6c9b90a2f18423",
+      "hipml": {
+        "available": true,
+        "reps": 1,
+        "reps_requested": 1,
+        "ttft_ms": {
+          "n": 1,
+          "median": 339.7433,
+          "min": 339.7433,
+          "max": 339.7433,
+          "values": [
+            339.7433
+          ]
+        },
+        "prefill_tok_s": {
+          "n": 1,
+          "median": 1097.8877,
+          "min": 1097.8877,
+          "max": 1097.8877,
+          "values": [
+            1097.8877
+          ]
+        },
+        "decode_tok_s": {
+          "n": 1,
+          "median": 26.4517,
+          "min": 26.4517,
+          "max": 26.4517,
+          "values": [
+            26.4517
+          ]
+        },
+        "peak_vram_mib": 18303.8515625,
+        "cold_cache_n_zero": null,
+        "cache_n_values": [],
+        "duration_s": 12.078572273254395,
+        "kv_type": null,
+        "kv_mode": "f32",
+        "warm": null,
+        "stage": null,
+        "server_version": null,
+        "ids_sha256": "bc6c9b90a2f18423",
+        "tokens": 373
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "prose_explanation@8192",
+      "prompt": "prose_explanation",
+      "depth": 8192,
+      "total": 8192,
+      "prompt_len": 373,
+      "prefix_len": 7819,
+      "ids_sha256": "72dc08f9c6cdd339",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "prose_explanation@32768",
+      "prompt": "prose_explanation",
+      "depth": 32768,
+      "total": 32768,
+      "prompt_len": 373,
+      "prefix_len": 32395,
+      "ids_sha256": "158a05d636ce6293",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "prose_explanation@100000",
+      "prompt": "prose_explanation",
+      "depth": 100000,
+      "total": 100000,
+      "prompt_len": 373,
+      "prefix_len": 99627,
+      "ids_sha256": "e45e88ce5ce4297d",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "longdoc_qa@0",
+      "prompt": "longdoc_qa",
+      "depth": 0,
+      "total": 7694,
+      "prompt_len": 7694,
+      "prefix_len": 0,
+      "ids_sha256": "13515cd9d176f88d",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "longdoc_qa@8192",
+      "prompt": "longdoc_qa",
+      "depth": 8192,
+      "total": 8192,
+      "prompt_len": 7694,
+      "prefix_len": 498,
+      "ids_sha256": "f5b4814c6aab8bb1",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "longdoc_qa@32768",
+      "prompt": "longdoc_qa",
+      "depth": 32768,
+      "total": 32768,
+      "prompt_len": 7694,
+      "prefix_len": 25074,
+      "ids_sha256": "b887a1368b6bd47f",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "longdoc_qa@100000",
+      "prompt": "longdoc_qa",
+      "depth": 100000,
+      "total": 100000,
+      "prompt_len": 7694,
+      "prefix_len": 92306,
+      "ids_sha256": "ddd4db4206407926",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "copy_200_words@0",
+      "prompt": "copy_200_words",
+      "depth": 0,
+      "total": 285,
+      "prompt_len": 285,
+      "prefix_len": 0,
+      "ids_sha256": "195bdd899f53d74b",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "copy_200_words@8192",
+      "prompt": "copy_200_words",
+      "depth": 8192,
+      "total": 8192,
+      "prompt_len": 285,
+      "prefix_len": 7907,
+      "ids_sha256": "2b5979005a3a063e",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "copy_200_words@32768",
+      "prompt": "copy_200_words",
+      "depth": 32768,
+      "total": 32768,
+      "prompt_len": 285,
+      "prefix_len": 32483,
+      "ids_sha256": "0936ac9ce6675b6e",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    },
+    {
+      "id": "copy_200_words@100000",
+      "prompt": "copy_200_words",
+      "depth": 100000,
+      "total": 100000,
+      "prompt_len": 285,
+      "prefix_len": 99715,
+      "ids_sha256": "165523c796722973",
+      "hipml": {
+        "available": false,
+        "error": "missing"
+      },
+      "llama": {
+        "available": false,
+        "error": "missing"
+      },
+      "gaps": {
+        "prefill_pct_hipml_minus_llama": null,
+        "decode_pct_hipml_minus_llama": null,
+        "ttft_ratio_llama_over_hipml": null
+      }
+    }
+  ],
+  "gaps": []
+}

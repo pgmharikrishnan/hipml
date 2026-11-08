@@ -126,6 +126,20 @@ def main():
             print(f"warning: ignoring {args.meta}: {e}", file=sys.stderr)
 
     jobs = load_jobs(args.jobs)
+    if not meta.get("llama_version"):
+        for j in jobs.values():
+            v = j.get("server_version")
+            if v:
+                meta["llama_version"] = v
+                break
+    if meta.get("llama_version") and not meta.get("llama_build"):
+        import re
+        m = re.search(r"build (\d+)", meta["llama_version"])
+        c = re.search(r"commit ([0-9a-f]+)", meta["llama_version"])
+        if m:
+            meta["llama_build"] = m.group(1)
+        if c:
+            meta["llama_commit"] = c.group(1)
     cells = []
     for c in fixture["cells"]:
         h = engine_summary(jobs.get(("hipml", c["prompt"], c["depth"])))
@@ -163,6 +177,17 @@ def main():
                     "reps_hipml": c["hipml"].get("reps"),
                     "reps_llama": c["llama"].get("reps"),
                 })
+        ttft_ratio = g.get("ttft_ratio_llama_over_hipml")
+        if ttft_ratio is not None:
+            gaps.append({
+                "metric": "ttft",
+                "prompt": c["prompt"],
+                "depth": c["depth"],
+                "tokens": c["total"],
+                "pct_hipml_minus_llama": (ttft_ratio - 1.0) * 100.0,
+                "reps_hipml": c["hipml"].get("reps"),
+                "reps_llama": c["llama"].get("reps"),
+            })
 
     report = {
         "format": "hipml-bench-results/1",
@@ -302,15 +327,21 @@ def write_markdown(report, path):
         return max(rows, key=lambda x: sign * x["pct_hipml_minus_llama"])
 
     lines.append("## Headline gaps\n")
-    for metric in ("prefill", "decode"):
+    for metric in ("prefill", "decode", "ttft"):
         hi = best(metric, +1)
         lo = best(metric, -1)
-        if hi:
-            lines.append(
-                f"- **{metric}**: hipml fastest at `{hi['prompt']}@{hi['depth']}` "
-                f"({hi['pct_hipml_minus_llama']:+.1f}%, reps {hi['reps_hipml']}/{hi['reps_llama']}); "
-                f"llama.cpp fastest at `{lo['prompt']}@{lo['depth']}` "
+        if not hi:
+            continue
+        line = (
+            f"- **{metric}**: hipml fastest at `{hi['prompt']}@{hi['depth']}` "
+            f"({hi['pct_hipml_minus_llama']:+.1f}%, reps {hi['reps_hipml']}/{hi['reps_llama']})")
+        if lo and lo["pct_hipml_minus_llama"] < 0:
+            line += (
+                f"; llama.cpp fastest at `{lo['prompt']}@{lo['depth']}` "
                 f"({lo['pct_hipml_minus_llama']:+.1f}%, reps {lo['reps_hipml']}/{lo['reps_llama']}).")
+        else:
+            line += "; llama.cpp did not win any cell for this metric."
+        lines.append(line)
     lines.append("")
 
     # Warm llama pass.

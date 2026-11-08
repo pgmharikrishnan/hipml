@@ -319,10 +319,10 @@ def main():
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--llama-kv", default="f32", choices=["f32", "f16"])
     ap.add_argument("--stage-report", action="store_true")
-    ap.add_argument("--timeout", type=int, default=1800,
-                    help="hipml per-cell wall timeout")
-    ap.add_argument("--load-timeout", type=int, default=600)
-    ap.add_argument("--request-timeout", type=int, default=1800)
+    ap.add_argument("--timeout", type=int, default=1080,
+                    help="hipml per-cell wall timeout (keeps the lock under 20 min)")
+    ap.add_argument("--load-timeout", type=int, default=300)
+    ap.add_argument("--request-timeout", type=int, default=900)
     ap.add_argument("--out-dir", default=os.path.join(HERE, "out", "jobs"))
     ap.add_argument("--tmp", default=os.path.join(HERE, "out", "tmp"))
     args = ap.parse_args()
