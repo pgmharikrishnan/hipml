@@ -7,7 +7,11 @@
 //
 // Included by `prefill_f16.hip` (packed-fp16 dot2 inner loop) and
 // `prefill_wmma.hip` (matrix unit). Not a `.hip` file, so build.rs does not
-// compile it on its own.
+// compile it on its own; the guard is what lets both include it from the one
+// amalgamated translation unit.
+
+#ifndef PF_PREFILL_COMMON_INC
+#define PF_PREFILL_COMMON_INC
 
 #define PF_Q4K_BLOCK_BYTES 144
 #define PF_Q6K_BLOCK_BYTES 210
@@ -94,3 +98,5 @@ static __device__ __forceinline__ size_t pf_row_bytes(int k, int kind)
          : kind == 1 ? (size_t)(k / 256) * PF_Q6K_BLOCK_BYTES
                      : (size_t)(k / 32) * PF_Q8_0_BLOCK_BYTES;
 }
+
+#endif // PF_PREFILL_COMMON_INC
