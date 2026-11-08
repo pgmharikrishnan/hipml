@@ -100,13 +100,19 @@ pub fn run(l: &Launcher, cfg: &Config, w: &FullAttnW) -> Result<(bool, Stats), S
 /// bytes, so the comparison isolates accumulation order and the f16 operand
 /// conversion; the 8-bit quantization error is common to both sides.
 pub fn run_q8(l: &Launcher, cfg: &Config, w: &FullAttnW) -> Result<(bool, Stats), String> {
-    const TOK: usize = 37;
-    const POS0: usize = 29;
+    // Default is the 37@29 case; the env knobs run the same comparison deep in
+    // a cache whose per-head stride is larger than the live length, which is
+    // how the engine lays the cache out (stride = n_ctx).
+    let tok = env_usize("HIPML_CHUNK_PARITY_TOK", 37);
+    let pos0 = env_usize("HIPML_CHUNK_PARITY_POS0", 29);
+    let stride = pos0 + tok + env_usize("HIPML_CHUNK_PARITY_PAD", 0);
+    let (tok, pos0) = (tok.max(1), pos0);
     let hd = cfg.head_dim;
     let nkv = cfg.n_head_kv;
     let width = nkv * hd;
     let nhd = cfg.n_head * hd;
-    let seq = POS0 + TOK;
+    // The cache is allocated with the full per-head stride.
+    let seq = stride;
     if hd % kv::BLOCK != 0 {
         return Err(format!(
             "q8 chunk parity: head_dim {hd} is not a block multiple"
@@ -114,7 +120,7 @@ pub fn run_q8(l: &Launcher, cfg: &Config, w: &FullAttnW) -> Result<(bool, Stats)
     }
 
     let mut rng = Rng::new(0xC4A0_9876_5432);
-    let qc: Vec<f32> = (0..TOK * nhd).map(|_| rng.normal()).collect();
+    let qc: Vec<f32> = (0..tok * nhd).map(|_| rng.normal()).collect();
     let kc: Vec<f32> = (0..seq * width).map(|_| rng.normal()).collect();
     let vc: Vec<f32> = (0..seq * width).map(|_| rng.normal()).collect();
 
@@ -151,15 +157,15 @@ pub fn run_q8(l: &Launcher, cfg: &Config, w: &FullAttnW) -> Result<(bool, Stats)
     let vbb = hipml_hip::Buffer::alloc(vb.len().div_ceil(4))?;
     kbb.upload_bytes(0, &kb)?;
     vbb.upload_bytes(0, &vb)?;
-    let ob = hipml_hip::Buffer::alloc(TOK * nhd)?;
+    let ob = hipml_hip::Buffer::alloc(tok * nhd)?;
 
     let layer = AttnLayer::new(l, w, cfg, seq + 8)?;
-    layer.chunk_attention_q8(l, &qb, &kbb, &vbb, &ob, POS0, TOK, 1, seq)?;
+    layer.chunk_attention_q8(l, &qb, &kbb, &vbb, &ob, pos0, tok, 1, seq)?;
     let gpu = ob.to_host()?;
 
     let scale = 1.0f32 / (hd as f32).sqrt();
-    let mut cpu = vec![0.0f32; TOK * nhd];
-    for t in 0..TOK {
+    let mut cpu = vec![0.0f32; tok * nhd];
+    for t in 0..tok {
         let row = attn_causal_f32(
             &qc[t * nhd..(t + 1) * nhd],
             &kq,
@@ -167,14 +173,43 @@ pub fn run_q8(l: &Launcher, cfg: &Config, w: &FullAttnW) -> Result<(bool, Stats)
             cfg.n_head,
             cfg.n_head_kv,
             hd,
-            POS0 + t + 1,
+            pos0 + t + 1,
             scale,
         );
         cpu[t * nhd..(t + 1) * nhd].copy_from_slice(&row);
     }
     let stats = compare(&cpu, &gpu, tolerance());
+    if stats.is_err() {
+        let (mut worst, mut at) = (0.0f32, (0usize, 0usize, 0usize));
+        for t in 0..tok {
+            for h in 0..cfg.n_head {
+                for d in 0..hd {
+                    let i = t * nhd + h * hd + d;
+                    let e = (cpu[i] - gpu[i]).abs();
+                    if e > worst {
+                        worst = e;
+                        at = (t, h, d);
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "  diag: q8 worst at row {} head {} d {} (cpu {:.5} gpu {:.5}, max|d| {worst:.3e})",
+            at.0, at.1, at.2, cpu[at.0 * nhd + at.1 * hd + at.2],
+            gpu[at.0 * nhd + at.1 * hd + at.2]
+        );
+    }
     Ok(match stats {
         Ok(st) => (true, st),
         Err(st) => (false, st),
     })
 }
+
+/// Integer env override, used only by the parity diagnostics above.
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
