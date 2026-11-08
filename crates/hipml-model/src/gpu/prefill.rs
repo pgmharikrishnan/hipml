@@ -251,8 +251,8 @@ impl<'a> GpuEngine<'a> {
                 }
                 BlockKind::Full { attn, deep } => {
                     // One batched GEMM per chunk for q/k/v, then the cache-
-                    // dependent attention tile (f32 mirror, q8/q4 read in
-                    // place, or the row-at-a-time fallback).
+                    // dependent attention tile (q8/q4 read in place, or the
+                    // row-at-a-time fallback).
                     attn.project_chunk(l, &c.t, &c.qg, &c.k, &c.v, n_tok)?;
                     if let Some(r) = rep.as_mut() {
                         r.lap(l, |r| &mut r.attn_gemm_ms);

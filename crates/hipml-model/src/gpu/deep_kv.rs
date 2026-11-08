@@ -10,8 +10,6 @@ use super::*;
 pub struct DeepKv {
     pub dtype: KvDtype,
     pub seq: usize,
-    /// Whether the engine also carries the f32 prefill mirror for this layer.
-    pub mirror: bool,
     n_kv: usize,
     head_dim: usize,
     pub(super) k: Buffer,
@@ -31,19 +29,13 @@ pub struct DeepKv {
 pub(super) const MAX_SPLITS: usize = 64;
 
 impl DeepKv {
-    pub(super) fn new(
-        cfg: &Config,
-        seq: usize,
-        dtype: KvDtype,
-        mirror: bool,
-    ) -> Result<DeepKv, String> {
+    pub(super) fn new(cfg: &Config, seq: usize, dtype: KvDtype) -> Result<DeepKv, String> {
         let row = dtype.row_bytes(cfg.head_dim);
         let bytes = cfg.n_head_kv * seq * row;
         let f32s = bytes.div_ceil(4);
         Ok(DeepKv {
             dtype,
             seq,
-            mirror,
             n_kv: cfg.n_head_kv,
             head_dim: cfg.head_dim,
             k: Buffer::alloc(f32s)?,

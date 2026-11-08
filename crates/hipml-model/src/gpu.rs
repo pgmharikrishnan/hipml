@@ -160,15 +160,16 @@ pub struct GpuEngine<'a> {
 /// is one wave on this card and turns the 993 KB logit pass into a single sweep.
 const ARGMAX_PARTS: usize = 64;
 
-/// The f32 prefill mirror is a convenience, not a requirement: it is only
-/// allocated while it costs at most this many bytes across the attention
-/// layers. At this model's shape the mirror is `2 * 4 B * width * layers` =
-/// 128 KiB per position, so 5 GiB covers a 40K context: the 32K bench cell
-/// (n_ctx 32832, 4.3 GiB) keeps the mirror, which measured 864 tok/s there
-/// against 847 on the q8 chunk path. A 64K context needs 8.6 GiB and 100K
-/// 13.4 GiB, so both run the matrix-unit kernel straight out of the q8/q4
-/// decode cache and no mirror is ever allocated.
-const F32_MIRROR_MAX_BYTES: usize = 5 << 30;
+/// Quantized-KV engines carry no f32 prefill mirror.
+///
+/// The mirror existed so chunked prefill could read f32 KV tiles. The
+/// matrix-unit kernel now stages a q8_0/q4_0 tile in place, and that is not
+/// just cheaper in memory: at 8K it prefills at 1,016 tok/s against 993 through
+/// the mirror (a q8 row is 272 B, not 1 KB), and at 32K the two are level
+/// (870 vs 871). A 32K mirror is 4.3 GiB and 100K's would be 13.4 GiB, so the
+/// engine never allocates one; `--kv f32` keeps the f32 cache and the token
+/// loop, which is the parity reference.
+const MIRROR_ROWS: usize = 1;
 
 impl<'a> GpuEngine<'a> {
     /// Build every resident layer, borrowing the loader's weight payloads.
@@ -206,17 +207,11 @@ impl<'a> GpuEngine<'a> {
             let kind = if cfg.is_recr[i] {
                 BlockKind::Ssm(build_ssm(model, l, &cfg, i)?)
             } else if let Some(dtype) = kv_mode.dtype() {
-                // The mirror is a prefill-only convenience, bounded by a byte
-                // budget (see F32_MIRROR_MAX_BYTES) and never allocated at the
-                // depths that need the VRAM, where the q8 chunk kernel reads the
-                // cache directly.
-                let n_attn = cfg.is_recr.iter().filter(|r| !**r).count();
-                let mirror_bytes = 2 * n_ctx * (cfg.n_head_kv * cfg.head_dim) * 4 * n_attn;
-                let mirror = mirror_bytes <= F32_MIRROR_MAX_BYTES;
-                let f32_mirror = if mirror { n_ctx } else { 1 };
+                // No f32 mirror: prefill and decode share the quantized cache
+                // (see MIRROR_ROWS).
                 BlockKind::Full {
-                    attn: build_attn(model, l, &cfg, i, f32_mirror)?,
-                    deep: Some(DeepKv::new(&cfg, n_ctx, dtype, mirror)?),
+                    attn: build_attn(model, l, &cfg, i, MIRROR_ROWS)?,
+                    deep: Some(DeepKv::new(&cfg, n_ctx, dtype)?),
                 }
             } else {
                 BlockKind::Full {
@@ -423,9 +418,7 @@ impl<'a> GpuEngine<'a> {
             .iter()
             .map(|b| match &b.kind {
                 BlockKind::Full { attn, deep: None } => 2 * depth * attn.dims.width * 4,
-                BlockKind::Full { attn, deep: Some(d) } => {
-                    d.bytes() + 2 * depth * attn.dims.width * 4 * usize::from(d.mirror)
-                }
+                BlockKind::Full { attn: _, deep: Some(d) } => d.bytes(),
                 BlockKind::Ssm(_) => 0,
             })
             .sum()

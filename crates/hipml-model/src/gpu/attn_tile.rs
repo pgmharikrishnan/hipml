@@ -1,5 +1,5 @@
-//! One layer's chunk attention, dispatched by cache: the f32 mirror, the
-//! q8/q4 decode cache read in place, or the row-at-a-time fallbacks.
+//! One layer's chunk attention, dispatched by cache: the q8/q4 decode cache
+//! read in place, the f32 tile, or the row-at-a-time fallbacks.
 //!
 //! Child module of `gpu` so it can reach the engine's chunk scratch, the
 //! quantized cache buffers and `deep_attention_ptr`. `prefill.rs` keeps the
@@ -40,36 +40,11 @@ pub(super) fn attention_tile(
             }
         }
         Some(dk) => {
-            // Escape hatches: the f32 row path (HIPML_TOKEN_STEPS) and the
-            // quantized row path (HIPML_Q8_ROW). HIPML_Q8_CHUNK ignores the
-            // mirror so the q8 chunk path can be measured at shallow depth.
-            if steps || !attn.chunk_supported() {
-                for t in 0..n_tok {
-                    attn.step_chunk_row(
-                        l, &c.qg, &c.k, &c.v, &c.q, &c.aq_gate, &c.aout, t, pos0 + t,
-                    )?;
-                }
-            } else if dk.mirror
-                && std::env::var_os("HIPML_Q8_CHUNK").is_none()
-                && std::env::var_os("HIPML_Q8_ROW").is_none()
-            {
-                attn.step_chunk(
-                    l, &c.qg, &c.k, &c.v, &c.q, &c.aq_gate, &c.aout, pos0, n_tok,
-                )?;
-                l.kv_encode_bulk(
-                    dk.dtype.id(),
-                    attn.kv_k_buf(),
-                    attn.kv_v_buf(),
-                    &dk.k,
-                    &dk.v,
-                    cfg.n_head_kv,
-                    cfg.head_dim,
-                    dk.seq,
-                    pos0,
-                    pos0,
-                    n_tok,
-                )?;
-            } else if attn.q8_chunk_supported()
+            // Escape hatches HIPML_TOKEN_STEPS and HIPML_Q8_ROW both select the
+            // row-at-a-time quantized path; this engine carries no f32 mirror
+            // for `step_chunk_row` to append to.
+            if attn.q8_chunk_supported()
+                && !steps
                 && std::env::var_os("HIPML_Q8_ROW").is_none()
             {
                 // Quantize the tile straight into the decode cache, then run the
