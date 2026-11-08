@@ -109,14 +109,17 @@ static __device__ __forceinline__ void q4k_acc(const unsigned char* __restrict__
 // the same columns either way, so the per-row accumulation order and the warp
 // reduction tree are unchanged: the two entries are bit-identical, and the
 // 1-row grid is twice as long, which is what a 5120-row tensor needs.
+// `tile` is blockIdx.x in the standalone entry points and blockIdx.x of the
+// job's own grid in gemv_jobs. External linkage so the job kernel can call it.
 template <int RPW>
-static __device__ __forceinline__ void q4k_tile(
+__device__ __forceinline__ void q4k_tile(
     const unsigned char* __restrict__ w,
     const float* __restrict__ x,
     float* __restrict__ y,
     int m,
     int k,
-    float* __restrict__ sx)
+    float* __restrict__ sx,
+    int tile)
 {
     const int tid = threadIdx.x;
     const int lane = tid & 31;
@@ -130,7 +133,7 @@ static __device__ __forceinline__ void q4k_tile(
     float acc[RPW];
 #pragma unroll
     for (int rr = 0; rr < RPW; ++rr) {
-        row[rr] = blockIdx.x * row_tile + warp * RPW + rr;
+        row[rr] = tile * row_tile + warp * RPW + rr;
         r[rr] = min(row[rr], m - 1);
         rp[rr] = w + (size_t)r[rr] * (size_t)nblocks * Q4K_BLOCK_BYTES;
         acc[rr] = 0.0f;
@@ -172,7 +175,7 @@ extern "C" __global__ void gemv_q4_k(
     int k)
 {
     __shared__ __align__(16) float sx[Q4K_K_TILE];
-    q4k_tile<Q4K_ROWS_PER_WARP>(w, x, y, m, k, sx);
+    q4k_tile<Q4K_ROWS_PER_WARP>(w, x, y, m, k, sx, blockIdx.x);
 }
 
 extern "C" __global__ void gemv_q4_k_r1(
@@ -183,5 +186,5 @@ extern "C" __global__ void gemv_q4_k_r1(
     int k)
 {
     __shared__ __align__(16) float sx[Q4K_K_TILE];
-    q4k_tile<1>(w, x, y, m, k, sx);
+    q4k_tile<1>(w, x, y, m, k, sx, blockIdx.x);
 }

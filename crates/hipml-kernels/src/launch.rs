@@ -16,6 +16,9 @@ pub(crate) mod device {
 
     #[path = "graph_launch.rs"]
     mod graph_launch;
+    pub use graph_launch::{
+        gemv_job_tiles, GemvJob, GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80,
+    };
     #[path = "prefill_launch.rs"]
     mod prefill_launch;
 
@@ -25,7 +28,6 @@ pub(crate) mod device {
     #[path = "stream_launch.rs"]
     mod stream_launch;
     pub use stream_launch::ReadJob;
-
     pub struct Launcher {
         pub(crate) module: Module,
         /// The graph's main stream: every op that has no declared partner.
@@ -498,7 +500,9 @@ pub(crate) mod device {
 #[cfg(feature = "hip")]
 pub use device::prefill_resident;
 #[cfg(feature = "hip")]
-pub use device::{Launcher, ReadJob};
+pub use device::{gemv_job_tiles, GemvJob, Launcher, ReadJob};
+#[cfg(feature = "hip")]
+pub use device::{GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80};
 
 /// Without the `hip` feature the launcher exists but refuses to run, so callers
 /// need no conditional compilation of their own.

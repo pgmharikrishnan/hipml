@@ -27,7 +27,9 @@ pub mod launch_kv;
 #[cfg(feature = "hip")]
 pub use launch::prefill_resident;
 #[cfg(feature = "hip")]
-pub use launch::ReadJob;
+pub use launch::{gemv_job_tiles, GemvJob, ReadJob};
+#[cfg(feature = "hip")]
+pub use launch::{GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80};
 pub use launch::Launcher;
 
 /// How a kernel is gridded.

@@ -6,7 +6,54 @@
 
 use super::*;
 
+/// One entry of the `gemv_jobs` device job list. Mirrors `HipmlGemvJob` in
+/// `gemv_jobs.hip`; pointers are device addresses.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GemvJob {
+    pub w: usize,
+    pub x: usize,
+    pub y: usize,
+    pub m: i32,
+    pub k: i32,
+    pub kind: i32,
+    pub pad: i32,
+}
+
+/// `kind` values the job kernel dispatches on.
+pub const GEMV_JOB_Q4K: i32 = 0;
+pub const GEMV_JOB_Q6K: i32 = 1;
+pub const GEMV_JOB_Q5K: i32 = 2;
+pub const GEMV_JOB_Q80: i32 = 3;
+
+/// Tiles a job occupies (8 rows per tile for the K-quants, one row for Q8_0).
+pub fn gemv_job_tiles(kind: i32, m: usize) -> usize {
+    if kind == GEMV_JOB_Q80 {
+        m
+    } else {
+        (m + 7) / 8
+    }
+}
+
 impl Launcher {
+    /// Launch every job in `jobs` with one kernel: grid.y picks the job, grid.x
+    /// the row tile inside it. Jobs must be independent of each other.
+    pub fn gemv_jobs(&self, jobs: &Buffer, n_jobs: usize, tiles: usize) -> Result<(), String> {
+        let kernel = self.module.kernel("gemv_jobs")?;
+        let mut p_jobs = jobs.as_ptr();
+        let mut v_n = n_jobs as i32;
+        let mut params: [*mut c_void; 2] = [
+            &mut p_jobs as *mut _ as *mut c_void,
+            &mut v_n as *mut _ as *mut c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (tiles.max(1) as u32, n_jobs.max(1) as u32, 1),
+            block: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        kernel.launch(cfg, &self.stream, &mut params)
+    }
+
     /// `y = x / sqrt(mean(x^2) + eps) * w`, one block per row (row count 1 here).
     pub fn rmsnorm_buf(
         &self,

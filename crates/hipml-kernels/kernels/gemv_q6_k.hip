@@ -110,14 +110,16 @@ static __device__ __forceinline__ void q6k_acc8(const unsigned char* __restrict_
 
 // One row/warp when RPW is 1. Lane ownership and the reduction tree are
 // unchanged, so this is bit-identical to the two-row entry with twice the grid.
+// External linkage so gemv_jobs can call it; `tile` is blockIdx.x there.
 template <int RPW>
-static __device__ __forceinline__ void q6k_tile(
+__device__ __forceinline__ void q6k_tile(
     const unsigned char* __restrict__ w,
     const float* __restrict__ x,
     float* __restrict__ y,
     int m,
     int k,
-    float* __restrict__ sx)
+    float* __restrict__ sx,
+    int tile)
 {
     const int tid = threadIdx.x;
     const int lane = tid & 31;
@@ -131,7 +133,7 @@ static __device__ __forceinline__ void q6k_tile(
     float acc[RPW];
 #pragma unroll
     for (int rr = 0; rr < RPW; ++rr) {
-        row[rr] = blockIdx.x * row_tile + warp * RPW + rr;
+        row[rr] = tile * row_tile + warp * RPW + rr;
         r[rr] = min(row[rr], m - 1);
         rp[rr] = w + (size_t)r[rr] * (size_t)nblocks * Q6K_BLOCK_BYTES;
         acc[rr] = 0.0f;
@@ -173,7 +175,7 @@ extern "C" __global__ void gemv_q6_k(
     int k)
 {
     __shared__ __align__(16) float sx[Q6K_K_TILE];
-    q6k_tile<Q6K_ROWS_PER_WARP>(w, x, y, m, k, sx);
+    q6k_tile<Q6K_ROWS_PER_WARP>(w, x, y, m, k, sx, blockIdx.x);
 }
 
 extern "C" __global__ void gemv_q6_k_r1(
@@ -184,5 +186,5 @@ extern "C" __global__ void gemv_q6_k_r1(
     int k)
 {
     __shared__ __align__(16) float sx[Q6K_K_TILE];
-    q6k_tile<1>(w, x, y, m, k, sx);
+    q6k_tile<1>(w, x, y, m, k, sx, blockIdx.x);
 }

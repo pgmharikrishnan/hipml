@@ -112,21 +112,22 @@ static __device__ __forceinline__ void q5k_acc(const unsigned char* __restrict__
     *acc = a;
 }
 
-extern "C" __global__ void gemv_q5_k(
+// External linkage so gemv_jobs can call it; `tile` is blockIdx.x there.
+__device__ __forceinline__ void q5k_rows(
     const unsigned char* __restrict__ w,
     const float* __restrict__ x,
     float* __restrict__ y,
     int m,
-    int k)
+    int k,
+    float* __restrict__ sx,
+    int tile)
 {
-    __shared__ __align__(16) float sx[Q5K_K_TILE];
-
     const int tid = threadIdx.x;
     const int lane = tid & 31;
     const int warp = tid >> 5;
     const int nblocks = k / Q5K_VALUES;
 
-    const int row = blockIdx.x * Q5K_ROW_TILE + warp;
+    const int row = tile * Q5K_ROW_TILE + warp;
     const int r = min(row, m - 1);
     const unsigned char* rp = w + (size_t)r * (size_t)nblocks * Q5K_BLOCK_BYTES;
     float acc = 0.0f;
@@ -152,4 +153,15 @@ extern "C" __global__ void gemv_q5_k(
 #pragma unroll
     for (int off = 16; off > 0; off >>= 1) a += __shfl_down(a, off);
     if (lane == 0 && row < m) y[row] = a;
+}
+
+extern "C" __global__ void gemv_q5_k(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k)
+{
+    __shared__ __align__(16) float sx[Q5K_K_TILE];
+    q5k_rows(w, x, y, m, k, sx, blockIdx.x);
 }
