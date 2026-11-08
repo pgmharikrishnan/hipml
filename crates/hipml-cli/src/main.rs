@@ -15,6 +15,8 @@ mod cache_cmd;
 #[cfg(feature = "hip")]
 mod device_cmd;
 #[cfg(feature = "hip")]
+mod gdn_parity;
+#[cfg(feature = "hip")]
 mod gpu_bench_cmd;
 mod gen_cmd;
 mod kv_cmds;
@@ -66,6 +68,8 @@ fn main() {
                 std::process::exit(2);
             }
         }
+        #[cfg(feature = "hip")]
+        "gdn-parity" => std::process::exit(gdn_parity::run(&args[1..])),
         #[cfg(feature = "hip")]
         "ssm" => std::process::exit(ssm_cmd::ssm(&args[1..])),
         "attn-parity" => std::process::exit(attn_cmd::parity(&args[1..])),

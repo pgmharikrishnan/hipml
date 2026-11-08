@@ -417,6 +417,11 @@ pub const KERNELS: &[KernelSpec] = &[
         kind: KernelKind::PerHead { block: 1024 },
     },
     KernelSpec {
+        name: "gdn_rows_f32",
+        entry: "gdn_rows_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
+    KernelSpec {
         name: "gate_norm_chunk_f32",
         entry: "gate_norm_chunk_f32",
         kind: KernelKind::PerHead { block: 128 },

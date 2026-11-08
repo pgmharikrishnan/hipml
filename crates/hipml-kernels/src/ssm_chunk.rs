@@ -182,8 +182,12 @@ impl<'a> SsmGpuLayer<'a> {
                 .launch(cfg, s, &mut params)?;
         }
 
-        // the recurrence, one block per value head, state in registers
-        {
+        // the recurrence, state in registers: 32-row blocks with the operands
+        // staged in shared when the head is 128 wide, else one block per head
+        let rows = d.head_v == 128 && d.head_k == 128;
+        if rows && std::env::var_os("HIPML_GDN_HEAD").is_none() {
+            self.gdn_rows(c, tokens)?;
+        } else {
             let mut p_s = self.s_state.as_ptr();
             let mut p_qkv = c.conv.as_ptr();
             let mut p_g = c.g.as_ptr();
@@ -246,6 +250,42 @@ impl<'a> SsmGpuLayer<'a> {
                 .launch(cfg, s, &mut params)?;
         }
         Ok(())
+    }
+
+    /// `gdn_rows_f32`: the chunk recurrence split into 32-row blocks of a
+    /// head, bit-identical to `gdn_chunk_f32` (`HIPML_GDN_HEAD=1` selects that).
+    fn gdn_rows(&self, c: &SsmChunk, tokens: usize) -> Result<(), String> {
+        let d = &self.dims;
+        let mut p_s = self.s_state.as_ptr();
+        let mut p_qkv = c.conv.as_ptr();
+        let mut p_g = c.g.as_ptr();
+        let mut p_b = c.beta_sig.as_ptr();
+        let mut p_o = c.o.as_ptr();
+        let mut v_nv = d.n_v as i32;
+        let mut v_nk = d.n_k as i32;
+        let mut v_cc = d.conv_ch as i32;
+        let mut v_kd = d.key_dim() as i32;
+        let mut v_t = tokens as i32;
+        let mut params: [*mut c_void; 10] = [
+            &mut p_s as *mut _ as *mut c_void,
+            &mut p_qkv as *mut _ as *mut c_void,
+            &mut p_g as *mut _ as *mut c_void,
+            &mut p_b as *mut _ as *mut c_void,
+            &mut p_o as *mut _ as *mut c_void,
+            &mut v_nv as *mut _ as *mut c_void,
+            &mut v_nk as *mut _ as *mut c_void,
+            &mut v_cc as *mut _ as *mut c_void,
+            &mut v_kd as *mut _ as *mut c_void,
+            &mut v_t as *mut _ as *mut c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (d.n_v as u32, (d.head_v / 32) as u32, 1),
+            block: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        self.module
+            .kernel("gdn_rows_f32")?
+            .launch(cfg, self.stream, &mut params)
     }
 
     /// `out[t, :] = W_out gated[t, :]` for the whole chunk.
