@@ -14,15 +14,15 @@
 // issues four WMMA: 32 KiB of MMA work per 80 B of LDS per lane, 12.8 FLOP per
 // shared byte against a 128 B/cycle LDS.
 //
-// Fragment layout (measured on gfx1201, wave32 — `wmma_probe`, the accumulator
-// readout of A*I):
-//   operand A/B: lane l, element e -> index (l >> 1), k = (l & 1) * 8 + e
-//   accumulator: lane l, element e -> row 8*(l&1) + 4*((l>>4)&1) + (e>>1),
-//                                      col ((l>>1)&7) + 8*(e&1)
+// Fragment layout, measured on gfx1201 (wave32) with a one-warp probe that
+// reads the accumulator back for A*I, A = row indices and B = column indices
+// (`crates/hipml-kernels/README` records the run):
+//   operands A/B: lane l, element e -> index l % 16, k = 8*(l / 16) + e
+//   accumulator:  lane l, element e -> col l % 16, row 8*(l / 16) + e
 // so both operands load as one LDS.128 per lane from a row-major tile, and the
 // epilogue writes f32 straight to `y` with no shared transpose: for one
-// (accumulator, element) pair the 32 lanes cover 4 tokens x 8 consecutive rows,
-// which is four fully-covered 32 B sectors.
+// (accumulator, element) pair the 32 lanes cover 2 tokens x 16 consecutive
+// rows, four fully-covered 32 B sectors.
 //
 // The dequant is the same 8-value reader the dot2 kernel uses
 // (`prefill_common.inc`), four threads per weight row.
@@ -82,10 +82,10 @@ static __device__ __forceinline__ void pww_body(
     const int d_q = tid & 3;
 
     // Fragment offsets, fixed for the whole k loop.
-    const int arow = lane >> 1;
-    const int acol = (lane & 1) * 8;
-    const int xoff = (wtg * PWW_WT + arow) * PWW_XS + acol;
-    const int boff = (wrg * PWW_WR + (lane >> 1)) * PWW_WS + acol;
+    const int frow = lane & 15;          // row of the tile this lane feeds
+    const int fcol = (lane >> 4) * 8;    // k offset of this lane's 8 values
+    const int xoff = (wtg * PWW_WT + frow) * PWW_XS + fcol;
+    const int boff = (wrg * PWW_WR + frow) * PWW_WS + fcol;
 
     pww_f8 acc[PWW_ACC];
 #pragma unroll
@@ -142,16 +142,16 @@ static __device__ __forceinline__ void pww_body(
         }
     }
 
-    // Accumulator -> row-major f32 output, straight to global.
-    const int mrow = 8 * (lane & 1) + 4 * ((lane >> 4) & 1);
-    const int ncol = (lane >> 1) & 7;
+    // Accumulator -> row-major f32 output, straight to global: this lane holds
+    // column (lane & 15) of rows 8*(lane >> 4) + e.
+    const int mrow = 8 * (lane >> 4);
+    const int gr = row_base + wrg * PWW_WR + (lane & 15);
 #pragma unroll
     for (int j = 0; j < PWW_ACC; ++j) {
-        const int gr = row_base + wrg * PWW_WR + j * 16 + ncol;
 #pragma unroll
         for (int e = 0; e < 8; ++e) {
-            const int gt = tok_base + wtg * PWW_WT + mrow + (e >> 1);
-            const int r = gr + 8 * (e & 1);
+            const int gt = tok_base + wtg * PWW_WT + mrow + e;
+            const int r = gr + j * 16;
             if (gt < tokens && r < m)
                 y[(size_t)gt * m + r] = acc[j][e];
         }
