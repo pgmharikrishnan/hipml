@@ -531,7 +531,7 @@ pub(crate) mod device {
 }
 
 #[cfg(feature = "hip")]
-pub use device::{gemm_rows_f32, prefill_resident};
+pub use device::{gemm_rows_f32, prefill_resident, prefill_xhalf};
 #[cfg(feature = "hip")]
 pub use device::{gemv_job_tiles, GemvJob, Launcher, ReadJob};
 #[cfg(feature = "hip")]
