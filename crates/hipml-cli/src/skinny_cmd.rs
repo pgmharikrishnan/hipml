@@ -251,7 +251,7 @@ fn sweep_geometry(launcher: &Launcher, reps: usize) {
         ("gemm_skinny_q4_kg3", "RT32 KW128 T128"),
         ("gemm_skinny_q4_kg4", "RT64 KW256 T128"),
         ("gemm_skinny_q4_kg5", "RT64 KW256 T256"),
-        ("gemm_skinny_q4_kg6", "RT128 KW256 T256"),
+        ("gemm_skinny_q4_kg6", "RT48 KW256 T128"),
     ];
     println!("\ngeometry sweep (Q4_K), ms at r=1 / r=8:");
     for shape in SHAPES.iter().filter(|s| s.ty == TensorType::Q4K) {

@@ -388,8 +388,8 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "gemm_skinny_q4_kg6",
         entry: "gemm_skinny_q4_kg6",
         kind: KernelKind::RowTile {
-            rows: 128,
-            block: 256,
+            rows: 48,
+            block: 128,
         },
     },
     KernelSpec {

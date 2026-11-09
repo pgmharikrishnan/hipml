@@ -362,11 +362,11 @@ extern "C" __global__ void gemm_skinny_q4_kg5( // RT 64, KW 256, 8 warps
     pws_body<0, 64, 256, 256>(w, x, y, n, k, r);
 }
 
-extern "C" __global__ void gemm_skinny_q4_kg6( // RT 128, KW 256, 8 warps
+extern "C" __global__ void gemm_skinny_q4_kg6( // RT 48, KW 256
     const unsigned char* __restrict__ w, const float* __restrict__ x,
     float* __restrict__ y, int n, int k, int r)
 {
-    pws_body<0, 128, 256, 256>(w, x, y, n, k, r);
+    pws_body<0, 48, 256, 128>(w, x, y, n, k, r);
 }
 
 // Cost probes at the shipped geometry: `_ns` skips the staging stores, `_nc`
