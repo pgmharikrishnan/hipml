@@ -419,6 +419,11 @@ mod imp {
         /// (after `attn_norm`). Downloads the layer output.
         pub fn forward(&self, l: &Launcher, x: &[f32], pos: usize) -> Result<Vec<f32>, String> {
             let xb = Buffer::from_host(x)?;
+            // `forward_buf` reads the position and the sequence length from the
+            // step buffer; this host entry point is the one that owns them.
+            // (The engine sets the step itself, with the token id, so the
+            // capture-safe `forward_buf` stays free of the upload.)
+            l.set_step(pos, pos + 1, 0)?;
             self.forward_buf(l, &xb, pos)?;
             self.y.to_host()
         }

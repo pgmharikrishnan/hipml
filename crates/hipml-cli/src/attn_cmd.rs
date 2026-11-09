@@ -384,6 +384,14 @@ fn bench_run(l: &Launcher, m: &Loaded, a: &Args) -> i32 {
             return 1;
         }
         // Warm-up launch, then the timed series; one sync for the whole run.
+        // `forward_buf` reads the position and sequence length from the step
+        // buffer, so the bench has to publish them once (the depth is fixed for
+        // the whole series).
+        #[cfg(feature = "hip")]
+        if let Err(e) = l.set_step(depth, depth + 1, 0) {
+            eprintln!("attn: depth {depth} step: {e}");
+            return 1;
+        }
         if let Err(e) = layer.forward_buf(l, &xb, depth) {
             eprintln!("attn: depth {depth} launch: {e}");
             return 1;
