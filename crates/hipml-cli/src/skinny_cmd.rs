@@ -245,12 +245,13 @@ pub fn run(args: &[String]) -> i32 {
 /// Tile-shape sweep on the Q4_K entries at R = 1 and R = 8.
 fn sweep_geometry(launcher: &Launcher, reps: usize) {
     const VARIANTS: &[(&str, &str)] = &[
-        ("gemm_skinny_q4_kg1", "RT16 KW64 T128"),
-        ("gemm_skinny_q4_kg2", "RT32 KW64 T128"),
+        ("gemm_skinny_q4_k", "RT32 KW256 T128"),
+        ("gemm_skinny_q4_kg1", "RT16 KW256 T128"),
+        ("gemm_skinny_q4_kg2", "RT32 KW256 T256"),
         ("gemm_skinny_q4_kg3", "RT32 KW128 T128"),
-        ("gemm_skinny_q4_kg4", "RT32 KW256 T128"),
-        ("gemm_skinny_q4_kg5", "RT64 KW128 T256"),
-        ("gemm_skinny_q4_kg6", "RT128 KW64 T256"),
+        ("gemm_skinny_q4_kg4", "RT64 KW256 T128"),
+        ("gemm_skinny_q4_kg5", "RT64 KW256 T256"),
+        ("gemm_skinny_q4_kg6", "RT128 KW256 T256"),
     ];
     println!("\ngeometry sweep (Q4_K), ms at r=1 / r=8:");
     for shape in SHAPES.iter().filter(|s| s.ty == TensorType::Q4K) {
@@ -283,7 +284,7 @@ fn sweep_geometry(launcher: &Launcher, reps: usize) {
         for (entry, what) in [
             ("gemm_skinny_q4_k", "full"),
             ("gemm_skinny_q4_ns", "no staging"),
-            ("gemm_skinny_q4_nc", "no fragment/wmma"),
+            ("gemm_skinny_q4_nc", "empty (barriers only)"),
         ] {
             let Ok(ms) = best_ms(
                 || {

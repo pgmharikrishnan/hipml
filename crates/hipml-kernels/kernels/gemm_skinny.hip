@@ -37,10 +37,10 @@
 // Shipped geometry. Every value is a template argument so the sweep entries
 // below can be one build; the defaults are the measured best.
 #ifndef PWS_RT
-#define PWS_RT 64      // output rows per block (4 warp tiles)
+#define PWS_RT 32      // output rows per block
 #endif
 #ifndef PWS_KW
-#define PWS_KW 128     // k values per shared tile (also = 8 independent WMMA chains)
+#define PWS_KW 256     // k values per shared tile
 #endif
 #ifndef PWS_THREADS
 #define PWS_THREADS 128
@@ -166,10 +166,19 @@ static __device__ __forceinline__ void pws_body(
     constexpr int NW = RT / 16;             // warp n-tiles (= compute warps)
     constexpr int XROW = KW / 4;            // threads per token row (float4)
     constexpr int XRP = THR / XROW;         // token rows staged per pass
-    constexpr int DROW = THR / 4;           // weight rows staged per pass
+    // Weight staging: one warp reads one row's k-tile as one contiguous run,
+    // 8 values per lane. GPR is how many lanes cover a row (KW/8), so a warp
+    // covers 32/GPR rows per pass. Coalescing is the reason: 8 rows x 32 B per
+    // instruction (the rows-first layout) ran the staging at 24 GB/s, one row x
+    // 256 B per instruction is what the GEMV already does at 630 GB/s.
+    constexpr int GPR = KW / 8;             // lanes per weight row
+    constexpr int RPW = 32 / GPR;           // weight rows per warp per pass
+    constexpr int PRP = (THR / 32) * RPW;   // weight rows staged per pass
     static_assert(RT % 16 == 0, "RT must be a multiple of the 16 tile");
-    static_assert(KW % 32 == 0, "KW must be 32-value aligned (pf_dequant8)");
+    static_assert(KW % 32 == 0 && KW <= 256, "KW must be 32-aligned and <= 256");
+    static_assert(KW >= 64 || THR / 32 == 1, "small KW needs one warp per row");
     static_assert(16 % XRP == 0, "token staging must cover 16 rows");
+    static_assert(RT % PRP == 0 || RT < PRP, "ragged weight staging");
 
     __shared__ __align__(16) _Float16 shx[16 * XS];
     __shared__ __align__(16) _Float16 shw[RT * WS];
@@ -183,9 +192,9 @@ static __device__ __forceinline__ void pws_body(
     // x staging: XROW threads per token row, four floats each.
     const int xt = tid / XROW;
     const int xc = (tid % XROW) * 4;
-    // weight staging: four threads per row, eight values each.
-    const int d_row = tid >> 2;
-    const int d_q = tid & 3;
+    // weight staging: lane l covers values [l*8, l*8+8) of its row.
+    const int wcol = (lane % GPR) * 8;
+    const int wrow_l = warp * RPW + lane / GPR;
 
     auto stage = [&](int base) {
         if (PROBE == 1) return;
@@ -202,13 +211,11 @@ static __device__ __forceinline__ void pws_body(
             dst[1] = __floats2half2_rn(v.z, v.w);
         }
 #pragma unroll
-        for (int q = 0; q < KW / 32; ++q)
-#pragma unroll
-        for (int p = 0; p < RT; p += DROW) {
-            const int rl = p + d_row;
+        for (int p = 0; p < RT; p += PRP) {
+            const int rl = p + wrow_l;
             if (rl >= RT) continue;
             const int gr = row_base + rl;
-            const int kc = q * 32 + d_q * 8;
+            const int kc = wcol;
             pws_h8 hv;
             if (gr < n && base + kc < k) {
                 float v[8];
@@ -223,9 +230,15 @@ static __device__ __forceinline__ void pws_body(
         }
     };
 
-    pws_f8 acc[KW / 16];
+    // Independent WMMA chains. A single accumulator per warp runs the matrix
+    // unit at 1/8 of what the prefill kernel gets, because consecutive WMMA
+    // into the same accumulator are a dependency chain. Rotating the k16 steps
+    // through NACC accumulators costs one fold at the end and gives NACC
+    // instructions in flight.
+    constexpr int NACC = (KW / 16) < 8 ? (KW / 16) : 8;
+    pws_f8 acc[NACC];
 #pragma unroll
-    for (int t = 0; t < KW / 16; ++t)
+    for (int t = 0; t < NACC; ++t)
 #pragma unroll
         for (int e = 0; e < 8; ++e) acc[t][e] = 0.0f;
 
@@ -241,10 +254,6 @@ static __device__ __forceinline__ void pws_body(
         __syncthreads();
         if (warp < NW) {
             if (PROBE == 2) continue;
-            // One accumulator per k16 in the tile: the WMMA chains are then
-            // independent, which is where the matrix unit's throughput lives
-            // (a single accumulator per warp runs it at 1/8 of the prefill
-            // kernel). They are folded once, after the k loop.
 #pragma unroll
             for (int t = 0; t < KW / 16; ++t) {
                 const int kk = t * 16;
@@ -252,7 +261,8 @@ static __device__ __forceinline__ void pws_body(
                     *reinterpret_cast<const pws_h8*>(shx + xoff + kk);
                 const pws_h8 b =
                     *reinterpret_cast<const pws_h8*>(shw + boff + kk);
-                acc[t] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc[t]);
+                acc[t % NACC] =
+                    __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc[t % NACC]);
             }
         }
     }
@@ -260,7 +270,7 @@ static __device__ __forceinline__ void pws_body(
     // Fold the k-split accumulators into one (the reduction order differs from
     // a single chain; that is the one numerics difference of this kernel).
 #pragma unroll
-    for (int t = 1; t < KW / 16; ++t)
+    for (int t = 1; t < NACC; ++t)
 #pragma unroll
         for (int e = 0; e < 8; ++e) acc[0][e] += acc[t][e];
 
@@ -317,18 +327,18 @@ extern "C" __global__ void gemm_skinny_q8_0(
 // row (`RowTile { rows = RT, block = THR }`) and runs the same parity case, so
 // a sweep cannot pick a geometry that no test covers. The winning geometry is
 // baked into PWS_* and the rest are removed.
-extern "C" __global__ void gemm_skinny_q4_kg1( // RT 16, KW 64
+extern "C" __global__ void gemm_skinny_q4_kg1( // RT 16, KW 256
     const unsigned char* __restrict__ w, const float* __restrict__ x,
     float* __restrict__ y, int n, int k, int r)
 {
-    pws_body<0, 16, 64, 128>(w, x, y, n, k, r);
+    pws_body<0, 16, 256, 128>(w, x, y, n, k, r);
 }
 
-extern "C" __global__ void gemm_skinny_q4_kg2( // RT 32, KW 64
+extern "C" __global__ void gemm_skinny_q4_kg2( // RT 32, KW 256, 8 warps
     const unsigned char* __restrict__ w, const float* __restrict__ x,
     float* __restrict__ y, int n, int k, int r)
 {
-    pws_body<0, 32, 64, 128>(w, x, y, n, k, r);
+    pws_body<0, 32, 256, 256>(w, x, y, n, k, r);
 }
 
 extern "C" __global__ void gemm_skinny_q4_kg3( // RT 32, KW 128
@@ -338,25 +348,25 @@ extern "C" __global__ void gemm_skinny_q4_kg3( // RT 32, KW 128
     pws_body<0, 32, 128, 128>(w, x, y, n, k, r);
 }
 
-extern "C" __global__ void gemm_skinny_q4_kg4( // RT 32, KW 256
+extern "C" __global__ void gemm_skinny_q4_kg4( // RT 64, KW 256
     const unsigned char* __restrict__ w, const float* __restrict__ x,
     float* __restrict__ y, int n, int k, int r)
 {
-    pws_body<0, 32, 256, 128>(w, x, y, n, k, r);
+    pws_body<0, 64, 256, 128>(w, x, y, n, k, r);
 }
 
-extern "C" __global__ void gemm_skinny_q4_kg5( // RT 64, KW 128
+extern "C" __global__ void gemm_skinny_q4_kg5( // RT 64, KW 256, 8 warps
     const unsigned char* __restrict__ w, const float* __restrict__ x,
     float* __restrict__ y, int n, int k, int r)
 {
-    pws_body<0, 64, 128, 256>(w, x, y, n, k, r);
+    pws_body<0, 64, 256, 256>(w, x, y, n, k, r);
 }
 
-extern "C" __global__ void gemm_skinny_q4_kg6( // RT 128, KW 64
+extern "C" __global__ void gemm_skinny_q4_kg6( // RT 128, KW 256, 8 warps
     const unsigned char* __restrict__ w, const float* __restrict__ x,
     float* __restrict__ y, int n, int k, int r)
 {
-    pws_body<0, 128, 64, 256>(w, x, y, n, k, r);
+    pws_body<0, 128, 256, 256>(w, x, y, n, k, r);
 }
 
 // Cost probes at the shipped geometry: `_ns` skips the staging stores, `_nc`
@@ -365,12 +375,12 @@ extern "C" __global__ void gemm_skinny_q4_ns(
     const unsigned char* __restrict__ w, const float* __restrict__ x,
     float* __restrict__ y, int n, int k, int r)
 {
-    pws_body<0, 64, 128, 128, 1>(w, x, y, n, k, r);
+    pws_body<0, 32, 256, 128, 1>(w, x, y, n, k, r);
 }
 
 extern "C" __global__ void gemm_skinny_q4_nc(
     const unsigned char* __restrict__ w, const float* __restrict__ x,
     float* __restrict__ y, int n, int k, int r)
 {
-    pws_body<0, 64, 128, 128, 2>(w, x, y, n, k, r);
+    pws_body<0, 32, 256, 128, 2>(w, x, y, n, k, r);
 }
