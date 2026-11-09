@@ -545,8 +545,7 @@ pub fn generate(args: &[String]) -> i32 {
         };
         let rep_json: Vec<String> = reps
             .iter()
-            .map(|r| {
-                let prefill_tps = prompt_ids.len() as f64 / (r.prefill_ms / 1e3).max(1e-9);
+            .map(|r| {                let prefill_tps = prompt_ids.len() as f64 / (r.prefill_ms / 1e3).max(1e-9);
                 let decode_tps = r.decode_tokens as f64 / (r.decode_ms / 1e3).max(1e-9);
                 let tk = match &r.topk {
                     None => "null".to_string(),
@@ -566,8 +565,12 @@ pub fn generate(args: &[String]) -> i32 {
                 )
             })
             .collect();
+        let text_json = reps
+            .last()
+            .map(|r| crate::chat_cmd::json_escape(&tok.decode_text(&r.ids)))
+            .unwrap_or_default();
         let out = format!(
-            "{{\"engine\":\"hipml\",\"prompt_tokens\":{},\"n_ctx\":{},\"gen_tokens\":{},\"model_load_s\":{:.4},\"resident_upload_s\":{:.4},\"weights_bytes\":{},\"kv_bytes\":{},\"kv_mode\":\"{}\",\"stop_ids\":{:?},\"reps\":[{}],\"stage\":{}}}",
+            "{{\"engine\":\"hipml\",\"prompt_tokens\":{},\"n_ctx\":{},\"gen_tokens\":{},\"model_load_s\":{:.4},\"resident_upload_s\":{:.4},\"weights_bytes\":{},\"kv_bytes\":{},\"kv_mode\":\"{}\",\"stop_ids\":{:?},\"text\":\"{}\",\"reps\":[{}],\"stage\":{}}}",
             prompt_ids.len(),
             n_ctx,
             a.tokens,
@@ -577,6 +580,7 @@ pub fn generate(args: &[String]) -> i32 {
             kv_bytes,
             a.kv.name(),
             stop_ids,
+            text_json,
             rep_json.join(","),
             stage_json
         );
