@@ -126,16 +126,27 @@ fn peer_closed(stream: &TcpStream) -> bool {
 
 /// The next scheduler event, watching the socket meanwhile. On a hang-up the
 /// request is cancelled so the scheduler frees its slot (or its prefill).
-fn next_event(rx: &Receiver<Event>, stream: &TcpStream, cancel: &AtomicU8) -> Result<Event, String> {
+///
+/// The socket is checked every 250 ms of wall time, not only when the
+/// channel is quiet: a decoding slot sends a token every few tens of ms, so a
+/// non-streaming client that hangs up would otherwise go unnoticed until the
+/// whole reply was generated. `peek` carries the last check across calls.
+fn next_event(rx: &Receiver<Event>, stream: &TcpStream, cancel: &AtomicU8, peek: &mut Instant)
+    -> Result<Event, String>
+{
+    let every = Duration::from_millis(250);
     let deadline = Instant::now() + Duration::from_secs(3600);
     loop {
-        match rx.recv_timeout(Duration::from_millis(250)) {
+        if peek.elapsed() >= every {
+            *peek = Instant::now();
+            if peer_closed(stream) {
+                cancel.store(CANCEL_GONE, Ordering::Relaxed);
+                return Err("client disconnected".to_string());
+            }
+        }
+        match rx.recv_timeout(every) {
             Ok(ev) => return Ok(ev),
             Err(RecvTimeoutError::Timeout) => {
-                if peer_closed(stream) {
-                    cancel.store(CANCEL_GONE, Ordering::Relaxed);
-                    return Err("client disconnected".to_string());
-                }
                 if Instant::now() > deadline {
                     cancel.store(CANCEL_GONE, Ordering::Relaxed);
                     return Err("scheduler timed out".to_string());
@@ -232,8 +243,9 @@ fn drain(
     let mut out = String::new();
     let mut text = Text::new();
     let mut first_at: Option<Instant> = None;
+    let mut peek = Instant::now();
     loop {
-        match next_event(rx, stream, cancel)? {
+        match next_event(rx, stream, cancel, &mut peek)? {
             Event::Tokens(t) => {
                 if first_at.is_none() {
                     first_at = Some(Instant::now());
@@ -345,8 +357,9 @@ fn stream_chat(
         now_unix()
     );
     sse.event(&role)?;
+    let mut peek = Instant::now();
     loop {
-        let ev = match next_event(&rx, stream, cancel) {
+        let ev = match next_event(&rx, stream, cancel, &mut peek) {
             Ok(ev) => ev,
             Err(e) => {
                 let event = format!("{{\"error\":{{\"message\":\"{}\"}}}}", json::escape(&e));
@@ -479,8 +492,9 @@ fn stream_completion(
     let mut text = Text::new();
     let mut first_at: Option<Instant> = None;
     let mut last_at = at;
+    let mut peek = Instant::now();
     loop {
-        let ev = match next_event(&rx, stream, cancel) {
+        let ev = match next_event(&rx, stream, cancel, &mut peek) {
             Ok(ev) => ev,
             Err(e) => {
                 let event = format!("{{\"error\":\"{}\"}}", json::escape(&e));
