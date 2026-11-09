@@ -40,6 +40,31 @@ pub struct Stats {
     pub tail_row_blocks: u64,
     pub tail_rows: u64,
     pub tail_rows_ms: f64,
+    /// WP51: backpressure. Requests turned away with 503 because the slots and
+    /// the queue were full, connections refused past the connection bound, and
+    /// the live gauges for both.
+    pub requests_rejected_busy: u64,
+    pub connections_rejected: u64,
+    pub inflight: u64,
+    pub inflight_max: u64,
+    pub connections: u64,
+    pub connections_max: u64,
+    pub queue_max: u64,
+    /// WP51: per-job error isolation. Jobs that died alone (their own slot
+    /// freed, the engine kept serving), and whole-batch resets (a device-level
+    /// step failure that could not be pinned to one slot).
+    pub job_errors: u64,
+    pub slot_faults: u64,
+    pub batch_resets: u64,
+    /// Prefix-cache entries dropped because a job failed.
+    pub prefix_invalidated: u64,
+    /// WP51: whether the serving batch path is the bit-exact `_b` kernels (1)
+    /// or the WMMA tile at B>=4 (0), and how many replies were decoded with
+    /// the tile.
+    pub batch_exact: u64,
+    pub tile_steps: u64,
+    /// WP51: load-time warm-up wall time.
+    pub warmup_ms: f64,
 }
 
 #[derive(Default)]
@@ -101,6 +126,20 @@ impl Metrics {
         c("hipml_tail_row_blocks_total", "Row-block tail prefills run", "counter", s.tail_row_blocks.to_string());
         c("hipml_tail_rows_total", "Prompt tail rows served by row blocks", "counter", s.tail_rows.to_string());
         c("hipml_tail_rows_seconds_total", "Wall time in row-block tail prefill", "counter", format!("{:.6}", s.tail_rows_ms / 1e3));
+        c("hipml_requests_rejected_busy_total", "Requests answered 503 because slots and queue were full", "counter", s.requests_rejected_busy.to_string());
+        c("hipml_connections_rejected_total", "Connections refused past the connection bound", "counter", s.connections_rejected.to_string());
+        c("hipml_inflight", "Generation requests admitted but not yet finished", "gauge", s.inflight.to_string());
+        c("hipml_inflight_max", "Admission bound (slots + queue bound)", "gauge", s.inflight_max.to_string());
+        c("hipml_connections", "Open connection threads", "gauge", s.connections.to_string());
+        c("hipml_connections_max", "Connection thread bound", "gauge", s.connections_max.to_string());
+        c("hipml_queue_max", "Admission bound minus slots (the queue bound)", "gauge", s.queue_max.to_string());
+        c("hipml_job_errors_total", "Jobs that failed alone; the engine kept serving", "counter", s.job_errors.to_string());
+        c("hipml_slot_faults_total", "Decode steps failed for one slot only", "counter", s.slot_faults.to_string());
+        c("hipml_batch_resets_total", "Whole-batch resets after an unpinnable step failure", "counter", s.batch_resets.to_string());
+        c("hipml_prefix_invalidated_total", "Prefix-cache entries dropped because a job failed", "counter", s.prefix_invalidated.to_string());
+        c("hipml_batch_exact_path", "1 when batched decode is bit-exact at every B, 0 when B>=4 uses the WMMA tile", "gauge", s.batch_exact.to_string());
+        c("hipml_tile_steps_total", "Batched decode steps that used the non-exact WMMA tile (B>=4)", "counter", s.tile_steps.to_string());
+        c("hipml_warmup_seconds", "Load-time warm-up wall time", "gauge", format!("{:.6}", s.warmup_ms / 1e3));
         if let Some((free, total)) = vram {
             c("hipml_vram_free_bytes", "Device free memory", "gauge", free.to_string());
             c("hipml_vram_total_bytes", "Device total memory", "gauge", total.to_string());

@@ -11,6 +11,7 @@
 //! owns the GPU, `metrics` is the Prometheus text, `chat` renders and
 //! tokenizes, `json` is the tiny reader/writer.
 
+mod admit;
 mod api;
 mod chat;
 mod http;
@@ -44,6 +45,9 @@ struct Args {
     drafts: usize,
     prefix_entries: usize,
     prefix_mb: usize,
+    /// Requests allowed to wait for a slot. 0 means "slots only".
+    max_queue: Option<usize>,
+    max_conns: usize,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -58,6 +62,8 @@ fn parse(args: &[String]) -> Result<Args, String> {
         drafts: 1,
         prefix_entries: 16,
         prefix_mb: 2048,
+        max_queue: None,
+        max_conns: 64,
     };
     let mut i = 0;
     while i < args.len() {
@@ -111,6 +117,20 @@ fn parse(args: &[String]) -> Result<Args, String> {
                     .map_err(|e| format!("bad --prefix-mb: {e}"))?;
                 i += 2;
             }
+            "--max-queue" => {
+                a.max_queue = Some(
+                    need(i)?
+                        .parse()
+                        .map_err(|e| format!("bad --max-queue: {e}"))?,
+                );
+                i += 2;
+            }
+            "--max-conns" => {
+                a.max_conns = need(i)?
+                    .parse()
+                    .map_err(|e| format!("bad --max-conns: {e}"))?;
+                i += 2;
+            }
             "--help" | "-h" => return Err("help".to_string()),
             other => return Err(format!("unknown argument {other}")),
         }
@@ -127,6 +147,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
     if a.drafts > 3 {
         return Err("--drafts must be in 0..=3".to_string());
     }
+    if a.max_conns == 0 {
+        return Err("--max-conns must be positive".to_string());
+    }
     Ok(a)
 }
 
@@ -135,13 +158,18 @@ fn help() {
         "hipml serve --gguf PATH [--mtp PATH] [--port 8093] [--host 127.0.0.1]\n\
          \x20           [--ctx 32768] [--slots 16] [--chunk 256] [--drafts 1]\n\
          \x20           [--prefix-entries 16] [--prefix-mb 2048]\n\
+         \x20           [--max-queue N] [--max-conns 64]\n\
          \n\
          endpoints: GET /health /metrics /props, POST /tokenize,\n\
          \x20          POST /v1/chat/completions (SSE with \"stream\":true),\n\
          \x20          POST /completion (llama-style, SSE)\n\
          \n\
          one request alone is decoded with MTP speculation; two or more are\n\
-         decoded by the batched engine, with new prompts prefilled in tiles."
+         decoded by the batched engine, with new prompts prefilled in tiles.\n\
+         \n\
+         greedy only: temperature must be 0 and n must be 1, or the request is\n\
+         refused with a 400. --max-queue bounds the wait (default 2 x slots);\n\
+         past slots + max-queue the answer is 503 with Retry-After."
     );
 }
 
@@ -155,6 +183,7 @@ pub fn run(args: &[String]) -> i32 {
     if std::env::var_os("HIPML_BATCH_LEGACY").is_none() {
         std::env::set_var("HIPML_BATCH_SKINNY", "1");
     }
+    let skinny = std::env::var_os("HIPML_BATCH_LEGACY").is_none();
     let a = match parse(args) {
         Ok(a) => a,
         Err(e) => {
@@ -210,8 +239,23 @@ pub fn run(args: &[String]) -> i32 {
         prefix_entries: a.prefix_entries,
         prefix_bytes: a.prefix_mb.max(1) * 1024 * 1024,
         mtp: a.mtp.is_some() && a.drafts > 0,
+        skinny,
     };
     let metrics = Arc::new(Metrics::default());
+    // Backpressure. The real limit is VRAM slots; the queue is a small
+    // multiple of them because a waiting request costs only its token ids on
+    // the host. `inflight` is the whole admission bound: slots + queue.
+    let queue_max = a.max_queue.unwrap_or(cfg.slots * 2);
+    let inflight = admit::Bound::new(cfg.slots + queue_max, Arc::clone(&metrics), |s| {
+        &mut s.inflight
+    });
+    let conns = admit::Bound::new(a.max_conns, Arc::clone(&metrics), |s| &mut s.connections);
+    metrics.update(|s| {
+        s.inflight_max = (cfg.slots + queue_max) as u64;
+        s.queue_max = queue_max as u64;
+        s.connections_max = a.max_conns as u64;
+        s.batch_exact = (!cfg.skinny) as u64;
+    });
     let listener = match TcpListener::bind((a.host.as_str(), a.port)) {
         Ok(l) => l,
         Err(e) => {
@@ -228,11 +272,15 @@ pub fn run(args: &[String]) -> i32 {
         next_id: std::sync::atomic::AtomicU64::new(0),
         model: a.gguf.clone(),
         cfg,
+        inflight,
+        conns,
+        exact: !skinny,
     });
 
     println!(
         "hipml serve on http://{}:{} | {} tensors, {:.2} GiB resident + {:.2} GiB drafter\n\
-         slots {} x ctx {} | chunk {} | drafts {} | prefix cache {} entries / {} MiB",
+         slots {} x ctx {} | chunk {} | drafts {} | prefix cache {} entries / {} MiB\n\
+         admission: {} in flight ({} slots + {} queued) | {} connections | batch exact: {}",
         a.host,
         a.port,
         report.tensor_count,
@@ -243,7 +291,12 @@ pub fn run(args: &[String]) -> i32 {
         cfg.chunk,
         cfg.drafts,
         cfg.prefix_entries,
-        a.prefix_mb
+        a.prefix_mb,
+        cfg.slots + queue_max,
+        cfg.slots,
+        queue_max,
+        a.max_conns,
+        if skinny { "no (WMMA tile at B>=4)" } else { "yes" }
     );
 
     let l = Arc::clone(&shared);

@@ -233,6 +233,29 @@ impl<T> PrefixCache<T> {
         self.entries.clear();
         self.bytes = 0;
     }
+
+    /// Remove every entry whose token ids are a prefix of `prompt`, including
+    /// an exact match, and return how many went.
+    ///
+    /// Used when a request dies part-way through its prefill: the snapshots it
+    /// captured are the ones a later request with the same prefix would
+    /// restore, and a failed job's device state cannot be vouched for. Entries
+    /// for unrelated prefixes are left alone, so one bad request does not cost
+    /// every other conversation its cache.
+    pub fn invalidate_prefixes(&mut self, prompt: &[u32]) -> usize {
+        let mut removed = 0;
+        let mut bytes = 0;
+        self.entries.retain(|e| {
+            let hit = e.tokens.len() <= prompt.len() && prompt[..e.tokens.len()] == e.tokens[..];
+            if hit {
+                removed += 1;
+                bytes += e.bytes;
+            }
+            !hit
+        });
+        self.bytes -= bytes;
+        removed
+    }
 }
 
 #[cfg(test)]
@@ -283,6 +306,25 @@ mod tests {
         push(&mut c, &[1, 2, 3], 30, 10);
         // Same length, different ids: not a hit.
         assert!(c.find_longest(&[1, 2, 4]).is_none());
+    }
+
+    #[test]
+    fn invalidate_drops_only_the_failed_prompts_prefixes() {
+        let mut c = PrefixCache::new(8, 1 << 20);
+        push(&mut c, &[1, 2], 20, 10);
+        push(&mut c, &[1, 2, 3], 30, 10);
+        push(&mut c, &[1, 9], 19, 10);
+        push(&mut c, &[7], 70, 10);
+        // A failed job for [1,2,3,4] leaves the two entries that are prefixes
+        // of it, and nothing else.
+        assert_eq!(c.invalidate_prefixes(&[1, 2, 3, 4]), 2);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c.bytes(), 20);
+        assert!(c.find_longest(&[1, 2, 3, 4]).is_none());
+        assert!(c.find_longest(&[1, 9]).is_some());
+        assert!(c.find_longest(&[7]).is_some());
+        // A prompt that is a prefix of nothing removes nothing.
+        assert_eq!(c.invalidate_prefixes(&[5]), 0);
     }
 
     #[test]

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hipml_core::tokenizer::Tokenizer;
 
+use super::admit;
 use super::api;
 use super::chat;
 use super::json::{self, Value};
@@ -35,14 +36,38 @@ pub struct Shared {
     pub next_id: std::sync::atomic::AtomicU64,
     pub model: String,
     pub cfg: SchedCfg,
+    /// WP51: admission bounds. `inflight` is `slots + queue_max`; `conns` is
+    /// the thread bound. A request past either is answered 503, not queued.
+    pub inflight: Arc<admit::Bound>,
+    pub conns: Arc<admit::Bound>,
+    /// WP51: false when batched decode at B>=4 uses the WMMA tile, which is
+    /// faster but not bit-identical to the single-column launch.
+    pub exact: bool,
+}
+
+/// Generation endpoints are the only ones that can hold a slot, so they are
+/// the only ones that count against the admission bound.
+fn is_generation(path: &str) -> bool {
+    path == "/completion"
+        || path.starts_with("/v1/chat/completions")
+        || path.starts_with("/chat/completions")
 }
 
 pub fn listen(listener: TcpListener, shared: Arc<Shared>) {
     for stream in listener.incoming() {
         match stream {
-            Ok(s) => {
+            Ok(mut s) => {
+                let Some(conn) = shared.conns.try_enter() else {
+                    let msg = format!(
+                        "too many connections ({} open)",
+                        shared.conns.used()
+                    );
+                    let _ = admit::busy(&mut s, &msg, 1, &shared.metrics, true);
+                    continue;
+                };
                 let shared = shared.clone();
                 std::thread::spawn(move || {
+                    let _conn = conn;
                     if let Err(e) = handle(shared, s) {
                         eprintln!("serve: connection: {e}");
                     }
@@ -75,6 +100,24 @@ fn handle(shared: Arc<Shared>, mut stream: TcpStream) -> Result<(), String> {
     // timeout only guards the request read.
     let _ = stream.set_read_timeout(None);
     let path = req.path.clone();
+    // Backpressure: a generation request past the bound is told to come back
+    // rather than queued behind every other request. `_slot` lives to the end
+    // of this function, i.e. until the whole reply (or stream) is written.
+    let _slot = if is_generation(&path) {
+        match shared.inflight.try_enter() {
+            Some(t) => Some(t),
+            None => {
+                let msg = format!(
+                    "busy: {} slots and {} queued requests; retry shortly",
+                    shared.cfg.slots,
+                    shared.inflight.max() - shared.cfg.slots
+                );
+                return admit::busy(&mut stream, &msg, 1, &shared.metrics, false);
+            }
+        }
+    } else {
+        None
+    };
     match (req.method.as_str(), path.as_str()) {
         ("GET", "/health") | ("GET", "/v1/health") => {
             write_json(&mut stream, "200 OK", "{\"status\":\"ok\"}")
@@ -201,14 +244,35 @@ pub fn write_json(stream: &mut TcpStream, status: &str, body: &str) -> Result<()
     write_body(stream, status, "application/json", body.as_bytes())
 }
 
+/// `write_json` with one extra header line (`""` for none). Used to advertise
+/// whether this server's batched decode is bit-exact.
+pub fn write_json_h(
+    stream: &mut TcpStream,
+    status: &str,
+    extra: &str,
+    body: &str,
+) -> Result<(), String> {
+    write_body_h(stream, status, "application/json", extra, body.as_bytes())
+}
+
 pub fn write_body(
     stream: &mut TcpStream,
     status: &str,
     content_type: &str,
     body: &[u8],
 ) -> Result<(), String> {
+    write_body_h(stream, status, content_type, "", body)
+}
+
+pub fn write_body_h(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    extra: &str,
+    body: &[u8],
+) -> Result<(), String> {
     let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream
@@ -225,13 +289,20 @@ pub struct Sse {
 
 impl Sse {
     pub fn start(stream: &mut TcpStream) -> Result<Sse, String> {
+        Sse::start_h(stream, "")
+    }
+
+    /// `extra` is one extra header line (`""` for none).
+    pub fn start_h(stream: &mut TcpStream, extra: &str) -> Result<Sse, String> {
         stream
             .try_clone()
             .map_err(|e| e.to_string())
             .and_then(|mut s| {
-                let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
-                            Cache-Control: no-cache\r\nTransfer-Encoding: chunked\r\n\
-                            Connection: close\r\nX-Accel-Buffering: no\r\n\r\n";
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                     Cache-Control: no-cache\r\nTransfer-Encoding: chunked\r\n\
+                     {extra}Connection: close\r\nX-Accel-Buffering: no\r\n\r\n"
+                );
                 s.write_all(head.as_bytes())
                     .and_then(|_| s.flush())
                     .map(|_| Sse { stream: s })

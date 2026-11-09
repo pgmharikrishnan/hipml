@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::chat;
-use super::http::{new_job, now_unix, write_body, write_json, Shared, Sse, Text};
+use super::http::{new_job, now_unix, write_body_h, write_json, write_json_h, Shared, Sse, Text};
 use super::json::{self, Value};
 use super::sched::{Done, Event, CANCEL_GONE, CANCEL_STOP};
 
@@ -199,6 +199,45 @@ fn finish_reason(done: &Done) -> &str {
     }
 }
 
+/// This server decodes greedily: `argmax` over the logits, one id a step. A
+/// request that asks for anything else would be silently served the greedy
+/// answer, which is worse than a refusal — a client that set
+/// `temperature: 0.8` would believe it got a sample. So `temperature > 0` and
+/// `n > 1` are a 400 that says so.
+///
+/// `top_p` and `seed` are accepted: under greedy decode `top_p` cannot change
+/// the argmax (the highest-probability token is inside every nucleus), and a
+/// seed has nothing to seed. Both are no-ops by arithmetic, not by neglect.
+fn greedy_only(v: &Value) -> Result<(), String> {
+    if let Some(t) = v.get("temperature").and_then(Value::as_f64) {
+        if t > 0.0 {
+            return Err(format!(
+                "temperature {t} is not supported: this server is greedy-only \
+                 (temperature must be 0 or absent). Sampling is refused rather \
+                 than silently ignored."
+            ));
+        }
+    }
+    if let Some(n) = v.get("n").and_then(Value::as_i64) {
+        if n > 1 {
+            return Err(format!(
+                "n {n} is not supported: this server is greedy-only and returns \
+                 one choice per request."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The header that says whether batched decode can change an answer.
+fn exact_header(shared: &Shared) -> &'static str {
+    if shared.exact {
+        "X-Hipml-Batch-Exact: 1\r\n"
+    } else {
+        "X-Hipml-Batch-Exact: 0\r\nX-Hipml-Batch-Tile-Min: 4\r\n"
+    }
+}
+
 fn timings(done: &Done, ttft_ms: f64, decode_ms: f64) -> String {
     let prompt_s = done.prefill_ms / 1e3;
     let pred_s = decode_ms / 1e3;
@@ -281,6 +320,9 @@ pub fn chat_completion(
         Ok(v) => v,
         Err(e) => return bad(stream, &e),
     };
+    if let Err(e) = greedy_only(&v) {
+        return bad(stream, &e);
+    }
     let messages = match chat::messages(&v) {
         Ok(m) => m,
         Err(e) => return bad(stream, &e),
@@ -331,7 +373,7 @@ pub fn chat_completion(
             done.prompt_tokens + done.completion_tokens,
             timings(&done, ttft, decode_ms)
         );
-        write_json(stream, "200 OK", &body)
+        write_json_h(stream, "200 OK", exact_header(shared), &body)
     }
 }
 
@@ -346,7 +388,7 @@ fn stream_chat(
     cancel: &AtomicU8,
     mut stops: Stops,
 ) -> Result<(), String> {
-    let mut sse = Sse::start(stream)?;
+    let mut sse = Sse::start_h(stream, exact_header(shared))?;
     let mut text = Text::new();
     let mut first_at: Option<Instant> = None;
     let mut last_at = at;
@@ -436,6 +478,9 @@ pub fn completion(
         Ok(v) => v,
         Err(e) => return bad(stream, &e),
     };
+    if let Err(e) = greedy_only(&v) {
+        return bad(stream, &e);
+    }
     let prompt = match chat::completion(&shared.tok, &v) {
         Ok(p) => p,
         Err(e) => return bad(stream, &e),
@@ -473,7 +518,7 @@ pub fn completion(
             ids,
             timings(&done, ttft, decode_ms)
         );
-        write_body(stream, "200 OK", "application/json", body.as_bytes())
+        write_body_h(stream, "200 OK", "application/json", exact_header(shared), body.as_bytes())
     } else {
         stream_completion(shared, stream, rx, at, id, &cancel, stops)
     }
@@ -488,7 +533,7 @@ fn stream_completion(
     cancel: &AtomicU8,
     mut stops: Stops,
 ) -> Result<(), String> {
-    let mut sse = Sse::start(stream)?;
+    let mut sse = Sse::start_h(stream, exact_header(shared))?;
     let mut text = Text::new();
     let mut first_at: Option<Instant> = None;
     let mut last_at = at;

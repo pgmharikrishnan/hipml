@@ -32,7 +32,20 @@ use super::metrics::Metrics;
 
 #[path = "sched/run.rs"]
 mod run;
+#[path = "sched/fail.rs"]
+mod fail;
+#[path = "sched/warm.rs"]
+mod warm;
 pub use run::run;
+
+/// Count one request as finished, by reason.
+pub fn finished(metrics: &Metrics, finish: &str) {
+    if finish == "cancelled" {
+        metrics.update(|s| s.requests_cancelled += 1);
+    } else {
+        metrics.update(|s| s.requests_done += 1);
+    }
+}
 
 /// One admitted request. `tx` carries tokens (and the final summary) back to
 /// the connection that owns it.
@@ -91,6 +104,9 @@ pub struct SchedCfg {
     pub prefix_entries: usize,
     pub prefix_bytes: usize,
     pub mtp: bool,
+    /// True when batched decode at B>=4 uses the WMMA tile, i.e. when the
+    /// batch path is not bit-identical to the single-column launch.
+    pub skinny: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -155,24 +171,65 @@ fn send_done(tx: &Sender<Event>, job: &Job, finish: &str, completion: usize, pre
 }
 
 /// Admit one request: reset the prefill engine, try the prefix cache, and set
-/// up the tile boundaries. Returns `None` when the request cannot run at all.
+/// up the tile boundaries. On failure the job comes back with the reason, so
+/// the caller can fail that job alone.
 fn begin(
     engine: &mut GpuEngine<'_>,
     job: Job,
     cfg: &SchedCfg,
-    mut mode: Mode,
+    mode: Mode,
     metrics: &Metrics,
-) -> Result<Prefill, String> {
+) -> Result<Prefill, (Job, String)> {
     let len = job.prompt.len();
     if len == 0 {
-        return Err("empty prompt".to_string());
+        return Err((job, "empty prompt".to_string()));
     }
     if len + job.max_tokens > cfg.ctx {
-        return Err(format!(
-            "prompt {} + {} tokens exceeds the {} token slot",
-            len, job.max_tokens, cfg.ctx
+        return Err((
+            job,
+            format!(
+                "prompt {} + {} tokens exceeds the {} token slot",
+                len, job.max_tokens, cfg.ctx
+            ),
         ));
     }
+    match prepare(engine, &job, cfg, mode, metrics) {
+        Ok(a) => Ok(Prefill {
+            job,
+            st: a.st,
+            done: a.start,
+            cuts: a.cuts,
+            deep: GpuEngine::prefill_wants_deep(len),
+            cap: cfg.chunk,
+            capture: a.capture,
+            mode: a.mode,
+            first: a.first,
+            prefill_ms: 0.0,
+            hit_tokens: a.start,
+        }),
+        Err(e) => Err((job, e)),
+    }
+}
+
+/// The fallible half of [`begin`]: everything that touches the device or the
+/// cache. Kept separate so the job can be handed back with the error.
+struct Admitted {
+    st: GpuState,
+    start: usize,
+    cuts: Vec<usize>,
+    capture: Option<Buffer>,
+    mode: Mode,
+    first: Option<u32>,
+}
+
+fn prepare(
+    engine: &mut GpuEngine<'_>,
+    job: &Job,
+    cfg: &SchedCfg,
+    mut mode: Mode,
+    metrics: &Metrics,
+) -> Result<Admitted, String> {
+    let len = job.prompt.len();
     let n = engine.n_embd();
     engine.reset_state()?;
     let mut st = engine.new_state();
@@ -219,18 +276,13 @@ fn begin(
     } else {
         None
     };
-    Ok(Prefill {
-        job,
+    Ok(Admitted {
         st,
-        done: start,
+        start,
         cuts,
-        deep: GpuEngine::prefill_wants_deep(len),
-        cap: cfg.chunk,
         capture,
         mode,
         first,
-        prefill_ms: 0.0,
-        hit_tokens: start,
     })
 }
 

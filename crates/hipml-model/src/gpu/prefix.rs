@@ -93,6 +93,30 @@ impl<'a> GpuEngine<'a> {
         )
     }
 
+    /// Drop every cached prefix of `prompt`; returns how many entries went.
+    ///
+    /// Called when a job fails: the snapshots it captured during its own
+    /// prefill are exactly the entries a later request with that prefix would
+    /// restore, and a job that died mid-flight cannot vouch for its state.
+    pub fn prefix_invalidate(&mut self, prompt: &[u32]) -> usize {
+        match self.prefix.as_mut() {
+            Some(c) => c.invalidate_prefixes(prompt),
+            None => 0,
+        }
+    }
+
+    /// Drop the whole prefix cache; returns how many entries went.
+    pub fn prefix_clear(&mut self) -> usize {
+        match self.prefix.as_mut() {
+            Some(c) => {
+                let n = c.len();
+                c.clear();
+                n
+            }
+            None => 0,
+        }
+    }
+
     /// Snapshot the live state as the entry for `prompt[..pos]`.
     ///
     /// The caller must have just prefilled exactly `prompt[..pos]`; `pos` is
