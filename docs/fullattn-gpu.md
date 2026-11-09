@@ -289,13 +289,17 @@ no longer serialised behind one barrier chain.
 
 | case | splits | TTFT | attention stage | useful TFLOP/s |
 | --- | ---: | ---: | ---: | ---: |
-| 100K | 1 (mono) | 136.98 s | 64.42 s | 31.7 |
-| 100K | 8, gate 16K, no interior-mask fix | 126.35 s | 53.99 s | 37.8 |
-| 100K | 8, gate 0, interior-mask fix | **124.41 s** | **52.29 s** | **38.6** |
-| 32K | 1 (mono) | 31.58 s | 8.09 s | 37.4 |
-| 32K | 8, gate 8K | **30.63 s** | **7.03 s** | 43.0 |
-| 8K | any | 6.71 s | 0.85 s | 43.4 |
-| 512 | any | 0.43 s (1186 tok/s) | 30 ms | |
+| 100K | 1 (mono) | 136.98 s | 64.42 s | 30.6 |
+| 100K | 8, gate 16K, no interior-mask fix | 126.35 s | 53.99 s | 36.5 |
+| 100K | 8, gate 0, interior-mask fix | **124.41 s** | **52.29 s** | **37.7** |
+| 32K | 1 (mono, f32 mirror; the q8 mono cell was not re-run) | 31.68 s | 8.09 s | 26.1 |
+| 32K | 8, gate 8K | **30.63 s** | **7.03 s** | 30.0 |
+| 8K | any (gate never fires) | 6.71 s | 0.85 s | 15.5 |
+| 512 | any (gate never fires) | 0.43 s (1186 tok/s) | 30 ms | |
+
+The useful rate falls with depth because a shallow chunk is all short query
+tiles: 8K spends the same per-tile overhead on 1/12 of the keys per query, which
+is also why splitting cannot pay there.
 
 ### What the combine costs
 
