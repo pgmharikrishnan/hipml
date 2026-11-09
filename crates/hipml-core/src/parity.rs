@@ -12,7 +12,7 @@ use crate::rng::Rng;
 use crate::tensor::Tensor;
 
 pub use crate::parity_kv::deep_cases;
-pub use crate::prefill_parity::{qwen38_prefill_cases, prefill_cases, PrefillCase};
+pub use crate::prefill_parity::{qwen38_prefill_cases, prefill_cases, skinny_cases, PrefillCase};
 pub use crate::quant_parity::{quant_bench_cases, quant_cases, QuantCase};
 
 /// Absolute and relative tolerance for a case.

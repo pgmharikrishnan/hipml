@@ -25,6 +25,8 @@ pub(crate) mod device {
     pub use prefill_launch::{gemm_rows_f32, prefill_resident};
     #[path = "quant_launch.rs"]
     mod quant_launch;
+    #[path = "skinny_launch.rs"]
+    mod skinny_launch;
     #[path = "stream_launch.rs"]
     mod stream_launch;
     pub use stream_launch::ReadJob;
@@ -609,6 +611,20 @@ impl Launcher {
         _m: usize,
         _k: usize,
         _tokens: usize,
+        _reps: usize,
+    ) -> Result<(Vec<f32>, f64), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_skinny_reps(
+        &self,
+        _name: &str,
+        _w: &[u8],
+        _x: &[f32],
+        _n: usize,
+        _k: usize,
+        _r: usize,
         _reps: usize,
     ) -> Result<(Vec<f32>, f64), String> {
         Err("hipml was built without the `hip` feature".to_string())
