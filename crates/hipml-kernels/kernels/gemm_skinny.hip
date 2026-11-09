@@ -203,8 +203,10 @@ static __device__ __forceinline__ void pws_finish(const pws_raw& in, int within,
 }
 
 // PROBE splits the block's cost for the bench: 0 runs everything, 1 skips the
-// staging stores (fragment reads still happen), 2 skips the fragment reads and
-// the WMMA. Probes compute garbage; they exist only to name the bottleneck.
+// staging entirely, 2 skips the fragment reads and the WMMA, 3 keeps the
+// staging loads and the dequant but drops the shared stores, 4 keeps the
+// shared stores but drops the global loads. Probes compute garbage; they exist
+// only to name the bottleneck.
 template <int KIND, int RT, int KW, int THR, int PROBE = 0>
 static __device__ __forceinline__ void pws_body(
     const unsigned char* __restrict__ w,
@@ -240,6 +242,7 @@ static __device__ __forceinline__ void pws_body(
     const int lane = tid & 31;
     const int warp = tid >> 5;
     const int row_base = blockIdx.x * RT;
+    unsigned sink = 0;
     const size_t wrow = pf_row_bytes(k, KIND);
 
     // x staging: XROW threads per token row, four floats each.
@@ -260,12 +263,24 @@ static __device__ __forceinline__ void pws_body(
             constexpr int XB = XP < 4 ? XP : 4;
             for (int p0 = 0; p0 < XP; p0 += XB) {
                 float4 xv[XB];
+                if (PROBE != 4) {
 #pragma unroll
-                for (int p = 0; p < XB; ++p) {
-                    const int rl = (p0 + p) * XRP + xt;
-                    const int gt = rl < r ? rl : r - 1;
-                    xv[p] = *reinterpret_cast<const float4*>(
-                        x + (size_t)gt * k + base + xc);
+                    for (int p = 0; p < XB; ++p) {
+                        const int rl = (p0 + p) * XRP + xt;
+                        const int gt = rl < r ? rl : r - 1;
+                        xv[p] = *reinterpret_cast<const float4*>(
+                            x + (size_t)gt * k + base + xc);
+                    }
+                } else {
+#pragma unroll
+                    for (int p = 0; p < XB; ++p)
+                        xv[p] = make_float4(0.f, 0.f, 0.f, 0.f);
+                }
+                if (PROBE == 3) {
+#pragma unroll
+                    for (int p = 0; p < XB; ++p)
+                        sink ^= __float_as_uint(xv[p].x) ^ __float_as_uint(xv[p].w);
+                    continue;
                 }
 #pragma unroll
                 for (int p = 0; p < XB; ++p) {
@@ -285,11 +300,16 @@ static __device__ __forceinline__ void pws_body(
             static_assert(WP % WB == 0, "weight hoist group must divide the passes");
             for (int p0 = 0; p0 < WP; p0 += WB) {
                 pws_raw raw[WB];
+                if (PROBE != 4) {
 #pragma unroll
-                for (int p = 0; p < WB; ++p) {
-                    const int g = row_base + (p0 + p) * PRP + wrow_l;
-                    const int gr = g < n ? g : n - 1;
-                    pws_prep<KIND>(w + (size_t)gr * wrow, base + wcol, raw[p]);
+                    for (int p = 0; p < WB; ++p) {
+                        const int g = row_base + (p0 + p) * PRP + wrow_l;
+                        const int gr = g < n ? g : n - 1;
+                        pws_prep<KIND>(w + (size_t)gr * wrow, base + wcol, raw[p]);
+                    }
+                } else {
+#pragma unroll
+                    for (int p = 0; p < WB; ++p) raw[p] = pws_raw{{0, 0, 0, 0, 0, 0}};
                 }
                 const int within = (base + wcol) & 255;
 #pragma unroll
@@ -297,6 +317,10 @@ static __device__ __forceinline__ void pws_body(
                     const int rl = (p0 + p) * PRP + wrow_l;
                     float v[8];
                     pws_finish<KIND>(raw[p], within, v);
+                    if (PROBE == 3) {
+                        sink ^= __float_as_uint(v[0]) ^ __float_as_uint(v[7]);
+                        continue;
+                    }
                     pws_h8 hv;
 #pragma unroll
                     for (int i = 0; i < 8; ++i) hv[i] = (_Float16)v[i];
@@ -349,6 +373,9 @@ static __device__ __forceinline__ void pws_body(
     for (int t = 1; t < NACC; ++t)
 #pragma unroll
         for (int e = 0; e < 8; ++e) acc[0][e] += acc[t][e];
+
+    // Keep probe 3's loads alive without writing shared.
+    if (PROBE == 3 && tid == 0 && r > 0) y[(size_t)(n - 1)] += (float)sink * 0.0f;
 
     // Accumulator -> f32: this lane holds column (output row) `lane & 15` of
     // token rows 8*(lane>>4) + e.
@@ -459,4 +486,20 @@ extern "C" __global__ void gemm_skinny_q4_nc(
     float* __restrict__ y, int n, int k, int r)
 {
     pws_body<0, 32, 128, 128, 2>(w, x, y, n, k, r);
+}
+
+// `_nw` keeps the loads and the dequant but drops the shared stores; `_nl`
+// keeps the stores but drops the loads.
+extern "C" __global__ void gemm_skinny_q4_nw(
+    const unsigned char* __restrict__ w, const float* __restrict__ x,
+    float* __restrict__ y, int n, int k, int r)
+{
+    pws_body<0, 32, 128, 128, 3>(w, x, y, n, k, r);
+}
+
+extern "C" __global__ void gemm_skinny_q4_nl(
+    const unsigned char* __restrict__ w, const float* __restrict__ x,
+    float* __restrict__ y, int n, int k, int r)
+{
+    pws_body<0, 32, 128, 128, 4>(w, x, y, n, k, r);
 }

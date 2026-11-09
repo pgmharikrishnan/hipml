@@ -283,7 +283,9 @@ fn sweep_geometry(launcher: &Launcher, reps: usize) {
         // Split the shipped geometry's cost: no staging stores, no fragments.
         for (entry, what) in [
             ("gemm_skinny_q4_k", "full"),
-            ("gemm_skinny_q4_ns", "no staging"),
+            ("gemm_skinny_q4_ns", "no staging at all"),
+            ("gemm_skinny_q4_nw", "staging loads+dequant"),
+            ("gemm_skinny_q4_nl", "staging stores only"),
             ("gemm_skinny_q4_nc", "empty (barriers only)"),
         ] {
             let Ok(ms) = best_ms(
