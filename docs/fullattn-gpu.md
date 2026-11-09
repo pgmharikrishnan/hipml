@@ -323,13 +323,14 @@ an estimated ~5% of the attention stage.
 
 `attn_chunk_wmma_f16` gives every (KV head, 32-query tile, half of head_dim)
 block the whole causal prefix. At 100K the last chunk's blocks stream ~6,250
-key tiles each, and a block owns its CU for its whole life (`168` VGPRs at 12
-warps is exactly one block per CU), so the two `__syncthreads` of every tile sit
-on the critical path with nothing else resident to run. The kernel was measured
-at 58 TFLOP/s of *issued* matrix work, i.e. 33% of the 171-188 TFLOPS the
-shipped prefill GEMM reaches, and at 137 GB/s of staged bytes, i.e. a fifth of
-the 640 GB/s spec: it is not traffic-bound, which is why query-tile 64, key-tile
-32, accumulator chain counts and the q8 cache all failed to move it.
+key tiles each. The measured shape is 186 VGPRs, 0 spill, LDS 13,056 B and
+8 waves/SIMD of register occupancy, so two 12-warp blocks are resident per CU
+and the two `__syncthreads` of every tile sit on the critical path whenever both
+blocks reach the barrier together. The kernel was measured at 58 TFLOP/s of
+*issued* matrix work, i.e. 33% of the 171-188 TFLOPS the shipped prefill GEMM
+reaches, and at 137 GB/s of staged bytes, i.e. a fifth of the 640 GB/s spec: it
+is not traffic-bound, which is why query-tile 64, key-tile 32, accumulator chain
+counts and the q8 cache all failed to move it.
 
 `attn_chunk_split_f16` cuts the live key range into `splits` equal slices; each
 (kv head, query tile, d half, split) block streams one slice and writes an
@@ -380,17 +381,58 @@ The staged byte count is unchanged by splitting (each block streams its own
 slice); the bandwidth rises because the same bytes are read by blocks that are
 no longer serialised behind one barrier chain.
 
+### Whole head width: the score tile once (WP40)
+
+Both d-half blocks of the shipped shape recompute the full 256-d score tile:
+288 matrix instructions per (head, 32 queries, 256 d, key tile) where 192 are
+necessary. `attn_chunk_full_f16` gives each block the whole head width, so the
+score tile is consumed by all 16 output fragments and the duplication is gone.
+The launch is the shipped one otherwise -- blockIdx.y is still 32 queries,
+blockIdx.z is now just the key split, and the block is 12 warps (group 6 x two
+16-query tiles) -- so the occupancy is identical and the only change is the
+removed work:
+
+| shape | VGPRs | spill | LDS | waves/SIMD | attention @100K |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| shipped split (d half) | 186 | 0 | 13,056 B | 8 | 113.0 ms |
+| Q in shared, 6-head block | 256 | 174 | **115,968 B** | 3 | does not compile |
+| whole width, Q in regs | 235 | 0 | 17,664 B | 6 | **74.9 ms** |
+
+The Q mirror is the shape that does *not* fit. On gfx1201 `hipDeviceProp_t`
+reports 65,536 B of LDS per CU, and a block-wide fp16 Q mirror for the 6-head
+group is 98,304 B before the 17,664 B of K/V staging: the compiler rejects it
+outright (and its register fallback is 256 VGPRs with 174 spills). `attn_chunk_full_f16`
+therefore keeps Q in registers and pays for the 16 output fragments with a
+`__launch_bounds__(384, 2)` hint instead: 235 VGPRs, no spill, two blocks per
+CU. Without the hint the compiler caps at 192 VGPRs, spills 56 registers inside
+the key loop and keeps the same 8-wave occupancy, which measured no better than
+the shipped kernel (113.6 ms vs 114.1).
+
+One layer-chunk, q8 cache, 8 splits, 2048 tokens at 98304 and at 30720:
+
+| chunk at | shipped split | whole width | ratio |
+| ---: | ---: | ---: | ---: |
+| 98,304 | 113.0 ms | **74.9 ms** | **1.52x** |
+| 30,720 | 37.2 ms | **26.0 ms** | **1.43x** |
+
 ### Whole-model prefill (q8, chunk 2048, `--prefill-split`)
 
 | case | splits | TTFT | attention stage | useful TFLOP/s |
 | --- | ---: | ---: | ---: | ---: |
 | 100K | 1 (mono) | 136.98 s | 64.42 s | 30.6 |
 | 100K | 8, gate 16K, no interior-mask fix | 126.35 s | 53.99 s | 36.5 |
-| 100K | 8, gate 0, interior-mask fix | **124.41 s** | **52.29 s** | **37.7** |
+| 100K | 8, gate 0, interior-mask fix | 124.41 s | 52.29 s | 37.7 |
+| 100K | 8, gate 8K, whole width | **110.54 s** | **38.37 s** | **42.4** |
 | 32K | 1 (mono, f32 mirror; the q8 mono cell was not re-run) | 31.68 s | 8.09 s | 26.1 |
-| 32K | 8, gate 8K | **30.63 s** | **7.03 s** | 30.0 |
+| 32K | 8, gate 8K, d half | 30.63 s | 7.03 s | 30.0 |
+| 32K | 8, gate 8K, whole width | **28.49 s** | | |
 | 8K | any (gate never fires) | 6.71 s | 0.85 s | 15.5 |
 | 512 | any (gate never fires) | 0.43 s (1186 tok/s) | 30 ms | |
+
+The 100K and 32K rows are from the same session, so the d-half baseline was
+re-measured next to the new shape: 127.11 s at 100K, i.e. the whole-width kernel
+buys **16.6 s / 13.1%** there. The 8K and 512 cells are the mono path untouched
+by this change (6.56 s / 1240 tok/s measured in the same session).
 
 The useful rate falls with depth because a shallow chunk is all short query
 tiles: 8K spends the same per-tile overhead on 1/12 of the keys per query, which
@@ -411,32 +453,36 @@ at 100K the trade is 8:1.
 
 - `hipml attn-parity` gained `chunk attention q8 split4`: the 37-query @ 29 case
   through the split kernel and the combine, max |d| **8.00e-4** against the CPU
-  reference (tolerance 2e-3). The mono cases are unchanged (7.91e-4).
-- Token ids are identical to the mono path at every depth measured: 100K `100`,
-  32K `868`, 8K `292`, 512 `489`.
-- `parity prefill --deep` 6/6; `cargo test --workspace` green; `cargo check
-  --features hip` green.
+  reference (tolerance 2e-3). The mono cases are unchanged (7.91e-4). The
+  whole-width kernel replaced the d-half kernel on that path with the same
+  8.00e-4, i.e. the deduplicated QK is arithmetically identical.
+- Token ids at every depth measured: 512 `489`, 8K `292`, 32K `868`. At 100K the
+  whole-width kernel returns `500`, exactly the id of the shipped split kernel
+  (`500`) and of the mono kernel (`500`) for the same synthetic prompt. The
+  older `100` in this table does not reproduce on this binary with any of the
+  three kernels; it is not a regression from this change.
+- `parity prefill --deep` 6/6; `cargo test --workspace` green (58 tests);
+  `cargo check --features hip` green.
 - The two `attn-parity` decode-layer cases fail identically on the base commit
   (`d7b53f6`): depth 1 max_abs 8.01e0. Pre-existing, not this work.
 
 ### Not verified / next step
 
-- **The 1.5x duplicated QK is still there.** Each `blockIdx.z` half recomputes
-  the full 256-d score tile. A probe that skips QK on the z=1 half measured
-  113.3 -> 95.0 ms, so computing the score once per query tile (one block over
-  all 256 d) is worth ~30% of the attention stage — it would put 100K near
-  110 s. It does not fit at 12 warps: 16 output fragments (128 VGPRs) plus 16 Q
-  fragments (64) is ~232, over the 168 that a 12-warp block can have. The two
-  viable shapes are 16-query blocks with Q staged in shared (61 KB of LDS, 6
-  warps per CU, 2x the K/V re-read) or a per-tile reload of an fp16 Q mirror
-  (needs a `prefill_xhalf` pass over `q`, and the compiler is free to hoist the
-  loop-invariant fragments straight back into registers). Neither is built.
+- **The mono kernel still computes QK twice.** `attn_chunk_wmma_f16` (every
+  chunk below the split gate, and the whole f32-mirror path) keeps the d-half
+  split, so its 100K chunk is 151 ms against the whole-width 74.9 ms. Routing
+  `splits == 1` through `attn_chunk_full_f16` would need the combine pass at one
+  split (measured fixed cost ~1.75 ms per layer-chunk, i.e. ~1.4 s at 100K) and
+  a re-measure of the 8K cell; the math is bit-identical, but this cell did not
+  change the gate.
+- The whole-width kernel is gated to GQA group <= 6 by
+  `__launch_bounds__(384, 2)`; a wider group (8) falls back to the d-half split
+  kernel and keeps its 1.5x QK. Only the shipped group of six was measured.
 - Splits are not wired into the f32-mirror chunk path, so `--kv f32` at 100K is
-  still the mono 135.7 s. The benchmarked and compared cell is q8.
-- The key-major outer loop was not tried. The staged rate is 182 GB/s against a
-  640 GB/s spec, and WP27 measured no benefit from re-reads, so a cache-locality
-  reorder is unlikely to pay; the staged bytes at 100K would need a 3.5x better
-  effective rate to become the limit.
+  still the mono path (~140 s in this session). The benchmarked and compared
+  cell is q8.
+- The key-major outer loop was not tried. The staged rate at 100K is 277 GB/s
+  against a 640 GB/s spec, so a cache-locality reorder is still unlikely to pay.
 - Split counts above 16 and `HIPML_ATTN_SPLIT_MIN` between 0 and 8K were
   sampled, not swept: 16 was level with 8, and every gate below 8K changes only
   chunks whose attention is under 1 ms.
