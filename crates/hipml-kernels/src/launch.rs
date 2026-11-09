@@ -723,13 +723,15 @@ pub fn prefill_half() -> bool {
     prefill_path() != PrefillPath::F32
 }
 
-/// The occupancy-shape prefill kernels (`prefill_wmma2.hip`). Opt-in with
-/// `HIPML_PREFILL_V2=1` while the shape is still being measured; they keep the
-/// shipped kernel's k order, so switching between them is a performance
-/// decision and not a numeric one.
+/// The occupancy-shape prefill kernels (`prefill_wmma2.hip`). On by default on
+/// the wmma path; `HIPML_PREFILL_V2=0` selects the shipped `prefill_wmma.hip`
+/// shape. They keep the shipped kernel's k order, so switching between them is
+/// a performance decision and not a numeric one.
 pub fn prefill_v2() -> bool {
     static V2: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V2.get_or_init(|| std::env::var_os("HIPML_PREFILL_V2").is_some())
+    *V2.get_or_init(|| {
+        std::env::var_os("HIPML_PREFILL_V2").map_or(true, |v| v != "0")
+    })
 }
 
 /// The entry point a base (f32) prefill kernel name maps to on the active path.
