@@ -132,6 +132,15 @@ fn main_run(a: &Args) -> Result<(), String> {
         let mut st = single.new_state();
         single.prefill_tile(&prefix, &mut st, cap, false)?;
         batch.adopt_quiet(&single, batch.next_slot(), st.pos)?;
+        if std::env::var_os("HIPML_ROWS_DEBUG").is_some() {
+            let got = batch.slot_ssm_state_host(b)?;
+            let want = single.ssm_state_host()?;
+            let bad = got
+                .iter()
+                .zip(want.iter())
+                .position(|(x, y)| x.to_bits() != y.to_bits());
+            println!("adopt slot {b}: first differing word {bad:?}");
+        }
     }
 
     // One weight pass over every tail.
@@ -174,10 +183,21 @@ fn main_run(a: &Args) -> Result<(), String> {
                 .iter()
                 .zip(e.ssm.iter())
                 .position(|(a, b)| a.to_bits() != b.to_bits());
+            let diffs = state
+                .iter()
+                .zip(e.ssm.iter())
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
+            let worst = state
+                .iter()
+                .zip(e.ssm.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
             println!(
-                "slot {b} (tail {}): SSM state differs at word {:?} (len {}/{}) -> MISMATCH",
+                "slot {b} (tail {}): SSM state differs at word {:?}, {} words, max |d| {worst:e} (len {}/{}) -> MISMATCH",
                 e.tail.len(),
                 first_bad,
+                diffs,
                 state.len(),
                 e.ssm.len()
             );
