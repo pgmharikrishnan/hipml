@@ -88,7 +88,7 @@ run after the bit-identity fixes, so the `exact` column is again the honest
 | prose_explanation (373) | 29.23 | 41.82 | **42.58** | 36.96 |
 | json_tool_call (300) | 29.16 | 42.93 | 49.56 | **50.06** |
 | copy_200_words (285) | 29.16 | 45.86 | 55.40 | **61.12** |
-| code_edit (672) | 29.11 | 44.23 | **49.53** | 51.43 |
+| code_edit (672) | 29.11 | 44.23 | 49.53 | **51.43** |
 
 Tokens per step and acceptance (`P(draft k | 1..k-1 correct)`):
 
@@ -176,7 +176,7 @@ cannot be weight-batched.
 ## What is not verified / not done
 
 * The prose ≥48 / JSON ≥53 tok/s targets are **not met** (42.6 / 50.1). copy
-  reaches 61.1 (target 65) and code 49.5. The gap is the verify pass, not
+  reaches 61.1 (target 65) and code 51.4. The gap is the verify pass, not
   acceptance.
 * The 8K path is measured with `--kv q8` only; `--kv f32` at 8K was not run.
   At 8K, 3 drafts is slower than plain.
@@ -194,7 +194,7 @@ cannot be weight-batched.
   | prose | 42.58 (d2) | 38.71 (d2) | 9.4e-3 | 128/128 |
   | json | 50.06 (d3) | 51.21 (d3) | 9.4e-3 | 128/128 |
   | copy | 61.12 (d3) | 62.51 (d3) | 9.4e-3 | 128/128 |
-  | code | 49.53 (d2) | 52.46 (d3) | 9.4e-3 | 128/128 |
+  | code | 51.43 (d3) | 52.46 (d3) | 9.4e-3 | 128/128 |
 
   The skinny path is *not* a token divergence (128/128 on every prompt), but it
   is not faster enough: its dequantise-into-shared staging runs at ~40-68 GB/s
