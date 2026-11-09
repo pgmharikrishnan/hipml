@@ -68,8 +68,8 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     if a.slots == 0 || a.slots > 32 {
         return Err("--slots must be 1..=32".to_string());
     }
-    if a.prefix < 2 {
-        return Err("--prefix must be at least 2".to_string());
+    if a.prefix > 8 * 1024 {
+        return Err("--prefix must be at most 8192".to_string());
     }
     if a.decode == 0 {
         return Err("--decode must be at least 1".to_string());
@@ -113,7 +113,9 @@ fn main_run(a: &Args) -> Result<(), String> {
             .collect();
         single.reset_state()?;
         let mut st = single.new_state();
-        single.prefill_tile(&prefix, &mut st, cap, false)?;
+        if !prefix.is_empty() {
+            single.prefill_tile(&prefix, &mut st, cap, false)?;
+        }
         let first = single.prefill_tile(&tail, &mut st, cap, false)?;
         let ssm = single.ssm_state_host()?;
         let mut ids = vec![first];
@@ -130,7 +132,9 @@ fn main_run(a: &Args) -> Result<(), String> {
         let prefix: Vec<u32> = (0..a.prefix).map(|i| tok(b, i)).collect();
         single.reset_state()?;
         let mut st = single.new_state();
-        single.prefill_tile(&prefix, &mut st, cap, false)?;
+        if !prefix.is_empty() {
+            single.prefill_tile(&prefix, &mut st, cap, false)?;
+        }
         batch.adopt_quiet(&single, batch.next_slot(), st.pos)?;
         if std::env::var_os("HIPML_ROWS_DEBUG").is_some() {
             let got = batch.slot_ssm_state_host(b)?;
