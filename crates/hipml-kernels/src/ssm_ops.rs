@@ -72,6 +72,11 @@ impl<'a> SsmGpuLayer<'a> {
     ) -> Result<(), String> {
         match w {
             SsmWeight::Quant(b, entry) => {
+                if crate::skinny_on() {
+                    if let Some(name) = crate::skinny_entry(entry) {
+                        return l.run_skinny_resident(name, b, x, y, m, k, rows);
+                    }
+                }
                 if let Some(kind) = crate::batch_kind_entry(entry) {
                     return l.gemv_batched(kind, b, x, y, m, k, rows);
                 }

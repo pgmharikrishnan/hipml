@@ -347,17 +347,31 @@ impl<'a> GpuEngine<'a> {
             .model
             .tensor(OUTPUT)
             .ok_or_else(|| "model has no output.weight".to_string())?;
-        let kind = hipml_kernels::batch_kind_entry(gemv_entry(out.ty())?)
-            .ok_or_else(|| format!("{} has no batched GEMV", out.ty().name()))?;
-        l.gemv_batched(
-            kind,
-            out.buffer(),
-            &c.final_h,
-            &c.logits,
-            cfg.n_vocab,
-            n,
-            rows,
-        )?;
+        let entry = gemv_entry(out.ty())?;
+        if let Some(name) = hipml_kernels::skinny_entry(entry).filter(|_| hipml_kernels::skinny_on())
+        {
+            l.run_skinny_resident(
+                name,
+                out.buffer(),
+                &c.final_h,
+                &c.logits,
+                cfg.n_vocab,
+                n,
+                rows,
+            )?;
+        } else {
+            let kind = hipml_kernels::batch_kind_entry(entry)
+                .ok_or_else(|| format!("{} has no batched GEMV", out.ty().name()))?;
+            l.gemv_batched(
+                kind,
+                out.buffer(),
+                &c.final_h,
+                &c.logits,
+                cfg.n_vocab,
+                n,
+                rows,
+            )?;
+        }
         super::trace::mark(&mut self.trace, l, "lm_head")?;
         l.argmax_batched(
             &c.logits,

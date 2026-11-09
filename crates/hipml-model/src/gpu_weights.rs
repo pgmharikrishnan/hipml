@@ -123,6 +123,11 @@ impl<'a> Proj<'a> {
         y: &Buffer,
         rows: usize,
     ) -> Result<(), String> {
+        if hipml_kernels::skinny_on() {
+            if let Some(name) = hipml_kernels::skinny_entry(self.entry) {
+                return l.run_skinny_resident(name, self.w, x, y, self.rows, self.cols, rows);
+            }
+        }
         if let Some(kind) = hipml_kernels::batch_kind_entry(self.entry) {
             return l.gemv_batched(kind, self.w, x, y, self.rows, self.cols, rows);
         }

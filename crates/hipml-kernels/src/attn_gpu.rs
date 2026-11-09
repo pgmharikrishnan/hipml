@@ -633,6 +633,19 @@ mod imp {
             y: &Buffer,
             rows: usize,
         ) -> Result<(), String> {
+            if crate::skinny_on() {
+                if let Some(name) = crate::skinny_entry(w.entry()?) {
+                    return l.run_skinny_resident(
+                        name,
+                        w.data_bytes(),
+                        x,
+                        y,
+                        w.rows,
+                        w.cols,
+                        rows,
+                    );
+                }
+            }
             if let Some(kind) = crate::batch_kind_for(w.kind) {
                 return l.gemv_batched(kind, w.data_bytes(), x, y, w.rows, w.cols, rows);
             }

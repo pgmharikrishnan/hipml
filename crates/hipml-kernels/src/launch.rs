@@ -24,6 +24,9 @@ pub(crate) mod device {
     mod prefill_launch;
 
     pub use prefill_launch::{gemm_rows_f32, prefill_resident};
+    #[path = "skinny_launch.rs"]
+    #[allow(dead_code)]
+    mod skinny_launch;
     #[path = "quant_launch.rs"]
     mod quant_launch;
     #[path = "stream_launch.rs"]

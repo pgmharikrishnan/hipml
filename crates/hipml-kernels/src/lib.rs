@@ -77,6 +77,31 @@ pub fn batch_kind_entry(_entry: &str) -> Option<i32> {
     None
 }
 
+/// Whether the opt-in WMMA skinny verify path is on (`HIPML_SKINNY=1`).
+/// Cached: the verify pass asks once per projection.
+pub fn skinny_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("HIPML_SKINNY").is_some())
+}
+
+/// The WMMA skinny GEMM entry for a resident GEMV entry name, when the format
+/// has one. Not bit-identical to the GEMV: an opt-in verify path only.
+#[cfg(feature = "hip")]
+pub fn skinny_entry(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "gemv_q4_k" | "gemm_skinny_q4_k" => "gemm_skinny_q4_k",
+        "gemv_q6_k" | "gemm_skinny_q6_k" => "gemm_skinny_q6_k",
+        "gemv_q8_0" | "gemm_skinny_q8_0" => "gemm_skinny_q8_0",
+        _ => return None,
+    })
+}
+
+/// Without the `hip` feature there is no skinny kernel.
+#[cfg(not(feature = "hip"))]
+pub fn skinny_entry(_name: &str) -> Option<&'static str> {
+    None
+}
+
 /// How a kernel is gridded.
 #[derive(Clone, Copy, Debug)]
 pub enum KernelKind {
@@ -211,6 +236,24 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "gemv_q8_0",
         entry: "gemv_q8_0",
         kind: KernelKind::PerRow { block: 256 },
+    },
+    // WP33 WMMA skinny GEMM: `R <= 16` activation rows in one weights pass.
+    // `rows` must equal the kernel's PWS_RT (32), block its PWS_THREADS (128);
+    // a mismatch silently halves the grid.
+    KernelSpec {
+        name: "gemm_skinny_q4_k",
+        entry: "gemm_skinny_q4_k",
+        kind: KernelKind::RowTile { rows: 32, block: 128 },
+    },
+    KernelSpec {
+        name: "gemm_skinny_q6_k",
+        entry: "gemm_skinny_q6_k",
+        kind: KernelKind::RowTile { rows: 32, block: 128 },
+    },
+    KernelSpec {
+        name: "gemm_skinny_q8_0",
+        entry: "gemm_skinny_q8_0",
+        kind: KernelKind::RowTile { rows: 32, block: 128 },
     },
     KernelSpec {
         name: "dequant_q4_k_f32",
