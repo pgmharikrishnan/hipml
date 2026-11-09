@@ -18,6 +18,11 @@ impl<'a> BatchEngine<'a> {
         if b != self.active.len() {
             return Err(format!("{} tokens for {} active slots", b, self.active.len()));
         }
+        // The batched kernels use `grid.y` as both the row index and the
+        // physical stateslot, so the active set has to be dense.
+        if self.active.iter().enumerate().any(|(i, &s)| i != s) {
+            return Err(format!("active set is not dense: {:?}", self.active));
+        }
         let l = self.model.launcher();
         let cfg = self.cfg.clone();
         let n = cfg.n_embd;

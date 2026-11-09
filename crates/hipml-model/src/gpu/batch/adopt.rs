@@ -113,15 +113,21 @@ impl<'a> BatchEngine<'a> {
         let Some(i) = self.active.iter().position(|&s| s == slot) else {
             return Err(format!("release: slot {slot} is not active"));
         };
-        let last = *self.active.last().expect("non-empty");
-        self.active.remove(i);
+        if i != slot {
+            return Err(format!("release: active[{i}] is slot {slot}, want a dense set"));
+        }
+        let last = self.active.len() - 1;
         if slot == last {
+            self.active.pop();
             self.positions[slot] = 0;
             return Ok(None);
         }
+        // The active set is dense (0..n), so popping the tail leaves `slot`
+        // in place; only the device state has to move down.
         self.copy_slot(last, slot)?;
         self.positions[slot] = self.positions[last];
         self.positions[last] = 0;
+        self.active.pop();
         self.model.launcher().synchronize()?;
         Ok(Some(last))
     }

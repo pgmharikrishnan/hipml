@@ -11,8 +11,9 @@ hold short. Cells:
 Context: llama-server's `-c` is the total KV budget and `--parallel B` splits
 it, so the script passes `-c (ctx * slots)` to give llama the same per-slot
 context hipml gets from `--ctx`. 16 x 32K per slot does not fit on the 32 GiB
-card (about 19.4 GiB of q8 KV + SSM on top of 17.4 GiB of weights), so cell c
-uses 8K per slot on both engines; cell b still uses 32K per slot.
+card (about 19.4 GiB of q8 KV + SSM on top of 17.4 GiB of weights), and 8 x 32K
+per slot already pages (32.2 GiB measured), so b uses 16K per slot and c 8K,
+on both engines. Cell a keeps 32K.
 
 Every cell sends the same messages to both engines and uses greedy decoding.
 The measured prompt always contains the shared system prompt, so the prefix
@@ -40,7 +41,9 @@ LLAMA = r"C:\llama.cpp\rocm-gfx120x\llama-server.exe"
 
 CELLS = {
     "a": {"slots": 1, "ctx": 32768, "requests": 5, "reps": 3},
-    "b": {"slots": 8, "ctx": 32768, "requests": 8, "reps": 3},
+    # 8 x 32K per slot does not fit beside the prefill engine and weights
+    # (measured 32.2 GiB of 31.9 GiB and paging), so 16K per slot.
+    "b": {"slots": 8, "ctx": 16384, "requests": 8, "reps": 3},
     "c": {"slots": 16, "ctx": 8192, "requests": 16, "reps": 3},
 }
 
@@ -211,7 +214,9 @@ def chat_once(port, user, max_tokens, timeout_s, cache=True):
                 delta = obj["choices"][0]["delta"]
             except (KeyError, IndexError):
                 delta = {}
-            content = delta.get("content") or ""
+            # llama-server may stream a reasoning phase before content when the
+            # chat template enables it; either is a generated token.
+            content = (delta.get("content") or "") + (delta.get("reasoning_content") or "")
             if content:
                 chunks += 1
                 t = time.perf_counter()
@@ -296,6 +301,11 @@ def summarize(results, cell):
     for w in results:
         ok = w["ok"]
         if not ok:
+            continue
+        if cell["slots"] == 1:
+            # Sequential requests: aggregate == per-stream decode. Including
+            # the cold prefills would report wall-clock goodput instead.
+            aggs.append(median(streams))
             continue
         t_first = min(x["first"] for x in ok)
         t_last = max(x["last"] for x in ok)
