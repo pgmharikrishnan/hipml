@@ -230,7 +230,7 @@ def llama_phase(convs, tokens, n_probs):
 
 
 # ---------------------------------------------------------------------- hipml
-def hipml_phase(convs, tokens, kv):
+def hipml_phase(convs, tokens, kv, chunk):
     results = {}
     for name, _message, _tools in convs:
         ids_path = os.path.join(OUT, name + ".ids.json")
@@ -239,6 +239,8 @@ def hipml_phase(convs, tokens, kv):
         cmd = [HIPML, "generate", "--device", "--gguf", MODEL,
                "--ids-file", ids_path, "--tokens", str(tokens),
                "--ctx", str(n_ctx), "--kv", kv, "--stop-eos", "--json"]
+        if chunk is not None:
+            cmd += ["--chunk", str(chunk)]
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
         if r.returncode != 0:
             raise RuntimeError(f"hipml generate {name} failed: {r.stderr[-3000:]}")
@@ -315,6 +317,7 @@ def main():
     ap.add_argument("--tokens", type=int, default=256)
     ap.add_argument("--kv", default="q8")
     ap.add_argument("--llama-kv", default="q8_0")
+    ap.add_argument("--hipml-chunk", type=int, default=None)
     ap.add_argument("--n-probs", type=int, default=32)
     args = ap.parse_args()
     os.makedirs(OUT, exist_ok=True)
@@ -328,7 +331,7 @@ def main():
     finally:
         stop_llama(proc, log)
     print("llama stopped; running hipml")
-    hipml = hipml_phase(convs, args.tokens, args.kv)
+    hipml = hipml_phase(convs, args.tokens, args.kv, args.hipml_chunk)
     same = compare(convs, llama, hipml)
     return 0 if same >= 3 else 1
 

@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use hipml_core::gen::{greedy_with, logprob_of, top_logprobs};
+use hipml_core::gen::{greedy_with_stop, logprob_of, top_logprobs};
 use std::io::Write;
 use hipml_core::gguf::Gguf;
 use hipml_core::model::Model;
@@ -12,20 +12,26 @@ struct Args {
     gguf: String,
     text: Option<String>,
     ids: Option<Vec<u32>>,
+    ids_file: Option<String>,
     tokens: usize,
     ctx: Option<usize>,
     topk: usize,
     logprobs: bool,
+    stop_ids: Vec<u32>,
+    stop_eos: bool,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
     let mut gguf = None;
     let mut text = None;
     let mut ids = None;
+    let mut ids_file = None;
     let mut tokens = 20usize;
     let mut ctx = None;
     let mut topk = 0usize;
     let mut logprobs = false;
+    let mut stop_ids = Vec::new();
+    let mut stop_eos = false;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&str, String> {
@@ -49,6 +55,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 ids = Some(parsed.map_err(|e| format!("bad --ids: {e}"))?);
                 i += 2;
             }
+            "--ids-file" => {
+                ids_file = Some(need(i)?.to_string());
+                i += 2;
+            }
             "--tokens" => {
                 tokens = need(i)?.parse().map_err(|e| format!("bad --tokens: {e}"))?;
                 i += 2;
@@ -65,6 +75,19 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 logprobs = true;
                 i += 1;
             }
+            "--stop-eos" => {
+                stop_eos = true;
+                i += 1;
+            }
+            "--stop-ids" => {
+                stop_ids = need(i)?
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.parse::<u32>().map_err(|e| format!("bad --stop-ids: {e}")))
+                    .collect::<Result<_, _>>()?;
+                i += 2;
+            }
             // `--cpu` is the default oracle path; accept the flag so a script
             // can say which path it means.
             "--cpu" => i += 1,
@@ -75,10 +98,13 @@ fn parse(args: &[String]) -> Result<Args, String> {
         gguf: gguf.ok_or("--gguf PATH is required")?,
         text,
         ids,
+        ids_file,
         tokens,
         ctx,
         topk,
         logprobs,
+        stop_ids,
+        stop_eos,
     })
 }
 
@@ -132,15 +158,27 @@ pub fn generate(args: &[String]) -> i32 {
         t0.elapsed().as_secs_f64()
     );
 
-    // Prompt: either explicit ids or text through the BPE tokenizer.
-    let prompt_ids = if let Some(ids) = &a.ids {
+    // Prompt: explicit ids, an ids file, or text through the BPE tokenizer.
+    let prompt_ids = if let Some(path) = &a.ids_file {
+        match read_ids_json(path) {
+            Ok(ids) => ids,
+            Err(e) => {
+                eprintln!("generate: {e}");
+                return 2;
+            }
+        }
+    } else if let Some(ids) = &a.ids {
         ids.clone()
     } else if let Some(text) = &a.text {
-        tok.encode(text)
+        tok.encode_special(text)
     } else {
-        eprintln!("generate: need --text or --ids");
+        eprintln!("generate: need --text, --ids or --ids-file");
         return 2;
     };
+    let mut stop_ids = a.stop_ids.clone();
+    if a.stop_eos && !stop_ids.contains(&tok.eos_id) {
+        stop_ids.push(tok.eos_id);
+    }
     if prompt_ids.is_empty() {
         eprintln!("generate: empty prompt");
         return 2;
@@ -151,7 +189,7 @@ pub fn generate(args: &[String]) -> i32 {
 
     let t1 = Instant::now();
     let mut steps_done = 0usize;
-    let out = greedy_with(&model, &tok, &prompt_ids, a.tokens, n_ctx, |i, id, logits| {
+    let out = greedy_with_stop(&model, &tok, &prompt_ids, a.tokens, n_ctx, &stop_ids, |i, id, logits| {
         steps_done = i + 1;
         if a.logprobs {
             println!("  [{i}] {id} logprob {:.6}", logprob_of(logits, id as usize));
@@ -170,7 +208,30 @@ pub fn generate(args: &[String]) -> i32 {
     println!("gen ids:    {:?}", out.ids);
     println!("steps:      {steps:.0} tokens in {secs:.1}s ({:.2}s/token)", secs / steps.max(1.0));
     println!("text:       {}", out.text);
+    println!("stopped:    {}", out.stopped);
     0
+}
+
+/// Read the `{"ids":[...]}` fixture written by `hipml chat` / the bench.
+fn read_ids_json(path: &str) -> Result<Vec<u32>, String> {
+    let s = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+    let start = s
+        .find('[')
+        .ok_or_else(|| format!("{path}: no token array"))?;
+    let end = s[start + 1..]
+        .find(']')
+        .map(|i| start + 1 + i)
+        .ok_or_else(|| format!("{path}: unterminated array"))?;
+    let ids: Result<Vec<u32>, _> = s[start + 1..end]
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+        .map(str::parse::<u32>)
+        .collect();
+    let ids = ids.map_err(|e| format!("{path}: bad token: {e}"))?;
+    if ids.is_empty() {
+        return Err(format!("{path}: empty token array"));
+    }
+    Ok(ids)
 }
 
 /// `hipml matbench --gguf PATH --tensor NAME --reps N`: time one GEMV.
