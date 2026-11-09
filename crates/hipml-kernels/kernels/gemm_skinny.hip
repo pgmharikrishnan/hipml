@@ -40,7 +40,7 @@
 #define PWS_RT 64      // output rows per block (4 warp tiles)
 #endif
 #ifndef PWS_KW
-#define PWS_KW 64      // k values per shared tile
+#define PWS_KW 128     // k values per shared tile (also = 8 independent WMMA chains)
 #endif
 #ifndef PWS_THREADS
 #define PWS_THREADS 128
@@ -223,9 +223,11 @@ static __device__ __forceinline__ void pws_body(
         }
     };
 
-    pws_f8 acc;
+    pws_f8 acc[KW / 16];
 #pragma unroll
-    for (int e = 0; e < 8; ++e) acc[e] = 0.0f;
+    for (int t = 0; t < KW / 16; ++t)
+#pragma unroll
+        for (int e = 0; e < 8; ++e) acc[t][e] = 0.0f;
 
     // Fragment offsets: A row is the token row, B row is the output row.
     const int frow = lane & 15;
@@ -239,16 +241,28 @@ static __device__ __forceinline__ void pws_body(
         __syncthreads();
         if (warp < NW) {
             if (PROBE == 2) continue;
+            // One accumulator per k16 in the tile: the WMMA chains are then
+            // independent, which is where the matrix unit's throughput lives
+            // (a single accumulator per warp runs it at 1/8 of the prefill
+            // kernel). They are folded once, after the k loop.
 #pragma unroll
-            for (int kk = 0; kk < KW; kk += 16) {
+            for (int t = 0; t < KW / 16; ++t) {
+                const int kk = t * 16;
                 const pws_h8 a =
                     *reinterpret_cast<const pws_h8*>(shx + xoff + kk);
                 const pws_h8 b =
                     *reinterpret_cast<const pws_h8*>(shw + boff + kk);
-                acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc);
+                acc[t] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a, b, acc[t]);
             }
         }
     }
+
+    // Fold the k-split accumulators into one (the reduction order differs from
+    // a single chain; that is the one numerics difference of this kernel).
+#pragma unroll
+    for (int t = 1; t < KW / 16; ++t)
+#pragma unroll
+        for (int e = 0; e < 8; ++e) acc[0][e] += acc[t][e];
 
     // Accumulator -> f32: this lane holds column (output row) `lane & 15` of
     // token rows 8*(lane>>4) + e.
@@ -259,7 +273,7 @@ static __device__ __forceinline__ void pws_body(
 #pragma unroll
             for (int e = 0; e < 8; ++e) {
                 const int t = t0 + e;
-                if (t < r) y[(size_t)t * n + gr] = acc[e];
+                if (t < r) y[(size_t)t * n + gr] = acc[0][e];
             }
         }
     }
@@ -351,12 +365,12 @@ extern "C" __global__ void gemm_skinny_q4_ns(
     const unsigned char* __restrict__ w, const float* __restrict__ x,
     float* __restrict__ y, int n, int k, int r)
 {
-    pws_body<0, 64, 64, 128, 1>(w, x, y, n, k, r);
+    pws_body<0, 64, 128, 128, 1>(w, x, y, n, k, r);
 }
 
 extern "C" __global__ void gemm_skinny_q4_nc(
     const unsigned char* __restrict__ w, const float* __restrict__ x,
     float* __restrict__ y, int n, int k, int r)
 {
-    pws_body<0, 64, 64, 128, 2>(w, x, y, n, k, r);
+    pws_body<0, 64, 128, 128, 2>(w, x, y, n, k, r);
 }
