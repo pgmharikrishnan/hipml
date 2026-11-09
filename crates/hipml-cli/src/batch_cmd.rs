@@ -156,11 +156,11 @@ pub fn run(args: &[String]) -> i32 {
         probe::probe_kernels(&model, a.slots);
     }
 
-    if let Err(e) = eng.fill_synthetic(&a.depths) {
+    if let Err(e) = eng.fill_synthetic(&a.depths[..active]) {
         eprintln!("batch-bench: synthetic fill: {e}");
         return 1;
     }
-    if let Err(e) = eng.set_positions(&a.depths) {
+    if let Err(e) = eng.set_positions(&a.depths[..active]) {
         eprintln!("batch-bench: positions: {e}");
         return 1;
     }
@@ -176,7 +176,7 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("batch-bench: reset: {e}");
         return 1;
     }
-    if let Err(e) = eng.set_positions(&a.depths) {
+    if let Err(e) = eng.set_positions(&a.depths[..active]) {
         eprintln!("batch-bench: rewind: {e}");
         return 1;
     }
@@ -274,7 +274,7 @@ pub fn run(args: &[String]) -> i32 {
             let vocab = eng.cfg.n_vocab as u32;
             let stream = |b: usize, step: usize| (7 + b as u32 * 97 + step as u32 * 13) % vocab;
             let mut batch_ids = vec![Vec::with_capacity(n); active];
-            if let Err(e) = eng.reset_state().and_then(|_| eng.set_positions(&a.depths)) {
+            if let Err(e) = eng.reset_state().and_then(|_| eng.set_positions(&a.depths[..active])) {
                 eprintln!("batch-bench: check reset: {e}");
                 return 1;
             }
