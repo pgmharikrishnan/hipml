@@ -62,7 +62,15 @@ struct Request {
 fn handle(shared: Arc<Shared>, mut stream: TcpStream) -> Result<(), String> {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
-    let req = read_request(&mut stream)?;
+    let req = match read_request(&mut stream) {
+        Ok(r) => r,
+        Err(e) => {
+            // Say why instead of closing silently; the client may be gone.
+            let body = format!("{{\"error\":{{\"message\":\"{}\"}}}}", json::escape(&e));
+            let _ = write_json(&mut stream, "400 Bad Request", &body);
+            return Err(e);
+        }
+    };
     // Generation can legitimately wait minutes for its first token; the
     // timeout only guards the request read.
     let _ = stream.set_read_timeout(None);
@@ -133,6 +141,9 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
     if line.is_empty() {
         return Err("empty request".to_string());
     }
+    if !line.ends_with('\n') {
+        return Err("request line too long".to_string());
+    }
     let mut parts = line.trim_end().split_whitespace();
     let method = parts.next().ok_or("no method")?.to_string();
     let target = parts.next().ok_or("no path")?.to_string();
@@ -149,6 +160,9 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
         let n = (&mut reader).take(MAX_LINE).read_line(&mut h).map_err(|e| e.to_string())?;
         if n == 0 || h == "\r\n" || h == "\n" {
             break;
+        }
+        if !h.ends_with('\n') {
+            return Err("header line too long".to_string());
         }
         if let Some((k, v)) = h.split_once(':') {
             let k = k.trim().to_ascii_lowercase();
