@@ -17,6 +17,8 @@ mod cache_cmd;
 #[cfg(feature = "hip")]
 mod batch_cmd;
 #[cfg(feature = "hip")]
+mod mtp_batch_cmd;
+#[cfg(feature = "hip")]
 mod device_cmd;
 #[cfg(feature = "hip")]
 mod gdn_parity;
@@ -105,6 +107,8 @@ fn main() {
         "ssm" => std::process::exit(ssm_cmd::ssm(&args[1..])),
         #[cfg(feature = "hip")]
         "spec-bench" => std::process::exit(spec_cmd::bench(&args[1..])),
+        #[cfg(feature = "hip")]
+        "mtp-batch-bench" => std::process::exit(mtp_batch_cmd::run(&args[1..])),
         "serve" => {
             #[cfg(feature = "hip")]
             std::process::exit(serve::run(&args[1..]));
