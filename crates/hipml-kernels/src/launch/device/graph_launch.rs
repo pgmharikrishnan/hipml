@@ -80,6 +80,12 @@ impl Launcher {
         }
         if batch <= 16 && std::env::var_os("HIPML_BATCH_SKINNY").is_some() {
             if let Some(entry) = Self::skinny_for_kind(kind) {
+                // One line, once per process: the A/B needs to know the path is
+                // live, and a silent fall-through has burned this before.
+                static ONCE: std::sync::Once = std::sync::Once::new();
+                ONCE.call_once(|| {
+                    eprintln!("[skinny] batched projections on {entry} (m={m} k={k} r={batch})")
+                });
                 return super::skinny_launch::skinny_resident(
                     &self.module,
                     &self.stream,
