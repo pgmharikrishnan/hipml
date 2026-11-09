@@ -24,6 +24,8 @@ use super::*;
 mod forward;
 #[path = "batch/kv.rs"]
 mod kv;
+#[path = "batch/adopt.rs"]
+mod adopt;
 
 /// Slot bookkeeping. Capacity is fixed when the engine is built; allocation
 /// just hands out the indices, so nothing in the forward path assumes slot 0

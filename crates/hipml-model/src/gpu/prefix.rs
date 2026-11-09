@@ -11,9 +11,9 @@
 //! host except the (optional) next-token logits, which are already on the host
 //! side of a prefill and make an exact repeat a restore plus an argmax.
 //!
-//! Only `--kv f32` engines are snapshot targets: the quantized q8/q4 caches
-//! have a head-major layout this cache does not copy yet, so a capture against
-//! one returns an error rather than copying the wrong bytes.
+//! Both cache kinds are snapshot targets: the f32 oracle cache copies its
+//! `[pos][width]` rows, and the quantized q8/q4 cache copies its head-major
+//! buffer verbatim (positions past `pos` are never read).
 
 use super::*;
 use hipml_core::prefix_cache::{CacheStats, InsertOutcome, PrefixCache};
@@ -27,11 +27,17 @@ pub struct SsmBufs {
 }
 
 /// The KV rows `[0, pos)` of one full-attention layer.
+///
+/// `quantized` distinguishes the f32 oracle cache from a q8/q4 `DeepKv`: the
+/// quantized snapshot copies the whole cache buffer, because the head-major
+/// row layout is already the cache's own.
 pub struct KvBufs {
     k: Buffer,
     v: Buffer,
     rows: usize,
     width: usize,
+    words: usize,
+    quantized: bool,
 }
 
 /// A complete prefix state, owned by the cache.
@@ -109,7 +115,8 @@ impl<'a> GpuEngine<'a> {
         }
         // All state writes are kernels on the engine stream; finish them before
         // the copies so a snapshot never catches a half-written tile.
-        self.model.launcher().synchronize()?;
+        let l = self.model.launcher();
+        l.synchronize()?;
 
         let mut ssm = Vec::with_capacity(self.layers.len());
         let mut kv = Vec::with_capacity(self.layers.len());
@@ -146,13 +153,41 @@ impl<'a> GpuEngine<'a> {
                         v,
                         rows: pos,
                         width,
+                        words: 0,
+                        quantized: false,
                     }));
                 }
-                BlockKind::Full { deep: Some(_), .. } => {
-                    return Err("prefix cache covers the f32 KV path, not q8/q4".to_string())
+                BlockKind::Full { deep: Some(dk), .. } => {
+                    // A quantized cache is head-major: each head has `seq`
+                    // rows. Copy only the first `pos` rows of each head into a
+                    // packed `[head][pos][row]` snapshot, so a 2K prefix of a
+                    // 32K engine stores 2K of KV, not 32K.
+                    let row = dk.row_words();
+                    let heads = dk.heads();
+                    let per = pos * row;
+                    let words = heads * per;
+                    let k = Buffer::alloc(words.max(1))?;
+                    let v = Buffer::alloc(words.max(1))?;
+                    for h in 0..heads {
+                        dk.k.copy_range_on(&k, h * dk.seq * row, h * per, per, l.stream())?;
+                        dk.v.copy_range_on(&v, h * dk.seq * row, h * per, per, l.stream())?;
+                    }
+                    bytes += 2 * words * 4;
+                    ssm.push(None);
+                    kv.push(Some(KvBufs {
+                        k,
+                        v,
+                        rows: pos,
+                        width: row,
+                        words,
+                        quantized: true,
+                    }));
                 }
             }
         }
+        // The quantized snapshot used stream-ordered copies; the entry must be
+        // complete before another request can restore it.
+        l.synchronize()?;
 
         let snap = Snapshot {
             pos,
@@ -208,7 +243,8 @@ impl<'a> GpuEngine<'a> {
             return Err("prefix restore: snapshot position disagrees with the hit".to_string());
         }
 
-        self.model.launcher().synchronize()?;
+        let l = self.model.launcher();
+        l.synchronize()?;
         for ((b, ss), kk) in self
             .layers
             .iter()
@@ -229,18 +265,34 @@ impl<'a> GpuEngine<'a> {
                     let bufs = kk
                         .as_ref()
                         .ok_or_else(|| "prefix restore: missing KV snapshot".to_string())?;
-                    if bufs.width != attn.dims.width {
-                        return Err("prefix restore: KV width changed".to_string());
+                    if bufs.quantized || bufs.width != attn.dims.width {
+                        return Err("prefix restore: KV cache kind changed".to_string());
                     }
                     let n = bufs.rows * bufs.width;
                     attn.kv_k_buf().copy_from_device(&bufs.k, n)?;
                     attn.kv_v_buf().copy_from_device(&bufs.v, n)?;
                 }
-                BlockKind::Full { deep: Some(_), .. } => {
-                    return Err("prefix restore covers the f32 KV path".to_string())
+                BlockKind::Full { deep: Some(dk), .. } => {
+                    let bufs = kk
+                        .as_ref()
+                        .ok_or_else(|| "prefix restore: missing KV snapshot".to_string())?;
+                    let row = dk.row_words();
+                    let per = bufs.rows * row;
+                    if !bufs.quantized
+                        || bufs.width != row
+                        || bufs.words != dk.heads() * per
+                        || per * dk.heads() > bufs.words
+                    {
+                        return Err("prefix restore: quantized KV snapshot does not fit".to_string());
+                    }
+                    for h in 0..dk.heads() {
+                        bufs.k.copy_range_on(&dk.k, h * per, h * dk.seq * row, per, l.stream())?;
+                        bufs.v.copy_range_on(&dk.v, h * per, h * dk.seq * row, per, l.stream())?;
+                    }
                 }
             }
         }
+        l.synchronize()?;
         st.pos = snap.pos;
         Ok(snap.logits.clone())
     }

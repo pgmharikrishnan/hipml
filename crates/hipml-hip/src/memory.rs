@@ -217,6 +217,101 @@ impl Buffer {
         Err("built without the `hip` feature".to_string())
     }
 
+    /// Stream-ordered copy of `elems` f32 from `src[src_off..]` into
+    /// `dst[dst_off..]`. Both offsets are in f32 words.
+    #[cfg(feature = "hip")]
+    pub fn copy_range_on(
+        &self,
+        dst: &Buffer,
+        src_off: usize,
+        dst_off: usize,
+        elems: usize,
+        stream: &crate::Stream,
+    ) -> Result<(), String> {
+        if src_off + elems > self.len || dst_off + elems > dst.len {
+            return Err(format!(
+                "device copy of {elems} from {src_off} to {dst_off} needs src {} and dst {}",
+                self.len, dst.len
+            ));
+        }
+        if elems == 0 {
+            return Ok(());
+        }
+        unsafe {
+            let s = (self.ptr as *mut u8).add(src_off * std::mem::size_of::<f32>());
+            let d = (dst.ptr as *mut u8).add(dst_off * std::mem::size_of::<f32>());
+            check(
+                ffi::hipMemcpyAsync(
+                    d as *mut std::ffi::c_void,
+                    s as *const std::ffi::c_void,
+                    elems * std::mem::size_of::<f32>(),
+                    ffi::HIP_MEMCPY_DEVICE_TO_DEVICE,
+                    stream.handle(),
+                ),
+                "hipMemcpyAsync device->device (range)",
+            )
+        }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn copy_range_on(
+        &self,
+        _dst: &Buffer,
+        _src_off: usize,
+        _dst_off: usize,
+        _elems: usize,
+        _stream: &crate::Stream,
+    ) -> Result<(), String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
+    /// Stream-ordered copy of `elems` f32 from the front of `src` into
+    /// `dst[dst_off..]`. The mirror of [`copy_from_device_on_at`], used when a
+    /// single-sequence engine hands its state to a slot inside a packed
+    /// multi-sequence buffer.
+    #[cfg(feature = "hip")]
+    pub fn copy_to_offset_on(
+        &self,
+        dst: &Buffer,
+        dst_off: usize,
+        elems: usize,
+        stream: &crate::Stream,
+    ) -> Result<(), String> {
+        if elems > self.len || dst_off + elems > dst.len {
+            return Err(format!(
+                "device copy of {elems} to {dst_off} needs src {} and dst {}",
+                self.len, dst.len
+            ));
+        }
+        if elems == 0 {
+            return Ok(());
+        }
+        unsafe {
+            let d = (dst.ptr as *mut u8).add(dst_off * std::mem::size_of::<f32>());
+            check(
+                ffi::hipMemcpyAsync(
+                    d as *mut std::ffi::c_void,
+                    self.ptr,
+                    elems * std::mem::size_of::<f32>(),
+                    ffi::HIP_MEMCPY_DEVICE_TO_DEVICE,
+                    stream.handle(),
+                ),
+                "hipMemcpyAsync device->device (dst offset)",
+            )
+        }
+    }
+
+    #[cfg(not(feature = "hip"))]
+    pub fn copy_to_offset_on(
+        &self,
+        _dst: &Buffer,
+        _dst_off: usize,
+        _elems: usize,
+        _stream: &crate::Stream,
+    ) -> Result<(), String> {
+        Err("built without the `hip` feature".to_string())
+    }
+
     /// Download into host memory.
     #[cfg(feature = "hip")]
     pub fn to_host(&self) -> Result<Vec<f32>, String> {

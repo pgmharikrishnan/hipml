@@ -76,7 +76,150 @@ pub struct SpecRun {
     pub rollback_s: f64,
 }
 
+/// One speculative step's output.
+pub struct SpecStep {
+    /// Tokens to append to the reply: the accepted drafts followed by the
+    /// correction (unless a draft was itself a stop token).
+    pub ids: Vec<u32>,
+    /// True when a stop id was emitted.
+    pub stopped: bool,
+    /// Draft tokens accepted in this step.
+    pub accepted: usize,
+    /// Where the step's wall time went, for the bench breakdown.
+    pub draft_s: f64,
+    pub verify_s: f64,
+    pub rollback_s: f64,
+}
+
 impl<'a> GpuEngine<'a> {
+    /// Build the drafter's prompt KV from the target's captured hidden rows and
+    /// seed the first recursive draft.
+    ///
+    /// The caller must have just prefilled `prompt` with
+    /// [`GpuEngine::prefill_tile_capture`] into `capture`, one row per token.
+    /// Splitting this from the prefill lets a server check for new requests
+    /// between prefill tiles and abandon the MTP path without throwing away
+    /// work it has already done.
+    pub fn spec_seed(
+        &mut self,
+        mtp: &mut MtpGpu<'_>,
+        prompt: &[u32],
+        capture: &Buffer,
+    ) -> Result<(), String> {
+        for q in 0..prompt.len().saturating_sub(1) {
+            mtp.set_hidden_row(capture, q)?;
+            mtp.prefill_kv(prompt[q + 1], q)?;
+        }
+        if prompt.is_empty() {
+            return Err("empty prompt".to_string());
+        }
+        mtp.set_hidden_row(capture, prompt.len() - 1)?;
+        Ok(())
+    }
+
+    /// One draft + verify + rollback step.
+    ///
+    /// `next` is the token that will be appended at `st.pos` (the last emitted
+    /// token); `snaps` must hold at least `drafts` columns and is reused across
+    /// steps. `stats` accumulates the acceptance counters. The target state
+    /// advances to `st.pos + a + 1` and the drafter KV is rewritten for the
+    /// accepted positions, ready for the next call.
+    pub fn spec_step(
+        &mut self,
+        mtp: &mut MtpGpu<'_>,
+        st: &mut GpuState,
+        snaps: &mut Snap,
+        next: u32,
+        drafts: usize,
+        stop_ids: &[u32],
+        stats: &mut SpecStats,
+    ) -> Result<SpecStep, String> {
+        if drafts == 0 || drafts > 3 {
+            return Err(format!("drafts {drafts} outside 1..=3"));
+        }
+        if next as usize >= self.cfg.n_vocab {
+            return Err(format!("seed token {next} outside the vocabulary"));
+        }
+
+        // 1. Draft recursively from the current position's hidden state.
+        let q = st.pos.saturating_sub(1);
+        let mut draft_ids = Vec::with_capacity(drafts);
+        let mut tok = next;
+        let t = Instant::now();
+        for k in 0..drafts {
+            tok = mtp.step(tok, q + k)?;
+            draft_ids.push(tok);
+        }
+        let draft_s = t.elapsed().as_secs_f64();
+
+        // 2. Verify all R = 1 + drafts columns in one weight pass.
+        let mut cols = Vec::with_capacity(1 + drafts);
+        cols.push(next);
+        cols.extend_from_slice(&draft_ids);
+        let pos0 = st.pos;
+        let t = Instant::now();
+        let ids = self.forward_columns(&cols, st, snaps)?;
+        let verify_s = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+
+        // 3. Longest accepted prefix.
+        let mut a = 0usize;
+        let mut stopped = false;
+        let mut stopped_on_draft = false;
+        for k in 0..drafts {
+            stats.drafted[k] += 1;
+            if ids[k] == draft_ids[k] {
+                a += 1;
+                stats.accepted[k] += 1;
+                if stop_ids.contains(&ids[k]) {
+                    stopped = true;
+                    stopped_on_draft = true;
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        stats.steps += 1;
+
+        // 4. Roll back to the state after column `a` and move `pos` to the
+        //    first position the next step will append.
+        if a < drafts {
+            self.restore_ssm(snaps, a)?;
+        }
+        st.pos = pos0 + a + 1;
+
+        // 5. Emit the accepted drafts, then the correction.
+        let mut emitted = Vec::with_capacity(a + 1);
+        emitted.extend_from_slice(&draft_ids[..a]);
+        let correction = ids[a];
+        if !stopped_on_draft {
+            if stop_ids.contains(&correction) {
+                stopped = true;
+            }
+            emitted.push(correction);
+        }
+
+        // 6. Rewrite the drafter's KV for the accepted positions from the
+        //    target's hidden state and seed the next draft.
+        if !stopped {
+            for k in 0..a {
+                mtp.set_hidden_row(self.column_hidden()?, k)?;
+                mtp.prefill_kv(emitted[k], pos0 + k)?;
+            }
+            mtp.set_hidden_row(self.column_hidden()?, a)?;
+        }
+
+        Ok(SpecStep {
+            ids: emitted,
+            stopped,
+            accepted: a,
+            draft_s,
+            verify_s,
+            rollback_s: t.elapsed().as_secs_f64(),
+        })
+    }
+
     /// Greedy speculative decode of `tokens` ids after `prompt`.
     ///
     /// `drafts` is 1..=3. The engine's caches must be sized for the prompt plus
@@ -105,7 +248,6 @@ impl<'a> GpuEngine<'a> {
                 prompt.len()
             ));
         }
-        let p0 = prompt.len();
         let mut stats = SpecStats::default();
 
         // 1. Prompt, keeping every row's post-norm hidden for the drafter.
@@ -118,111 +260,31 @@ impl<'a> GpuEngine<'a> {
         // 2. The drafter's own KV over the prompt: position q pairs hidden h_q
         //    with the token at q+1.
         let t_draft = Instant::now();
-        for q in 0..prompt.len().saturating_sub(1) {
-            mtp.set_hidden_row(&capture, q)?;
-            mtp.prefill_kv(prompt[q + 1], q)?;
-        }
+        self.spec_seed(mtp, prompt, &capture)?;
         let draft_prefill_s = t_draft.elapsed().as_secs_f64();
-        // The first draft is seeded from the last prompt token's hidden state.
-        mtp.set_hidden_row(&capture, prompt.len() - 1)?;
 
         let mut gen = Vec::with_capacity(tokens + 1);
         gen.push(next);
         let mut stopped = stop_ids.contains(&next);
         let mut snaps = self.alloc_snapshots(drafts)?;
-        let mut draft_ids = Vec::with_capacity(drafts);
         let (mut draft_s, mut verify_s, mut rollback_s) = (0.0f64, 0.0f64, 0.0f64);
         let t_decode = Instant::now();
 
         while gen.len() < tokens && !stopped {
-            // 3. Draft `drafts` tokens from the current position's hidden
-            //    state (`hnext` was seeded above).
-            let q = st.pos - 1;
-            draft_ids.clear();
-            let t = Instant::now();
-            let mut tok = next;
-            for k in 0..drafts {
-                tok = mtp.step(tok, q + k)?;
-                draft_ids.push(tok);
-            }
-            draft_s += t.elapsed().as_secs_f64();
-
-            // 4. Verify all R = 1 + drafts columns in one weight pass.
-            let mut cols = Vec::with_capacity(1 + drafts);
-            cols.push(next);
-            cols.extend_from_slice(&draft_ids);
-            let pos0 = st.pos;
-            let t = Instant::now();
-            let ids = self.forward_columns(&cols, &mut st, &mut snaps)?;
-            verify_s += t.elapsed().as_secs_f64();
-            let t = Instant::now();
-
-            // 5. Longest matching prefix. A stop token ends the completion even
-            //    if the draft would have continued past it: with EOS ignored the
-            //    model closes the turn, invents a user turn and repeats, and
-            //    every acceptance figure is measured on degenerate text.
-            let mut a = 0usize;
-            let mut stopped_on_draft = false;
-            for k in 0..drafts {
-                stats.drafted[k] += 1;
-                if ids[k] == draft_ids[k] {
-                    a += 1;
-                    stats.accepted[k] += 1;
-                    if stop_ids.contains(&ids[k]) {
-                        stopped = true;
-                        stopped_on_draft = true;
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-            stats.steps += 1;
-
-            // 6. Roll back to the state after column `a`, then move `pos` to
-            //    the first position the next step will append.
-            if a < drafts {
-                self.restore_ssm(&snaps, a)?;
-            }
-            st.pos = pos0 + a + 1;
-
-            // 7. Emit the accepted drafts, then the correction unless the stop
-            //    token was itself the last accepted draft.
-            for &d in &draft_ids[..a] {
+            let step = self.spec_step(mtp, &mut st, &mut snaps, next, drafts, stop_ids, &mut stats)?;
+            draft_s += step.draft_s;
+            verify_s += step.verify_s;
+            rollback_s += step.rollback_s;
+            for id in step.ids {
                 if gen.len() < tokens {
-                    gen.push(d);
+                    gen.push(id);
                     stats.tokens += 1;
                 }
             }
-            next = ids[a];
-            if !stopped_on_draft {
-                if stop_ids.contains(&next) {
-                    stopped = true;
-                }
-                if gen.len() < tokens || stopped {
-                    gen.push(next);
-                    stats.tokens += 1;
-                }
+            if let Some(&last) = gen.last() {
+                next = last;
             }
-
-            rollback_s += t.elapsed().as_secs_f64();
-            if stopped {
-                break;
-            }
-            // 8. Rewrite the drafter's KV for the accepted positions from the
-            //    target's hidden state (the recursive draft wrote its own), as
-            //    the reference does. `gen[p + 1 - p0]` is the token after `p`.
-            //    Skipped once the requested token count is reached.
-            let t = Instant::now();
-            if gen.len() < tokens {
-                for p in pos0..pos0 + a {
-                    mtp.set_hidden_row(self.column_hidden()?, p - pos0)?;
-                    mtp.prefill_kv(gen[p + 1 - p0], p)?;
-                }
-                // Seed the next draft from the last accepted column's hidden.
-                mtp.set_hidden_row(self.column_hidden()?, a)?;
-            }
-            rollback_s += t.elapsed().as_secs_f64();
+            stopped = step.stopped;
         }
 
         let decode_s = t_decode.elapsed().as_secs_f64();

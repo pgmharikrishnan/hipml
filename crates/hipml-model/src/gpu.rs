@@ -69,7 +69,7 @@ use trace::mark;
 
 pub use columns::Snap;
 pub use mtp::MtpGpu;
-pub use spec::{SpecRun, SpecStats};
+pub use spec::{SpecRun, SpecStats, SpecStep};
 pub use prefill::PrefillReport;
 pub use prefix::PrefixHit;
 

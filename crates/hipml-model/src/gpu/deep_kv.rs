@@ -83,6 +83,16 @@ impl DeepKv {
         self.dtype.row_bytes(self.head_dim)
     }
 
+    /// One head's row, in f32 words (the cache buffer is allocated as f32).
+    pub(super) fn row_words(&self) -> usize {
+        self.row() / 4
+    }
+
+    /// KV heads per layer.
+    pub(super) fn heads(&self) -> usize {
+        self.n_kv
+    }
+
     /// `2 * n_kv * seq * row_bytes`.
     pub fn bytes(&self) -> usize {
         2 * self.n_kv * self.seq * self.row()

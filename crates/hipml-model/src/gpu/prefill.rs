@@ -194,6 +194,49 @@ impl Chunk {
 }
 
 impl<'a> GpuEngine<'a> {
+    /// One prefill tile with a caller-owned scratch capacity and the split
+    /// decision fixed by the whole prompt, not by the tile length.
+    ///
+    /// The serving loop never has the whole prompt at once: it hands the
+    /// engine a 256-token tile at a time so decode of the running batch can
+    /// interleave. `prefill_chunked` derives the split scratch from the total
+    /// length, which is right for one call; this entry point takes the same
+    /// decision from the scheduler and keeps the scratch at `cap`.
+    pub fn prefill_tile(
+        &mut self,
+        tokens: &[u32],
+        st: &mut GpuState,
+        cap: usize,
+        deep: bool,
+    ) -> Result<u32, String> {
+        self.prefill_tile_capture(tokens, st, cap, deep, None)
+    }
+
+    /// `prefill_tile`, also writing every token's post-norm hidden row at its
+    /// absolute position into `capture` (the MTP drafter's prompt input).
+    pub fn prefill_tile_capture(
+        &mut self,
+        tokens: &[u32],
+        st: &mut GpuState,
+        cap: usize,
+        deep: bool,
+        capture: Option<&Buffer>,
+    ) -> Result<u32, String> {
+        if tokens.is_empty() {
+            return Err("empty prefill tile".to_string());
+        }
+        let cap = cap.max(tokens.len()).max(1);
+        self.ensure_chunk(cap, deep)?;
+        self.forward_chunk_capture(tokens, st, &mut None, capture)
+    }
+
+    /// Whether a prompt of `tokens` length reaches the split-attention gate.
+    /// The serving loop asks once per request so every tile uses one scratch
+    /// shape.
+    pub fn prefill_wants_deep(tokens: usize) -> bool {
+        Self::wants_deep(tokens)
+    }
+
     /// Prefill `tokens` in tiles of `chunk` tokens; returns the id for the last
     /// token, i.e. the first sampled token of the reply.
     pub fn prefill_chunked(

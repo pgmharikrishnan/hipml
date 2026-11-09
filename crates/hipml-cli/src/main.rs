@@ -45,6 +45,8 @@ mod column_cmd;
 mod gemv_cmd;
 #[cfg(feature = "hip")]
 mod spec_cmd;
+#[cfg(feature = "hip")]
+mod serve;
 
 /// What happened to one case.
 enum Outcome {
@@ -96,6 +98,15 @@ fn main() {
         "ssm" => std::process::exit(ssm_cmd::ssm(&args[1..])),
         #[cfg(feature = "hip")]
         "spec-bench" => std::process::exit(spec_cmd::bench(&args[1..])),
+        "serve" => {
+            #[cfg(feature = "hip")]
+            std::process::exit(serve::run(&args[1..]));
+            #[cfg(not(feature = "hip"))]
+            {
+                eprintln!("serve needs a build with `--features hip`");
+                std::process::exit(2);
+            }
+        }
         #[cfg(feature = "hip")]
         "column-bench" => std::process::exit(column_cmd::bench(&args[1..])),
         #[cfg(feature = "hip")]
@@ -190,6 +201,7 @@ fn help() {
          \x20 gpu-profile --gguf PATH  launch cost, host round-trips, graph token\n\
          \x20 bench-kv  quantized-KV decode attention: depth x q8/q4 x 1 head / 16 layers\n\
          \x20           --depths 1024,8192,32768,100000 --reps 3\n\
+         \x20 serve     HTTP server: continuous batching, MTP, prefix cache\n\
          \n\
          build with `--features hip` on a machine with the ROCm/HIP runtime.",
         version = env!("CARGO_PKG_VERSION")
