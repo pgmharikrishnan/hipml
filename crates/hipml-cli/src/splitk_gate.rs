@@ -80,8 +80,11 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 i += 2;
             }
             "--sweep-base" => {
-                a.sweep_base =
-                    Some(need(i)?.parse().map_err(|e| format!("bad --sweep-base: {e}"))?);
+                a.sweep_base = Some(
+                    need(i)?
+                        .parse()
+                        .map_err(|e| format!("bad --sweep-base: {e}"))?,
+                );
                 i += 2;
             }
             "--ctx" => {
@@ -189,7 +192,11 @@ pub fn run(args: &[String]) -> i32 {
     let vocab = engine.cfg.n_vocab as u32;
     // A real-token fixture can amplify last-bit ffn differences through the
     // recurrence; the synthetic prompt is chosen so the bound stays tight.
-    let tol = if fixture.is_some() { NATURAL_LOGIT_TOL } else { SPLIT_LOGIT_TOL };
+    let tol = if fixture.is_some() {
+        NATURAL_LOGIT_TOL
+    } else {
+        SPLIT_LOGIT_TOL
+    };
     println!(
         "splitk-gate: chunk {}, {} lengths ({}..{}), {} KV, {} prompt, logit tol {tol}",
         a.chunk,
@@ -197,7 +204,11 @@ pub fn run(args: &[String]) -> i32 {
         lens.first().copied().unwrap_or(0),
         longest,
         a.kv.name(),
-        if fixture.is_some() { "fixture" } else { "synthetic" }
+        if fixture.is_some() {
+            "fixture"
+        } else {
+            "synthetic"
+        }
     );
 
     let mut failed = 0usize;
