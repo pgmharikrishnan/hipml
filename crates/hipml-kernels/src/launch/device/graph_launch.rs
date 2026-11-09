@@ -118,38 +118,60 @@ impl Launcher {
                 return Ok(());
             }
         }
-        if batch > 8 {
-            return Err(format!("legacy batched GEMV covers at most 8 rows, got {batch}"));
+        if batch > 8 && Self::skinny_for_kind(kind).is_some() {
+            return Err(format!("skinny GEMV did not handle batch {batch}"));
         }
-        let (entry, rows, tile) = match kind {
-            GEMV_B_Q4K => ("gemv_q4_k_b", 16usize, if batch <= 4 { 1024 } else { 512 }),
-            GEMV_B_Q6K => ("gemv_q6_k_b", 16, if batch <= 4 { 1024 } else { 512 }),
-            GEMV_B_Q5K => ("gemv_q5_k_b", 16, if batch <= 4 { 1024 } else { 512 }),
-            GEMV_B_Q80 => ("gemv_q8_0_b", 1, 0),
+        let (entry, rows, tile, tid) = match kind {
+            GEMV_B_Q4K => ("gemv_q4_k_b", 16usize, 1024usize, 256u32),
+            GEMV_B_Q6K => ("gemv_q6_k_b", 16, 1024, 256),
+            GEMV_B_Q5K => ("gemv_q5_k_b", 16, 1024, 256),
+            GEMV_B_Q80 => ("gemv_q8_0_b", 1, 0, 256),
             other => return Err(format!("unknown batched GEMV kind {other}")),
         };
-        let shared = batch * tile * 4;
         let kernel = self.module.kernel(entry)?;
-        let mut p_w = w.as_ptr();
-        let mut p_x = x.as_ptr();
-        let mut p_y = y.as_ptr();
-        let mut v_m = m as i32;
-        let mut v_k = k as i32;
-        let mut v_b = batch as i32;
-        let mut params: [*mut c_void; 6] = [
-            &mut p_w as *mut _ as *mut c_void,
-            &mut p_x as *mut _ as *mut c_void,
-            &mut p_y as *mut _ as *mut c_void,
-            &mut v_m as *mut _ as *mut c_void,
-            &mut v_k as *mut _ as *mut c_void,
-            &mut v_b as *mut _ as *mut c_void,
-        ];
-        let cfg = LaunchConfig {
-            grid: (m.div_ceil(rows) as u32, 1, 1),
-            block: (256, 1, 1),
-            shared_mem_bytes: shared as u32,
-        };
-        kernel.launch(cfg, &self.stream, &mut params)
+        // Formats without a skinny entry (Q5_K today) still have the `_b`
+        // kernel; it covers at most 8 rows, so run it once per group. Those
+        // tensors are a small share of the resident bytes.
+        let mut base = 0usize;
+        while base < batch {
+            let r = (batch - base).min(8);
+            let tile = if tid == 256 {
+                if r <= 4 {
+                    1024
+                } else {
+                    512
+                }
+            } else {
+                tile
+            };
+            let shared = r * tile * 4;
+            let mut p_w = w.as_ptr();
+            let mut p_x = unsafe {
+                (x.as_ptr() as *mut u8).add(base * k * 4) as *mut c_void
+            };
+            let mut p_y = unsafe {
+                (y.as_ptr() as *mut u8).add(base * m * 4) as *mut c_void
+            };
+            let mut v_m = m as i32;
+            let mut v_k = k as i32;
+            let mut v_b = r as i32;
+            let mut params: [*mut c_void; 6] = [
+                &mut p_w as *mut _ as *mut c_void,
+                &mut p_x as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut v_m as *mut _ as *mut c_void,
+                &mut v_k as *mut _ as *mut c_void,
+                &mut v_b as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: (m.div_ceil(rows) as u32, 1, 1),
+                block: (tid, 1, 1),
+                shared_mem_bytes: shared as u32,
+            };
+            kernel.launch(cfg, &self.stream, &mut params)?;
+            base += r;
+        }
+        Ok(())
     }
 
     /// Batched greedy argmax over `rows` logit vectors of `n` values each.
