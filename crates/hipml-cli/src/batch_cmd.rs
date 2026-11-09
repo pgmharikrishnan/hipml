@@ -17,6 +17,7 @@ mod probe;
 struct Args {
     gguf: String,
     slots: usize,
+    active: Option<usize>,
     tokens: usize,
     depths: Vec<usize>,
     kv: KvMode,
@@ -29,6 +30,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
     let mut a = Args {
         gguf: String::new(),
         slots: 4,
+        active: None,
         tokens: 16,
         depths: vec![0],
         kv: KvMode::Q8,
@@ -50,6 +52,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--slots" => {
                 a.slots = need(i)?.parse().map_err(|e| format!("bad --slots: {e}"))?;
+                i += 2;
+            }
+            "--active" => {
+                a.active = Some(need(i)?.parse().map_err(|e| format!("bad --active: {e}"))?);
                 i += 2;
             }
             "--tokens" => {
@@ -129,7 +135,8 @@ pub fn run(args: &[String]) -> i32 {
             return 1;
         }
     };
-    if let Err(e) = eng.activate(a.slots) {
+    let active = a.active.unwrap_or(a.slots);
+    if let Err(e) = eng.activate(active) {
         eprintln!("batch-bench: activate: {e}");
         return 1;
     }
@@ -161,7 +168,7 @@ pub fn run(args: &[String]) -> i32 {
     // Warm: one step per slot, so clocks and caches settle. Then rewind the
     // positions and clear SSM state, so the measured run and the B=1 check both
     // start at the same depth.
-    if let Err(e) = eng.forward(&vec![1u32; a.slots]) {
+    if let Err(e) = eng.forward(&vec![1u32; active]) {
         eprintln!("batch-bench: warm: {e}");
         return 1;
     }
@@ -179,7 +186,7 @@ pub fn run(args: &[String]) -> i32 {
     let t = Instant::now();
     let mut last = vec![0u32; a.slots];
     for _ in 0..n {
-        match eng.forward(&vec![1u32; a.slots]) {
+        match eng.forward(&vec![1u32; active]) {
             Ok(ids) => last = ids,
             Err(e) => {
                 eprintln!("batch-bench: decode: {e}");
@@ -188,8 +195,8 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
     let secs = t.elapsed().as_secs_f64();
-    let agg = (a.slots * n) as f64 / secs;
-    let per_stream = agg / a.slots as f64;
+    let agg = (active * n) as f64 / secs;
+    let per_stream = agg / active as f64;
     let step_ms = secs * 1e3 / n as f64;
     let gbs = eng.weight_bytes() as f64 * n as f64 / secs / 1e9;
     println!(
@@ -252,8 +259,8 @@ pub fn run(args: &[String]) -> i32 {
         a.depths[0],
         single_tps,
         ssecs * 1e3 / n as f64,
-        agg / (a.slots as f64 * single_tps),
-        a.slots
+        agg / (active as f64 * single_tps),
+        active
     );
 
     if a.check {
@@ -266,13 +273,13 @@ pub fn run(args: &[String]) -> i32 {
             // hide (all slots would then be identical by construction).
             let vocab = eng.cfg.n_vocab as u32;
             let stream = |b: usize, step: usize| (7 + b as u32 * 97 + step as u32 * 13) % vocab;
-            let mut batch_ids = vec![Vec::with_capacity(n); a.slots];
+            let mut batch_ids = vec![Vec::with_capacity(n); active];
             if let Err(e) = eng.reset_state().and_then(|_| eng.set_positions(&a.depths)) {
                 eprintln!("batch-bench: check reset: {e}");
                 return 1;
             }
             for step in 0..n {
-                let toks: Vec<u32> = (0..a.slots).map(|b| stream(b, step)).collect();
+                let toks: Vec<u32> = (0..active).map(|b| stream(b, step)).collect();
                 match eng.forward(&toks) {
                     Ok(ids) => {
                         for (b, id) in ids.into_iter().enumerate() {
@@ -286,7 +293,7 @@ pub fn run(args: &[String]) -> i32 {
                 }
             }
             let mut ok = true;
-            for b in 0..a.slots {
+            for b in 0..active {
                 if let Err(e) = single.reset_state() {
                     eprintln!("batch-bench: check single reset: {e}");
                     return 1;
