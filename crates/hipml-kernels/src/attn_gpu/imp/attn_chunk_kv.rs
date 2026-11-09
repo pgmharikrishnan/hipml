@@ -16,6 +16,13 @@ use super::*;
 const ATTN_WMMA_QUERIES: u32 = 32;
 const ATTN_WMMA_WARPS: usize = 2;
 
+/// Query rows per block in the whole-width kernel: two 16-query tiles per
+/// head. Must match FC_QTILES in `attn_chunk_full.hip`, whose
+/// `__launch_bounds__(384, 2)` also caps the GQA group at six (12 warps).
+const ATTN_FULL_QUERIES: u32 = 32;
+const ATTN_FULL_TILES: usize = 2;
+const ATTN_FULL_MAX_GROUP: usize = 6;
+
 /// Query tokens per block in `attn_chunk_tile_f32`. Must match ACQ_TOKENS in
 /// `attn_chunk_f32.hip`, which is also the KV re-read stride.
 const ATTN_QUERY_TILE: u32 = 64;
@@ -177,11 +184,24 @@ impl AttnLayer<'_> {
             && warp_heads <= 8
             && (dtype != 0 || std::env::var_os("HIPML_ATTN_F32").is_none())
         {
-            // Split-K path: every (KV head, 32-query tile) block streams one
+            // Split-K path: every (KV head, query-tile) block streams one
             // slice of the key axis, then a combine pass folds the slices.
             if let Some((pa, pm, splits)) = part {
                 let qslots = (tokens + 31) / 32 * 32;
-                let split = self.module_kernel(l, "attn_chunk_split_f16")?;
+                // The whole-width kernel computes the 256-d score tile once
+                // and feeds all 16 output fragments, removing the 1.5x
+                // duplicated QK of the d-half split. Its launch bound caps the
+                // GQA group at six (the shipped model's group); wider groups
+                // keep the shipped shape. `HIPML_ATTN_FULL=0` forces that shape
+                // for an A/B.
+                let full = warp_heads <= ATTN_FULL_MAX_GROUP
+                    && std::env::var_os("HIPML_ATTN_FULL").map_or(true, |v| v != "0");
+                let (entry, qrow, tiles) = if full {
+                    ("attn_chunk_full_f16", ATTN_FULL_QUERIES, ATTN_FULL_TILES)
+                } else {
+                    ("attn_chunk_split_f16", ATTN_WMMA_QUERIES, ATTN_WMMA_WARPS)
+                };
+                let split = self.module_kernel(l, entry)?;
                 let mut p_pa = pa.as_ptr();
                 let mut p_pm = pm.as_ptr();
                 let mut nsp = splits as i32;
@@ -204,14 +224,12 @@ impl AttnLayer<'_> {
                     &mut nsp as *mut _ as *mut c_void,
                     &mut qs as *mut _ as *mut c_void,
                 ];
+                let zgrid = if full { splits as u32 } else { 2 * splits as u32 };
                 let cfg = LaunchConfig {
-                    // blockIdx.z is split * 2 + d half.
-                    grid: (
-                        d.n_kv as u32,
-                        (t + ATTN_WMMA_QUERIES - 1) / ATTN_WMMA_QUERIES,
-                        2 * splits as u32,
-                    ),
-                    block: ((warp_heads * ATTN_WMMA_WARPS * 32) as u32, 1, 1),
+                    // Whole-width: blockIdx.z is the key split. Shipped shape:
+                    // split * 2 + d half.
+                    grid: (d.n_kv as u32, (t + qrow - 1) / qrow, zgrid),
+                    block: ((warp_heads * tiles * 32) as u32, 1, 1),
                     shared_mem_bytes: 0,
                 };
                 split.launch(cfg, &l.stream, &mut params)?;
