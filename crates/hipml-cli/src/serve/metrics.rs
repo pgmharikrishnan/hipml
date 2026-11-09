@@ -24,9 +24,6 @@ pub struct Stats {
     pub prefix_capture_ms: f64,
     pub prefill_chunks: u64,
     pub prefill_ms: f64,
-    /// Prefix-hit tails finished through the batched step (admissions, rows).
-    pub tail_feeds: u64,
-    pub tail_rows: u64,
     /// Prefill chunks that ran while at least one request was decoding.
     pub prefill_interleaved: u64,
     pub interleave_stall_ms: f64,
@@ -82,8 +79,6 @@ impl Metrics {
         c("hipml_prefix_capture_seconds_total", "Device time capturing a prefix", "counter", format!("{:.6}", s.prefix_capture_ms / 1e3));
         c("hipml_prefill_chunks_total", "Prefill tiles run by the scheduler", "counter", s.prefill_chunks.to_string());
         c("hipml_prefill_seconds_total", "Wall time in prefill tiles", "counter", format!("{:.6}", s.prefill_ms / 1e3));
-        c("hipml_tail_feeds_total", "Prefix-hit tails finished through the batched step", "counter", s.tail_feeds.to_string());
-        c("hipml_tail_rows_total", "Prompt tokens fed through the batched step", "counter", s.tail_rows.to_string());
         c("hipml_prefill_interleaved_total", "Prefill tiles run while a batch was decoding", "counter", s.prefill_interleaved.to_string());
         c("hipml_interleave_stall_seconds_total", "Decode stall charged to interleaved prefill", "counter", format!("{:.6}", s.interleave_stall_ms / 1e3));
         c("hipml_interleave_stall_seconds_max", "Longest single interleaved prefill tile", "gauge", format!("{:.6}", s.max_interleave_stall_ms / 1e3));

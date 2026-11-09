@@ -81,52 +81,7 @@ pub fn run(
             match begin(&mut engine, job, &cfg, mode, &metrics) {
                 Ok(pf) => {
                     metrics.update(|s| s.prompt_tokens += plen as u64);
-                    // A prefix hit leaves only the user tail. While the batch
-                    // is busy, finish it one row per step in the batched
-                    // decode instead of taking the prefill engine away from
-                    // every decoding slot for a whole weight pass. An idle
-                    // server keeps the chunked path: one tile is cheaper than
-                    // a step per tail token when nothing else needs the GPU.
-                    let tail_len = pf.job.prompt.len() - pf.done;
-                    let interleave = pf.done > 0
-                        && tail_len > 0
-                        && tail_len <= TAIL_FEED_MAX
-                        && slots.iter().any(|s| s.is_some());
-                    if interleave {
-                        let tail: VecDeque<u32> =
-                            pf.job.prompt[pf.done..].iter().copied().collect();
-                        let slot = batch.adopt(&engine, pf.st.pos)?;
-                        metrics.update(|s| {
-                            s.batch_requests += 1;
-                            s.tail_feeds += 1;
-                            s.tail_rows += tail.len() as u64;
-                        });
-                        if std::env::var_os("HIPML_SERVE_TRACE").is_some() {
-                            eprintln!(
-                                "serve: tail-feed slot {slot} at {} ({} tokens, {} active)",
-                                pf.done,
-                                tail.len(),
-                                batch.active().len()
-                            );
-                        }
-                        slots[slot] = Some(Active {
-                            job: pf.job,
-                            feed: 0,
-                            emitted: 0,
-                            prefill_ms: pf.prefill_ms,
-                            hit_tokens: pf.hit_tokens,
-                            tail,
-                        });
-                    } else {
-                        if std::env::var_os("HIPML_SERVE_TRACE").is_some() {
-                            eprintln!(
-                                "serve: prefill len={plen} start={} tail={tail_len} active={}",
-                                pf.done,
-                                slots.iter().filter(|s| s.is_some()).count()
-                            );
-                        }
-                        prefill = Some(pf);
-                    }
+                    prefill = Some(pf);
                 }
                 Err(e) => {
                     eprintln!("serve: admit: {e}");
@@ -202,7 +157,6 @@ pub fn run(
                             emitted: 1,
                             prefill_ms: pf.prefill_ms,
                             hit_tokens: pf.hit_tokens,
-                            tail: VecDeque::new(),
                         });
                     }
                 }
@@ -222,7 +176,6 @@ pub fn run(
                     emitted: sp.emitted,
                     prefill_ms: sp.prefill_ms,
                     hit_tokens: sp.hit_tokens,
-                    tail: VecDeque::new(),
                 });
             } else {
                 let sp = spec.as_mut().expect("checked");
@@ -275,31 +228,14 @@ pub fn run(
             }
         }
 
-        // One batched step for every active slot. A slot still consuming a
-        // prefix-hit tail feeds the next prompt token instead of its last id;
-        // the step that consumes the final tail token emits that slot's first
-        // completion token. Tail rows share the weight pass with decoding
-        // rows, which is the whole point: they add a row, not a stall.
+        // One batched step for every active slot.
         let order: Vec<usize> = batch.active_slots().to_vec();
         if !order.is_empty() {
             let toks: Vec<u32> = order
                 .iter()
-                .map(|&s| {
-                    let a = slots[s].as_ref().expect("active slot has a job");
-                    a.tail.front().copied().unwrap_or(a.feed)
-                })
+                .map(|&s| slots[s].as_ref().expect("active slot has a job").feed)
                 .collect();
-            let t_step = Instant::now();
-            if std::env::var_os("HIPML_SERVE_TRACE").is_some() {
-                let tails: Vec<usize> =
-                    order.iter().map(|&s| slots[s].as_ref().map_or(0, |a| a.tail.len())).collect();
-                eprintln!("serve: step b={} tails={tails:?}", order.len());
-            }
             let ids = batch.forward(&toks)?;
-            if std::env::var_os("HIPML_SERVE_TRACE").is_some() {
-                eprintln!("serve: step done in {:.1} ms", t_step.elapsed().as_secs_f64() * 1e3);
-            }
-            let step_ms = t_step.elapsed().as_secs_f64() * 1e3;
             metrics.update(|s| {
                 s.decode_steps += 1;
                 s.batch_steps += 1;
@@ -308,16 +244,6 @@ pub fn run(
             for (i, &slot) in order.iter().enumerate() {
                 let a = slots[slot].as_mut().expect("active slot has a job");
                 let id = ids[i];
-                if !a.tail.is_empty() {
-                    a.tail.pop_front();
-                    a.prefill_ms += step_ms;
-                    a.feed = id;
-                    if !a.tail.is_empty() {
-                        // `id` predicts the next tail token; do not emit it.
-                        continue;
-                    }
-                    // Last prompt token consumed: `id` is the first completion.
-                }
                 if a.job.tx.send(Event::Tokens(vec![id])).is_err() {
                     retire.push((slot, "cancelled"));
                     continue;

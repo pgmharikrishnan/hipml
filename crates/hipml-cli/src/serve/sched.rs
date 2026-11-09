@@ -19,7 +19,6 @@
 //! `BatchEngine` slot (KV rows plus SSM conv window and delta-net matrix), so a
 //! request keeps exactly the tokens it would have produced on either path.
 
-use std::collections::VecDeque;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
@@ -111,20 +110,7 @@ struct Active {
     emitted: usize,
     prefill_ms: f64,
     hit_tokens: usize,
-    /// Prompt tokens still to be consumed through the batched step after a
-    /// prefix hit. They ride with the decoding slots instead of running as an
-    /// exclusive prefill tile, so a 26-token tail costs one row in a weight
-    /// pass that was going to happen anyway. Empty for a normally prefilled
-    /// request.
-    tail: VecDeque<u32>,
 }
-
-/// Longest suffix a prefix hit may finish through the batched step. A hit
-/// always reuses the expensive system prefix; the remaining user turn is short.
-/// A longer suffix (a new document, a long tool result) is a real prefill and
-/// stays on the chunked path, where one tile is much cheaper than one step per
-/// token.
-const TAIL_FEED_MAX: usize = 256;
 
 fn send_done(tx: &Sender<Event>, job: &Job, finish: &str, completion: usize, prefill_ms: f64, hit: usize) {
     let _ = tx.send(Event::Done(Done {
