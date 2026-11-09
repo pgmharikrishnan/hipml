@@ -79,8 +79,8 @@ impl Launcher {
         k: usize,
         batch: usize,
     ) -> Result<(), String> {
-        if batch == 0 || batch > 32 {
-            return Err(format!("batched GEMV: batch {batch} outside 1..=32"));
+        if batch == 0 || batch > 128 {
+            return Err(format!("batched GEMV: batch {batch} outside 1..=128"));
         }
         // Opt-in only. The exact `_b` kernels keep each row's accumulation
         // order identical to the single-sequence GEMV, so the default batched
