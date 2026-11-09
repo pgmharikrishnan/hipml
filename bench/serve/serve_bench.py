@@ -358,6 +358,21 @@ def main():
         wait_health(port, proc, args.load_timeout)
         results = run_waves(port, USERS[: cell["requests"]], cell, args.tokens,
                             args.request_timeout, cell["reps"])
+        metrics = None
+        if args.engine == "hipml":
+            try:
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/metrics", timeout=15) as r:
+                    text = r.read().decode("utf-8", errors="replace")
+                metrics = {}
+                for line in text.splitlines():
+                    if line.startswith("#") or not line.strip():
+                        continue
+                    name, _, value = line.partition(" ")
+                    if any(k in name for k in ("prefix", "interleave", "spec_", "mtp_", "prefill")):
+                        metrics[name] = float(value)
+            except Exception:
+                metrics = None
     finally:
         try:
             proc.terminate()
@@ -378,6 +393,7 @@ def main():
         "tokens_per_request": args.tokens,
         "system_prompt_chars": len(SYSTEM),
         "summary": summary,
+        "metrics": metrics,
         "peak_vram_mib": read_peak(peak_path),
         "command": cmd,
         "duration_s": time.time() - started,
