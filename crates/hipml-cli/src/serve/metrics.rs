@@ -28,6 +28,10 @@ pub struct Stats {
     pub prefill_interleaved: u64,
     pub interleave_stall_ms: f64,
     pub max_interleave_stall_ms: f64,
+    /// Row-block tail prefill (WP47): blocks run, tails served and wall time.
+    pub tail_row_blocks: u64,
+    pub tail_rows: u64,
+    pub tail_rows_ms: f64,
 }
 
 #[derive(Default)]
@@ -82,6 +86,9 @@ impl Metrics {
         c("hipml_prefill_interleaved_total", "Prefill tiles run while a batch was decoding", "counter", s.prefill_interleaved.to_string());
         c("hipml_interleave_stall_seconds_total", "Decode stall charged to interleaved prefill", "counter", format!("{:.6}", s.interleave_stall_ms / 1e3));
         c("hipml_interleave_stall_seconds_max", "Longest single interleaved prefill tile", "gauge", format!("{:.6}", s.max_interleave_stall_ms / 1e3));
+        c("hipml_tail_row_blocks_total", "Row-block tail prefills run", "counter", s.tail_row_blocks.to_string());
+        c("hipml_tail_rows_total", "Prompt tail rows served by row blocks", "counter", s.tail_rows.to_string());
+        c("hipml_tail_rows_seconds_total", "Wall time in row-block tail prefill", "counter", format!("{:.6}", s.tail_rows_ms / 1e3));
         if let Some((free, total)) = vram {
             c("hipml_vram_free_bytes", "Device free memory", "gauge", free.to_string());
             c("hipml_vram_total_bytes", "Device total memory", "gauge", total.to_string());

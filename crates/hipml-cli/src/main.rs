@@ -29,6 +29,8 @@ mod mtp_cmd;
 mod oracle_gate;
 mod prefill_cmd;
 #[cfg(feature = "hip")]
+mod rows_cmd;
+#[cfg(feature = "hip")]
 mod profile_cmd;
 #[cfg(feature = "hip")]
 mod sweep_ab;
@@ -128,6 +130,15 @@ fn main() {
                 std::process::exit(2);
             }
         }
+        "rows-check" => {
+            #[cfg(feature = "hip")]
+            std::process::exit(rows_cmd::run(&args[1..]));
+            #[cfg(not(feature = "hip"))]
+            {
+                eprintln!("rows-check needs a build with `--features hip`");
+                std::process::exit(2);
+            }
+        }
         "gpu-bench" => {
             #[cfg(feature = "hip")]
             std::process::exit(gpu_bench_cmd::bench(&args[1..]));
@@ -209,6 +220,8 @@ fn help() {
          \x20 gpu-profile --gguf PATH  launch cost, host round-trips, graph token\n\
          \x20 bench-kv  quantized-KV decode attention: depth x q8/q4 x 1 head / 16 layers\n\
          \x20           --depths 1024,8192,32768,100000 --reps 3\n\
+         \x20 rows-check --gguf PATH [--slots N --prefix P --tail T --decode D]\n\
+         \x20           multi-row tail prefill vs the single-sequence path\n\
          \x20 serve     HTTP server: continuous batching, MTP, prefix cache\n\
          \n\
          build with `--features hip` on a machine with the ROCm/HIP runtime.",

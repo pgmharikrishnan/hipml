@@ -67,6 +67,153 @@ pub fn run(
             }
         }
 
+        // WP47: gather prefix-hit tails for one multi-row prefill. Each tail's
+        // restored state is copied into a quiet slot; one block then advances
+        // every tail's suffix in a single weight pass (instead of one tiled
+        // prefill per tail, each streaming the whole model).
+        if prefill.is_none() && spec.is_none() {
+            let row_max = batch.row_block_max();
+            let min_tail = batch.row_min_tail();
+            let max_tail = batch.row_tail_max();
+            let gather_ms: u64 = std::env::var("HIPML_ROW_GATHER_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4);
+            let mut gathered: Vec<RowTail> = Vec::new();
+            let mut rows_used = 0usize;
+            let mut waited = false;
+            let mut flush = false;
+            loop {
+                let slots_left = batch.available_slots().saturating_sub(gathered.len());
+                if slots_left == 0 || row_max.saturating_sub(rows_used) < min_tail {
+                    flush = !gathered.is_empty();
+                    break;
+                }
+                if queue.is_empty() {
+                    if gathered.is_empty() || waited || gather_ms == 0 {
+                        flush = !gathered.is_empty();
+                        break;
+                    }
+                    waited = true;
+                    match rx.recv_timeout(Duration::from_millis(gather_ms)) {
+                        Ok(j) => {
+                            metrics.update(|s| s.requests_total += 1);
+                            queue.push_back(j);
+                            continue;
+                        }
+                        Err(_) => {
+                            flush = !gathered.is_empty();
+                            break;
+                        }
+                    }
+                }
+                let job = queue.pop_front().expect("checked");
+                let tx = job.tx.clone();
+                let plen = job.prompt.len();
+                let alone = slots.iter().all(|s| s.is_none())
+                    && queue.is_empty()
+                    && gathered.is_empty();
+                let mode = if alone && cfg.mtp { Mode::Spec } else { Mode::Batch };
+                match begin(&mut engine, job, &cfg, mode, &metrics) {
+                    Ok(mut pf) => {
+                        let tail = pf.job.prompt.len().saturating_sub(pf.done);
+                        let qualifies = pf.mode == Mode::Batch
+                            && pf.done > 0
+                            && tail >= min_tail
+                            && tail <= max_tail
+                            && tail <= row_max - rows_used
+                            && pf.cuts.is_empty();
+                        if qualifies {
+                            let slot = batch.next_slot() + gathered.len();
+                            match batch.adopt_quiet(&engine, slot, pf.st.pos) {
+                                Ok(()) => {
+                                    let ids = pf.job.prompt[pf.done..].to_vec();
+                                    metrics.update(|s| s.prompt_tokens += plen as u64);
+                                    rows_used += tail;
+                                    gathered.push(RowTail {
+                                        job: pf.job,
+                                        slot,
+                                        ids,
+                                        hit_tokens: pf.done,
+                                    });
+                                    continue;
+                                }
+                                Err(e) => {
+                                    eprintln!("serve: row adopt: {e}");
+                                    let _ = tx.send(Event::Error(e));
+                                    continue;
+                                }
+                            }
+                        }
+                        if gathered.is_empty() {
+                            prefill = Some(pf);
+                        } else {
+                            // Let the queued request keep its place; the block
+                            // runs first so it is not delayed behind it.
+                            queue.push_front(pf.job);
+                            flush = true;
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("serve: admit: {e}");
+                        let _ = tx.send(Event::Error(e));
+                    }
+                }
+            }
+
+            if flush && !gathered.is_empty() {
+                let tails: Vec<(usize, &[u32])> = gathered
+                    .iter()
+                    .map(|g| (g.slot, g.ids.as_slice()))
+                    .collect();
+                match batch.prefill_rows(&tails) {
+                    Ok(ids) => {
+                        let ms = batch.last_row_block().1;
+                        let tails_n = gathered.len();
+                        metrics.update(|s| {
+                            s.tail_row_blocks += 1;
+                            s.tail_rows += rows_used as u64;
+                            s.tail_rows_ms += ms;
+                            s.batch_requests += tails_n as u64;
+                            s.generated_tokens += tails_n as u64;
+                        });
+                        let mut finish: Vec<(usize, &'static str)> = Vec::new();
+                        for (k, g) in gathered.drain(..).enumerate() {
+                            let id = ids[k];
+                            batch.activate_slot(g.slot)?;
+                            let _ = g.job.tx.send(Event::Tokens(vec![id]));
+                            if g.job.stop_ids.contains(&id) {
+                                finish.push((g.slot, "stop"));
+                            } else if g.job.max_tokens <= 1 {
+                                finish.push((g.slot, "length"));
+                            }
+                            slots[g.slot] = Some(Active {
+                                job: g.job,
+                                feed: id,
+                                emitted: 1,
+                                prefill_ms: ms,
+                                hit_tokens: g.hit_tokens,
+                            });
+                        }
+                        finish.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+                        for (slot, reason) in finish {
+                            take_active(&mut slots, slot, reason, &metrics);
+                            if let Some(from) = batch.release(slot)? {
+                                slots[slot] = slots[from].take();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("serve: row prefill: {e}");
+                        for g in gathered.drain(..) {
+                            let _ = g.job.tx.send(Event::Error(e.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
         // Start one prefill when the engine is free. A request is only allowed
         // to become speculative when it is alone and nothing is queued.
         let alone_next = slots.iter().all(|s| s.is_none()) && queue.len() == 1;

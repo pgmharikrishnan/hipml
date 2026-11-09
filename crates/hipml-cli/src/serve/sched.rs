@@ -112,6 +112,16 @@ struct Active {
     hit_tokens: usize,
 }
 
+/// One prefix-hit tail waiting for the row-block prefill. Its state already
+/// sits (quietly, unactivated) in `slot`; `ids` is the prompt suffix that the
+/// block will run in one weight pass with every other gathered tail.
+struct RowTail {
+    job: Job,
+    slot: usize,
+    ids: Vec<u32>,
+    hit_tokens: usize,
+}
+
 fn send_done(tx: &Sender<Event>, job: &Job, finish: &str, completion: usize, prefill_ms: f64, hit: usize) {
     let _ = tx.send(Event::Done(Done {
         finish: finish.to_string(),

@@ -176,9 +176,17 @@ pub fn completion(tok: &Tokenizer, body: &Value) -> Result<Prompt, String> {
     if ids.is_empty() {
         return Err("prompt is empty".to_string());
     }
+    // Test knob: `cache_cut` makes a raw-id prompt capture a prefix state at
+    // that boundary, so a second identical request exercises the prefix-hit
+    // tail path (the default cut is the whole prompt, which never hits).
+    let cut = body
+        .get("cache_cut")
+        .and_then(Value::as_u64)
+        .map(|c| c as usize)
+        .filter(|c| *c > 0 && *c < ids.len());
     Ok(Prompt {
-        ids: ids.clone(),
-        cuts: vec![ids.len()],
+        ids,
+        cuts: vec![cut.unwrap_or(ids.len())],
     })
 }
 
