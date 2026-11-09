@@ -199,6 +199,9 @@ impl<'a> GpuEngine<'a> {
         if rows == 0 {
             return Err("no columns".to_string());
         }
+        // Exact unless the verify itself opted into the skinny tile
+        // (`HIPML_SKINNY`); the server's batch flag must not reach it.
+        let _exact = (!hipml_kernels::skinny_on()).then(hipml_kernels::exact_scope);
         self.ensure_cols(rows)?;
         if rows > 1 && snaps.cols < rows - 1 {
             return Err(format!("{} snapshot columns for {rows} columns", snaps.cols));

@@ -93,6 +93,32 @@ pub fn skinny_on() -> bool {
     *ON.get_or_init(|| std::env::var_os("HIPML_SKINNY").is_some())
 }
 
+thread_local! {
+    static EXACT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While the returned guard lives, batched GEMVs on this thread take the
+/// exact `_b` kernels even when `HIPML_BATCH_SKINNY` is set. The MTP verify
+/// holds one: its R columns are a batch, and the server sets the batch flag
+/// process-wide, so at drafts 3 (R = 4) it would otherwise switch to the
+/// non-bit-identical tile and stop matching plain greedy.
+pub fn exact_scope() -> ExactScope {
+    ExactScope(EXACT.with(|e| e.replace(true)))
+}
+
+/// Whether an [`exact_scope`] is active on this thread.
+pub fn exact_forced() -> bool {
+    EXACT.with(|e| e.get())
+}
+
+pub struct ExactScope(bool);
+
+impl Drop for ExactScope {
+    fn drop(&mut self) {
+        EXACT.with(|e| e.set(self.0));
+    }
+}
+
 /// How a kernel is gridded.
 #[derive(Clone, Copy, Debug)]
 pub enum KernelKind {
