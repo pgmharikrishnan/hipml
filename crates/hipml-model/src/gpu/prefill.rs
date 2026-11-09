@@ -106,6 +106,9 @@ pub(crate) struct Chunk {
     /// `tokens * max(n_embd, n_ff, ssm inner)` halves, i.e. half that many
     /// 4-byte words.
     pub xh: Buffer,
+    /// Second k-partial for split-K ffn projections. Only allocated for short
+    /// prompts, where the ffn tile is wave-starved; `tokens * max(n_embd,n_ff)`.
+    pub sk: Buffer,
 }
 
 impl Chunk {
@@ -119,6 +122,10 @@ impl Chunk {
         // The fp16 activation copy must hold the widest tile any projection
         // reads: the ffn tiles, the ssm `out` input and the plain residual.
         let wide = n.max(ff).max(sd.inner());
+        // Split-K only fires for prompts short enough that the ffn tile is
+        // under three waves (see `prefill_should_split`); at the 2048-token
+        // chunk used by long prompts the scratch would never be touched.
+        let sk = if tokens <= 1024 { tokens * wide } else { 1 };
         Ok(Chunk {
             x: zeros(tokens * n)?,
             x1: zeros(tokens * n)?,
@@ -136,6 +143,7 @@ impl Chunk {
             aout: zeros(tokens * qd)?,
             y: zeros(tokens * n)?,
             xh: zeros((tokens * wide + 1) / 2)?,
+            sk: zeros(sk)?,
         })
     }
 
@@ -154,7 +162,8 @@ impl Chunk {
             + self.v.len()
             + self.aout.len()
             + self.y.len()
-            + self.xh.len()) * 4
+            + self.xh.len()
+            + self.sk.len()) * 4
             + self.ssm.bytes()
     }
 }
@@ -301,8 +310,8 @@ impl<'a> GpuEngine<'a> {
                     &c.xh,
                     n_tok * cfg.n_embd,
                 )?;
-                block.gate.gemm_half(l, &c.xh, &c.gate, n_tok)?;
-                block.up.gemm_half(l, &c.xh, &c.up, n_tok)?;
+                block.gate.gemm_half(l, &c.xh, &c.gate, &c.sk, n_tok)?;
+                block.up.gemm_half(l, &c.xh, &c.up, &c.sk, n_tok)?;
                 l.silu_mul_buf(&c.gate, &c.up, &c.act, n_tok * cfg.n_ff)?;
                 ::hipml_kernels::prefill_xhalf(
                     l.module(),
@@ -311,7 +320,7 @@ impl<'a> GpuEngine<'a> {
                     &c.xh,
                     n_tok * cfg.n_ff,
                 )?;
-                block.down.gemm_half(l, &c.xh, &c.down, n_tok)?;
+                block.down.gemm_half(l, &c.xh, &c.down, &c.sk, n_tok)?;
             } else {
                 block.gate.gemm(l, &c.t, &c.gate, n_tok)?;
                 block.up.gemm(l, &c.t, &c.up, n_tok)?;

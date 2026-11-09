@@ -249,7 +249,7 @@ fn split_entry(name: &str) -> Option<&'static str> {
 /// chunks used by 8K and deeper prompts are 320 blocks and stay single-pass.
 /// The lower bound keeps tiny projections (k/v, 16 blocks) on one launch: two
 /// halves of 16 blocks would still be under one wave and only add a pass.
-fn should_split(m: usize, k: usize, tokens: usize) -> bool {
+pub fn prefill_should_split(m: usize, k: usize, tokens: usize) -> bool {
     if std::env::var_os("HIPML_SPLITK").map_or(false, |v| v == "0") {
         return false;
     }
@@ -262,9 +262,12 @@ fn should_split(m: usize, k: usize, tokens: usize) -> bool {
     blocks >= 32 && blocks < 3 * 64
 }
 
-/// Launch the split-K pair: `[0, ks)` overwrites `y`, `[ks, k)` adds into it.
-/// The two launches are ordered on one stream, so the sum is deterministic and
-/// needs no atomics or reduce pass.
+/// Split-K launch: one grid with `blockIdx.z` selecting the k half, so both
+/// halves run concurrently instead of as two serialized launches. Slice 0
+/// writes `y`, slice 1 writes `scratch`, then `residual_add_f32` sums them.
+/// The split point and the addition order are fixed, so the result is
+/// deterministic (but not bit-identical to the single-pass accumulation, whose
+/// k-tile sum is one continuous register chain).
 #[allow(clippy::too_many_arguments)]
 fn prefill_split(
     module: &Module,
@@ -273,6 +276,7 @@ fn prefill_split(
     w: &ByteBuffer,
     x: &Buffer,
     y: &Buffer,
+    scratch: &Buffer,
     m: usize,
     k: usize,
     tokens: usize,
@@ -291,33 +295,69 @@ fn prefill_split(
     if ks == 0 || ks >= k {
         return Err(format!("{name}: k={k} cannot be split"));
     }
+    if scratch.len() < tokens * m {
+        return Err(format!(
+            "{name}: split scratch has {} values, needs {}",
+            scratch.len(),
+            tokens * m
+        ));
+    }
     let kernel = module.kernel(name)?;
-    let cfg = LaunchConfig::prefill(m, tokens, rpb, tpb, block);
-    let mut launch = |k0: usize, k1: usize, acc: i32| -> Result<(), String> {
-        let mut p_w = w.as_ptr();
-        let mut p_x = x.as_ptr();
-        let mut p_y = y.as_ptr();
-        let mut v_m = m as i32;
-        let mut v_k = k as i32;
-        let mut v_tokens = tokens as i32;
-        let mut v_k0 = k0 as i32;
-        let mut v_k1 = k1 as i32;
-        let mut v_acc = acc;
-        let mut params: [*mut c_void; 9] = [
-            &mut p_w as *mut _ as *mut c_void,
-            &mut p_x as *mut _ as *mut c_void,
-            &mut p_y as *mut _ as *mut c_void,
-            &mut v_m as *mut _ as *mut c_void,
-            &mut v_k as *mut _ as *mut c_void,
-            &mut v_tokens as *mut _ as *mut c_void,
-            &mut v_k0 as *mut _ as *mut c_void,
-            &mut v_k1 as *mut _ as *mut c_void,
-            &mut v_acc as *mut _ as *mut c_void,
-        ];
-        kernel.launch(cfg, stream, &mut params)
-    };
-    launch(0, ks, 0)?;
-    launch(ks, k, 1)
+    let mut cfg = LaunchConfig::prefill(m, tokens, rpb, tpb, block);
+    cfg.grid.2 = 2;
+    let mut p_w = w.as_ptr();
+    let mut p_x = x.as_ptr();
+    let mut p_y = y.as_ptr();
+    let mut p_s = scratch.as_ptr();
+    let mut v_m = m as i32;
+    let mut v_k = k as i32;
+    let mut v_tokens = tokens as i32;
+    let mut v_ks = ks as i32;
+    let mut params: [*mut c_void; 8] = [
+        &mut p_w as *mut _ as *mut c_void,
+        &mut p_x as *mut _ as *mut c_void,
+        &mut p_y as *mut _ as *mut c_void,
+        &mut p_s as *mut _ as *mut c_void,
+        &mut v_m as *mut _ as *mut c_void,
+        &mut v_k as *mut _ as *mut c_void,
+        &mut v_tokens as *mut _ as *mut c_void,
+        &mut v_ks as *mut _ as *mut c_void,
+    ];
+    kernel.launch(cfg, stream, &mut params)?;
+
+    // y = y + scratch, the deterministic two-partial sum.
+    let reduce = module.kernel("residual_add_f32")?;
+    let mut p_a = y.as_ptr();
+    let mut p_b = scratch.as_ptr();
+    let mut p_o = y.as_ptr();
+    let mut v_n = (tokens * m) as i32;
+    let mut rparams: [*mut c_void; 4] = [
+        &mut p_a as *mut _ as *mut c_void,
+        &mut p_b as *mut _ as *mut c_void,
+        &mut p_o as *mut _ as *mut c_void,
+        &mut v_n as *mut _ as *mut c_void,
+    ];
+    reduce.launch(LaunchConfig::linear(tokens * m, 256), stream, &mut rparams)
+}
+
+/// Split-K variant of [`prefill_resident_half`], for a wave-starved ffn
+/// projection. `scratch` must hold `tokens * m` f32.
+#[allow(clippy::too_many_arguments)]
+pub fn prefill_resident_split_half(
+    module: &Module,
+    stream: &Stream,
+    name: &str,
+    w: &ByteBuffer,
+    xh: &Buffer,
+    y: &Buffer,
+    scratch: &Buffer,
+    m: usize,
+    k: usize,
+    tokens: usize,
+) -> Result<(), String> {
+    let name = prefill_entry_for_half(name).unwrap_or(name);
+    let sk = split_entry(name).ok_or_else(|| format!("{name}: no split-K entry"))?;
+    prefill_split(module, stream, sk, w, xh, y, scratch, m, k, tokens)
 }
 
 /// Tiled prefill GEMM over a resident weight payload.
@@ -349,11 +389,6 @@ pub fn prefill_resident(
     };
     if k % 64 != 0 {
         return Err(format!("{name}: k={k} must be a multiple of the 64-value k-tile"));
-    }
-    if let Some(sk) = split_entry(name) {
-        if should_split(m, k, tokens) {
-            return prefill_split(module, stream, sk, w, x, y, m, k, tokens);
-        }
     }
     let kernel = module.kernel(name)?;
     let mut p_w = w.as_ptr();

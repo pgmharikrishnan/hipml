@@ -206,15 +206,16 @@ static __device__ __forceinline__ void pww2_body_impl(
     const unsigned char* __restrict__ w,
     const void* __restrict__ x,
     float* __restrict__ y,
+    float* __restrict__ scratch,
     int m,
     int k,
     int tokens,
-    int k0,
-    int k1,
-    int accumulate)
+    int ks)
 {
-    const int kb = SPLIT ? k0 : 0;
-    const int ke = SPLIT ? k1 : k;
+    const int z = SPLIT ? (int)blockIdx.z : 0;
+    const int kb = SPLIT ? (z ? ks : 0) : 0;
+    const int ke = SPLIT ? (z ? k : ks) : k;
+    float* __restrict__ out = SPLIT ? (z ? scratch : y) : y;
     __shared__ __align__(16) _Float16 shx[PWW2_BUF * PWW2_TT * PWW2_XS];
     __shared__ __align__(16) _Float16 shw[PWW2_BUF * PWW2_RT * PWW2_WS];
 
@@ -459,8 +460,7 @@ static __device__ __forceinline__ void pww2_body_impl(
                 const int r = gr + j * 16;
                 if (gt < tokens && r < m) {
                     const size_t o = (size_t)gt * m + r;
-                    if (SPLIT && accumulate) y[o] += acc[i * PWW2_NRG + j][e];
-                    else y[o] = acc[i * PWW2_NRG + j][e];
+                    out[o] = acc[i * PWW2_NRG + j][e];
                 }
             }
         }
@@ -475,7 +475,7 @@ static __device__ __forceinline__ void pww2_body(
     int k,
     int tokens)
 {
-    pww2_body_impl<KIND, XHALF, false>(w, x, y, m, k, tokens, 0, k, 0);
+    pww2_body_impl<KIND, XHALF, false>(w, x, y, nullptr, m, k, tokens, 0);
 }
 
 template <int KIND, bool XHALF>
@@ -483,14 +483,13 @@ static __device__ __forceinline__ void pww2_body_split(
     const unsigned char* __restrict__ w,
     const void* __restrict__ x,
     float* __restrict__ y,
+    float* __restrict__ scratch,
     int m,
     int k,
     int tokens,
-    int k0,
-    int k1,
-    int accumulate)
+    int ks)
 {
-    pww2_body_impl<KIND, XHALF, true>(w, x, y, m, k, tokens, k0, k1, accumulate);
+    pww2_body_impl<KIND, XHALF, true>(w, x, y, scratch, m, k, tokens, ks);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q4_k_w2(const unsigned char* __restrict__ w,
@@ -555,32 +554,32 @@ extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) pref
 // the two-partial sum is deterministic.
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q4_k_w2h_sk(const unsigned char* __restrict__ w,
                                                const void* __restrict__ x,
-                                               float* __restrict__ y, int m, int k, int tokens,
-                                               int k0, int k1, int accumulate)
+                                               float* __restrict__ y, float* __restrict__ scratch, int m, int k, int tokens,
+                                               int ks)
 {
-    pww2_body_split<0, true>(w, x, y, m, k, tokens, k0, k1, accumulate);
+    pww2_body_split<0, true>(w, x, y, scratch, m, k, tokens, ks);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q6_k_w2h_sk(const unsigned char* __restrict__ w,
                                                const void* __restrict__ x,
-                                               float* __restrict__ y, int m, int k, int tokens,
-                                               int k0, int k1, int accumulate)
+                                               float* __restrict__ y, float* __restrict__ scratch, int m, int k, int tokens,
+                                               int ks)
 {
-    pww2_body_split<1, true>(w, x, y, m, k, tokens, k0, k1, accumulate);
+    pww2_body_split<1, true>(w, x, y, scratch, m, k, tokens, ks);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q8_0_w2h_sk(const unsigned char* __restrict__ w,
                                                const void* __restrict__ x,
-                                               float* __restrict__ y, int m, int k, int tokens,
-                                               int k0, int k1, int accumulate)
+                                               float* __restrict__ y, float* __restrict__ scratch, int m, int k, int tokens,
+                                               int ks)
 {
-    pww2_body_split<2, true>(w, x, y, m, k, tokens, k0, k1, accumulate);
+    pww2_body_split<2, true>(w, x, y, scratch, m, k, tokens, ks);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_halfw_w2h_sk(const unsigned char* __restrict__ w,
                                                 const void* __restrict__ x,
-                                                float* __restrict__ y, int m, int k, int tokens,
-                                                int k0, int k1, int accumulate)
+                                                float* __restrict__ y, float* __restrict__ scratch, int m, int k, int tokens,
+                                                int ks)
 {
-    pww2_body_split<3, true>(w, x, y, m, k, tokens, k0, k1, accumulate);
+    pww2_body_split<3, true>(w, x, y, scratch, m, k, tokens, ks);
 }

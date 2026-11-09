@@ -156,18 +156,38 @@ impl<'a> Proj<'a> {
     /// The same projection, reading an fp16 copy of the activation tile that the
     /// caller has already converted (`prefill_xhalf`). Only the `_w2h` entries
     /// exist for it, so this requires the v2 prefill kernels.
+    ///
+    /// `scratch` holds `tokens * rows` f32 and is only touched when the shape
+    /// is wave-starved enough for split-K (short prompts; 2048-token chunks
+    /// stay single-pass).
     pub(crate) fn gemm_half(
         &self,
         l: &Launcher,
         xh: &Buffer,
         y: &Buffer,
+        scratch: &Buffer,
         tokens: usize,
     ) -> Result<(), String> {
         if let Some(half) = &self.q5_half {
+            let e = "prefill_halfw_w2h";
+            if hipml_kernels::prefill_should_split(self.rows, self.cols, tokens) {
+                return hipml_kernels::prefill_resident_split_half(
+                    l.module(),
+                    l.stream(),
+                    e,
+                    half,
+                    xh,
+                    y,
+                    scratch,
+                    self.rows,
+                    self.cols,
+                    tokens,
+                );
+            }
             return hipml_kernels::prefill_resident(
                 l.module(),
                 l.stream(),
-                "prefill_halfw_w2h",
+                e,
                 half,
                 xh,
                 y,
@@ -177,6 +197,20 @@ impl<'a> Proj<'a> {
             );
         }
         let e = prefill_entry_half(self.entry)?;
+        if hipml_kernels::prefill_should_split(self.rows, self.cols, tokens) {
+            return hipml_kernels::prefill_resident_split_half(
+                l.module(),
+                l.stream(),
+                e,
+                self.w,
+                xh,
+                y,
+                scratch,
+                self.rows,
+                self.cols,
+                tokens,
+            );
+        }
         l.run_prefill_resident(e, self.w, xh, y, self.rows, self.cols, tokens)
     }
 
