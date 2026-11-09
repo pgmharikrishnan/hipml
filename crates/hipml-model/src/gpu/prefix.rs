@@ -128,8 +128,8 @@ impl<'a> GpuEngine<'a> {
                     let (cl, sl) = s.state_lens();
                     let conv = Buffer::alloc(cl.max(1))?;
                     let s_buf = Buffer::alloc(sl.max(1))?;
-                    conv.copy_from_device(s.conv_state_buf(), cl)?;
-                    s_buf.copy_from_device(s.s_state_buf(), sl)?;
+                    conv.copy_from_device_on(s.conv_state_buf(), cl, l.stream())?;
+                    s_buf.copy_from_device_on(s.s_state_buf(), sl, l.stream())?;
                     bytes += (cl + sl) * 4;
                     ssm.push(Some(SsmBufs {
                         conv,
@@ -144,8 +144,8 @@ impl<'a> GpuEngine<'a> {
                     let n = pos * width;
                     let k = Buffer::alloc(n.max(1))?;
                     let v = Buffer::alloc(n.max(1))?;
-                    k.copy_from_device(attn.kv_k_buf(), n)?;
-                    v.copy_from_device(attn.kv_v_buf(), n)?;
+                    k.copy_from_device_on(attn.kv_k_buf(), n, l.stream())?;
+                    v.copy_from_device_on(attn.kv_v_buf(), n, l.stream())?;
                     bytes += 2 * n * 4;
                     ssm.push(None);
                     kv.push(Some(KvBufs {
@@ -257,9 +257,9 @@ impl<'a> GpuEngine<'a> {
                         .as_ref()
                         .ok_or_else(|| "prefix restore: missing SSM snapshot".to_string())?;
                     s.conv_state_buf()
-                        .copy_from_device(&bufs.conv, bufs.conv_len)?;
+                        .copy_from_device_on(&bufs.conv, bufs.conv_len, l.stream())?;
                     s.s_state_buf()
-                        .copy_from_device(&bufs.s, bufs.s_len)?;
+                        .copy_from_device_on(&bufs.s, bufs.s_len, l.stream())?;
                 }
                 BlockKind::Full { deep: None, attn } => {
                     let bufs = kk
@@ -269,8 +269,8 @@ impl<'a> GpuEngine<'a> {
                         return Err("prefix restore: KV cache kind changed".to_string());
                     }
                     let n = bufs.rows * bufs.width;
-                    attn.kv_k_buf().copy_from_device(&bufs.k, n)?;
-                    attn.kv_v_buf().copy_from_device(&bufs.v, n)?;
+                    attn.kv_k_buf().copy_from_device_on(&bufs.k, n, l.stream())?;
+                    attn.kv_v_buf().copy_from_device_on(&bufs.v, n, l.stream())?;
                 }
                 BlockKind::Full { deep: Some(dk), .. } => {
                     let bufs = kk

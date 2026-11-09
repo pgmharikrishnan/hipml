@@ -152,7 +152,10 @@ fn begin(
         // later request can reuse the prefix.
     } else if let Some(hit) = engine.prefix_lookup(&job.prompt) {
         metrics.update(|s| s.prefix_lookups += 1);
+        let t = Instant::now();
         restored_logits = engine.prefix_restore(hit, &mut st)?;
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        metrics.update(|s| s.prefix_restore_ms += ms);
         start = hit.pos;
         if start > 0 {
             // A restored prefix has no drafter KV; speculation is only valid
@@ -248,7 +251,13 @@ fn prefill_step(
     let at_cut = cut == Some(end);
     if at_cut {
         let logits = engine.logits_host()?;
+        let t = Instant::now();
         let _ = engine.prefix_capture(&pf.job.prompt, end, Some(&logits))?;
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        metrics.update(|s| {
+            s.prefix_captures += 1;
+            s.prefix_capture_ms += ms;
+        });
     }
     Ok(ms)
 }

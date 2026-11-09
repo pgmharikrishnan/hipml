@@ -19,6 +19,9 @@ pub struct Stats {
     pub prefix_hits: u64,
     pub prefix_hit_tokens: u64,
     pub prefix_misses: u64,
+    pub prefix_restore_ms: f64,
+    pub prefix_captures: u64,
+    pub prefix_capture_ms: f64,
     pub prefill_chunks: u64,
     pub prefill_ms: f64,
     /// Prefill chunks that ran while at least one request was decoding.
@@ -71,6 +74,9 @@ impl Metrics {
         c("hipml_prefix_misses_total", "Prefix-cache misses", "counter", s.prefix_misses.to_string());
         c("hipml_prefix_hit_tokens_total", "Prompt tokens restored from cache", "counter", s.prefix_hit_tokens.to_string());
         c("hipml_prefix_hit_rate", "Fixture hit rate over lookups", "gauge", format!("{hit_rate:.6}"));
+        c("hipml_prefix_restore_seconds_total", "Device time restoring a prefix", "counter", format!("{:.6}", s.prefix_restore_ms / 1e3));
+        c("hipml_prefix_captures_total", "Prefix snapshots taken", "counter", s.prefix_captures.to_string());
+        c("hipml_prefix_capture_seconds_total", "Device time capturing a prefix", "counter", format!("{:.6}", s.prefix_capture_ms / 1e3));
         c("hipml_prefill_chunks_total", "Prefill tiles run by the scheduler", "counter", s.prefill_chunks.to_string());
         c("hipml_prefill_seconds_total", "Wall time in prefill tiles", "counter", format!("{:.6}", s.prefill_ms / 1e3));
         c("hipml_prefill_interleaved_total", "Prefill tiles run while a batch was decoding", "counter", s.prefill_interleaved.to_string());
