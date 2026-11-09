@@ -322,7 +322,7 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "gemm_skinny_q4_k",
         entry: "gemm_skinny_q4_k",
         kind: KernelKind::RowTile {
-            rows: 64,
+            rows: 32,
             block: 128,
         },
     },
@@ -330,7 +330,7 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "gemm_skinny_q6_k",
         entry: "gemm_skinny_q6_k",
         kind: KernelKind::RowTile {
-            rows: 64,
+            rows: 32,
             block: 128,
         },
     },
@@ -338,7 +338,7 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "gemm_skinny_q8_0",
         entry: "gemm_skinny_q8_0",
         kind: KernelKind::RowTile {
-            rows: 64,
+            rows: 32,
             block: 128,
         },
     },

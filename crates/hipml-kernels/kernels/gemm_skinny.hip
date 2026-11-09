@@ -36,9 +36,10 @@
 #endif
 
 // Shipped geometry: 32 output rows, a 128-value k tile, 4 warps. Measured
-// against the alternatives (16/32/48/64 rows, 128/256 k, 4 vs 8 warps) on all
-// five shapes; the differences are within 10% except for the geometries whose
-// shared footprint costs a resident block.
+// against the alternatives (16/32/48/64 rows, 128/256 k, 4 vs 8 warps) on the
+// Q4_K shapes; the best of them is within 1% of this one and the rest are 10%
+// to 40% worse. Note `rows` in the manifest must equal PWS_RT: the launch grid
+// is what turns a mismatch into silently half-computed output.
 #ifndef PWS_RT
 #define PWS_RT 32      // output rows per block
 #endif
