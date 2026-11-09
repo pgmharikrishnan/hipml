@@ -244,7 +244,8 @@ impl<'a> GpuEngine<'a> {
         capture: &Buffer,
     ) -> Result<u32, String> {
         let chunk = chunk.min(tokens.len()).max(1);
-        self.ensure_chunk(chunk)?;
+        let deep = attn_tile::split_count(attn_tile::env_splits(), tokens.len()) > 1;
+        self.ensure_chunk(chunk, deep)?;
         let mut last = 0u32;
         for tile in tokens.chunks(chunk) {
             last = self.forward_chunk_capture(tile, st, &mut None, Some(capture))?;
