@@ -138,8 +138,8 @@ impl Chunk {
         // chunk used by long prompts the scratch would never be touched.
         let sk = if tokens <= 1024 { tokens * wide } else { 1 };
         // Split-K attention scratch. `splits` is the env knob; the buffer is
-        // capped so a deep prompt cannot turn it into a residency problem
-        // (8 splits of a 2048-token chunk is 402 MiB, which is the ceiling).
+        // capped at 1 GiB so a deep prompt cannot turn it into a residency
+        // problem (8 splits of a 2048-token chunk is 403 MiB).
         let qslots = (tokens + 31) / 32 * 32;
         let mut attn_splits = if deep { attn_tile::env_splits() } else { 1 };
         let part_len = |splits: usize| splits * qslots * cfg.n_head * cfg.head_dim;

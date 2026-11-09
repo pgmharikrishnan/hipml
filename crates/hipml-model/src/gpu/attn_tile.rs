@@ -115,14 +115,6 @@ fn row_ptr(buf: &Buffer, t: usize, width: usize) -> *mut std::ffi::c_void {
     unsafe { (buf.as_ptr() as *mut u8).add(t * width * 4) as *mut std::ffi::c_void }
 }
 
-/// Key splits for a chunk starting at `pos0`.
-///
-/// Short chunks gain nothing (the combine pass costs more than the loop it
-/// shortens), so the mono kernel keeps everything below
-/// `HIPML_ATTN_SPLIT_MIN` positions (default 8K). That also makes an 8K prompt
-/// and anything shorter bit-identical to the mono path: its chunks all sit
-/// below the gate. `HIPML_ATTN_SPLITS` sets the count; 1 keeps the mono kernel
-/// everywhere.
 /// `HIPML_ATTN_SPLITS`: key splits for a deep chunk (default 8, 1 disables).
 pub(super) fn env_splits() -> usize {
     std::env::var("HIPML_ATTN_SPLITS")
@@ -132,6 +124,14 @@ pub(super) fn env_splits() -> usize {
         .clamp(1, 32)
 }
 
+/// Key splits for a chunk starting at `pos0`.
+///
+/// Short chunks gain nothing (the combine pass costs more than the loop it
+/// shortens), so the mono kernel keeps everything below
+/// `HIPML_ATTN_SPLIT_MIN` positions (default 8K). That also makes an 8K prompt
+/// and anything shorter bit-identical to the mono path: its chunks all sit
+/// below the gate. `HIPML_ATTN_SPLITS` sets the count; 1 keeps the mono kernel
+/// everywhere.
 pub(super) fn split_count(splits: usize, pos0: usize) -> usize {
     if splits <= 1 {
         return 1;
