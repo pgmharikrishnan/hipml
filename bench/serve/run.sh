@@ -7,6 +7,6 @@ set -e
 ENGINE=${1:?engine}
 CELL=${2:?cell}
 LOCK='C:\models\gpu-lock.ps1'
-powershell -NoProfile -ExecutionPolicy Bypass -File "$LOCK" acquire wp45
-trap 'powershell -NoProfile -ExecutionPolicy Bypass -File "$LOCK" release wp45' EXIT
+powershell -NoProfile -ExecutionPolicy Bypass -File "$LOCK" acquire wp47
+trap 'powershell -NoProfile -ExecutionPolicy Bypass -File "$LOCK" release wp47' EXIT
 python "$(dirname "$0")/serve_bench.py" --engine "$ENGINE" --cell "$CELL"

@@ -369,7 +369,7 @@ def main():
                     if line.startswith("#") or not line.strip():
                         continue
                     name, _, value = line.partition(" ")
-                    if any(k in name for k in ("prefix", "interleave", "spec_", "mtp_", "prefill")):
+                    if any(k in name for k in ("prefix", "interleave", "spec_", "mtp_", "prefill", "tail_")):
                         metrics[name] = float(value)
             except Exception:
                 metrics = None
