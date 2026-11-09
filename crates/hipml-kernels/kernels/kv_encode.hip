@@ -231,3 +231,98 @@ extern "C" __global__ void kv_encode_q4(
         vc[off + 2 + lane] = (unsigned char)(qv | (hv << 4));
     }
 }
+
+// --- batched append: one grid.y step per slot ------------------------------
+//
+// `pos` is [slots][2] = (position, seq). The quantized caches are contiguous:
+// `kc`/`vc` for slot s start at `s * slot_bytes`. Source K/V rows are
+// `[slots][n_kv * head_dim]`.
+
+extern "C" __global__ void kv_encode_q8_b(
+    const float* __restrict__ k,
+    const float* __restrict__ v,
+    unsigned char* __restrict__ kc,
+    unsigned char* __restrict__ vc,
+    int n_kv,
+    int head_dim,
+    int stride,
+    const int* __restrict__ pos,
+    int slot_bytes)
+{
+    const int h = blockIdx.x;
+    const int slot = blockIdx.y;
+    const int chunk = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const int nchunk = head_dim >> 5;
+    if (chunk >= nchunk) return;
+
+    const int width = n_kv * head_dim;
+    const int i = slot * width + h * head_dim + chunk * KVQ_BLOCK + lane;
+    unsigned char* kcs = kc + (size_t)slot * slot_bytes;
+    unsigned char* vcs = vc + (size_t)slot * slot_bytes;
+    const size_t off = ((size_t)h * stride + pos[slot * 2]) * nchunk * KVQ_Q8_BYTES
+                     + (size_t)chunk * KVQ_Q8_BYTES;
+
+    const float xk = k[i];
+    const float amax_k = kvq_amax(xk);
+    const float dk = amax_k / 127.0f;
+    const float idk = dk > 0.0f ? 1.0f / dk : 0.0f;
+    if (lane == 0) *reinterpret_cast<__half*>(kcs + off) = __float2half(dk);
+    kcs[off + 2 + lane] = (unsigned char)(signed char)kvq_q8_i8(xk, idk);
+
+    const float xv = v[i];
+    const float amax_v = kvq_amax(xv);
+    const float dv = amax_v / 127.0f;
+    const float idv = dv > 0.0f ? 1.0f / dv : 0.0f;
+    if (lane == 0) *reinterpret_cast<__half*>(vcs + off) = __float2half(dv);
+    vcs[off + 2 + lane] = (unsigned char)(signed char)kvq_q8_i8(xv, idv);
+}
+
+extern "C" __global__ void kv_encode_q4_b(
+    const float* __restrict__ k,
+    const float* __restrict__ v,
+    unsigned char* __restrict__ kc,
+    unsigned char* __restrict__ vc,
+    int n_kv,
+    int head_dim,
+    int stride,
+    const int* __restrict__ pos,
+    int slot_bytes)
+{
+    const int h = blockIdx.x;
+    const int slot = blockIdx.y;
+    const int chunk = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const int nchunk = head_dim >> 5;
+    if (chunk >= nchunk) return;
+
+    const int width = n_kv * head_dim;
+    const int i = slot * width + h * head_dim + chunk * KVQ_BLOCK + lane;
+    unsigned char* kcs = kc + (size_t)slot * slot_bytes;
+    unsigned char* vcs = vc + (size_t)slot * slot_bytes;
+    const size_t off = ((size_t)h * stride + pos[slot * 2]) * nchunk * KVQ_Q4_BYTES
+                     + (size_t)chunk * KVQ_Q4_BYTES;
+
+    const float xk = k[i];
+    const float vmax_k = kvq_vmax(xk);
+    const float dk = -vmax_k / 8.0f;
+    const float idk = dk != 0.0f ? 1.0f / dk : 0.0f;
+    const unsigned qk = (unsigned)fmaxf(0.0f, fminf(15.0f, roundf(xk * idk) + 8.0f));
+
+    const float xv = v[i];
+    const float vmax_v = kvq_vmax(xv);
+    const float dv = -vmax_v / 8.0f;
+    const float idv = dv != 0.0f ? 1.0f / dv : 0.0f;
+    const unsigned qv = (unsigned)fmaxf(0.0f, fminf(15.0f, roundf(xv * idv) + 8.0f));
+
+    if (lane == 0) {
+        *reinterpret_cast<__half*>(kcs + off) = __float2half(dk);
+        *reinterpret_cast<__half*>(vcs + off) = __float2half(dv);
+    }
+    const unsigned hk = __shfl_sync(0xffffffffffffffffULL, qk, lane + 16);
+    const unsigned hv = __shfl_sync(0xffffffffffffffffULL, qv, lane + 16);
+    if (lane < 16) {
+        kcs[off + 2 + lane] = (unsigned char)(qk | (hk << 4));
+        vcs[off + 2 + lane] = (unsigned char)(qv | (hv << 4));
+    }
+}

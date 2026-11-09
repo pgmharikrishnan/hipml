@@ -33,38 +33,49 @@ The decode GEMV reads each weight byte once and now produces B outputs:
   order the single-sequence kernel does, so row b is bit-identical to a B=1
   launch on the same input.
 - `lm_head` uses the same Q6_K kernel over B rows.
-- attention/SSM projections use the batched kernels; attention itself, the SSM
-  recurrence and the KV append stay per slot (different position/state). An
-  opt-in two-stream split (`HIPML_BATCH_SPLIT=1`) alternates slots, but it was
-  slower than the sequential step at every measured B, so it is off by default.
+- The batched projections route through the WP33 skinny WMMA GEMM at B >= 4
+  (one 16-row tile per launch, so B=4..16 cost one weight pass; B=17..32 cost
+  two). B <= 3 keeps the f32-from-LDS `_b` kernels. Q5_K has no skinny entry and
+  keeps `_b` in groups of 8.
+- Attention, the SSM recurrence and the KV append run **one launch per stage for
+  all slots**: the slot index is `blockIdx.y`, the per-slot KV caches and SSM
+  state are contiguous, and the per-slot position/seq pair is read from a
+  `[slots][2]` device array written once per step. `gemv_f32_b` does the same for
+  the alpha/beta projections, `qg_split_b`/`head_rmsnorm_b`/`mrope_b` for the
+  per-row q-gate/norm/rope, and one `q_gate_f32` covers every row's output gate.
 - `argmax_part_rows_f32`/`argmax_final_rows_f32` sample all B rows on device.
 
-The batched kernels decode each weight block once and feed all B x-rows, and one
-shared x read feeds two weight rows per warp. The k-tile is 1024 values for B<=4
-and 512 above that, so the shared x staging stays under 32 KB.
+The batched `_b` kernels decode each weight block once and feed all B x-rows.
+The skinny tile pads R to one 16-wide WMMA tile, so its cost is the weight
+stream, not R.
 
 ## Measured (Qwen3.8-27B Q4_K_M, R9700, q8 KV, depth 0)
 
-`batch-bench --tokens 16`, best of one run; the single-stream reference is
-measured inside each run.
+`batch-bench --tokens 16`, one run; the single-stream reference is measured
+inside each run (30.0-30.2 tok/s, 33.1-33.3 ms/step).
 
 | B | aggregate tok/s | per stream | ms/step | weight GB/s | B x single |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 44.5 | 22.3 | 44.9 | 375 | 0.74x |
-| 4 | **64.4** | 16.1 | 62.1 | 271 | 0.53x |
-| 8 | 68.6 | 8.6 | 116.6 | 144 | 0.28x |
+| 2 | 54.6 | 27.3 | 36.6 | 459 | 0.90x |
+| 4 | 82.1 | 20.5 | 48.8 | 345 | 0.68x |
+| 8 | **155.0** | 19.4 | 51.6 | 326 | 0.64x |
+| 16 | **275.4** | 17.2 | 58.1 | 290 | 0.57x |
+| 32 | 284.5 | 8.9 | 112.5 | 150 | 0.30x |
 
-Single-stream reference: 30.0-30.2 tok/s (33.1-33.3 ms/step). The batched path
-at B=1 is slower than the production single-stream kernels (20.6 tok/s,
-48.7 ms/step with stage tracing), which is the first clue where the gap is: the
-`_b` GEMV costs ~1.47x the single-stream GEMV on the same weights even when
-there is only one row.
+The knee is between 16 and 32: one 16-row skinny tile serves B<=16, so B=8 and
+B=16 add only the per-slot recurrence work; B=32 needs two weight passes and
+drops to the 150 GB/s row of the table. Aggregate throughput is still rising at
+32, but per-step weight efficiency halves.
 
-Token parity (`--check`, distinct token stream per slot, 16 greedy steps): all
-4 slots reproduce the B=1 path, 16/16 ids each, on the default (unsplit) step.
+Token parity (`--check`, distinct token stream per slot, 16 greedy steps): B=1
+8/8; B=2 8/8 both slots; B=4, B=8 and B=16 16/16 on every slot. At B=32 the
+skinny path reproduces 511 of 512 slot-streams: slot 30 flips one id at step 12
+(a near-tie; the upstream WMMA/fp16 logits differ from the GEMV path by ~1e-2).
+The exact `_b` path at B=32 (`HIPML_BATCH_LEGACY=1`) matches 32/32 at 94 tok/s.
 
-Mixed depth `0,1024,8192,32768`: 58.7 tok/s aggregate (68.1 ms/step,
-247 GB/s).
+Mixed depth `0,1024,2048,4096,8192,8192,8192,8192` at B=8: **138.4 tok/s**
+(57.8 ms/step, 291 GB/s weight). Uniform 0,1024,8192,32768 at the pre-WP37
+engine was 58.7 tok/s.
 
 ### Against llama.cpp at equal B
 
@@ -72,56 +83,68 @@ Same model file, q8_0 K/V, `-np B`, B concurrent greedy requests:
 
 | B | hipml batch | llama.cpp | hipml / llama |
 | ---: | ---: | ---: | ---: |
-| 2 | 45.7 | 56.3 | 0.81 |
-| 4 | 64.8 | 87.3 | 0.74 |
-| 8 | **102.0** | 101.3 | **1.01** |
+| 2 | 54.6 | 56.3 | 0.97 |
+| 4 | 82.1 | 87.3 | 0.94 |
+| 8 | 155.0 | 101.3 | 1.53 |
+| 16 | 275.4 | 231.2 | 1.19 |
+| 32 | 284.5 | 302.7 | 0.94 |
 
-The B=8 number is WP33: `Launcher::gemv_batched` routes batched projections to
-`gemm_skinny_*` at B >= 4, which holds ~400 GB/s where the `_b` kernels fall to
-154 GB/s (B=2 stays on `_b`, measured better there: 45.3 vs 37.2). B=4 is a wash
-because both paths sit at 273 GB/s; the remaining 1.3x there is the
-non-projection half of the step. See `docs/review.md` §9 for the cost curve,
-the exactness statement and the routing switches (`HIPML_BATCH_SKINNY`,
-`HIPML_BATCH_LEGACY`, `HIPML_BATCH_SKINNY_TRACE`).
-
-llama.cpp's np8 client-overlap figure was 88.96 tok/s; its server clock says
-101.26.
+llama.cpp's client-overlap figures are lower (np8 89.0, np16 179.5, np32
+229.8); the table uses its server clock as before.
 
 ### VRAM per slot and how many slots fit
 
 At 8K context, q8 KV: **421.6 MiB per slot** (272.0 MiB KV + 149.6 MiB SSM
-state), on top of the 16.01 GiB weight residency. With 13.59 GiB free after a
-4-slot run, `batch-bench` estimates **37 slots**; a B=8 run left 12.52 GiB and
-estimated 38. Both are allocator arithmetic, not a stress test.
+state), on top of the 16.01 GiB weight residency. After the B=4 run the
+allocator reports **37 total slots** at 8K; B=8 leaves 12.96 GiB and still says
+39. The mixed 8K run reports 34. VRAM, not compute, is the slot ceiling: B=32
+at depth 0 already streams 4.8 GiB of SSM state, and 32 slots at 8K would be
+16.01 + 13.2 = 29.2 GiB of the 31.86 GiB card, i.e. ~37 slots is the measured
+fit. Compute limits at ~B=87 if state were free.
 
-### Where the B=4 step goes
+### Where the B=4 step goes (before and after WP37)
 
-Stage timing (`--split`, B=4; the split overhead itself makes the total 72.9 ms,
-so read the shares, not the absolute values):
+Stage timing (`--split`; the split itself costs a sync per stage, so read the
+shares). Before = WP33 skinny GEMM with per-slot attention/SSM; after = this
+work's one-launch batching.
 
-| stage | ms/step | share |
-| --- | ---: | ---: |
-| ffn (3 batched GEMVs x 64 layers) | 28.92 | 39.7% |
-| ssm proj | 10.67 | 14.6% |
-| ssm recurrence (per slot) | 9.60 | 13.2% |
-| attn proj | 7.32 | 10.0% |
-| ssm out | 6.65 | 9.1% |
-| attn kv + core (per slot) | 4.20 | 5.8% |
-| attn out | 3.25 | 4.5% |
-| final (lm_head + argmax) | 2.07 | 2.8% |
+| stage | before ms | after ms | after share |
+| --- | ---: | ---: | ---: |
+| ffn (3 batched GEMMs x 64 layers) | 30.42 | 30.85 | 51.2% |
+| ssm proj | 11.39 | 10.41 | 17.3% |
+| ssm out | 5.48 | 5.68 | 9.4% |
+| attn proj (incl. split/norm/rope) | 7.72 | 3.65 | 6.1% |
+| final (lm_head + argmax) | 1.94 | 1.96 | 3.2% |
+| attn out | 1.87 | 1.84 | 3.1% |
+| **ssm recurrence (per slot)** | **9.40** | **4.85** | 8.0% |
+| **attn kv + core (per slot)** | **4.13** | **0.79** | 1.3% |
+| embed | 0.14 | 0.05 | 0.1% |
+| total (traced) | 72.58 | 60.30 | |
 
-The FFN batched GEMV is the single biggest kernel, and the batched GEMV family
-as a whole runs at 271 GB/s at B=4 against 469 GB/s for the single-stream
-kernel (15.68 GiB in 33.1 ms): a ~1.5x efficiency loss. The per-slot SSM
-recurrence and attention together are ~14 ms of the 62.1 ms step.
+The per-slot half fell from 13.5 ms to 5.6 ms at B=4. At B=8 it is 7.9 ms vs
+24.4 ms before (90.16 -> 63.96 ms traced); at B=16 the same stages are 12.0 ms
+of a 69.6 ms traced step. The remaining growth is the real delta-net arithmetic
+(one block per value head per slot), not launch gaps.
+
+### Per-slot SSM state traffic
+
+Each slot reads and writes 313.8 MB of recurrent state per step (151 MB of
+conv window + delta-net matrix read, 149.6 MB written). The whole 48-layer
+state for B=8 is 1.2 GB, far beyond the card's L2, so it must stream. Measured
+`ssm rec` stage: 4.85 ms at B=4, 7.07 ms at B=8, 11.23 ms at B=16, i.e.
+259/355/447 GB/s of state traffic. It fits HBM, but it is 8-16% of the step and
+grows with B; keeping a slot group's state resident would need a state tile
+under L2 (a few slots per layer), not the whole 1.2 GB.
 
 ## What is not verified
 
+- B=32 token parity on the skinny path: 511/512 slot-streams (one near-tie
+  flip); the legacy path is 32/32.
+- Mixed-depth token parity: `--check` is defined at depth 0 only.
+- B=32 at 8K (29.2 GiB arithmetic, not exercised).
 - The per-tensor `--probe` numbers: the probe crashed on a one-row x buffer and
   the fix built after the last measurement window.
-- Mixed-depth token parity: `--check` is defined at depth 0 only.
-- Split-mode parity at B=8 (B=4 passes).
-- The 37-38 slot estimate was not exercised by actually allocating that many.
+- The 37-43 slot estimates were not exercised by actually allocating that many.
 
 
 ## Measuring
@@ -131,6 +154,7 @@ hipml batch-bench --gguf MODEL --slots 4 --tokens 16 --check
 hipml batch-bench --gguf MODEL --slots 4 --depths 0,1024,8192,32768
 hipml batch-bench --gguf MODEL --slots 8 --probe     # per-tensor GB/s
 hipml batch-bench --gguf MODEL --slots 4 --split     # stage ms/step
+hipml batch-bench --gguf MODEL --slots 32 --active 16 # capacity vs active slots
 ```
 
 `--check` runs the same token stream through the single-stream engine and

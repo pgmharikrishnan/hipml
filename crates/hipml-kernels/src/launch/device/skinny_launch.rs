@@ -24,6 +24,33 @@ pub fn skinny_resident(
     k: usize,
     r: usize,
 ) -> Result<(), String> {
+    skinny_resident_rows(
+        module,
+        stream,
+        name,
+        w,
+        x.as_ptr() as *const u8,
+        y.as_ptr() as *const u8,
+        n,
+        k,
+        r,
+    )
+}
+
+/// Same launch with raw `[row][k]` x and `[row][n]` y pointers, so a caller
+/// with more than 16 rows can hand the tile one 16-row slice at a time.
+#[allow(clippy::too_many_arguments)]
+pub fn skinny_resident_rows(
+    module: &Module,
+    stream: &Stream,
+    name: &str,
+    w: &ByteBuffer,
+    x: *const u8,
+    y: *const u8,
+    n: usize,
+    k: usize,
+    r: usize,
+) -> Result<(), String> {
     if r == 0 || r > 16 {
         return Err(format!("{name}: r={r} must be in 1..=16"));
     }
@@ -60,8 +87,8 @@ pub fn skinny_resident(
     }
     let kernel = module.kernel(name)?;
     let mut p_w = w.as_ptr();
-    let mut p_x = x.as_ptr();
-    let mut p_y = y.as_ptr();
+    let mut p_x = x as *mut std::ffi::c_void;
+    let mut p_y = y as *mut std::ffi::c_void;
     let mut v_n = n as i32;
     let mut v_k = k as i32;
     let mut v_r = r as i32;

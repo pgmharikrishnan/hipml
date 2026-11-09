@@ -420,6 +420,68 @@ KV_ENTRY(attn_decode_kv_q4, KvQ4, KV_TILE_Q4)
 
 #undef KV_ENTRY
 
+// Batched form: one grid.y step per slot, one query row / cache per slot. The
+// slot strides are base pointers advanced here, so the body above is reused
+// unchanged and slot b computes exactly the single-slot arithmetic.
+#define KV_ENTRY_B(NAME, LOADER, TILE)                                        \
+    extern "C" __global__ void NAME(                                          \
+        const float* __restrict__ q,                                          \
+        const void* __restrict__ k,                                           \
+        const void* __restrict__ v,                                           \
+        float* __restrict__ part_acc,                                         \
+        float* __restrict__ part_ml,                                          \
+        int n_heads, int n_kv, int head_dim, const int* pos, int stride,      \
+        float scale, int splits, int kv_slot_bytes, int acc_slot, int ml_slot,\
+        int q_slot)                                                           \
+    {                                                                         \
+        const int slot = blockIdx.y;                                          \
+        kv_dispatch<LOADER, TILE>(                                            \
+            q + (size_t)slot * q_slot,                                        \
+            (const char*)k + (size_t)slot * kv_slot_bytes,                    \
+            (const char*)v + (size_t)slot * kv_slot_bytes,                    \
+            part_acc + (size_t)slot * acc_slot,                               \
+            part_ml + (size_t)slot * ml_slot,                                 \
+            n_heads, n_kv, head_dim, pos + slot * 2, stride, scale, splits);  \
+    }
+
+KV_ENTRY_B(attn_decode_kv_q8_b, KvQ8, KV_TILE_Q8)
+KV_ENTRY_B(attn_decode_kv_q4_b, KvQ4, KV_TILE_Q4)
+
+#undef KV_ENTRY_B
+
+// Batched reduce: one grid.y step per slot.
+extern "C" __global__ void attn_decode_kv_reduce_b(
+    const float* __restrict__ part_acc,
+    const float* __restrict__ part_ml,
+    float* __restrict__ out,
+    int head_dim,
+    int splits,
+    int acc_slot,
+    int ml_slot,
+    int out_slot)
+{
+    const int h = blockIdx.x;
+    const int slot = blockIdx.y;
+    const int t = threadIdx.x;
+    if (t >= head_dim) return;
+
+    const float* ml = part_ml + (size_t)slot * ml_slot + (size_t)h * splits * 2;
+    float m = -INFINITY;
+    for (int s = 0; s < splits; ++s) m = fmaxf(m, ml[s * 2]);
+
+    float acc = 0.0f;
+    float l = 0.0f;
+    const float* pa = part_acc + (size_t)slot * acc_slot
+                    + (size_t)h * splits * head_dim + t;
+    for (int s = 0; s < splits; ++s) {
+        const float w = exp2f(ml[s * 2] - m);
+        l += ml[s * 2 + 1] * w;
+        acc += pa[(size_t)s * head_dim] * w;
+    }
+    out[(size_t)slot * out_slot + (size_t)h * head_dim + t] =
+        (l > 0.0f) ? acc / l : 0.0f;
+}
+
 // Merge per-split (acc, m, l) into out. One block per query head, one thread per
 // head component; every thread walks the splits itself because splits is small
 // (a few tens) and the per-split (m, l) pair is a broadcast load.

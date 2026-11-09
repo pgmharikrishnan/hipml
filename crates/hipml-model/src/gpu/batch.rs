@@ -22,6 +22,8 @@ use super::*;
 
 #[path = "batch/forward.rs"]
 mod forward;
+#[path = "batch/kv.rs"]
+mod kv;
 
 /// Slot bookkeeping. Capacity is fixed when the engine is built; allocation
 /// just hands out the indices, so nothing in the forward path assumes slot 0
@@ -76,10 +78,10 @@ enum BatchKind<'a> {
 }
 
 /// One full-attention layer: one `AttnLayer` (shared projections + row scratch)
-/// plus one quantized KV cache per slot.
+/// plus one contiguous KV cache for all slots.
 struct FullBatch<'a> {
     attn: AttnLayer<'a>,
-    deep: Vec<DeepKv>,
+    kv: kv::BatchKv,
     qg: Buffer,
     k: Buffer,
     v: Buffer,
@@ -89,10 +91,12 @@ struct FullBatch<'a> {
     y: Buffer,
 }
 
-/// One SSM layer: a `SsmGpuLayer` per slot (state), and the batched projection
-/// scratch shared by all slots.
+/// One SSM layer: one `SsmGpuLayer` (borrowed weights + shared scratch) and the
+/// per-slot recurrent state as contiguous `[slots][state]` buffers.
 struct SsmBatch<'a> {
-    per_slot: Vec<SsmGpuLayer<'a>>,
+    inst: SsmGpuLayer<'a>,
+    conv_state: Buffer,
+    s_state: Buffer,
     qkv: Buffer,
     z: Buffer,
     alpha: Buffer,
@@ -131,13 +135,13 @@ pub struct BatchEngine<'a> {
     pool: SlotPool,
     positions: Vec<usize>,
     active: Vec<usize>,
+    /// `[slots][2]` i32 of (position, seq), written once per forward step; the
+    /// batched attention/rope/append kernels read their slot's pair.
+    pos_buf: Buffer,
     /// Stage timing (sync at group boundaries); costs a sync per group.
     pub trace: bool,
     /// Seconds per stage accumulated by `forward` when `trace` is on.
     pub stages: [f64; 9],
-    /// Split alternating slots across the two streams (off by default: it is
-    /// an A/B behind `HIPML_BATCH_SPLIT`).
-    pub overlap: bool,
 }
 
 impl<'a> BatchEngine<'a> {
@@ -147,8 +151,8 @@ impl<'a> BatchEngine<'a> {
         kv_mode: KvMode,
         slots: usize,
     ) -> Result<BatchEngine<'a>, String> {
-        if slots == 0 || slots > 8 {
-            return Err(format!("slots={slots}: batched kernels cover 1..=8"));
+        if slots == 0 || slots > 32 {
+            return Err(format!("slots={slots}: batched kernels cover 1..=32"));
         }
         if kv_mode == KvMode::F32 {
             return Err("batch decode needs --kv q8 or q4 (the f32 cache is the single-stream oracle)".to_string());
@@ -168,7 +172,6 @@ impl<'a> BatchEngine<'a> {
         }
         let embed = (embed.buffer(), (embed.nbytes() / embed.rows()) as usize);
         let zeros = |count: usize| Buffer::alloc(count);
-        let overlap = std::env::var_os("HIPML_BATCH_SPLIT").is_some();
         let mut layers = Vec::with_capacity(cfg.n_layer);
         for i in 0..cfg.n_layer {
             let attn_norm = Buffer::from_host(&model.f32_vec(&format!("blk.{i}.attn_norm.weight"))?)?;
@@ -178,15 +181,15 @@ impl<'a> BatchEngine<'a> {
             let up = Proj::of(model, &format!("blk.{i}.ffn_up.weight"))?;
             let down = Proj::of(model, &format!("blk.{i}.ffn_down.weight"))?;
             let kind = if cfg.is_recr[i] {
-                let mut per_slot = Vec::with_capacity(slots);
-                for b in 0..slots {
-                    // Odd slots launch their recurrence on the side stream, so
-                    // the two halves overlap instead of serialising 8 small
-                    // kernels at a time.
-                    per_slot.push(build_ssm(model, l, &cfg, i, overlap && b % 2 == 1)?);
-                }
+                let conv_state = zeros(slots * (dims.d_conv - 1) * dims.conv_ch)?;
+                let s_state = zeros(slots * dims.n_v * dims.head_v * dims.head_v)?;
+                // Buffer::alloc is uninitialised; a cold start needs zero state.
+                conv_state.zero()?;
+                s_state.zero()?;
                 BatchKind::Ssm(SsmBatch {
-                    per_slot,
+                    inst: build_ssm(model, l, &cfg, i, false)?,
+                    conv_state,
+                    s_state,
                     qkv: zeros(slots * dims.conv_ch)?,
                     z: zeros(slots * dims.inner())?,
                     alpha: zeros(slots * dims.n_v)?,
@@ -199,16 +202,12 @@ impl<'a> BatchEngine<'a> {
                     out: zeros(slots * n)?,
                 })
             } else {
-                let mut deep = Vec::with_capacity(slots);
-                for _ in 0..slots {
-                    deep.push(DeepKv::new(&cfg, n_ctx, kv_mode.dtype().unwrap())?);
-                }
                 let qw = cfg.n_head * cfg.head_dim;
                 let width = cfg.n_head_kv * cfg.head_dim;
                 BatchKind::Full(FullBatch {
                     // 1 mirror row: the quantized path never reads the f32 cache.
                     attn: build_attn(model, l, &cfg, i, 1)?,
-                    deep,
+                    kv: kv::BatchKv::new(&cfg, n_ctx, kv_mode.dtype().unwrap(), slots)?,
                     qg: zeros(slots * 2 * qw)?,
                     k: zeros(slots * width)?,
                     v: zeros(slots * width)?,
@@ -251,9 +250,9 @@ impl<'a> BatchEngine<'a> {
             pool: SlotPool::new(slots),
             positions: vec![0; slots],
             active: Vec::new(),
+            pos_buf: Buffer::alloc(2 * slots)?,
             trace: false,
             stages: [0.0; 9],
-            overlap,
         })
     }
 
@@ -282,10 +281,8 @@ impl<'a> BatchEngine<'a> {
     pub fn reset_state(&self) -> Result<(), String> {
         for b in &self.layers {
             if let BatchKind::Ssm(s) = &b.kind {
-                for layer in &s.per_slot {
-                    layer.conv_state_buf().zero()?;
-                    layer.s_state_buf().zero()?;
-                }
+                s.conv_state.zero()?;
+                s.s_state.zero()?;
             }
         }
         self.model.launcher().synchronize()
@@ -297,10 +294,10 @@ impl<'a> BatchEngine<'a> {
         let mut seed = 0x9E37_79B9_7F4A_7C15u64;
         for b in &self.layers {
             if let BatchKind::Full(f) = &b.kind {
-                for (bi, &slot) in self.active.iter().enumerate() {
-                    f.deep[slot].fill_synthetic(depth[bi], seed)?;
-                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                }
+                let depths: Vec<usize> =
+                    self.active.iter().enumerate().map(|(bi, _)| depth[bi]).collect();
+                f.kv.fill_synthetic(&depths, seed)?;
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
             }
         }
         Ok(())
@@ -324,7 +321,7 @@ impl<'a> BatchEngine<'a> {
             b += l.gate.bytes() + l.up.bytes() + l.down.bytes();
             b += match &l.kind {
                 BatchKind::Full(f) => f.attn.weight_bytes(),
-                BatchKind::Ssm(s) => s.per_slot[0].weight_bytes(),
+                BatchKind::Ssm(s) => s.inst.weight_bytes(),
             };
         }
         b + self
@@ -339,7 +336,7 @@ impl<'a> BatchEngine<'a> {
         self.layers
             .iter()
             .map(|b| match &b.kind {
-                BatchKind::Full(f) => f.deep.iter().map(|d| d.bytes()).sum::<usize>(),
+                BatchKind::Full(f) => f.kv.bytes(),
                 BatchKind::Ssm(_) => 0,
             })
             .sum()
@@ -362,9 +359,4 @@ impl<'a> BatchEngine<'a> {
     pub fn model(&self) -> &Model {
         self.model
     }
-}
-
-/// Device pointer of row `row` of a `[rows][width]` f32 buffer.
-pub(super) fn row_ptr(buf: &Buffer, row: usize, width: usize) -> *mut std::ffi::c_void {
-    unsafe { (buf.as_ptr() as *mut u8).add(row * width * 4) as *mut std::ffi::c_void }
 }

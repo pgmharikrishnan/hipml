@@ -21,6 +21,8 @@ mod ssm_ops;
 #[cfg(feature = "hip")]
 mod ssm_cols;
 #[cfg(feature = "hip")]
+mod ssm_batch_ops;
+#[cfg(feature = "hip")]
 mod ssm_chunk;
 
 pub use attn_gpu::AttnLayer;
@@ -482,6 +484,77 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "gemm_rows_f32",
         entry: "gemm_rows_f32",
         kind: KernelKind::Linear { block: 256 },
+    },
+    // Batched per-slot work (WP37): slot on grid.y, one launch for all slots.
+    KernelSpec {
+        name: "ssm_gates_b",
+        entry: "ssm_gates_b",
+        kind: KernelKind::Linear { block: 64 },
+    },
+    KernelSpec {
+        name: "ssm_conv1d_b",
+        entry: "ssm_conv1d_b",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "l2norm_b",
+        entry: "l2norm_b",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "gdn_ar_b",
+        entry: "gdn_ar_b",
+        kind: KernelKind::Linear { block: 128 },
+    },
+    KernelSpec {
+        name: "ssm_gate_norm_b",
+        entry: "ssm_gate_norm_b",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "gemv_f32_b",
+        entry: "gemv_f32_b",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "qg_split_b",
+        entry: "qg_split_b",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "head_rmsnorm_b",
+        entry: "head_rmsnorm_b",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "mrope_b",
+        entry: "mrope_b",
+        kind: KernelKind::Linear { block: 32 },
+    },
+    KernelSpec {
+        name: "kv_encode_q8_b",
+        entry: "kv_encode_q8_b",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "kv_encode_q4_b",
+        entry: "kv_encode_q4_b",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "attn_decode_kv_q8_b",
+        entry: "attn_decode_kv_q8_b",
+        kind: KernelKind::Linear { block: 192 },
+    },
+    KernelSpec {
+        name: "attn_decode_kv_q4_b",
+        entry: "attn_decode_kv_q4_b",
+        kind: KernelKind::Linear { block: 192 },
+    },
+    KernelSpec {
+        name: "attn_decode_kv_reduce_b",
+        entry: "attn_decode_kv_reduce_b",
+        kind: KernelKind::Linear { block: 128 },
     },
     KernelSpec {
         name: "stream_read",

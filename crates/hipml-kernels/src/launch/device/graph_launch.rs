@@ -65,6 +65,9 @@ impl Launcher {
     /// B <= 3 keeps the `_b` kernels. `HIPML_BATCH_SKINNY=1` forces the skinny
     /// path at any batch, `HIPML_BATCH_LEGACY=1` forces `_b`;
     /// `HIPML_BATCH_SKINNY_TRACE=1` names every switched projection.
+    ///
+    /// Above 16 rows the tile runs once per 16-row group; each group is an
+    /// independent weight pass, so cost scales with `ceil(batch / 16)`.
     #[allow(clippy::too_many_arguments)]
     pub fn gemv_batched(
         &self,
@@ -76,8 +79,8 @@ impl Launcher {
         k: usize,
         batch: usize,
     ) -> Result<(), String> {
-        if batch == 0 || batch > 8 {
-            return Err(format!("batched GEMV: batch {batch} outside 1..=8"));
+        if batch == 0 || batch > 32 {
+            return Err(format!("batched GEMV: batch {batch} outside 1..=32"));
         }
         /// Lowest batch size where one 16-wide WMMA tile beats `batch` columns
         /// of the f32-from-LDS kernel. Measured crossover; below it the tile is
@@ -88,53 +91,87 @@ impl Launcher {
         } else {
             std::env::var_os("HIPML_BATCH_SKINNY").is_some() || batch >= SKINNY_MIN_BATCH
         };
-        if skinny && batch <= 16 {
+        if skinny {
             if let Some(entry) = Self::skinny_for_kind(kind) {
-                if std::env::var_os("HIPML_BATCH_SKINNY_TRACE").is_some() {
-                    eprintln!("[skinny] {entry} m={m} k={k} r={batch}");
+                let mut base = 0usize;
+                while base < batch {
+                    let r = (batch - base).min(16);
+                    if std::env::var_os("HIPML_BATCH_SKINNY_TRACE").is_some() {
+                        eprintln!("[skinny] {entry} m={m} k={k} r={r} row0={base}");
+                    }
+                    let px = unsafe {
+                        (x.as_ptr() as *mut u8).add(base * k * 4) as *const _
+                    };
+                    let py = unsafe {
+                        (y.as_ptr() as *mut u8).add(base * m * 4) as *const _
+                    };
+                    super::skinny_launch::skinny_resident_rows(
+                        &self.module,
+                        &self.stream,
+                        entry,
+                        w,
+                        px,
+                        py,
+                        m,
+                        k,
+                        r,
+                    )?;
+                    base += r;
                 }
-                return super::skinny_launch::skinny_resident(
-                    &self.module,
-                    &self.stream,
-                    entry,
-                    w,
-                    x,
-                    y,
-                    m,
-                    k,
-                    batch,
-                );
+                return Ok(());
             }
         }
-        let (entry, rows, tile) = match kind {
-            GEMV_B_Q4K => ("gemv_q4_k_b", 16usize, if batch <= 4 { 1024 } else { 512 }),
-            GEMV_B_Q6K => ("gemv_q6_k_b", 16, if batch <= 4 { 1024 } else { 512 }),
-            GEMV_B_Q5K => ("gemv_q5_k_b", 16, if batch <= 4 { 1024 } else { 512 }),
-            GEMV_B_Q80 => ("gemv_q8_0_b", 1, 0),
+        let (entry, rows, tile, tid) = match kind {
+            GEMV_B_Q4K => ("gemv_q4_k_b", 16usize, 1024usize, 256u32),
+            GEMV_B_Q6K => ("gemv_q6_k_b", 16, 1024, 256),
+            GEMV_B_Q5K => ("gemv_q5_k_b", 16, 1024, 256),
+            GEMV_B_Q80 => ("gemv_q8_0_b", 1, 0, 256),
             other => return Err(format!("unknown batched GEMV kind {other}")),
         };
-        let shared = batch * tile * 4;
         let kernel = self.module.kernel(entry)?;
-        let mut p_w = w.as_ptr();
-        let mut p_x = x.as_ptr();
-        let mut p_y = y.as_ptr();
-        let mut v_m = m as i32;
-        let mut v_k = k as i32;
-        let mut v_b = batch as i32;
-        let mut params: [*mut c_void; 6] = [
-            &mut p_w as *mut _ as *mut c_void,
-            &mut p_x as *mut _ as *mut c_void,
-            &mut p_y as *mut _ as *mut c_void,
-            &mut v_m as *mut _ as *mut c_void,
-            &mut v_k as *mut _ as *mut c_void,
-            &mut v_b as *mut _ as *mut c_void,
-        ];
-        let cfg = LaunchConfig {
-            grid: (m.div_ceil(rows) as u32, 1, 1),
-            block: (256, 1, 1),
-            shared_mem_bytes: shared as u32,
-        };
-        kernel.launch(cfg, &self.stream, &mut params)
+        // Formats without a skinny entry (Q5_K today) still have the `_b`
+        // kernel; it covers at most 8 rows, so run it once per group. Those
+        // tensors are a small share of the resident bytes.
+        let mut base = 0usize;
+        while base < batch {
+            let r = (batch - base).min(8);
+            let tile = if tid == 256 {
+                if r <= 4 {
+                    1024
+                } else {
+                    512
+                }
+            } else {
+                tile
+            };
+            let shared = r * tile * 4;
+            let mut p_w = w.as_ptr();
+            let mut p_x = unsafe {
+                (x.as_ptr() as *mut u8).add(base * k * 4) as *mut c_void
+            };
+            let mut p_y = unsafe {
+                (y.as_ptr() as *mut u8).add(base * m * 4) as *mut c_void
+            };
+            let mut v_m = m as i32;
+            let mut v_k = k as i32;
+            let mut v_b = r as i32;
+            let mut params: [*mut c_void; 6] = [
+                &mut p_w as *mut _ as *mut c_void,
+                &mut p_x as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut v_m as *mut _ as *mut c_void,
+                &mut v_k as *mut _ as *mut c_void,
+                &mut v_b as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: (m.div_ceil(rows) as u32, 1, 1),
+                block: (tid, 1, 1),
+                shared_mem_bytes: shared as u32,
+            };
+            kernel.launch(cfg, &self.stream, &mut params)?;
+            base += r;
+        }
+        Ok(())
     }
 
     /// Batched greedy argmax over `rows` logit vectors of `n` values each.
