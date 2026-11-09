@@ -54,10 +54,19 @@ mod graph;
 pub use graph::{launches_per_token, GraphTiming};
 #[path = "gpu/prefix.rs"]
 mod prefix;
+#[path = "gpu/columns.rs"]
+mod columns;
+#[path = "gpu/mtp.rs"]
+mod mtp;
+#[path = "gpu/spec.rs"]
+mod spec;
 
 use layers::{build_attn, build_ssm};
 use trace::mark;
 
+pub use columns::Snap;
+pub use mtp::MtpGpu;
+pub use spec::{SpecRun, SpecStats};
 pub use prefill::PrefillReport;
 pub use prefix::PrefixHit;
 
@@ -125,6 +134,8 @@ pub struct GpuState {
 pub struct GpuEngine<'a> {
     model: &'a Model,
     pub cfg: Config,
+    /// Positions the caches were sized for.
+    pub n_ctx: usize,
     pub kv_mode: KvMode,
     layers: Vec<Block<'a>>,
     output_norm: Buffer,
@@ -153,6 +164,8 @@ pub struct GpuEngine<'a> {
     pub trace: Option<Trace>,
     /// Prefix snapshots (SSM recurrent state + f32 KV rows), when enabled.
     prefix: Option<hipml_core::prefix_cache::PrefixCache<prefix::Snapshot>>,
+    /// R-column verify scratch, allocated on first use and reused after.
+    cols: Option<columns::Cols>,
 }
 
 /// Blocks the device argmax reduces over before the one-block fold. 64 blocks
@@ -233,6 +246,7 @@ impl<'a> GpuEngine<'a> {
         Ok(GpuEngine {
             model,
             cfg: cfg.clone(),
+            n_ctx,
             kv_mode,
             layers,
             output_norm,
@@ -253,6 +267,7 @@ impl<'a> GpuEngine<'a> {
             graph: None,
             trace: None,
             prefix: None,
+            cols: None,
         })
     }
 
@@ -349,7 +364,13 @@ impl<'a> GpuEngine<'a> {
                 BlockKind::Full { attn, deep: None } => {
                     l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
                     mark(&mut self.trace, l, "attn_in")?;
-                    attn.forward_buf(l, &self.t, pos)?;
+                    attn.prepare_qkv(l, &self.t)?;
+                    mark(&mut self.trace, l, "attn_append")?;
+                    attn.append_at(l, attn.k_buf().as_ptr(), attn.v_buf().as_ptr())?;
+                    mark(&mut self.trace, l, "attn_mix")?;
+                    attn.attention_at(l, attn.q_buf().as_ptr(), attn.attn_out().as_ptr())?;
+                    mark(&mut self.trace, l, "attn_wo")?;
+                    attn.apply_output(l)?;
                     mark(&mut self.trace, l, "block")?;
                     attn.output()
                 }

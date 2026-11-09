@@ -254,6 +254,55 @@ impl Model {
         ))
     }
 
+    /// Upload every tensor of a sidecar GGUF into this model's resident table.
+    ///
+    /// The sidecar (an MTP / `nextn` block) shares this model's launcher, so
+    /// main-model and drafter launches are ordered on one stream and a hidden
+    /// state never round-trips through the host. Names already resident (the
+    /// sidecar's own `token_embd`, `output` and `output_norm` copies) are
+    /// skipped: the drafter must read the target model's embedding and head.
+    ///
+    /// Returns the bytes uploaded.
+    pub fn load_sidecar(&mut self, path: impl AsRef<Path>) -> Result<u64, String> {
+        let path = path.as_ref();
+        let mut g =
+            Gguf::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let infos = g.tensors.clone();
+        let mut added = 0u64;
+        for info in &infos {
+            if self.index.contains_key(&info.name) {
+                continue;
+            }
+            let raw = g
+                .read_tensor(&info.name)
+                .map_err(|e| format!("{}: {e}", info.name))?;
+            if raw.len() as u64 != info.nbytes {
+                return Err(format!(
+                    "{}: read {} bytes, tensor info says {}",
+                    info.name,
+                    raw.len(),
+                    info.nbytes
+                ));
+            }
+            let buffer = ByteBuffer::from_host(&raw).map_err(|e| {
+                format!("{}: upload of {} bytes failed: {e}", info.name, info.nbytes)
+            })?;
+            let ok = supported(info.ty);
+            self.total_bytes += info.nbytes;
+            added += info.nbytes;
+            self.index.insert(info.name.clone(), self.tensors.len());
+            self.tensors.push(DeviceTensor {
+                name: info.name.clone(),
+                dims: info.dims.clone(),
+                ty: info.ty,
+                nbytes: info.nbytes,
+                supported: ok,
+                buffer,
+            });
+        }
+        Ok(added)
+    }
+
     pub fn tensor(&self, name: &str) -> Option<&DeviceTensor> {
         self.index.get(name).map(|&i| &self.tensors[i])
     }
