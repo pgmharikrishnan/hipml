@@ -11,9 +11,9 @@
 //! per layer:
 //!   tc   = rmsnorm_rows(xc, attn_norm)
 //!   block = chunk projections + per-token recurrence/attention
-//!   x1c  = xc + block;  tc = rmsnorm_rows(x1c, post_attention_norm)
+//!   x1c  = xc + block;  tc = rmsnorm_rows(x1c, post_attention_norm)  (fused)
 //!   act  = silu(gemm(gate, tc)) * gemm(up, tc)
-//!   xc   = x1c + gemm(down, act)
+//!   xc   = x1c + gemm(down, act)                                     (+ next norm, fused)
 //! logits = lm_head(rmsnorm(last row))
 //! ```
 //!
@@ -244,12 +244,17 @@ impl<'a> GpuEngine<'a> {
             r.lap(l, |r| &mut r.embed_ms);
         }
 
+        // The first layer's input norm has no residual to fold into it (the
+        // embedding wrote `x` directly); every later layer's input norm is
+        // fused with the residual that produces its input at the bottom of the
+        // loop. `residual_rmsnorm_f32` caps the row at `MAXK * BLOCK` columns.
+        let fused_norm = n <= 32 * 256;
+        l.rmsnorm_rows(&c.x, &self.layers[0].attn_norm, &c.t, n, cfg.eps, n_tok)?;
+        if let Some(r) = rep.as_mut() {
+            r.lap(l, |r| &mut r.elementwise_ms);
+        }
         for i in 0..self.layers.len() {
             let block = &self.layers[i];
-            l.rmsnorm_rows(&c.x, &block.attn_norm, &c.t, n, cfg.eps, n_tok)?;
-            if let Some(r) = rep.as_mut() {
-                r.lap(l, |r| &mut r.elementwise_ms);
-            }
             let block_out: &Buffer = match &block.kind {
                 BlockKind::Ssm(s) => {
                     s.project_chunk(l, &c.t, &c.xh, &c.ssm, n_tok)?;
@@ -293,8 +298,21 @@ impl<'a> GpuEngine<'a> {
                     &c.y
                 }
             };
-            l.residual_buf(&c.x, block_out, &c.x1, n_tok * n)?;
-            l.rmsnorm_rows(&c.x1, &block.post_norm, &c.t, n, cfg.eps, n_tok)?;
+            if fused_norm {
+                l.residual_rmsnorm(
+                    &c.x,
+                    block_out,
+                    &block.post_norm,
+                    &c.x1,
+                    &c.t,
+                    n,
+                    cfg.eps,
+                    n_tok,
+                )?;
+            } else {
+                l.residual_buf(&c.x, block_out, &c.x1, n_tok * n)?;
+                l.rmsnorm_rows(&c.x1, &block.post_norm, &c.t, n, cfg.eps, n_tok)?;
+            }
             if let Some(r) = rep.as_mut() {
                 r.lap(l, |r| &mut r.elementwise_ms);
             }
@@ -327,9 +345,31 @@ impl<'a> GpuEngine<'a> {
                 l.silu_mul_buf(&c.gate, &c.up, &c.act, n_tok * cfg.n_ff)?;
                 block.down.gemm(l, &c.act, &c.down, n_tok)?;
             }
-            l.residual_buf(&c.down, &c.x1, &c.x, n_tok * n)?;
             if let Some(r) = rep.as_mut() {
                 r.lap(l, |r| &mut r.ffn_gemm_ms);
+            }
+            // Bottom residual: `x = x1 + down`. When another layer follows,
+            // fold its input norm into the same pass; the last layer's `x` is
+            // only read by the logits projection, so it stays a bare add.
+            match self.layers.get(i + 1) {
+                Some(next) if fused_norm => l.residual_rmsnorm(
+                    &c.down,
+                    &c.x1,
+                    &next.attn_norm,
+                    &c.x,
+                    &c.t,
+                    n,
+                    cfg.eps,
+                    n_tok,
+                )?,
+                Some(next) => {
+                    l.residual_buf(&c.down, &c.x1, &c.x, n_tok * n)?;
+                    l.rmsnorm_rows(&c.x, &next.attn_norm, &c.t, n, cfg.eps, n_tok)?;
+                }
+                None => l.residual_buf(&c.down, &c.x1, &c.x, n_tok * n)?,
+            }
+            if let Some(r) = rep.as_mut() {
+                r.lap(l, |r| &mut r.elementwise_ms);
             }
         }
 

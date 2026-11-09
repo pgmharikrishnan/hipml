@@ -157,6 +157,42 @@ impl Launcher {
         self.linear3("residual_add_f32", a, b, y, n)
     }
 
+    /// `res = a + b` then `y = rmsnorm(res, w)` in one per-row pass: the fused
+    /// kernel keeps the row in registers, so it is bit-identical to
+    /// [`Self::residual_buf`] followed by [`Self::rmsnorm_ptr`] but skips one
+    /// global read of the row. `n` must be at most `32 * 256` (the kernel's
+    /// `MAXK * BLOCK`); callers fall back to the pair otherwise.
+    pub fn residual_rmsnorm(
+        &self,
+        a: &Buffer,
+        b: &Buffer,
+        w: &Buffer,
+        res: &Buffer,
+        y: &Buffer,
+        n: usize,
+        eps: f32,
+        rows: usize,
+    ) -> Result<(), String> {
+        let kernel = self.module.kernel("residual_rmsnorm_f32")?;
+        let mut p_a = a.as_ptr();
+        let mut p_b = b.as_ptr();
+        let mut p_w = w.as_ptr();
+        let mut p_res = res.as_ptr();
+        let mut p_y = y.as_ptr();
+        let mut v_n = n as i32;
+        let mut v_eps = eps;
+        let mut params: [*mut c_void; 7] = [
+            &mut p_a as *mut _ as *mut c_void,
+            &mut p_b as *mut _ as *mut c_void,
+            &mut p_w as *mut _ as *mut c_void,
+            &mut p_res as *mut _ as *mut c_void,
+            &mut p_y as *mut _ as *mut c_void,
+            &mut v_n as *mut _ as *mut c_void,
+            &mut v_eps as *mut _ as *mut c_void,
+        ];
+        kernel.launch(LaunchConfig::per_row(rows, 256), &self.stream, &mut params)
+    }
+
     /// `y = silu(gate) * up`, one thread per element.
     pub fn silu_mul_buf(
         &self,
