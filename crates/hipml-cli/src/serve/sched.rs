@@ -34,6 +34,10 @@ use super::metrics::Metrics;
 mod run;
 #[path = "sched/fail.rs"]
 mod fail;
+#[path = "sched/rows.rs"]
+mod rows;
+#[path = "sched/step.rs"]
+mod step;
 #[path = "sched/warm.rs"]
 mod warm;
 pub use run::run;
@@ -185,15 +189,13 @@ fn begin(
         return Err((job, "empty prompt".to_string()));
     }
     if len + job.max_tokens > cfg.ctx {
-        return Err((
-            job,
-            format!(
-                "prompt {} + {} tokens exceeds the {} token slot",
-                len, job.max_tokens, cfg.ctx
-            ),
-        ));
+        let why = format!(
+            "prompt {} + {} tokens exceeds the {} token slot",
+            len, job.max_tokens, cfg.ctx
+        );
+        return Err((job, why));
     }
-    match prepare(engine, &job, cfg, mode, metrics) {
+    match prepare(engine, &job, mode, metrics) {
         Ok(a) => Ok(Prefill {
             job,
             st: a.st,
@@ -225,7 +227,6 @@ struct Admitted {
 fn prepare(
     engine: &mut GpuEngine<'_>,
     job: &Job,
-    cfg: &SchedCfg,
     mut mode: Mode,
     metrics: &Metrics,
 ) -> Result<Admitted, String> {

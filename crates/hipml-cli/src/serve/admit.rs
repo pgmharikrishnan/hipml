@@ -82,6 +82,19 @@ impl Drop for Ticket {
     }
 }
 
+/// Wait until every admitted request has closed, or `max` elapses.
+///
+/// Used after a device-level failure: the scheduler has already sent every
+/// stream an error, and the process may exit only once the last frame is
+/// written. The connection thread holds its ticket until its reply is complete,
+/// so a zero count means every socket has been closed.
+pub fn await_close(bound: &Bound, max: std::time::Duration) {
+    let t = std::time::Instant::now();
+    while bound.used() > 0 && t.elapsed() < max {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// Answer `503 Service Unavailable` with `Retry-After`, so a client backs off
 /// instead of retrying in a tight loop.
 pub fn busy(

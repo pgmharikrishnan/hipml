@@ -288,10 +288,6 @@ pub struct Sse {
 }
 
 impl Sse {
-    pub fn start(stream: &mut TcpStream) -> Result<Sse, String> {
-        Sse::start_h(stream, "")
-    }
-
     /// `extra` is one extra header line (`""` for none).
     pub fn start_h(stream: &mut TcpStream, extra: &str) -> Result<Sse, String> {
         stream

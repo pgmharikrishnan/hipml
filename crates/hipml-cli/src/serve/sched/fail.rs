@@ -53,13 +53,6 @@ pub fn slot(engine: &mut GpuEngine<'_>, metrics: &Metrics, job: &Job, why: &str)
     });
 }
 
-/// A malformed or unschedulable request: tell the connection, count it.
-pub fn request(metrics: &Metrics, tx: &Sender<Event>, what: &str, e: &str) {
-    eprintln!("serve: {what}: {e}");
-    let _ = tx.send(Event::Error(format!("{what}: {e}")));
-    metrics.update(|s| s.requests_failed += 1);
-}
-
 /// Return one slot to the pool, moving the last active slot's bookkeeping into
 /// the freed index when the engine has to swap device state down.
 pub fn release(
@@ -91,8 +84,8 @@ pub fn batch(
     slots: &mut [Option<Active>],
     metrics: &Metrics,
     why: &str,
-) -> Result<usize, String> {
-    let mut failed = 0;
+) -> Result<u64, String> {
+    let mut failed = 0u64;
     for s in slots.iter_mut() {
         if let Some(a) = s.take() {
             let gone = engine.prefix_invalidate(&a.job.prompt);

@@ -590,7 +590,25 @@ fn stream_completion(
 
 #[cfg(test)]
 mod tests {
-    use super::Stops;
+    use super::{greedy_only, Stops};
+    use crate::serve::json::parse;
+
+    fn check(body: &str) -> Result<(), String> {
+        greedy_only(&parse(body).expect("valid json"))
+    }
+
+    #[test]
+    fn greedy_is_accepted_and_sampling_is_refused() {
+        assert!(check(r#"{"prompt": [1, 2]}"#).is_ok());
+        assert!(check(r#"{"prompt": [1], "temperature": 0}"#).is_ok());
+        assert!(check(r#"{"prompt": [1], "temperature": 0.0, "n": 1}"#).is_ok());
+        // `top_p` and `seed` are no-ops under greedy decode, not lies.
+        assert!(check(r#"{"prompt": [1], "temperature": 0, "top_p": 0.9, "seed": 7}"#).is_ok());
+        let e = check(r#"{"prompt": [1], "temperature": 0.8}"#).unwrap_err();
+        assert!(e.contains("greedy-only"), "{e}");
+        let e = check(r#"{"prompt": [1], "n": 2}"#).unwrap_err();
+        assert!(e.contains("greedy-only"), "{e}");
+    }
 
     fn run(pats: &[&str], parts: &[&str]) -> (String, bool) {
         let mut s = Stops::new(pats.iter().map(|p| p.to_string()).collect());

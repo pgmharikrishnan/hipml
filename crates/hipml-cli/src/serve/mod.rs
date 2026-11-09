@@ -299,9 +299,10 @@ pub fn run(args: &[String]) -> i32 {
         if skinny { "no (WMMA tile at B>=4)" } else { "yes" }
     );
 
+    let inflight = Arc::clone(&shared.inflight);
     let l = Arc::clone(&shared);
     std::thread::spawn(move || http::listen(listener, l));
-    match sched::run(&model, rx, cfg, metrics) {
+    match sched::run(&model, rx, cfg, metrics, inflight) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("serve: scheduler: {e}");
