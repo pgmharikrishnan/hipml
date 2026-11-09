@@ -108,8 +108,97 @@ fn launch(
         .launch(cfg, l.stream(), &mut params)
 }
 
-fn run_both(l: &Launcher, tokens: usize) -> Result<(usize, usize), String> {
-    let c = case(tokens, 0x6D17_0000 + tokens as u64)?;
+/// `gdn_cols_f32` (the verify kernel) against `gdn_ar_f32` (the plain decode
+/// kernel) on one token: output and carried state must be bit-identical.
+fn run_ar_cols(l: &Launcher) -> Result<(usize, usize), String> {
+    let c = case(1, 0xC015)?;
+    let mut out = Vec::new();
+    for cols in [false, true] {
+        let s = Buffer::from_host(&c.s0)?;
+        let o = Buffer::alloc(N_V * SD)?;
+        if cols {
+            let mut p_s = s.as_ptr();
+            let mut p_qkv = c.qkv.as_ptr();
+            let mut p_g = c.g.as_ptr();
+            let mut p_b = c.beta.as_ptr();
+            let mut p_o = o.as_ptr();
+            let mut p_snap: *mut c_void = std::ptr::null_mut();
+            let mut v_stride = 0i32;
+            let mut v_nv = N_V as i32;
+            let mut v_nk = N_K as i32;
+            let mut v_cc = CONV_CH as i32;
+            let mut v_kd = KEY_DIM as i32;
+            let mut v_sd = SD as i32;
+            let mut v_rows = 1i32;
+            let mut params: [*mut c_void; 13] = [
+                &mut p_s as *mut _ as *mut c_void,
+                &mut p_qkv as *mut _ as *mut c_void,
+                &mut p_g as *mut _ as *mut c_void,
+                &mut p_b as *mut _ as *mut c_void,
+                &mut p_o as *mut _ as *mut c_void,
+                &mut p_snap as *mut _ as *mut c_void,
+                &mut v_stride as *mut _ as *mut c_void,
+                &mut v_nv as *mut _ as *mut c_void,
+                &mut v_nk as *mut _ as *mut c_void,
+                &mut v_cc as *mut _ as *mut c_void,
+                &mut v_kd as *mut _ as *mut c_void,
+                &mut v_sd as *mut _ as *mut c_void,
+                &mut v_rows as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: (N_V as u32, 1, 1),
+                block: (128, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            l.module()
+                .kernel("gdn_cols_f32")?
+                .launch(cfg, l.stream(), &mut params)?;
+        } else {
+            let mut p_s = s.as_ptr();
+            let mut p_q = c.qkv.as_ptr();
+            let mut p_k = unsafe { (c.qkv.as_ptr() as *mut u8).add(KEY_DIM * 4) } as *mut c_void;
+            let mut p_v =
+                unsafe { (c.qkv.as_ptr() as *mut u8).add(2 * KEY_DIM * 4) } as *mut c_void;
+            let mut p_g = c.g.as_ptr();
+            let mut p_b = c.beta.as_ptr();
+            let mut p_o = o.as_ptr();
+            let mut v_nv = N_V as i32;
+            let mut v_nk = N_K as i32;
+            let mut v_sd = SD as i32;
+            let mut params: [*mut c_void; 10] = [
+                &mut p_s as *mut _ as *mut c_void,
+                &mut p_q as *mut _ as *mut c_void,
+                &mut p_k as *mut _ as *mut c_void,
+                &mut p_v as *mut _ as *mut c_void,
+                &mut p_g as *mut _ as *mut c_void,
+                &mut p_b as *mut _ as *mut c_void,
+                &mut p_o as *mut _ as *mut c_void,
+                &mut v_nv as *mut _ as *mut c_void,
+                &mut v_nk as *mut _ as *mut c_void,
+                &mut v_sd as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: (N_V as u32, 1, 1),
+                block: (128, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            l.module()
+                .kernel("gdn_ar_f32")?
+                .launch(cfg, l.stream(), &mut params)?;
+        }
+        l.synchronize()?;
+        out.push((o.to_host()?, s.to_host()?));
+    }
+    let diff = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .filter(|(x, y)| x.to_bits() != y.to_bits())
+            .count()
+    };
+    Ok((diff(&out[0].0, &out[1].0), diff(&out[0].1, &out[1].1)))
+}
+
+fn run_both(l: &Launcher, tokens: usize) -> Result<(usize, usize), String> {    let c = case(tokens, 0x6D17_0000 + tokens as u64)?;
     let mut out = Vec::new();
     for rows in [false, true] {
         let s = Buffer::from_host(&c.s0)?;
@@ -150,6 +239,20 @@ pub fn run(_args: &[String]) -> i32 {
         }
     };
     let mut ok = true;
+    match run_ar_cols(&l) {
+        Ok((dout, dstate)) => {
+            let pass = dout == 0 && dstate == 0;
+            ok &= pass;
+            println!(
+                "gdn_ar vs gdn_cols (1 tok): output bits differ {dout}, state bits differ {dstate}  {}",
+                if pass { "PASS" } else { "FAIL" }
+            );
+        }
+        Err(e) => {
+            eprintln!("gdn-parity: {e}");
+            return 1;
+        }
+    }
     for tokens in [1usize, 77, 512] {
         match run_both(&l, tokens) {
             Ok((dout, dstate)) => {
