@@ -44,6 +44,7 @@ pub(super) fn build_ssm<'a>(
     l: &'a Launcher,
     cfg: &Config,
     i: usize,
+    side: bool,
 ) -> Result<SsmGpuLayer<'a>, String> {
     let dims = SsmDims::from_config(cfg);
     let proj = |name: &str| -> Result<(&'a ByteBuffer, &'static str), String> {
@@ -66,7 +67,8 @@ pub(super) fn build_ssm<'a>(
         norm: &norm,
     };
     // The small vectors live as long as the layer; `new_resident` uploads them.
-    let layer = SsmGpuLayer::new_resident(l.module(), l.stream(), dims, &refs)?;
+    let stream = if side { l.stream2() } else { l.stream() };
+    let layer = SsmGpuLayer::new_resident(l.module(), stream, dims, &refs)?;
     let _ = l;
     Ok(layer)
 }

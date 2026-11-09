@@ -35,7 +35,144 @@ pub fn gemv_job_tiles(kind: i32, m: usize) -> usize {
     }
 }
 
+/// Batched-GEMV kind ids: the four resident weight formats whose decode
+/// kernels have a `_b` entry (B x rows, one weight pass).
+pub const GEMV_B_Q4K: i32 = 0;
+pub const GEMV_B_Q6K: i32 = 1;
+pub const GEMV_B_Q5K: i32 = 2;
+pub const GEMV_B_Q80: i32 = 3;
+
 impl Launcher {
+    /// The skinny-GEMM entry for a batched kind, when the format has one.
+    ///
+    /// This is the whole batch integration: `R <= 16` columns are padded to one
+    /// 16-wide WMMA tile, so the cost is the weight stream, not R.
+    fn skinny_for_kind(kind: i32) -> Option<&'static str> {
+        Some(match kind {
+            GEMV_B_Q4K => "gemm_skinny_q4_k",
+            GEMV_B_Q6K => "gemm_skinny_q6_k",
+            GEMV_B_Q80 => "gemm_skinny_q8_0",
+            _ => return None,
+        })
+    }
+
+    /// `y[b][row] = W[row,:] . x[b][:]` for `batch` rows, one weight pass.
+    ///
+    /// `x` is `[batch][k]`, `y` is `[batch][m]`. Up to 16 rows go through the
+    /// WMMA skinny GEMM (`gemm_skinny_*`); `HIPML_BATCH_LEGACY=1` forces the
+    /// f32-from-LDS `_b` kernels, which is the A/B and the fallback for batch
+    /// sizes above the 16-wide tile.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gemv_batched(
+        &self,
+        kind: i32,
+        w: &ByteBuffer,
+        x: &Buffer,
+        y: &Buffer,
+        m: usize,
+        k: usize,
+        batch: usize,
+    ) -> Result<(), String> {
+        if batch == 0 || batch > 8 {
+            return Err(format!("batched GEMV: batch {batch} outside 1..=8"));
+        }
+        if batch <= 16 && std::env::var_os("HIPML_BATCH_LEGACY").is_none() {
+            if let Some(entry) = Self::skinny_for_kind(kind) {
+                return super::skinny_launch::skinny_resident(
+                    &self.module,
+                    &self.stream,
+                    entry,
+                    w,
+                    x,
+                    y,
+                    m,
+                    k,
+                    batch,
+                );
+            }
+        }
+        let (entry, rows, tile) = match kind {
+            GEMV_B_Q4K => ("gemv_q4_k_b", 16usize, if batch <= 4 { 1024 } else { 512 }),
+            GEMV_B_Q6K => ("gemv_q6_k_b", 16, if batch <= 4 { 1024 } else { 512 }),
+            GEMV_B_Q5K => ("gemv_q5_k_b", 16, if batch <= 4 { 1024 } else { 512 }),
+            GEMV_B_Q80 => ("gemv_q8_0_b", 1, 0),
+            other => return Err(format!("unknown batched GEMV kind {other}")),
+        };
+        let shared = batch * tile * 4;
+        let kernel = self.module.kernel(entry)?;
+        let mut p_w = w.as_ptr();
+        let mut p_x = x.as_ptr();
+        let mut p_y = y.as_ptr();
+        let mut v_m = m as i32;
+        let mut v_k = k as i32;
+        let mut v_b = batch as i32;
+        let mut params: [*mut c_void; 6] = [
+            &mut p_w as *mut _ as *mut c_void,
+            &mut p_x as *mut _ as *mut c_void,
+            &mut p_y as *mut _ as *mut c_void,
+            &mut v_m as *mut _ as *mut c_void,
+            &mut v_k as *mut _ as *mut c_void,
+            &mut v_b as *mut _ as *mut c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (m.div_ceil(rows) as u32, 1, 1),
+            block: (256, 1, 1),
+            shared_mem_bytes: shared as u32,
+        };
+        kernel.launch(cfg, &self.stream, &mut params)
+    }
+
+    /// Batched greedy argmax over `rows` logit vectors of `n` values each.
+    /// `best_v`/`best_i` hold `rows * parts` entries, `out` holds `rows` ids.
+    #[allow(clippy::too_many_arguments)]
+    pub fn argmax_batched(
+        &self,
+        x: &Buffer,
+        best_v: &Buffer,
+        best_i: &Buffer,
+        out: &Buffer,
+        n: usize,
+        parts: usize,
+        rows: usize,
+    ) -> Result<(), String> {
+        let part = self.module.kernel("argmax_part_rows_f32")?;
+        let mut p_x = x.as_ptr();
+        let mut p_v = best_v.as_ptr();
+        let mut p_i = best_i.as_ptr();
+        let mut v_n = n as i32;
+        let mut v_parts = parts as i32;
+        let mut params: [*mut c_void; 5] = [
+            &mut p_x as *mut _ as *mut c_void,
+            &mut p_v as *mut _ as *mut c_void,
+            &mut p_i as *mut _ as *mut c_void,
+            &mut v_n as *mut _ as *mut c_void,
+            &mut v_parts as *mut _ as *mut c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (parts as u32, rows as u32, 1),
+            block: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        part.launch(cfg, &self.stream, &mut params)?;
+
+        let fin = self.module.kernel("argmax_final_rows_f32")?;
+        let mut p_v = best_v.as_ptr();
+        let mut p_i = best_i.as_ptr();
+        let mut p_out = out.as_ptr();
+        let mut params: [*mut c_void; 4] = [
+            &mut p_v as *mut _ as *mut c_void,
+            &mut p_i as *mut _ as *mut c_void,
+            &mut p_out as *mut _ as *mut c_void,
+            &mut v_parts as *mut _ as *mut c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (rows as u32, 1, 1),
+            block: (32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        fin.launch(cfg, &self.stream, &mut params)
+    }
+
     /// Split-K Q4_K GEMV: row tiles x splits, then the ordered reduce.
     pub fn gemv_q4_k_split(
         &self,
@@ -361,6 +498,26 @@ impl Launcher {
         head_dim: usize,
         stride: usize,
     ) -> Result<(), String> {
+        self.kv_encode_ptr_on(&self.stream, &self.step, dtype, k_ptr, v_ptr, k_cache, v_cache,
+                              n_kv, head_dim, stride)
+    }
+
+    /// Same append on a chosen stream with a chosen step buffer: the two-stream
+    /// batch path gives each stream its own position.
+    #[allow(clippy::too_many_arguments)]
+    pub fn kv_encode_ptr_on(
+        &self,
+        stream: &Stream,
+        step: &Buffer,
+        dtype: usize,
+        k_ptr: *mut std::ffi::c_void,
+        v_ptr: *mut std::ffi::c_void,
+        k_cache: &Buffer,
+        v_cache: &Buffer,
+        n_kv: usize,
+        head_dim: usize,
+        stride: usize,
+    ) -> Result<(), String> {
         let entry = match dtype {
             0 => "kv_encode_q8",
             1 => "kv_encode_q4",
@@ -373,7 +530,7 @@ impl Launcher {
         let mut p_vc = v_cache.as_ptr();
         let mut v_hd = head_dim as i32;
         let mut v_stride = stride as i32;
-        let mut p_step = self.step.as_ptr();
+        let mut p_step = step.as_ptr();
         let mut params: [*mut c_void; 7] = [
             &mut p_k as *mut _ as *mut c_void,
             &mut p_v as *mut _ as *mut c_void,
@@ -388,7 +545,7 @@ impl Launcher {
             block: (head_dim.max(32) as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        kernel.launch(cfg, &self.stream, &mut params)
+        kernel.launch(cfg, stream, &mut params)
     }
 
     /// Quantize `rows` positions of a position-major f32 buffer into the

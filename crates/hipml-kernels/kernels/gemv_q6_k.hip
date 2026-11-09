@@ -188,3 +188,174 @@ extern "C" __global__ void gemv_q6_k_r1(
     __shared__ __align__(16) float sx[Q6K_K_TILE];
     q6k_tile<1>(w, x, y, m, k, sx, blockIdx.x);
 }
+
+// ---------------------------------------------------------------------------
+// Batched variant: B x rows share one weight pass, and one shared x read feeds
+// Q6KB_ROWS_PER_WARP rows (see gemv_q4_k.hip for why both reuse axes matter).
+// Each row keeps its own accumulator in the same k order, so row b is
+// bit-identical to gemv_q6_k on x[b]. The k-tile is 1024 when B<=4 and 512
+// above that (two 256-value groups each), keeping shared staging under 32 KB.
+// ---------------------------------------------------------------------------
+
+#define Q6KB_K_TILE_BIG 1024
+#define Q6KB_K_TILE_SMALL 512
+#define Q6KB_ROWS_PER_WARP 2
+
+static __device__ __forceinline__ void q6k_load(const unsigned char* __restrict__ rp,
+                                                int p, float* wv)
+{
+    const int blk = p >> 8;
+    const int within = p & 255;
+    const int half = within >> 7;
+    const int ph = within & 127;
+    const int group = ph >> 5;
+    const int l = ph & 31;
+
+    const unsigned char* b = rp + (size_t)blk * Q6K_BLOCK_BYTES;
+    const float d = __half2float(*reinterpret_cast<const __half*>(b + 208));
+    const int sub = group * 2 + (l >> 4);
+    const float scale =
+        d * (float)reinterpret_cast<const signed char*>(b + 192)[half * 8 + sub];
+
+    const int ql_off = half * 64 + ((group & 1) ? 32 : 0) + l;
+    const int qh_off = 128 + half * 32 + l;
+    const unsigned int qlw0 = join16(
+        *reinterpret_cast<const unsigned short*>(b + ql_off),
+        *reinterpret_cast<const unsigned short*>(b + ql_off + 2));
+    const unsigned int qlw1 = join16(
+        *reinterpret_cast<const unsigned short*>(b + ql_off + 4),
+        *reinterpret_cast<const unsigned short*>(b + ql_off + 6));
+    const unsigned int qhw0 = join16(
+        *reinterpret_cast<const unsigned short*>(b + qh_off),
+        *reinterpret_cast<const unsigned short*>(b + qh_off + 2));
+    const unsigned int qhw1 = join16(
+        *reinterpret_cast<const unsigned short*>(b + qh_off + 4),
+        *reinterpret_cast<const unsigned short*>(b + qh_off + 6));
+
+    const int shift = 2 * group;
+    const bool high = group >= 2;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const unsigned int qw = (i < 4) ? qlw0 : qlw1;
+        const unsigned int hw = (i < 4) ? qhw0 : qhw1;
+        const unsigned int qb = (qw >> (8 * (i & 3))) & 0xFFu;
+        const unsigned int hb = (hw >> (8 * (i & 3))) & 0xFFu;
+        const unsigned int nib = high ? (qb >> 4) : (qb & 0xF);
+        const unsigned int hi = (hb >> shift) & 3u;
+        const int v = (int)(nib | (hi << 4)) - 32;
+        wv[i] = scale * (float)v;
+    }
+}
+
+template <int B, int RPW, int TILE>
+static __device__ __forceinline__ void q6k_tile_b(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k,
+    float* __restrict__ sx,
+    int tile)
+{
+    const int tid = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    const int nblocks = k / Q6K_VALUES;
+    const int row_tile = Q6K_WARPS * RPW;
+
+    int row[RPW];
+    int r[RPW];
+    const unsigned char* rp[RPW];
+    float acc[RPW][B];
+#pragma unroll
+    for (int rr = 0; rr < RPW; ++rr) {
+        row[rr] = tile * row_tile + warp * RPW + rr;
+        r[rr] = min(row[rr], m - 1);
+        rp[rr] = w + (size_t)r[rr] * (size_t)nblocks * Q6K_BLOCK_BYTES;
+#pragma unroll
+        for (int bi = 0; bi < B; ++bi) acc[rr][bi] = 0.0f;
+    }
+
+    for (int base = 0; base < k; base += TILE) {
+        const int n = min(TILE, k - base);
+        const int nchunks = n >> 3;
+        for (int j = tid; j < nchunks; j += Q6K_BLOCK) {
+#pragma unroll
+            for (int bi = 0; bi < B; ++bi)
+                stage_group6(x + (size_t)bi * k, sx + bi * TILE, base, j);
+        }
+        __syncthreads();
+
+        for (int c = lane * 8; c < n; c += 256) {
+            const int g = c >> 8;
+            const int s = g * 256 + lane;
+            const int p = base + c;
+            float wv[RPW][8];
+#pragma unroll
+            for (int rr = 0; rr < RPW; ++rr) q6k_load(rp[rr], p, wv[rr]);
+#pragma unroll
+            for (int bi = 0; bi < B; ++bi) {
+                const float* src = sx + bi * TILE + s;
+                float xv[8];
+#pragma unroll
+                for (int i = 0; i < 8; ++i) xv[i] = src[i * 32];
+#pragma unroll
+                for (int rr = 0; rr < RPW; ++rr) {
+                    float a = acc[rr][bi];
+#pragma unroll
+                    for (int i = 0; i < 8; ++i) a = fmaf(wv[rr][i], xv[i], a);
+                    acc[rr][bi] = a;
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+#pragma unroll
+    for (int rr = 0; rr < RPW; ++rr) {
+#pragma unroll
+        for (int bi = 0; bi < B; ++bi) {
+            float a = acc[rr][bi];
+#pragma unroll
+            for (int off = 16; off > 0; off >>= 1) a += __shfl_down(a, off);
+            if (lane == 0 && row[rr] < m) y[(size_t)bi * m + row[rr]] = a;
+        }
+    }
+}
+
+template <int B, int TILE>
+static __device__ __forceinline__ void q6k_entry_b(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k)
+{
+    extern __shared__ __align__(16) float hipml_sx_b[];
+    q6k_tile_b<B, Q6KB_ROWS_PER_WARP, TILE>(w, x, y, m, k, hipml_sx_b, blockIdx.x);
+}
+
+extern "C" __global__ void gemv_q6_k_b(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k,
+    int batch)
+{
+    if (batch <= 4) {
+        switch (batch) {
+        case 1: q6k_entry_b<1, Q6KB_K_TILE_BIG>(w, x, y, m, k); break;
+        case 2: q6k_entry_b<2, Q6KB_K_TILE_BIG>(w, x, y, m, k); break;
+        case 3: q6k_entry_b<3, Q6KB_K_TILE_BIG>(w, x, y, m, k); break;
+        case 4: q6k_entry_b<4, Q6KB_K_TILE_BIG>(w, x, y, m, k); break;
+        }
+    } else {
+        switch (batch) {
+        case 5: q6k_entry_b<5, Q6KB_K_TILE_SMALL>(w, x, y, m, k); break;
+        case 6: q6k_entry_b<6, Q6KB_K_TILE_SMALL>(w, x, y, m, k); break;
+        case 7: q6k_entry_b<7, Q6KB_K_TILE_SMALL>(w, x, y, m, k); break;
+        default: q6k_entry_b<8, Q6KB_K_TILE_SMALL>(w, x, y, m, k); break;
+        }
+    }
+}

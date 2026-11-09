@@ -52,6 +52,9 @@ mod trace;
 #[path = "gpu/graph.rs"]
 mod graph;
 pub use graph::{launches_per_token, GraphTiming};
+#[path = "gpu/batch.rs"]
+mod batch;
+pub use batch::{BatchEngine, SlotPool};
 #[path = "gpu/prefix.rs"]
 mod prefix;
 
@@ -204,7 +207,7 @@ impl<'a> GpuEngine<'a> {
             let down = Proj::of(model, &format!("blk.{i}.ffn_down.weight"))?;
 
             let kind = if cfg.is_recr[i] {
-                BlockKind::Ssm(build_ssm(model, l, &cfg, i)?)
+                BlockKind::Ssm(build_ssm(model, l, &cfg, i, false)?)
             } else if let Some(dtype) = kv_mode.dtype() {
                 // No f32 mirror: prefill and decode share the quantized cache
                 // (see MIRROR_ROWS).

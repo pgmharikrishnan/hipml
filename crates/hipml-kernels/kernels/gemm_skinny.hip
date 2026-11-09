@@ -83,7 +83,9 @@ static __device__ __forceinline__ void pws_body(
         for (int p = 0; p < 16 / XRP; ++p) {
             const int rl = p * XRP + xt;
             float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
-            if (rl < r)
+            // k is a multiple of 32, so a float4 is wholly inside or outside the
+            // last (partial) k-tile.
+            if (rl < r && base + xc < k)
                 v = *reinterpret_cast<const float4*>(x + (size_t)rl * k + base + xc);
             __half2* dst = reinterpret_cast<__half2*>(shx + rl * XS + xc);
             dst[0] = __floats2half2_rn(v.x, v.y);
@@ -98,7 +100,7 @@ static __device__ __forceinline__ void pws_body(
             const int gr = row_base + rl;
             const int kc = q * 32 + d_q * 8;
             pws_h8 hv;
-            if (gr < n) {
+            if (gr < n && base + kc < k) {
                 float v[8];
                 pf_dequant8<KIND>(w + (size_t)gr * wrow, base + kc, v);
 #pragma unroll
