@@ -114,7 +114,8 @@ pub(crate) struct Chunk {
     /// 32-query tile. One allocation per engine, reused by every layer.
     pub apart: Buffer,
     pub apart_ml: Buffer,
-    /// Key splits the deep chunks use, from `HIPML_ATTN_SPLITS` (1 disables).
+    /// Key splits the deep chunks use, from `HIPML_ATTN_SPLITS` (default 8,
+    /// 1 disables).
     pub attn_splits: usize,
 }
 
@@ -140,7 +141,7 @@ impl Chunk {
         let mut attn_splits = std::env::var("HIPML_ATTN_SPLITS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(1)
+            .unwrap_or(8)
             .clamp(1, 32);
         let part_len = |splits: usize| splits * qslots * cfg.n_head * cfg.head_dim;
         while attn_splits > 1 && part_len(attn_splits) * 4 > 1 << 30 {

@@ -119,9 +119,10 @@ fn row_ptr(buf: &Buffer, t: usize, width: usize) -> *mut std::ffi::c_void {
 ///
 /// Short chunks gain nothing (the combine pass costs more than the loop it
 /// shortens), so the mono kernel keeps everything below
-/// `HIPML_ATTN_SPLIT_MIN` positions (default 16K, the first depth where the
-/// per-block key loop reaches ~1,000 tiles). `HIPML_ATTN_SPLITS` sets the
-/// count; 1 keeps the mono kernel everywhere.
+/// `HIPML_ATTN_SPLIT_MIN` positions (default 8K). That also makes an 8K prompt
+/// and anything shorter bit-identical to the mono path: its chunks all sit
+/// below the gate. `HIPML_ATTN_SPLITS` sets the count; 1 keeps the mono kernel
+/// everywhere.
 fn split_count(splits: usize, pos0: usize) -> usize {
     if splits <= 1 {
         return 1;
@@ -129,7 +130,7 @@ fn split_count(splits: usize, pos0: usize) -> usize {
     let min_pos = std::env::var("HIPML_ATTN_SPLIT_MIN")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(16_384);
+        .unwrap_or(8_192);
     if pos0 < min_pos {
         1
     } else {
