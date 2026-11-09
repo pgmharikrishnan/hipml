@@ -54,7 +54,7 @@ mod graph;
 pub use graph::{launches_per_token, GraphTiming};
 #[path = "gpu/batch.rs"]
 mod batch;
-pub use batch::{BatchEngine, SlotPool};
+pub use batch::{BatchEngine, MtpBatch, SlotPool, VerifySnap};
 #[path = "gpu/prefix.rs"]
 mod prefix;
 #[path = "gpu/columns.rs"]
