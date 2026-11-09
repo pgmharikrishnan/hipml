@@ -17,8 +17,8 @@
 //! length does).
 //!
 //! Layout: rows are concatenated tail by tail, so a slot's rows are contiguous.
-//! `row_slot[r]` is row `r`'s slot and `row_local[r]` its token index inside
-//! that slot.
+//! Each per-tail launch therefore takes a row pointer and a token count, and
+//! the only per-row metadata is the tail list the host builds.
 
 use super::*;
 use hipml_kernels::ssm::{SsmChunk, SsmDims};
@@ -46,10 +46,6 @@ pub(crate) struct RowScratch {
     /// Split-K scratch for the ffn GEMMs; only touched for short blocks.
     pub sk: Buffer,
     pub ssm: SsmChunk,
-    /// Per-row metadata, `[cap]` i32. The conv/gdn stages walk each tail from
-    /// its base, so these are only needed by diagnostics today.
-    pub row_slot: Buffer,
-    pub row_local: Buffer,
 }
 
 impl RowScratch {
@@ -80,8 +76,6 @@ impl RowScratch {
             xh: zeros((cap * wide + 1) / 2)?,
             sk: zeros(if cap <= 1024 { cap * wide } else { 1 })?,
             ssm: SsmChunk::new(&sd, cap)?,
-            row_slot: zeros(cap)?,
-            row_local: zeros(cap)?,
         })
     }
 
@@ -101,9 +95,7 @@ impl RowScratch {
             + self.aout.len()
             + self.y.len()
             + self.xh.len()
-            + self.sk.len()
-            + self.row_slot.len()
-            + self.row_local.len();
+            + self.sk.len();
         f32s * 4 + self.ssm.bytes()
     }
 }
@@ -275,27 +267,17 @@ impl<'a> BatchEngine<'a> {
         let embed = self.embed;
         let m: usize = tails.iter().map(|(_, t)| t.len()).sum();
 
-        // Row maps: slot id and local token index per row, plus each tail's
-        // first row / slot / length for the per-tail launches.
-        let mut row_slot = vec![0i32; r.cap];
-        let mut row_local = vec![0i32; r.cap];
+        // Each tail's first row / slot / length for the per-tail launches.
         let mut tail_slot = Vec::with_capacity(tails.len());
         let mut tail_base = Vec::with_capacity(tails.len());
         let mut tail_len = Vec::with_capacity(tails.len());
         let mut base = 0usize;
         for (slot, tok) in tails {
-            for t in 0..tok.len() {
-                row_slot[base + t] = *slot as i32;
-                row_local[base + t] = t as i32;
-            }
             tail_slot.push(*slot);
             tail_base.push(base);
             tail_len.push(tok.len());
             base += tok.len();
         }
-        let bytes = |v: &[i32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
-        r.row_slot.upload_bytes_async(0, &bytes(&row_slot), stream)?;
-        r.row_local.upload_bytes_async(0, &bytes(&row_local), stream)?;
 
         // Embed every tail token at its row.
         let mut row = 0usize;

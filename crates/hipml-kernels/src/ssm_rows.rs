@@ -1,8 +1,8 @@
 //! Row-block SSM stages (WP47).
 //!
-//! A row block is a concatenation of independent sequences' tails: row `r`
-//! belongs to slot `row_slot[r]` and is local token `row_local[r]` of that
-//! slot. The stateless stages (gates, L2 norm, gated RMS) are per row and
+//! A row block is a concatenation of independent sequences' tails: each tail
+//! is a contiguous run of rows with its own slot and position base. The
+//! stateless stages (gates, L2 norm, gated RMS) are per row and
 //! reuse the chunk kernels over `rows` tokens.
 //!
 //! The two stages that carry state across tokens — the causal conv and the
