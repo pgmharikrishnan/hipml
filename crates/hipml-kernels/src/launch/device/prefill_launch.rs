@@ -306,6 +306,31 @@ pub fn prefill_should_split(m: usize, k: usize, tokens: usize) -> bool {
     blocks >= 32 && blocks < 3 * 64
 }
 
+/// Largest split-K scratch (f32 values) that a projection of at most
+/// `max_rows` rows can need for any tile of at most `max_tokens` tokens.
+///
+/// This is the allocation side of [`prefill_should_split`]. A tile of `t`
+/// tokens can select the split only while
+/// `ceil(m / 128) * ceil(t / 256) < 3 * 64`, so the widest `m` it can select at
+/// that length is `128 * ((3 * 64 - 1) / ceil(t / 256))`. Taking the maximum of
+/// `t * m` over every tile length gives the one size at which the launch check
+/// in [`prefill_split`] (`scratch.len() < tokens * m`) can never fail.
+///
+/// Sizing by the chunk instead is what crashed an 8,193-token prompt: the last
+/// tile was one token, the predicate split the ffn shapes, and the buffer had
+/// been allocated as a single value because the chunk was 2,048.
+pub fn prefill_split_scratch_cap(max_tokens: usize, max_rows: usize) -> usize {
+    let mut need = 1;
+    for tokens in 1..=max_tokens.max(1) {
+        let tiles = tokens.div_ceil(256);
+        // `m.div_ceil(128) <= (3 * 64 - 1) / tiles` is the widest shape that
+        // still satisfies `blocks < 3 * 64`.
+        let rows = max_rows.min(128 * ((3 * 64 - 1) / tiles));
+        need = need.max(tokens * rows);
+    }
+    need
+}
+
 /// Split-K launch: one grid with `blockIdx.z` selecting the k half, so both
 /// halves run concurrently instead of as two serialized launches. Slice 0
 /// writes `y`, slice 1 writes `scratch`, then `residual_add_f32` sums them.
@@ -534,4 +559,31 @@ pub fn prefill_resident(
     ];
     let cfg = LaunchConfig::prefill(m, tokens, rpb, tpb, block);
     kernel.launch(cfg, stream, &mut params)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `(tokens, rows)` pair the predicate can split must fit the
+    /// allocation the same predicate produced. This is the invariant the
+    /// 8,193-token crash broke.
+    #[test]
+    fn split_scratch_cap_covers_every_selectable_tile() {
+        std::env::remove_var("HIPML_SPLITK");
+        let cap = 2048;
+        let max_rows = 24_448;
+        let scratch = prefill_split_scratch_cap(cap, max_rows);
+        for tokens in 1..=cap {
+            for rows in (1..=max_rows).step_by(31) {
+                if prefill_should_split(rows, 8192, tokens) {
+                    assert!(
+                        tokens * rows <= scratch,
+                        "tokens {tokens} x rows {rows} = {} exceeds cap {scratch}",
+                        tokens * rows
+                    );
+                }
+            }
+        }
+    }
 }
