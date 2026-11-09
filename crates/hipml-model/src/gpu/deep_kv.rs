@@ -63,9 +63,17 @@ impl DeepKv {
     }
 
     /// Split count for one decode at `seq` positions. Fixed at graph build.
+    ///
+    /// One split per 64 positions up to the scratch ceiling, for both kernel
+    /// families. The whole-group warp kernel is issued by `launch_ptrs` at
+    /// head_dim 256, and it needs the finer split: with `seq/256` (WP31's
+    /// 100K-tuned policy) an 8K decode gets 32 splits and measures 27.46
+    /// tok/s, against 28.34 at 128 splits; at 16K 256 splits beat 64 (1.72 vs
+    /// 2.98 ms for the 16 layers). At 100K both policies cap at 256, so this
+    /// only recovers the short and mid depths.
     pub(super) fn splits(&self, seq: usize) -> usize {
         if self.kernel >= 4 {
-            (seq / 256).clamp(1, WARP_SPLITS)
+            (seq / 64).clamp(1, WARP_SPLITS)
         } else {
             (seq / 64).clamp(1, STAGED_SPLITS)
         }

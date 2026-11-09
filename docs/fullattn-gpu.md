@@ -239,8 +239,13 @@ through L1). 100K, 16 layers, 256 splits:
 
 Fewer warps per task wins: the whole group in one warp removes the duplicate
 K/V reads, and the L1 sharing between the two `s4` warps does not pay for the
-extra issue slots. 384 splits are level (397 GB/s for `s4`) and 128 is worse
-(310 for `w2`), so the engine keeps `(seq/256).clamp(1,256)`.
+extra issue slots. At 100K, 384 splits are level with 256 (397 GB/s for `s4`)
+and 128 is worse (310 for `w2`). The engine therefore uses one split per 64
+positions, capped at 256: at 100K that is 256 (the 100K optimum), but at 8K it
+is 128 instead of the 32 that `seq/256` produced. That matters — `bench-kv
+--kernels 4` at 8K measures 2.90 ms with 32 splits, 1.59 with 64 and 1.12 with
+the 128 cap; the engine decode recovers from 27.46 to 28.34 tok/s. At 16K the
+256 cap wins (1.72 vs 2.98 ms for 64).
 
 **An earlier `s4` reading of 698 GB/s was a measurement bug, not a kernel.**
 The launcher sized the grid as `ceil(tasks/4)` blocks for a kernel that needs
