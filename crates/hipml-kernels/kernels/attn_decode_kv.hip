@@ -278,7 +278,12 @@ __device__ __forceinline__ void kv_decode_body(
 
     const int h = kvh * group + warp;
     const int nb = head_dim >> 5;
-    const int per = (seq + splits - 1) / splits;
+    // The split partition is fixed in cache positions (`stride`, the cache's
+    // per-head row count) rather than in `seq`, so a launch at position `p` and
+    // the verify pass's launch for its column share the same (max, sum, acc)
+    // grouping. Splits past `seq` are skipped, and rows past `seq` in the last
+    // tile are folded to -inf, exactly as a shorter launch would.
+    const int per = (stride + splits - 1) / splits;
     const int start = split * per;
     const int end = (start + per < seq) ? start + per : seq;
     const float sl2 = scale * KV_LOG2E;

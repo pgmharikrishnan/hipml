@@ -131,9 +131,10 @@ pub(super) fn deep_attention_ptr(
         return Err(format!("position {pos} beyond quantized cache {}", dk.seq));
     }
     // Chunked prefill is not graph-captured, so size the grid to the positions
-    // that exist. The fixed `dk.seq` split count is only needed when the grid
-    // becomes part of a captured graph (the decode path).
-    let splits = (seq / 64).clamp(1, MAX_SPLITS);
+    // that exist. The split count is fixed from the cache's row count (not the
+    // sequence length) so every verify column and the plain decode launch share
+    // one partition; see the comment in attn_decode_kv.hip.
+    let splits = (dk.seq / 64).clamp(1, MAX_SPLITS);
     launch_kv::launch_ptrs(
         l.module(),
         l.stream(),

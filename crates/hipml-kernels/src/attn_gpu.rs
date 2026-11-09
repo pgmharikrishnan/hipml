@@ -29,6 +29,8 @@ mod imp {
     mod chunk;
     #[path = "attn_chunk_kv.rs"]
     mod chunk_kv;
+    #[path = "attn_cols.rs"]
+    mod cols;
 
     /// A weight payload that is either owned (the standalone parity path) or
     /// borrowed from the resident loader, so the graph never uploads the same
@@ -507,7 +509,7 @@ mod imp {
             }
             self.prepare_qkv(l, x)?;
             self.append_at(l, self.k.as_ptr(), self.v.as_ptr())?;
-            self.attention(l)?;
+            self.attention(l, pos)?;
             self.apply_output(l)
         }
 
@@ -574,38 +576,10 @@ mod imp {
             v: &Buffer,
             pos0: usize,
         ) -> Result<(), String> {
-            let d = self.dims;
             self.gemv_rows(l, &self.wq, x, qg, rows)?;
             self.gemv_rows(l, &self.wk, x, k, rows)?;
             self.gemv_rows(l, &self.wv, x, v, rows)?;
-            let split = self.module_kernel(l, "qg_split_f32")?;
-            for c in 0..rows {
-                l.set_step(pos0 + c, pos0 + c + 1, 0)?;
-                let mut p_qg = row_ptr(qg, c, 2 * d.n_head * d.head_dim);
-                let mut p_q = row_ptr(q, c, d.n_head * d.head_dim);
-                let mut p_g = row_ptr(gate, c, d.n_head * d.head_dim);
-                let mut nh = d.n_head as i32;
-                let mut hd = d.head_dim as i32;
-                let mut params: [*mut c_void; 5] = [
-                    &mut p_qg as *mut _ as *mut c_void,
-                    &mut p_q as *mut _ as *mut c_void,
-                    &mut p_g as *mut _ as *mut c_void,
-                    &mut nh as *mut _ as *mut c_void,
-                    &mut hd as *mut _ as *mut c_void,
-                ];
-                let cfg = LaunchConfig {
-                    grid: (d.n_head as u32, 1, 1),
-                    block: (256, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                split.launch(cfg, &l.stream, &mut params)?;
-                self.norm_rope_at(
-                    l,
-                    row_ptr(q, c, d.n_head * d.head_dim),
-                    row_ptr(k, c, d.width),
-                )?;
-            }
-            Ok(())
+            self.split_norm_rope(l, rows, qg, q, gate, k, pos0)
         }
 
         /// Append row `c`'s K/V at `pos` and run this row's causal attention.
@@ -617,12 +591,12 @@ mod imp {
             out_row: *mut c_void,
             pos: usize,
         ) -> Result<(), String> {
-            l.set_step(pos, pos + 1, 0)?;
-            self.attention_at(l, q_row, out_row)
+            self.attention_at(l, q_row, out_row, pos)
         }
 
-        /// `y = Wo (aout * sigmoid(gate))` for `rows` rows: the gate per row,
-        /// then one batched weight pass for the output projection.
+        /// `y = Wo (aout * sigmoid(gate))` for `rows` rows: the gate in one
+        /// elementwise pass (the rows are contiguous), then one batched weight
+        /// pass for the output projection.
         pub fn output_rows(
             &self,
             l: &Launcher,
@@ -634,19 +608,18 @@ mod imp {
             let d = self.dims;
             let qgate = self.module_kernel(l, "q_gate_f32")?;
             let n = d.n_head * d.head_dim;
-            for c in 0..rows {
-                let mut p_out = row_ptr(aout, c, n);
-                let mut p_gate = row_ptr(gate, c, n);
-                let mut p_y = row_ptr(aout, c, n);
-                let mut v_n = n as i32;
-                let mut params: [*mut c_void; 4] = [
-                    &mut p_out as *mut _ as *mut c_void,
-                    &mut p_gate as *mut _ as *mut c_void,
-                    &mut p_y as *mut _ as *mut c_void,
-                    &mut v_n as *mut _ as *mut c_void,
-                ];
-                qgate.launch(LaunchConfig::linear(n, 256), &l.stream, &mut params)?;
-            }
+            let all = n * rows;
+            let mut p_out = aout.as_ptr();
+            let mut p_gate = gate.as_ptr();
+            let mut p_y = aout.as_ptr();
+            let mut v_n = all as i32;
+            let mut params: [*mut c_void; 4] = [
+                &mut p_out as *mut _ as *mut c_void,
+                &mut p_gate as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut v_n as *mut _ as *mut c_void,
+            ];
+            qgate.launch(LaunchConfig::linear(all, 256), &l.stream, &mut params)?;
             self.gemv_rows(l, &self.wo, aout, y, rows)
         }
 
@@ -679,116 +652,20 @@ mod imp {
 
         /// Causal attention for this token. Uses the split-K kernel when the
         /// head shape allows it, otherwise the one-block-per-head kernel.
-        fn attention(&self, l: &Launcher) -> Result<(), String> {
-            self.attention_at(l, self.q.as_ptr(), self.out.as_ptr())
+        fn attention(&self, l: &Launcher, pos: usize) -> Result<(), String> {
+            self.attention_at(l, self.q.as_ptr(), self.out.as_ptr(), pos)
         }
 
-        /// Same launch over explicit q/out rows and a given sequence length, so
-        /// a prefill chunk can attend from row `t` at `seq = pos + 1`.
+        /// Same launch over explicit q/out rows, at absolute position `pos`.
+        /// One column: the verify pass calls `attention_cols` directly.
         pub fn attention_at(
             &self,
             l: &Launcher,
             q: *mut c_void,
             out: *mut c_void,
+            pos: usize,
         ) -> Result<(), String> {
-            let d = self.dims;
-            let group = d.n_head / d.n_kv;
-            let dpl = d.head_dim / 32;
-            let shared = 2 * SPLIT_TILE * d.head_dim * 4;
-            let split_ok = d.head_dim % 32 == 0
-                && dpl <= 8
-                && group * 32 <= 1024
-                && shared <= 64 * 1024;
-
-            if split_ok {
-                // Fixed per layer, not per step: the grid is part of the
-                // captured graph. Sized for the whole cache, so it covers every
-                // position (empty splits write zeros and reduce to nothing).
-                let splits = (d.n_ctx / 128).clamp(1, MAX_SPLITS);
-                let mut p_q = q;
-                let mut p_k = self.kv_k.as_ptr();
-                let mut p_v = self.kv_v.as_ptr();
-                let mut p_acc = self.part_acc.as_ptr();
-                let mut p_ml = self.part_ml.as_ptr();
-                let mut n_heads = d.n_head as i32;
-                let mut n_kv = d.n_kv as i32;
-                let mut hd = d.head_dim as i32;
-                let mut p_step = l.step_buf().as_ptr();
-                let mut scale = 1.0f32 / (d.head_dim as f32).sqrt();
-                let mut v_splits = splits as i32;
-                let mut width = d.width as i32;
-                let mut params: [*mut c_void; 12] = [
-                    &mut p_q as *mut _ as *mut c_void,
-                    &mut p_k as *mut _ as *mut c_void,
-                    &mut p_v as *mut _ as *mut c_void,
-                    &mut p_acc as *mut _ as *mut c_void,
-                    &mut p_ml as *mut _ as *mut c_void,
-                    &mut n_heads as *mut _ as *mut c_void,
-                    &mut n_kv as *mut _ as *mut c_void,
-                    &mut hd as *mut _ as *mut c_void,
-                    &mut p_step as *mut _ as *mut c_void,
-                    &mut scale as *mut _ as *mut c_void,
-                    &mut v_splits as *mut _ as *mut c_void,
-                    &mut width as *mut _ as *mut c_void,
-                ];
-                let cfg = LaunchConfig {
-                    grid: ((d.n_kv * splits) as u32, 1, 1),
-                    block: ((group * 32) as u32, 1, 1),
-                    shared_mem_bytes: shared as u32,
-                };
-                self.module_kernel(l, "attn_decode_split_f32")?
-                    .launch(cfg, &l.stream, &mut params)?;
-
-                let reduce = self.module_kernel(l, "attn_reduce_f32")?;
-                let mut p_acc = self.part_acc.as_ptr();
-                let mut p_ml = self.part_ml.as_ptr();
-                let mut p_out = out;
-                let mut params: [*mut c_void; 5] = [
-                    &mut p_acc as *mut _ as *mut c_void,
-                    &mut p_ml as *mut _ as *mut c_void,
-                    &mut p_out as *mut _ as *mut c_void,
-                    &mut hd as *mut _ as *mut c_void,
-                    &mut v_splits as *mut _ as *mut c_void,
-                ];
-                let cfg = LaunchConfig {
-                    grid: (d.n_head as u32, 1, 1),
-                    block: (d.head_dim as u32, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                return reduce.launch(cfg, &l.stream, &mut params);
-            }
-
-            let attn = self.module_kernel(l, "attn_decode_f32")?;
-            let mut p_q = q;
-            let mut p_k = self.kv_k.as_ptr();
-            let mut p_v = self.kv_v.as_ptr();
-            let mut p_out = out;
-            let mut n_heads = d.n_head as i32;
-            let mut n_kv = d.n_kv as i32;
-            let mut hd = d.head_dim as i32;
-            let mut p_step = l.step_buf().as_ptr();
-            let mut scale = 1.0f32 / (d.head_dim as f32).sqrt();
-            let mut head_stride = d.head_dim as i32;
-            let mut row_stride = d.width as i32;
-            let mut params: [*mut c_void; 11] = [
-                &mut p_q as *mut _ as *mut c_void,
-                &mut p_k as *mut _ as *mut c_void,
-                &mut p_v as *mut _ as *mut c_void,
-                &mut p_out as *mut _ as *mut c_void,
-                &mut n_heads as *mut _ as *mut c_void,
-                &mut n_kv as *mut _ as *mut c_void,
-                &mut hd as *mut _ as *mut c_void,
-                &mut p_step as *mut _ as *mut c_void,
-                &mut scale as *mut _ as *mut c_void,
-                &mut head_stride as *mut _ as *mut c_void,
-                &mut row_stride as *mut _ as *mut c_void,
-            ];
-            let cfg = LaunchConfig {
-                grid: (d.n_head as u32, 1, 1),
-                block: (d.head_dim as u32, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            attn.launch(cfg, &l.stream, &mut params)
+            self.attention_cols(l, q, out, &self.part_acc, &self.part_ml, pos, 1)
         }
 
         fn module_kernel<'b>(

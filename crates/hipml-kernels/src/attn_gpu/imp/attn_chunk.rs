@@ -270,7 +270,7 @@ impl AttnLayer<'_> {
             &mut params,
         )?;
 
-        self.attention_at(l, q_row, out_row)
+        self.attention_at(l, q_row, out_row, pos)
     }
 
     /// `y[t, :] = W_o (attn_out[t] * gate[t])` for a whole chunk: one elementwise

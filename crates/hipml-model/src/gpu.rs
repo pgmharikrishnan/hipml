@@ -368,7 +368,7 @@ impl<'a> GpuEngine<'a> {
                     mark(&mut self.trace, l, "attn_append")?;
                     attn.append_at(l, attn.k_buf().as_ptr(), attn.v_buf().as_ptr())?;
                     mark(&mut self.trace, l, "attn_mix")?;
-                    attn.attention_at(l, attn.q_buf().as_ptr(), attn.attn_out().as_ptr())?;
+                    attn.attention_at(l, attn.q_buf().as_ptr(), attn.attn_out().as_ptr(), pos)?;
                     mark(&mut self.trace, l, "attn_wo")?;
                     attn.apply_output(l)?;
                     mark(&mut self.trace, l, "block")?;
@@ -430,6 +430,16 @@ impl<'a> GpuEngine<'a> {
 
     pub fn model(&self) -> &Model {
         self.model
+    }
+
+    /// The logits row of the last plain decode step (`[n_vocab]`).
+    pub fn logits(&self) -> &Buffer {
+        &self.logits
+    }
+
+    /// The post-`output_norm` hidden row of the last plain decode step.
+    pub fn final_hidden(&self) -> &Buffer {
+        &self.final_h
     }
 
     /// Resident attention-cache bytes at the configured depth.

@@ -19,6 +19,8 @@ pub mod ssm_launch;
 #[cfg(feature = "hip")]
 mod ssm_ops;
 #[cfg(feature = "hip")]
+mod ssm_cols;
+#[cfg(feature = "hip")]
 mod ssm_chunk;
 
 pub use attn_gpu::AttnLayer;
@@ -570,6 +572,66 @@ pub const KERNELS: &[KernelSpec] = &[
     // a second of work; `hipml parity --deep` runs it.
     kv_case("attn_decode_kv_q8_hd256_s100000", "attn_decode_kv_q8"),
     kv_case("attn_decode_kv_q4_hd256_s100000", "attn_decode_kv_q4"),
+    // R-column verify: one launch per stage for all of a step's columns. The
+    // f32 path is `attn_decode_cols_f32` + `attn_reduce_cols_f32`; the GDN
+    // chain is the `*_cols_*` family. They are checked end to end by
+    // `column-bench --check`, which compares each verify column against the
+    // one-column decode at the same position, bit for bit.
+    KernelSpec {
+        name: "attn_decode_cols_f32",
+        entry: "attn_decode_cols_f32",
+        kind: KernelKind::SplitK,
+    },
+    KernelSpec {
+        name: "attn_reduce_cols_f32",
+        entry: "attn_reduce_cols_f32",
+        kind: KernelKind::SplitK,
+    },
+    KernelSpec {
+        name: "kv_append_cols_f32",
+        entry: "kv_append_cols_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "qg_split_cols_f32",
+        entry: "qg_split_cols_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
+    KernelSpec {
+        name: "head_rmsnorm_cols_f32",
+        entry: "head_rmsnorm_cols_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
+    KernelSpec {
+        name: "mrope_cols_f32",
+        entry: "mrope_cols_f32",
+        kind: KernelKind::PerHead { block: 32 },
+    },
+    KernelSpec {
+        name: "ssm_gates_cols_f32",
+        entry: "ssm_gates_cols_f32",
+        kind: KernelKind::Linear { block: 64 },
+    },
+    KernelSpec {
+        name: "ssm_conv1d_cols_f32",
+        entry: "ssm_conv1d_cols_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "l2norm_cols_f32",
+        entry: "l2norm_cols_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
+    KernelSpec {
+        name: "gdn_cols_f32",
+        entry: "gdn_cols_f32",
+        kind: KernelKind::PerHead { block: 128 },
+    },
+    KernelSpec {
+        name: "ssm_gate_norm_cols_f32",
+        entry: "ssm_gate_norm_cols_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
 ];
 
 const fn kv_case(name: &'static str, entry: &'static str) -> KernelSpec {

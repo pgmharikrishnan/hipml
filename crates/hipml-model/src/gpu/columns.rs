@@ -3,17 +3,21 @@
 //! One weight pass over the 64 layers for `R` tokens at once. Every projection
 //! uses the batched GEMV (`gemv_*_b`), which keeps the single-sequence `k`
 //! accumulation order per row and is therefore bit-identical to `R` separate
-//! decode launches. The work that is genuinely sequential in time — the GDN
-//! recurrence, the conv window, the KV append and causal attention — stays per
-//! column and runs the same decode kernels, so column `c` produces exactly the
+//! decode launches. The work that is sequential in time — the GDN recurrence,
+//! the conv window, the KV append and causal attention — is walked over the
+//! columns inside one launch per stage (`*_cols_*`), with the same arithmetic
+//! order as the single-column kernels, so column `c` produces exactly the
 //! logits a plain decode at that position would.
 //!
 //! The layer-major loop means the recurrent state after column `c` only exists
-//! *inside* the layer that is processing it. For rollback, each SSM layer
-//! copies its state to `snap[c]` right after column `c`; at the end of the pass
-//! `snap[c]` holds every layer's state after column `c`, which is what a
-//! rejected draft restores to. KV needs no snapshot: position `t` is appended
-//! before it is read, so truncation is just the next step's `pos`.
+//! *inside* the layer that is processing it. Each stage that advances the state
+//! writes it to `snaps[c]` as it goes; at the end of the pass `snaps[c]` holds
+//! every layer's state after column `c`, which is what a rejected draft
+//! restores to. KV needs no snapshot: position `t` is appended before it is
+//! read, so truncation is just the next step's `pos`.
+//!
+//! No `set_step` upload appears in this path: the position, the column index and
+//! the row count are kernel arguments.
 
 use super::*;
 use crate::gpu_weights::gemv_entry;
@@ -48,6 +52,9 @@ pub(crate) struct Cols {
     pub v: Buffer,
     pub aout: Buffer,
     pub ay: Buffer,
+    /// Split-K partials for every column, `[cap][n_heads][splits][..]`.
+    pub p_acc: Buffer,
+    pub p_ml: Buffer,
     pub final_h: Buffer,
     pub logits: Buffer,
     pub arg_v: Buffer,
@@ -56,12 +63,21 @@ pub(crate) struct Cols {
 }
 
 /// The recurrent state of every GDN layer after one verify column.
+///
+/// Both buffers are layer-major: `[n_ssm][state_len]`, so a stage kernel gets
+/// one pointer per layer and writes the column's row in place.
 pub struct Snap {
-    pub layers: Vec<(Buffer, Buffer)>,
+    pub conv: Buffer,
+    pub s: Buffer,
 }
 
 impl Cols {
-    pub(crate) fn new(cfg: &Config, cap: usize) -> Result<Cols, String> {
+    pub(crate) fn new(
+        cfg: &Config,
+        cap: usize,
+        p_acc: usize,
+        p_ml: usize,
+    ) -> Result<Cols, String> {
         let n = cfg.n_embd;
         let ff = cfg.n_ff;
         let qd = cfg.n_head * cfg.head_dim;
@@ -94,6 +110,8 @@ impl Cols {
             v: zeros(cap * w)?,
             aout: zeros(cap * qd)?,
             ay: zeros(cap * n)?,
+            p_acc: zeros(p_acc)?,
+            p_ml: zeros(p_ml)?,
             final_h: zeros(cap * n)?,
             logits: zeros(cap * cfg.n_vocab)?,
             arg_v: zeros(cap * ARGMAX_PARTS)?,
@@ -106,34 +124,34 @@ impl Cols {
 impl<'a> GpuEngine<'a> {
     /// Allocate `count` recurrent-state snapshots (one per rollback column).
     pub fn alloc_snapshots(&self, count: usize) -> Result<Vec<Snap>, String> {
+        let (n_ssm, conv_len, st_len) = self.snap_lens()?;
         let mut out = Vec::with_capacity(count);
         for _ in 0..count {
-            let mut layers = Vec::new();
-            for b in &self.layers {
-                if let BlockKind::Ssm(s) = &b.kind {
-                    let (conv, st) = s.state_lens();
-                    layers.push((Buffer::alloc(conv)?, Buffer::alloc(st)?));
-                }
-            }
-            out.push(Snap { layers });
+            out.push(Snap {
+                conv: Buffer::alloc((n_ssm * conv_len).max(1))?,
+                s: Buffer::alloc((n_ssm * st_len).max(1))?,
+            });
         }
         Ok(out)
     }
 
-    /// Copy every GDN layer's live state into `snap`, stream-ordered.
-    pub fn snapshot_ssm(&self, snap: &Snap) -> Result<(), String> {
-        let l = self.model.launcher();
-        let mut i = 0;
+    /// `(SSM layers, conv-window floats per layer, delta-net floats per layer)`.
+    fn snap_lens(&self) -> Result<(usize, usize, usize), String> {
+        let mut n = 0usize;
+        let mut conv = 0usize;
+        let mut st = 0usize;
         for b in &self.layers {
             if let BlockKind::Ssm(s) = &b.kind {
-                let (conv, st) = s.state_lens();
-                let (dc, ds) = &snap.layers[i];
-                dc.copy_from_device_on(s.conv_state_buf(), conv, l.stream())?;
-                ds.copy_from_device_on(s.s_state_buf(), st, l.stream())?;
-                i += 1;
+                let (cl, sl) = s.state_lens();
+                n += 1;
+                conv = cl;
+                st = sl;
             }
         }
-        Ok(())
+        if n == 0 {
+            return Err("no GDN layers to snapshot".to_string());
+        }
+        Ok((n, conv, st))
     }
 
     /// Restore every GDN layer from `snap`, stream-ordered.
@@ -142,10 +160,11 @@ impl<'a> GpuEngine<'a> {
         let mut i = 0;
         for b in &self.layers {
             if let BlockKind::Ssm(s) = &b.kind {
-                let (conv, st) = s.state_lens();
-                let (dc, ds) = &snap.layers[i];
-                s.conv_state_buf().copy_from_device_on(dc, conv, l.stream())?;
-                s.s_state_buf().copy_from_device_on(ds, st, l.stream())?;
+                let (cl, sl) = s.state_lens();
+                s.conv_state_buf()
+                    .copy_from_device_on_at(&snap.conv, i * cl, cl, l.stream())?;
+                s.s_state_buf()
+                    .copy_from_device_on_at(&snap.s, i * sl, sl, l.stream())?;
                 i += 1;
             }
         }
@@ -176,6 +195,20 @@ impl<'a> GpuEngine<'a> {
         let pos0 = st.pos;
         let l = self.model.launcher();
         let embed = self.embed;
+        let (conv_len, st_len) = {
+            let (_, cl, sl) = self.snap_lens()?;
+            (cl, sl)
+        };
+        let snap_conv = if rows > 1 {
+            snaps[0].conv.as_ptr()
+        } else {
+            std::ptr::null_mut()
+        };
+        let snap_s = if rows > 1 {
+            snaps[0].s.as_ptr()
+        } else {
+            std::ptr::null_mut()
+        };
         let c = self.cols.as_ref().ok_or("columns scratch not allocated")?;
         if c.cap < rows {
             return Err(format!("{rows} columns exceed scratch {}", c.cap));
@@ -195,35 +228,22 @@ impl<'a> GpuEngine<'a> {
                     super::trace::mark(&mut self.trace, l, "ssm_in")?;
                     s.project_rows(l, &c.t, rows, &c.s_qkv, &c.s_z, &c.s_alpha, &c.s_beta)?;
                     super::trace::mark(&mut self.trace, l, "ssm_proj")?;
-                    for r in 0..rows {
-                        let alpha = row_ptr(&c.s_alpha, r, s.dims().n_v);
-                        let beta = row_ptr(&c.s_beta, r, s.dims().n_v);
-                        let g = row_ptr(&c.s_g, r, s.dims().n_v);
-                        let bs = row_ptr(&c.s_beta_sig, r, s.dims().n_v);
-                        s.gates_at(alpha, beta, g, bs)?;
-                        let qkv = row_ptr(&c.s_qkv, r, s.dims().conv_ch);
-                        let conv = row_ptr(&c.s_conv, r, s.dims().conv_ch);
-                        s.conv_at(qkv, conv)?;
-                        s.l2norm_at_ptr(conv, 0, s.dims().n_k, s.dims().head_k)?;
-                        s.l2norm_at_ptr(conv, s.dims().key_dim(), s.dims().n_k, s.dims().head_k)?;
-                        s.gdn_at(
-                            conv,
-                            g,
-                            bs,
-                            row_ptr(&c.s_o, r, s.dims().inner()),
-                        )?;
-                        s.gate_norm_at(
-                            row_ptr(&c.s_o, r, s.dims().inner()),
-                            row_ptr(&c.s_z, r, s.dims().inner()),
-                            row_ptr(&c.s_gated, r, s.dims().inner()),
-                        )?;
-                        if r + 1 < rows {
-                            let (conv_len, st_len) = s.state_lens();
-                            let (dc, ds) = &snaps[r].layers[ssm_idx];
-                            dc.copy_from_device_on(s.conv_state_buf(), conv_len, l.stream())?;
-                            ds.copy_from_device_on(s.s_state_buf(), st_len, l.stream())?;
-                        }
-                    }
+                    let conv_snap = ptr_at(snap_conv, ssm_idx * conv_len);
+                    let s_snap = ptr_at(snap_s, ssm_idx * st_len);
+                    s.recurrent_cols(
+                        rows,
+                        &c.s_alpha,
+                        &c.s_beta,
+                        &c.s_g,
+                        &c.s_beta_sig,
+                        &c.s_qkv,
+                        &c.s_conv,
+                        &c.s_o,
+                        &c.s_z,
+                        &c.s_gated,
+                        conv_snap,
+                        s_snap,
+                    )?;
                     ssm_idx += 1;
                     super::trace::mark(&mut self.trace, l, "ssm_rec")?;
                     s.out_rows(l, &c.s_gated, &c.s_out, rows)?;
@@ -245,45 +265,50 @@ impl<'a> GpuEngine<'a> {
                     )?;
                     // Append every column's K/V first, then attend: column `r`
                     // reads positions `0..=pos0 + r`, so a later column's append
-                    // is invisible to it and the two loops are one order apart.
+                    // is invisible to it.
                     super::trace::mark(&mut self.trace, l, "attn_append")?;
-                    for r in 0..rows {
-                        l.set_step(pos0 + r, pos0 + r + 1, 0)?;
-                        match deep {
-                            None => attn.append_at(
-                                l,
-                                row_ptr(&c.k, r, attn.dims.width),
-                                row_ptr(&c.v, r, attn.dims.width),
-                            )?,
-                            Some(dk) => l.kv_encode_ptr(
-                                dk.dtype.id(),
-                                row_ptr(&c.k, r, attn.dims.width),
-                                row_ptr(&c.v, r, attn.dims.width),
-                                &dk.k,
-                                &dk.v,
-                                cfg.n_head_kv,
-                                cfg.head_dim,
-                                dk.seq,
-                            )?,
-                        }
+                    match deep {
+                        None => attn.append_rows(l, &c.k, &c.v, rows, pos0)?,
+                        Some(dk) => l.kv_encode_bulk(
+                            dk.dtype.id(),
+                            &c.k,
+                            &c.v,
+                            &dk.k,
+                            &dk.v,
+                            cfg.n_head_kv,
+                            cfg.head_dim,
+                            dk.seq,
+                            pos0,
+                            0,
+                            rows,
+                        )?,
                     }
                     super::trace::mark(&mut self.trace, l, "attn_mix")?;
-                    for r in 0..rows {
-                        l.set_step(pos0 + r, pos0 + r + 1, 0)?;
-                        match deep {
-                            None => attn.attention_at(
-                                l,
-                                row_ptr(&c.q, r, cfg.n_head * cfg.head_dim),
-                                row_ptr(&c.aout, r, cfg.n_head * cfg.head_dim),
-                            )?,
-                            Some(dk) => super::attn_tile::deep_attention_ptr(
-                                l,
-                                &cfg,
-                                dk,
-                                pos0 + r,
-                                row_ptr(&c.q, r, cfg.n_head * cfg.head_dim),
-                                row_ptr(&c.aout, r, cfg.n_head * cfg.head_dim),
-                            )?,
+                    match deep {
+                        None => attn.attention_cols(
+                            l,
+                            c.q.as_ptr(),
+                            c.aout.as_ptr(),
+                            &c.p_acc,
+                            &c.p_ml,
+                            pos0,
+                            rows,
+                        )?,
+                        Some(dk) => {
+                            // The quantized decode kernel takes the position
+                            // count from the step buffer; one upload per column
+                            // is left on this path at 8K.
+                            for r in 0..rows {
+                                l.set_step(pos0 + r, pos0 + r + 1, 0)?;
+                                super::attn_tile::deep_attention_ptr(
+                                    l,
+                                    &cfg,
+                                    dk,
+                                    pos0 + r,
+                                    row_ptr(&c.q, r, cfg.n_head * cfg.head_dim),
+                                    row_ptr(&c.aout, r, cfg.n_head * cfg.head_dim),
+                                )?;
+                            }
                         }
                     }
                     super::trace::mark(&mut self.trace, l, "attn_wo")?;
@@ -292,38 +317,17 @@ impl<'a> GpuEngine<'a> {
                     &c.ay
                 }
             };
-            for r in 0..rows {
-                l.residual_ptr(
-                    row_ptr(&c.x, r, n),
-                    row_ptr(block_out, r, n),
-                    row_ptr(&c.x1, r, n),
-                    n,
-                )?;
-            }
+            l.residual_buf(&c.x, block_out, &c.x1, rows * n)?;
             l.rmsnorm_rows(&c.x1, &block.post_norm, &c.t, n, cfg.eps, rows)?;
             super::trace::mark(&mut self.trace, l, "post_norm")?;
             block.gate.gemv_rows(l, &c.t, &c.gate, rows)?;
             super::trace::mark(&mut self.trace, l, "gate")?;
             block.up.gemv_rows(l, &c.t, &c.up, rows)?;
             super::trace::mark(&mut self.trace, l, "up")?;
-            for r in 0..rows {
-                l.silu_mul_ptr(
-                    row_ptr(&c.gate, r, cfg.n_ff),
-                    row_ptr(&c.up, r, cfg.n_ff),
-                    row_ptr(&c.act, r, cfg.n_ff),
-                    cfg.n_ff,
-                )?;
-            }
+            l.silu_mul_buf(&c.gate, &c.up, &c.act, rows * cfg.n_ff)?;
             block.down.gemv_rows(l, &c.act, &c.down, rows)?;
             super::trace::mark(&mut self.trace, l, "down")?;
-            for r in 0..rows {
-                l.residual_ptr(
-                    row_ptr(&c.down, r, n),
-                    row_ptr(&c.x1, r, n),
-                    row_ptr(&c.x, r, n),
-                    n,
-                )?;
-            }
+            l.residual_buf(&c.down, &c.x1, &c.x, rows * n)?;
         }
 
         l.rmsnorm_rows(&c.x, &self.output_norm, &c.final_h, n, cfg.eps, rows)?;
@@ -370,6 +374,12 @@ impl<'a> GpuEngine<'a> {
         Ok(&c.final_h)
     }
 
+    /// The `[rows][n_vocab]` logits rows of the last `forward_columns` call.
+    pub fn column_logits(&self) -> Result<&Buffer, String> {
+        let c = self.cols.as_ref().ok_or("columns scratch not allocated")?;
+        Ok(&c.logits)
+    }
+
     /// The post-`output_norm` hidden row of the last `forward_columns` call,
     /// copied into `dst` (one `n_embd` vector).
     pub fn copy_column_hidden(&self, row: usize, dst: &Buffer) -> Result<(), String> {
@@ -386,9 +396,26 @@ impl<'a> GpuEngine<'a> {
         let have = matches!(&self.cols, Some(c) if c.cap >= rows);
         if !have {
             let cap = rows.max(4);
-            self.cols = Some(Cols::new(&self.cfg, cap)?);
+            let (p_acc, p_ml) = self
+                .layers
+                .iter()
+                .find_map(|b| match &b.kind {
+                    BlockKind::Full { attn, .. } => Some(attn.split_scratch(cap)),
+                    BlockKind::Ssm(_) => None,
+                })
+                .ok_or_else(|| "model has no full-attention layer".to_string())?;
+            self.cols = Some(Cols::new(&self.cfg, cap, p_acc, p_ml)?);
         }
         Ok(())
+    }
+}
+
+/// Device pointer `base + floats`, or null when `base` is null.
+fn ptr_at(base: *mut std::ffi::c_void, floats: usize) -> *mut std::ffi::c_void {
+    if base.is_null() {
+        base
+    } else {
+        unsafe { (base as *mut u8).add(floats * 4) as *mut std::ffi::c_void }
     }
 }
 
