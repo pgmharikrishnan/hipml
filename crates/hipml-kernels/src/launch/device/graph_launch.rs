@@ -87,8 +87,10 @@ impl Launcher {
         // path is bit-identical (gemv-check, column-check). The WMMA tile is
         // measured faster from B=4 up but is not bit-identical, so it needs
         // `HIPML_SKINNY=1` (or `HIPML_BATCH_SKINNY=1`); `HIPML_BATCH_LEGACY=1`
-        // forces the exact path even when one of those is set.
-        let skinny = std::env::var_os("HIPML_BATCH_LEGACY").is_none()
+        // forces the exact path even when one of those is set. Below B=4 the
+        // tile pads R to 16 and loses, so it is only used where it wins.
+        let skinny = batch >= 4
+            && std::env::var_os("HIPML_BATCH_LEGACY").is_none()
             && (std::env::var_os("HIPML_BATCH_SKINNY").is_some() || crate::skinny_on());
         if skinny {
             if let Some(entry) = Self::skinny_for_kind(kind) {
