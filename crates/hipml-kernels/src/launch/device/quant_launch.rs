@@ -131,54 +131,6 @@ impl Launcher {
             kernel.launch(cfg, stream, &mut params)
         }
 
-        /// GEMV with the SwiGLU activation in the epilogue:
-        /// `y[row] = silu(gate[row]) * W[row,:] . x`.
-        ///
-        /// The gate vector is the gate projection's output, so the up GEMV and
-        /// the standalone `silu_mul_f32` launch become one.
-        pub fn run_quant_silu_on(
-            &self,
-            which: &str,
-            name: &str,
-            w: &ByteBuffer,
-            x: &Buffer,
-            gate: &Buffer,
-            y: &Buffer,
-            m: usize,
-            k: usize,
-        ) -> Result<(), String> {
-            let stream = if which == "side" {
-                &self.side
-            } else {
-                &self.stream
-            };
-            assert_eq!(x.len(), k, "x must be k");
-            assert_eq!(y.len(), m, "y must be m");
-            assert_eq!(gate.len(), m, "gate must be m");
-            let spec = crate::spec(name).ok_or_else(|| format!("{name} is not in the manifest"))?;
-            let kernel = self.module.kernel(name)?;
-            let mut p_w = w.as_ptr();
-            let mut p_x = x.as_ptr();
-            let mut p_g = gate.as_ptr();
-            let mut p_y = y.as_ptr();
-            let mut v_m = m as i32;
-            let mut v_k = k as i32;
-            let mut params: [*mut c_void; 6] = [
-                &mut p_w as *mut _ as *mut c_void,
-                &mut p_x as *mut _ as *mut c_void,
-                &mut p_g as *mut _ as *mut c_void,
-                &mut p_y as *mut _ as *mut c_void,
-                &mut v_m as *mut _ as *mut c_void,
-                &mut v_k as *mut _ as *mut c_void,
-            ];
-            let cfg = match spec.kind {
-                crate::KernelKind::RowTile { rows, block } => LaunchConfig::row_tile(m, rows, block),
-                crate::KernelKind::PerRow { block } => LaunchConfig::per_row(m, block),
-                _ => return Err(format!("{name}: unsupported quantized grid")),
-            };
-            kernel.launch(cfg, stream, &mut params)
-        }
-
         /// `gemm_f32` with the weight already resident: the multi-row f32
         /// fallback for the prefill chunk (the two Q5_K `ffn_down` tensors).
         pub fn run_gemm_resident(

@@ -119,8 +119,7 @@ __device__ __forceinline__ void q6k_tile(
     int m,
     int k,
     float* __restrict__ sx,
-    int tile,
-    const float* __restrict__ gate = nullptr)
+    int tile)
 {
     const int tid = threadIdx.x;
     const int lane = tid & 31;
@@ -164,29 +163,8 @@ __device__ __forceinline__ void q6k_tile(
         float a = acc[rr];
 #pragma unroll
         for (int off = 16; off > 0; off >>= 1) a += __shfl_down(a, off);
-        // SwiGLU epilogue: the up GEMV writes silu(gate) * y, so the separate
-        // silu_mul launch disappears. Same expression as silu_mul_f32.
-        if (lane == 0 && row[rr] < m) {
-            if (gate) {
-                const float g = gate[row[rr]];
-                a *= g / (1.0f + expf(-g));
-            }
-            y[row[rr]] = a;
-        }
+        if (lane == 0 && row[rr] < m) y[row[rr]] = a;
     }
-}
-
-// Up-projection with the SwiGLU activation fused into the epilogue.
-extern "C" __global__ void gemv_q6_k_silu(
-    const unsigned char* __restrict__ w,
-    const float* __restrict__ x,
-    const float* __restrict__ gate,
-    float* __restrict__ y,
-    int m,
-    int k)
-{
-    __shared__ __align__(16) float sx[Q6K_K_TILE];
-    q6k_tile<Q6K_ROWS_PER_WARP>(w, x, y, m, k, sx, blockIdx.x, gate);
 }
 
 extern "C" __global__ void gemv_q6_k(

@@ -113,29 +113,6 @@ impl<'a> Proj<'a> {
         )
     }
 
-    /// `y = silu(gate) * W x`: the up projection with the SwiGLU activation in
-    /// the GEMV epilogue, replacing `gemv` + `silu_mul_buf`.
-    pub(crate) fn gemv_silu(
-        &self,
-        l: &Launcher,
-        x: &Buffer,
-        gate: &Buffer,
-        y: &Buffer,
-    ) -> Result<(), String> {
-        let entry = match self.entry {
-            "gemv_q4_k" => "gemv_q4_k_silu",
-            "gemv_q6_k" => "gemv_q6_k_silu",
-            // Other formats keep the two-launch form: GEMV, then silu_mul in
-            // place on its own output (the elementwise kernel reads before it
-            // writes, so `y` can be both `up` and `out`).
-            _ => {
-                self.gemv(l, x, y)?;
-                return l.silu_mul_buf(gate, y, y, self.rows);
-            }
-        };
-        l.run_quant_silu_on("stream", entry, self.w, x, gate, y, self.rows, self.cols)
-    }
-
     /// The same projection over `tokens` rows of `x` (`[tokens][cols]`), one
     /// tiled GEMM instead of `tokens` GEMVs. The prefill chunk's projection.
     pub(crate) fn gemm(
