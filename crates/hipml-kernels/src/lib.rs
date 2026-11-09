@@ -393,6 +393,22 @@ pub const KERNELS: &[KernelSpec] = &[
         },
     },
     KernelSpec {
+        name: "gemm_skinny_q4_ns",
+        entry: "gemm_skinny_q4_ns",
+        kind: KernelKind::RowTile {
+            rows: 64,
+            block: 128,
+        },
+    },
+    KernelSpec {
+        name: "gemm_skinny_q4_nc",
+        entry: "gemm_skinny_q4_nc",
+        kind: KernelKind::RowTile {
+            rows: 64,
+            block: 128,
+        },
+    },
+    KernelSpec {
         name: "stream_read",
         entry: "stream_read",
         kind: KernelKind::Linear { block: 256 },

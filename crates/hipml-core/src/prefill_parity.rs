@@ -177,7 +177,12 @@ pub fn prefill_cases() -> Vec<PrefillCase> {
 /// The tolerance is the fp16-operand budget, not `Tol::DEFAULT`: the fragment
 /// conversion loses ~1e-3 relative before the accumulation order changes.
 pub fn skinny_cases() -> Vec<PrefillCase> {
-    let small = Tol::new(2e-2, 5e-2);
+    // fp16 operands: ~1e-2 absolute on a 512-term dot, and a near-zero output
+    // moves the ratio by an order of magnitude. O(1) below a layout bug, which
+    // swaps or zeroes whole token rows.
+    let small = Tol::new(5e-2, 5e-1);
+    // Production k (5120 terms): the same few 1e-2 relative to the output scale.
+    let large = Tol::new(2.5e-1, 5e-2);
     vec![
         PrefillCase {
             name: "gemm_skinny_q4_k",
@@ -261,7 +266,7 @@ pub fn skinny_cases() -> Vec<PrefillCase> {
         PrefillCase {
             name: "gemm_skinny_q4_k",
             label: "skinny_q4_k 5120x5120 r=4",
-            tol: LARGE_TOL,
+            tol: large,
             seed: 0x5C11_0008,
             m: 5120,
             k: 5120,

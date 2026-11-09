@@ -279,5 +279,23 @@ fn sweep_geometry(launcher: &Launcher, reps: usize) {
                 bytes as f64 / b * 1e3 / 1e9
             );
         }
+        // Split the shipped geometry's cost: no staging stores, no fragments.
+        for (entry, what) in [
+            ("gemm_skinny_q4_k", "full"),
+            ("gemm_skinny_q4_ns", "no staging"),
+            ("gemm_skinny_q4_nc", "no fragment/wmma"),
+        ] {
+            let Ok(ms) = best_ms(
+                || {
+                    launcher.run_skinny_resident_reps(
+                        entry, &wb, &xb, &y, shape.n, shape.k, 8, reps,
+                    )
+                },
+                2,
+            ) else {
+                continue;
+            };
+            println!("    probe {what:<16} {ms:8.3} ms at r=8");
+        }
     }
 }

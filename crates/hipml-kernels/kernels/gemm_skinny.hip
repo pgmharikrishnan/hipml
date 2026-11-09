@@ -19,6 +19,12 @@
 // LDS.128 (one A fragment, one B fragment) and one WMMA. Weight bytes read are
 // independent of R; the only R-dependent work is the token-row staging and the
 // epilogue.
+//
+// Staging is the whole cost, so it is written for the memory system: four
+// threads per row, eight values each, and the eight payload bytes fetched with
+// the widest load the address alignment allows (one 64-bit load for Q4_K). As
+// eight scalar byte loads a warp instruction touched eight rows with 4 of 32
+// bytes used and the kernel ran at 32 GB/s; see `pws_load8_bytes`.
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -43,7 +49,110 @@
 typedef _Float16 __attribute__((ext_vector_type(8))) pws_h8;
 typedef float __attribute__((ext_vector_type(8))) pws_f8;
 
-template <int KIND, int RT, int KW, int THR>
+// The eight quant payload bytes of one row run, fetched with the widest load the
+// address alignment allows.
+//
+// This is the difference between 32 GB/s and the memory system's number: as
+// eight scalar byte loads, one warp instruction touches eight rows x 4 of 32
+// bytes, so a block issues 8x too many sector requests and every one is mostly
+// waste. As one 64-bit load per eight values the same instruction requests
+// eight sectors, each fully used.
+static __device__ __forceinline__ void pws_load8_bytes(const unsigned char* __restrict__ p,
+                                                       unsigned int* w)
+{
+    const size_t a = (size_t)p;
+    if ((a & 7) == 0) {
+        const uint2 v = *reinterpret_cast<const uint2*>(p);
+        w[0] = v.x;
+        w[1] = v.y;
+    } else if ((a & 3) == 0) {
+        const unsigned int* d = reinterpret_cast<const unsigned int*>(p);
+        w[0] = d[0];
+        w[1] = d[1];
+    } else if ((a & 1) == 0) {
+        const unsigned short* s = reinterpret_cast<const unsigned short*>(p);
+        w[0] = (unsigned int)s[0] | ((unsigned int)s[1] << 16);
+        w[1] = (unsigned int)s[2] | ((unsigned int)s[3] << 16);
+    } else {
+        w[0] = 0;
+        w[1] = 0;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) w[i >> 2] |= (unsigned int)p[i] << (8 * (i & 3));
+    }
+}
+
+// `pf_dequant8` with wide payload loads: same arithmetic, same block layouts,
+// eight contiguous values per lane. Only the load width differs, which is why
+// the parity cases compare it to the same CPU reference.
+template <int KIND>
+static __device__ __forceinline__ void pws_dequant8(const unsigned char* __restrict__ rp,
+                                                    int v, float* out)
+{
+    unsigned int w0[2];
+    unsigned int w1[2];
+    if (KIND == 0) {
+        const int blk = v >> 8;
+        const int within = v & 255;
+        const int sub = within >> 5;
+        const int part = (within & 31) >> 3;
+        const unsigned char* b = rp + (size_t)blk * PF_Q4K_BLOCK_BYTES;
+        const float d = __half2float(*reinterpret_cast<const __half*>(b));
+        const float dmin = __half2float(*reinterpret_cast<const __half*>(b + 2));
+        int sc, mn;
+        pf_scale_min(sub, b + 4, &sc, &mn);
+        const float scale = d * (float)sc;
+        const float minv = dmin * (float)mn;
+        const bool high = (sub & 1) != 0;
+        pws_load8_bytes(b + 16 + (sub >> 1) * 32 + part * 8, w0);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int byte = (int)((w0[i >> 2] >> (8 * (i & 3))) & 0xFF);
+            const int q = high ? (byte >> 4) : (byte & 0xF);
+            out[i] = scale * (float)q - minv;
+        }
+    } else if (KIND == 1) {
+        const int blk = v >> 8;
+        const int within = v & 255;
+        const int j = within >> 4;
+        const int l0 = within & 15;
+        const unsigned char* b = rp + (size_t)blk * PF_Q6K_BLOCK_BYTES;
+        const float d = __half2float(*reinterpret_cast<const __half*>(b + 208));
+        const float scale = d * (float)(signed char)b[192 + j];
+        const int hf = j >> 3;
+        const int s = j & 7;
+        const int group = s >> 1;
+        const int is = s & 1;
+        const int ql_off = hf * 64 + (group & 1) * 32 + is * 16 + l0;
+        const int qh_off = 128 + hf * 32 + is * 16 + l0;
+        const int shift = 2 * group;
+        const bool high = group >= 2;
+        pws_load8_bytes(b + ql_off, w0);
+        pws_load8_bytes(b + qh_off, w1);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int qb = (int)((w0[i >> 2] >> (8 * (i & 3))) & 0xFF);
+            const int hb = ((int)((w1[i >> 2] >> (8 * (i & 3))) & 0xFF) >> shift) & 3;
+            const int nib = high ? (qb >> 4) : (qb & 0xF);
+            out[i] = scale * (float)((nib | (hb << 4)) - 32);
+        }
+    } else {
+        const int blk = v >> 5;
+        const int part = (v & 31) >> 3;
+        const unsigned char* b = rp + (size_t)blk * PF_Q8_0_BLOCK_BYTES;
+        const float d = __half2float(*reinterpret_cast<const __half*>(b));
+        pws_load8_bytes(b + 2 + part * 8, w0);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int q = (int)((w0[i >> 2] >> (8 * (i & 3))) & 0xFF);
+            out[i] = d * (float)(signed char)q;
+        }
+    }
+}
+
+// PROBE splits the block's cost for the bench: 0 runs everything, 1 skips the
+// staging stores (fragment reads still happen), 2 skips the fragment reads and
+// the WMMA. Probes compute garbage; they exist only to name the bottleneck.
+template <int KIND, int RT, int KW, int THR, int PROBE = 0>
 static __device__ __forceinline__ void pws_body(
     const unsigned char* __restrict__ w,
     const float* __restrict__ x,
@@ -79,6 +188,7 @@ static __device__ __forceinline__ void pws_body(
     const int d_q = tid & 3;
 
     auto stage = [&](int base) {
+        if (PROBE == 1) return;
 #pragma unroll
         for (int p = 0; p < 16 / XRP; ++p) {
             const int rl = p * XRP + xt;
@@ -102,7 +212,7 @@ static __device__ __forceinline__ void pws_body(
             pws_h8 hv;
             if (gr < n && base + kc < k) {
                 float v[8];
-                pf_dequant8<KIND>(w + (size_t)gr * wrow, base + kc, v);
+                pws_dequant8<KIND>(w + (size_t)gr * wrow, base + kc, v);
 #pragma unroll
                 for (int i = 0; i < 8; ++i) hv[i] = (_Float16)v[i];
             } else {
@@ -128,6 +238,7 @@ static __device__ __forceinline__ void pws_body(
         stage(base);
         __syncthreads();
         if (warp < NW) {
+            if (PROBE == 2) continue;
 #pragma unroll
             for (int kk = 0; kk < KW; kk += 16) {
                 const pws_h8 a =
@@ -232,4 +343,20 @@ extern "C" __global__ void gemm_skinny_q4_kg6( // RT 128, KW 64
     float* __restrict__ y, int n, int k, int r)
 {
     pws_body<0, 128, 64, 256>(w, x, y, n, k, r);
+}
+
+// Cost probes at the shipped geometry: `_ns` skips the staging stores, `_nc`
+// skips the fragment reads and the WMMA. Garbage results, timing only.
+extern "C" __global__ void gemm_skinny_q4_ns(
+    const unsigned char* __restrict__ w, const float* __restrict__ x,
+    float* __restrict__ y, int n, int k, int r)
+{
+    pws_body<0, 64, 64, 128, 1>(w, x, y, n, k, r);
+}
+
+extern "C" __global__ void gemm_skinny_q4_nc(
+    const unsigned char* __restrict__ w, const float* __restrict__ x,
+    float* __restrict__ y, int n, int k, int r)
+{
+    pws_body<0, 64, 64, 128, 2>(w, x, y, n, k, r);
 }
