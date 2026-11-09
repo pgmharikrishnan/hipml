@@ -193,6 +193,28 @@ impl Launcher {
         kernel.launch(LaunchConfig::per_row(rows, 256), &self.stream, &mut params)
     }
 
+    /// [`Self::residual_rmsnorm`] when the row fits the fused kernel's register
+    /// window, otherwise the two passes it replaces. Keeps the `MAXK * BLOCK`
+    /// limit an implementation detail of the kernel.
+    pub fn residual_rmsnorm_or_pair(
+        &self,
+        a: &Buffer,
+        b: &Buffer,
+        w: &Buffer,
+        res: &Buffer,
+        y: &Buffer,
+        n: usize,
+        eps: f32,
+        rows: usize,
+    ) -> Result<(), String> {
+        if n <= 32 * 256 {
+            self.residual_rmsnorm(a, b, w, res, y, n, eps, rows)
+        } else {
+            self.residual_buf(a, b, res, rows * n)?;
+            self.rmsnorm_ptr(res.as_ptr(), w, y.as_ptr(), n, eps, rows)
+        }
+    }
+
     /// `y = silu(gate) * up`, one thread per element.
     pub fn silu_mul_buf(
         &self,

@@ -247,8 +247,7 @@ impl<'a> GpuEngine<'a> {
         // The first layer's input norm has no residual to fold into it (the
         // embedding wrote `x` directly); every later layer's input norm is
         // fused with the residual that produces its input at the bottom of the
-        // loop. `residual_rmsnorm_f32` caps the row at `MAXK * BLOCK` columns.
-        let fused_norm = n <= 32 * 256;
+        // loop.
         l.rmsnorm_rows(&c.x, &self.layers[0].attn_norm, &c.t, n, cfg.eps, n_tok)?;
         if let Some(r) = rep.as_mut() {
             r.lap(l, |r| &mut r.elementwise_ms);
@@ -298,21 +297,16 @@ impl<'a> GpuEngine<'a> {
                     &c.y
                 }
             };
-            if fused_norm {
-                l.residual_rmsnorm(
-                    &c.x,
-                    block_out,
-                    &block.post_norm,
-                    &c.x1,
-                    &c.t,
-                    n,
-                    cfg.eps,
-                    n_tok,
-                )?;
-            } else {
-                l.residual_buf(&c.x, block_out, &c.x1, n_tok * n)?;
-                l.rmsnorm_rows(&c.x1, &block.post_norm, &c.t, n, cfg.eps, n_tok)?;
-            }
+            l.residual_rmsnorm_or_pair(
+                &c.x,
+                block_out,
+                &block.post_norm,
+                &c.x1,
+                &c.t,
+                n,
+                cfg.eps,
+                n_tok,
+            )?;
             if let Some(r) = rep.as_mut() {
                 r.lap(l, |r| &mut r.elementwise_ms);
             }
@@ -352,7 +346,7 @@ impl<'a> GpuEngine<'a> {
             // fold its input norm into the same pass; the last layer's `x` is
             // only read by the logits projection, so it stays a bare add.
             match self.layers.get(i + 1) {
-                Some(next) if fused_norm => l.residual_rmsnorm(
+                Some(next) => l.residual_rmsnorm_or_pair(
                     &c.down,
                     &c.x1,
                     &next.attn_norm,
@@ -362,10 +356,6 @@ impl<'a> GpuEngine<'a> {
                     cfg.eps,
                     n_tok,
                 )?,
-                Some(next) => {
-                    l.residual_buf(&c.down, &c.x1, &c.x, n_tok * n)?;
-                    l.rmsnorm_rows(&c.x, &next.attn_norm, &c.t, n, cfg.eps, n_tok)?;
-                }
                 None => l.residual_buf(&c.down, &c.x1, &c.x, n_tok * n)?,
             }
             if let Some(r) = rep.as_mut() {
