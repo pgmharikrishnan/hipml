@@ -250,6 +250,18 @@ pub const KERNELS: &[KernelSpec] = &[
         kind: KernelKind::Linear { block: 256 },
     },
     KernelSpec {
+        name: "prefill_f32",
+        entry: "prefill_f32",
+        // Raw-f32 sibling of prefill_q4_k (the SSM alpha/beta projections):
+        // 256 tokens x 64 rows. RR=2 gives 32 row groups, so 1024 threads: the
+        // 48-row tail would otherwise leave most of the card idle.
+        kind: KernelKind::Prefill {
+            rows: 64,
+            tokens: 256,
+            block: 1024,
+        },
+    },
+    KernelSpec {
         name: "prefill_q4_k",
         entry: "prefill_q4_k",
         // 256 tokens x 64 rows per block, 256 threads, 8x8 microtile; the

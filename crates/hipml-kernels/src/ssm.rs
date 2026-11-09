@@ -230,6 +230,12 @@ pub struct SsmGpuLayer<'a> {
     pub(crate) wgate: SsmWeight<'a>,
     pub(crate) alpha_w: SsmWeight<'a>,
     pub(crate) beta_w: SsmWeight<'a>,
+    /// fp16 row-major copies of the f32 alpha/beta weights. The prefill chunk
+    /// otherwise has no tensor-core path for these two projections, and the
+    /// f32 fallback costs ~3.4 s on a 100K prompt. Only the resident
+    /// constructor fills them; the token loop keeps using the f32 weights.
+    pub(crate) alpha_half: Option<ByteBuffer>,
+    pub(crate) beta_half: Option<ByteBuffer>,
     pub(crate) conv_w: Buffer,
     pub(crate) dt_bias: Buffer,
     pub(crate) a: Buffer,
@@ -295,6 +301,8 @@ impl<'a> SsmGpuLayer<'a> {
             wgate: SsmWeight::F32(Buffer::from_host(w.wgate)?),
             alpha_w: SsmWeight::F32(Buffer::from_host(w.alpha)?),
             beta_w: SsmWeight::F32(Buffer::from_host(w.beta)?),
+            alpha_half: None,
+            beta_half: None,
             conv_w: Buffer::from_host(w.conv_w)?,
             dt_bias: Buffer::from_host(w.dt_bias)?,
             a: Buffer::from_host(w.a)?,
@@ -360,6 +368,8 @@ impl<'a> SsmGpuLayer<'a> {
             wgate: SsmWeight::Quant(w.wgate.0, w.wgate.1),
             alpha_w: SsmWeight::Quant(w.alpha.0, w.alpha.1),
             beta_w: SsmWeight::Quant(w.beta.0, w.beta.1),
+            alpha_half: f16_copy(w.alpha.0, w.alpha.1)?,
+            beta_half: f16_copy(w.beta.0, w.beta.1)?,
             conv_w: Buffer::from_host(w.conv_w)?,
             dt_bias: Buffer::from_host(w.dt_bias)?,
             a: Buffer::from_host(w.a)?,
@@ -500,4 +510,20 @@ pub(crate) fn upload(buf: &Buffer, data: &[f32]) -> Result<(), String> {
         return Err(format!("hipDeviceSynchronize failed: {code}"));
     }
     Ok(())
+}
+
+/// fp16 row-major copy of a raw-f32 resident tensor, for the tensor-core
+/// prefill path. `None` for any other entry, so a quantized or absent tensor
+/// keeps its normal kernel.
+fn f16_copy(w: &ByteBuffer, entry: &str) -> Result<Option<ByteBuffer>, String> {
+    if entry != "gemv_f32" {
+        return Ok(None);
+    }
+    let raw = w.to_host()?;
+    let mut half = Vec::with_capacity(raw.len() / 2);
+    for c in raw.chunks_exact(4) {
+        let v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+        half.extend_from_slice(&hipml_core::kv::f32_to_f16(v).to_le_bytes());
+    }
+    Ok(Some(ByteBuffer::from_host(&half)?))
 }

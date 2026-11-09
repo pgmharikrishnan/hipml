@@ -32,25 +32,41 @@ impl<'a> SsmGpuLayer<'a> {
             crate::prefill_xhalf(l.module(), l.stream(), x, xh, tokens * d.n_embd)?;
         }
         let plan = [
-            (&self.wqkv, &c.qkv, d.conv_ch),
-            (&self.wgate, &c.z, d.inner()),
-            (&self.alpha_w, &c.alpha, d.n_v),
-            (&self.beta_w, &c.beta, d.n_v),
+            (&self.wqkv, &c.qkv, d.conv_ch, None),
+            (&self.wgate, &c.z, d.inner(), None),
+            (&self.alpha_w, &c.alpha, d.n_v, self.alpha_half.as_ref()),
+            (&self.beta_w, &c.beta, d.n_v, self.beta_half.as_ref()),
         ];
-        for (w, y, m) in plan {
+        for (w, y, m, half_w) in plan {
             // The loader keeps F32 tensors (ssm_alpha, ssm_beta in Qwen3.8-27B) as raw
-            // little-endian f32, so those go through the f32 multi-row GEMM.
+            // little-endian f32, so those go through the f32 multi-row GEMM. The
+            // resident loader also leaves an fp16 copy, which rides the
+            // tensor-core path with the converted activation tile.
             match w {
-                SsmWeight::Quant(b, "gemv_f32") => crate::gemm_rows_f32(
-                    l.module(),
-                    l.stream(),
-                    b.as_ptr(),
-                    x.as_ptr(),
-                    y.as_ptr(),
-                    tokens,
-                    m,
-                    d.n_embd,
-                )?,
+                SsmWeight::Quant(b, "gemv_f32") => match (half, half_w) {
+                    (true, Some(hw)) => crate::prefill_resident_half(
+                        l.module(),
+                        l.stream(),
+                        "prefill_halfw_w2h",
+                        hw,
+                        xh,
+                        y,
+                        m,
+                        d.n_embd,
+                        tokens,
+                    )?,
+                    _ => crate::prefill_resident(
+                        l.module(),
+                        l.stream(),
+                        "prefill_f32",
+                        b,
+                        x,
+                        y,
+                        m,
+                        d.n_embd,
+                        tokens,
+                    )?,
+                },
                 SsmWeight::Quant(b, e) => {
                     let entry = prefill_entry(e)?;
                     if half {
@@ -333,15 +349,16 @@ impl<'a> SsmGpuLayer<'a> {
             crate::prefill_xhalf(l.module(), l.stream(), &c.gated, xh, tokens * d.inner())?;
         }
         match &self.wout {
-            SsmWeight::Quant(b, "gemv_f32") => crate::gemm_rows_f32(
+            SsmWeight::Quant(b, "gemv_f32") => crate::prefill_resident(
                 l.module(),
                 l.stream(),
-                b.as_ptr(),
-                c.gated.as_ptr(),
-                c.out.as_ptr(),
-                tokens,
+                "prefill_f32",
+                b,
+                &c.gated,
+                &c.out,
                 d.n_embd,
                 d.inner(),
+                tokens,
             ),
             SsmWeight::Quant(b, _) => {
                 let e = entry.expect("checked above");
