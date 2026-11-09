@@ -109,10 +109,21 @@ pub(crate) struct Chunk {
     /// Second k-partial for split-K ffn projections. Only allocated for short
     /// prompts, where the ffn tile is wave-starved; `tokens * max(n_embd,n_ff)`.
     pub sk: Buffer,
+    /// Split-K attention partials: `[splits][qslots][n_head][head_dim]` and
+    /// `[splits][qslots][n_head][2]`, f32, `qslots` the chunk rounded up to a
+    /// 32-query tile. One allocation per engine, reused by every layer.
+    pub apart: Buffer,
+    pub apart_ml: Buffer,
+    /// Key splits the deep chunks use, from `HIPML_ATTN_SPLITS` (default 8,
+    /// 1 disables).
+    pub attn_splits: usize,
 }
 
 impl Chunk {
-    fn new(cfg: &hipml_core::config::Config, tokens: usize) -> Result<Chunk, String> {
+    /// `deep` asks for the split-attention scratch: a prompt that never passes
+    /// the split gate must not pay to allocate it (the 512-token case is 8x
+    /// the partials for no work, and its prefill is under half a second).
+    fn new(cfg: &hipml_core::config::Config, tokens: usize, deep: bool) -> Result<Chunk, String> {
         let n = cfg.n_embd;
         let ff = cfg.n_ff;
         let qd = cfg.n_head * cfg.head_dim;
@@ -126,6 +137,15 @@ impl Chunk {
         // under three waves (see `prefill_should_split`); at the 2048-token
         // chunk used by long prompts the scratch would never be touched.
         let sk = if tokens <= 1024 { tokens * wide } else { 1 };
+        // Split-K attention scratch. `splits` is the env knob; the buffer is
+        // capped at 1 GiB so a deep prompt cannot turn it into a residency
+        // problem (8 splits of a 2048-token chunk is 403 MiB).
+        let qslots = (tokens + 31) / 32 * 32;
+        let mut attn_splits = if deep { attn_tile::env_splits() } else { 1 };
+        let part_len = |splits: usize| splits * qslots * cfg.n_head * cfg.head_dim;
+        while attn_splits > 1 && part_len(attn_splits) * 4 > 1 << 30 {
+            attn_splits /= 2;
+        }
         Ok(Chunk {
             x: zeros(tokens * n)?,
             x1: zeros(tokens * n)?,
@@ -144,6 +164,9 @@ impl Chunk {
             y: zeros(tokens * n)?,
             xh: zeros((tokens * wide + 1) / 2)?,
             sk: zeros(sk)?,
+            apart: zeros(part_len(attn_splits).max(1))?,
+            apart_ml: zeros((attn_splits * qslots * cfg.n_head * 2).max(2))?,
+            attn_splits,
         })
     }
 
@@ -163,7 +186,9 @@ impl Chunk {
             + self.aout.len()
             + self.y.len()
             + self.xh.len()
-            + self.sk.len()) * 4
+            + self.sk.len()
+            + self.apart.len()
+            + self.apart_ml.len()) * 4
             + self.ssm.bytes()
     }
 }
@@ -179,7 +204,8 @@ impl<'a> GpuEngine<'a> {
     ) -> Result<u32, String> {
         // Scratch is sized by the chunk, so a short prompt never asks for more.
         let chunk = chunk.min(tokens.len()).max(1);
-        self.ensure_chunk(chunk)?;
+        let deep = attn_tile::split_count(attn_tile::env_splits(), tokens.len()) > 1;
+        self.ensure_chunk(chunk, deep)?;
         let mut rep: Option<PrefillReport> = None;
         let mut last = 0u32;
         for tile in tokens.chunks(chunk) {
@@ -197,7 +223,8 @@ impl<'a> GpuEngine<'a> {
         chunk: usize,
     ) -> Result<(u32, PrefillReport), String> {
         let chunk = chunk.min(tokens.len()).max(1);
-        self.ensure_chunk(chunk)?;
+        let deep = attn_tile::split_count(attn_tile::env_splits(), tokens.len()) > 1;
+        self.ensure_chunk(chunk, deep)?;
         let mut rep = Some(PrefillReport::default());
         let mut last = 0u32;
         for tile in tokens.chunks(chunk) {
@@ -435,17 +462,20 @@ impl<'a> GpuEngine<'a> {
     }
 
     /// Allocate (or grow) the chunk scratch. Called by `prefill_chunked`.
-    fn ensure_chunk(&mut self, tokens: usize) -> Result<(), String> {
-        let have = matches!(&self.chunk, Some((cap, _)) if *cap >= tokens);
+    fn ensure_chunk(&mut self, tokens: usize, deep: bool) -> Result<(), String> {
+        let have = match &self.chunk {
+            Some((cap, c)) => *cap >= tokens && (c.attn_splits > 1) == deep,
+            None => false,
+        };
         if !have {
-            self.chunk = Some((tokens, Chunk::new(&self.cfg, tokens)?));
+            self.chunk = Some((tokens, Chunk::new(&self.cfg, tokens, deep)?));
         }
         Ok(())
     }
 
     /// Bytes the chunk scratch holds after `prefill_chunked(tokens, ..)`.
     pub fn chunk_bytes(&mut self, tokens: usize) -> usize {
-        match self.ensure_chunk(tokens) {
+        match self.ensure_chunk(tokens, true) {
             Ok(()) => self.chunk.as_ref().map(|(_, c)| c.bytes()).unwrap_or(0),
             Err(_) => 0,
         }

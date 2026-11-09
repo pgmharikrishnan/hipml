@@ -318,3 +318,128 @@ cache's key-major V is transposed through shared every tile. A dim-major f32 V
 cache would remove that staging pass; it was not measured because it touches
 every f32-cache reader (append, the chunk kernels and the decode fallback) for
 an estimated ~5% of the attention stage.
+
+## Split-K chunk attention (WP39)
+
+`attn_chunk_wmma_f16` gives every (KV head, 32-query tile, half of head_dim)
+block the whole causal prefix. At 100K the last chunk's blocks stream ~6,250
+key tiles each, and a block owns its CU for its whole life (`168` VGPRs at 12
+warps is exactly one block per CU), so the two `__syncthreads` of every tile sit
+on the critical path with nothing else resident to run. The kernel was measured
+at 58 TFLOP/s of *issued* matrix work, i.e. 33% of the 171-188 TFLOPS the
+shipped prefill GEMM reaches, and at 137 GB/s of staged bytes, i.e. a fifth of
+the 640 GB/s spec: it is not traffic-bound, which is why query-tile 64, key-tile
+32, accumulator chain counts and the q8 cache all failed to move it.
+
+`attn_chunk_split_f16` cuts the live key range into `splits` equal slices; each
+(kv head, query tile, d half, split) block streams one slice and writes an
+unnormalised `(acc, max, sum)` partial, and `attn_chunk_combine_f32` folds them
+in one pass — flash-decoding's split, applied to prefill.
+
+```
+blockIdx.x  KV head
+blockIdx.y  32 queries
+blockIdx.z  split * 2 + d half
+part_acc[(split * qslots + row) * n_heads + head][head_dim]   fp32
+part_ml [(split * qslots + row) * n_heads + head][2]          fp32 (max, sum)
+```
+
+Two details are load-bearing and neither is a tuning knob:
+
+- The running max is seeded at `-1e30`, not `-inf`. A slice can sit wholly above
+  the diagonal (short chunk, many splits); `exp2f(-inf - -inf)` is NaN, and a
+  NaN in one partial poisons the combine.
+- The causal mask also tests `kg < hi`. The last tile of a slice stages
+  duplicated rows when `hi - base < 16`, and the causal bound alone would admit
+  them.
+
+Interior tiles skip both bounds: they are warp-uniform, so a tile whose last key
+is at or before the warp's first query needs no mask at all. That is worth 5.4%
+on its own (`119.8 -> 113.3 ms` for the same 100K chunk at 8 splits) and is
+free: no extra registers, one branch.
+
+`splits` is `HIPML_ATTN_SPLITS` (default 8) and the mono kernel keeps every
+chunk below `HIPML_ATTN_SPLIT_MIN` positions (default 8,192, i.e. 8K prompts and
+shorter are bit-identical to the old path). Splits only apply to the
+quantized-cache chunk path; the f32 mirror path (`--kv f32`) still runs the mono
+kernel.
+
+### One chunk at the deepest position (q8 cache, 2048 tokens at 98304)
+
+`hipml attn-bench --chunk 98304,2048 --chunk-splits N`, one layer, `reps 2`:
+
+| splits | kernel ms | staged GB/s | useful TFLOP/s | scratch |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 (mono) | 151.0 | 137.4 | 33.1 | 48 MiB |
+| 2 | 127.2 | 163.1 | 39.3 | 97 MiB |
+| 4 | 119.7 | 173.4 | 41.8 | 194 MiB |
+| 8 | **114.1** | **181.8** | **43.8** | 387 MiB |
+| 16 | level (no further gain) | | | 774 MiB |
+
+The staged byte count is unchanged by splitting (each block streams its own
+slice); the bandwidth rises because the same bytes are read by blocks that are
+no longer serialised behind one barrier chain.
+
+### Whole-model prefill (q8, chunk 2048, `--prefill-split`)
+
+| case | splits | TTFT | attention stage | useful TFLOP/s |
+| --- | ---: | ---: | ---: | ---: |
+| 100K | 1 (mono) | 136.98 s | 64.42 s | 30.6 |
+| 100K | 8, gate 16K, no interior-mask fix | 126.35 s | 53.99 s | 36.5 |
+| 100K | 8, gate 0, interior-mask fix | **124.41 s** | **52.29 s** | **37.7** |
+| 32K | 1 (mono, f32 mirror; the q8 mono cell was not re-run) | 31.68 s | 8.09 s | 26.1 |
+| 32K | 8, gate 8K | **30.63 s** | **7.03 s** | 30.0 |
+| 8K | any (gate never fires) | 6.71 s | 0.85 s | 15.5 |
+| 512 | any (gate never fires) | 0.43 s (1186 tok/s) | 30 ms | |
+
+The useful rate falls with depth because a shallow chunk is all short query
+tiles: 8K spends the same per-tile overhead on 1/12 of the keys per query, which
+is also why splitting cannot pay there.
+
+### What the combine costs
+
+Each layer-chunk at 8 splits writes 403 MB of accumulator (`qslots` 2048,
+24 heads x 256 d, fp32) plus 3 MB of max/sum, then the combine reads 406 MB and
+writes the 50 MB output: 862 MB of extra traffic per layer-chunk, ~1.5 ms at the
+measured 600 GB/s. It is measurable directly as the fixed cost of a zero-key
+chunk: `--chunk 0,2048` is 1.75 ms at 1 split and 3.23 ms at 8. Across a 100K
+prompt that is 784 layer-chunks, i.e. **~1.2 s of combine against a 12.1 s
+saving**. Splits do not pay for themselves below ~8K positions (hence the gate);
+at 100K the trade is 8:1.
+
+### Verification
+
+- `hipml attn-parity` gained `chunk attention q8 split4`: the 37-query @ 29 case
+  through the split kernel and the combine, max |d| **8.00e-4** against the CPU
+  reference (tolerance 2e-3). The mono cases are unchanged (7.91e-4).
+- Token ids are identical to the mono path at every depth measured: 100K `100`,
+  32K `868`, 8K `292`, 512 `489`.
+- `parity prefill --deep` 6/6; `cargo test --workspace` green; `cargo check
+  --features hip` green.
+- The two `attn-parity` decode-layer cases fail identically on the base commit
+  (`d7b53f6`): depth 1 max_abs 8.01e0. Pre-existing, not this work.
+
+### Not verified / next step
+
+- **The 1.5x duplicated QK is still there.** Each `blockIdx.z` half recomputes
+  the full 256-d score tile. A probe that skips QK on the z=1 half measured
+  113.3 -> 95.0 ms, so computing the score once per query tile (one block over
+  all 256 d) is worth ~30% of the attention stage — it would put 100K near
+  110 s. It does not fit at 12 warps: 16 output fragments (128 VGPRs) plus 16 Q
+  fragments (64) is ~232, over the 168 that a 12-warp block can have. The two
+  viable shapes are 16-query blocks with Q staged in shared (61 KB of LDS, 6
+  warps per CU, 2x the K/V re-read) or a per-tile reload of an fp16 Q mirror
+  (needs a `prefill_xhalf` pass over `q`, and the compiler is free to hoist the
+  loop-invariant fragments straight back into registers). Neither is built.
+- Splits are not wired into the f32-mirror chunk path, so `--kv f32` at 100K is
+  still the mono 135.7 s. The benchmarked and compared cell is q8.
+- The key-major outer loop was not tried. The staged rate is 182 GB/s against a
+  640 GB/s spec, and WP27 measured no benefit from re-reads, so a cache-locality
+  reorder is unlikely to pay; the staged bytes at 100K would need a 3.5x better
+  effective rate to become the limit.
+- Split counts above 16 and `HIPML_ATTN_SPLIT_MIN` between 0 and 8K were
+  sampled, not swept: 16 was level with 8, and every gate below 8K changes only
+  chunks whose attention is under 1 ms.
+- One 8K run measured 17.5 s with the GPU lock free but another tenant active;
+  every number here was taken under the lock, and the two 8K repeats inside one
+  hold disagree by 0.5%.

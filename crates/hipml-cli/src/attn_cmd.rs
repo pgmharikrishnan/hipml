@@ -17,12 +17,20 @@ use hipml_kernels::{AttnLayer, Launcher};
 
 #[path = "attn_chunk_parity.rs"]
 mod attn_chunk_parity;
+#[path = "attn_chunk_bench.rs"]
+mod attn_chunk_bench;
 
 struct Args {
     gguf: String,
     layer: Option<usize>,
     depths: Vec<usize>,
     reps: usize,
+    /// `--chunk POS0,TOK`: one chunk of the chunk-attention kernel, timed.
+    chunk: Option<(usize, usize)>,
+    /// `--chunk-splits N`: key splits for that launch.
+    chunk_splits: usize,
+    /// `--chunk-kv TYPE`: q8 (default) or q4 cache format.
+    chunk_kv: hipml_core::kv::KvDtype,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -30,6 +38,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
     let mut layer = None;
     let mut depths = vec![0usize, 8192, 100_000];
     let mut reps = 5usize;
+    let mut chunk = None;
+    let mut chunk_splits = 1usize;
+    let mut chunk_kv = hipml_core::kv::KvDtype::Q8;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&str, String> {
@@ -44,6 +55,25 @@ fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--layer" => {
                 layer = Some(need(i)?.parse().map_err(|e| format!("bad --layer: {e}"))?);
+                i += 2;
+            }
+            "--chunk" => {
+                let (pos0, tok) = attn_chunk_bench::parse(need(i)?)?;
+                chunk = Some((pos0, tok));
+                i += 2;
+            }
+            "--chunk-splits" => {
+                chunk_splits = need(i)?
+                    .parse()
+                    .map_err(|e| format!("bad --chunk-splits: {e}"))?;
+                i += 2;
+            }
+            "--chunk-kv" => {
+                chunk_kv = match need(i)? {
+                    "q8" => hipml_core::kv::KvDtype::Q8,
+                    "q4" => hipml_core::kv::KvDtype::Q4,
+                    other => return Err(format!("bad --chunk-kv {other}: q8 or q4")),
+                };
                 i += 2;
             }
             "--depths" => {
@@ -66,6 +96,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
         layer,
         depths,
         reps,
+        chunk,
+        chunk_splits,
+        chunk_kv,
     })
 }
 
@@ -148,6 +181,25 @@ fn run(args: &[String], parity: bool) -> i32 {
 
     if parity {
         parity_run(&launcher, &l)
+    } else if let Some((pos0, tok)) = a.chunk {
+        match attn_chunk_bench::run(
+            &launcher,
+            &l.cfg,
+            &l.w,
+            &attn_chunk_bench::Args {
+                pos0,
+                tok,
+                splits: a.chunk_splits.max(1),
+                dtype: a.chunk_kv,
+                reps: a.reps,
+            },
+        ) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("attn: chunk bench: {e}");
+                1
+            }
+        }
     } else {
         bench_run(&launcher, &l, &a)
     }
@@ -295,6 +347,25 @@ fn parity_run(l: &Launcher, m: &Loaded) -> i32 {
         }
         Err(e) => {
             eprintln!("attn: chunk attention q8: {e}");
+            return 1;
+        }
+    }
+
+    // 2d. The same q8 case with the key axis split across four blocks and the
+    // combine pass folded back in.
+    match attn_chunk_parity::run_q8_split(l, cfg, &m.w) {
+        Ok((ok, st)) => {
+            failed |= !ok;
+            println!(
+                "{:<30} {:>10.2e} {:>10.2e}  {}",
+                "chunk attention q8 split4",
+                st.max_abs,
+                st.max_rel,
+                if ok { "PASS" } else { "FAIL" }
+            );
+        }
+        Err(e) => {
+            eprintln!("attn: chunk attention q8 split: {e}");
             return 1;
         }
     }
