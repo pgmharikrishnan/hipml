@@ -289,11 +289,13 @@ fn check(model: &Model, prompt: &[u32], a: &Args, n_ctx: usize, chunk: usize) ->
     let (mut total, mut diff, mut rows, mut nv) = (0usize, 0usize, 0usize, 0usize);
     let mut worst = 0.0f32;
     let (mut hdiff, mut hworst) = (0usize, 0.0f32);
+    let (mut xdiff, mut xworst) = (0usize, 0.0f32);
     let steps = (a.tokens / a.cols.max(1)).max(1);
     for _ in 0..steps {
         let mut cols = vec![next];
         let mut reference: Vec<Vec<f32>> = Vec::with_capacity(a.cols);
         let mut reference_h: Vec<Vec<f32>> = Vec::with_capacity(a.cols);
+        let mut reference_x: Vec<Vec<f32>> = Vec::with_capacity(a.cols);
         for r in 0..a.cols {
             let id = match ref_eng.forward_token_id(cols[r], &mut ref_st) {
                 Ok(id) => id,
@@ -313,6 +315,13 @@ fn check(model: &Model, prompt: &[u32], a: &Args, n_ctx: usize, chunk: usize) ->
                 Ok(h) => reference_h.push(h),
                 Err(e) => {
                     eprintln!("column-check: reference hidden: {e}");
+                    return 1;
+                }
+            }
+            match ref_eng.residual_x().to_host() {
+                Ok(x) => reference_x.push(x),
+                Err(e) => {
+                    eprintln!("column-check: reference residual: {e}");
                     return 1;
                 }
             }
@@ -341,6 +350,13 @@ fn check(model: &Model, prompt: &[u32], a: &Args, n_ctx: usize, chunk: usize) ->
             }
         };
         let n = col_eng.n_embd();
+        let residual = match col_eng.column_residual().and_then(|b| b.to_host()) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("column-check: column residual: {e}");
+                return 1;
+            }
+        };
         for (r, want) in reference.iter().enumerate() {
             let have = &got[r * nv..(r + 1) * nv];
             rows += 1;
@@ -364,12 +380,26 @@ fn check(model: &Model, prompt: &[u32], a: &Args, n_ctx: usize, chunk: usize) ->
                 hdiff += hd;
                 hworst = hworst.max(hw);
             }
+            if let Some(want_x) = reference_x.get(r) {
+                let have_x = &residual[r * n..(r + 1) * n];
+                let mut xd = 0usize;
+                let mut xw = 0.0f32;
+                for i in 0..n {
+                    if have_x[i].to_bits() != want_x[i].to_bits() {
+                        xd += 1;
+                        xw = xw.max((have_x[i] - want_x[i]).abs());
+                    }
+                }
+                xdiff += xd;
+                xworst = xworst.max(xw);
+            }
         }
     }
     println!(
         "column-check: {rows} columns x {nv} logits = {total} values, {diff} differ, max |d| {worst:.3e}"
     );
     println!("column-check: hidden {hdiff} differ, max |d| {hworst:.3e}");
+    println!("column-check: residual {xdiff} differ, max |d| {xworst:.3e}");
     if diff == 0 && hdiff == 0 {
         0
     } else {

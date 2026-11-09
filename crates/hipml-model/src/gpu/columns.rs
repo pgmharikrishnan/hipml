@@ -230,7 +230,7 @@ impl<'a> GpuEngine<'a> {
         super::trace::mark(&mut self.trace, l, "embed")?;
 
         let mut ssm_idx = 0usize;
-        for b in 0..self.layers.len() {
+        for b in 0..super::layer_limit(self.layers.len()) {
             let block = &self.layers[b];
             l.rmsnorm_rows(&c.x, &block.attn_norm, &c.t, n, cfg.eps, rows)?;
             let block_out: &Buffer = match &block.kind {
@@ -383,6 +383,13 @@ impl<'a> GpuEngine<'a> {
     pub fn column_hidden(&self) -> Result<&Buffer, String> {
         let c = self.cols.as_ref().ok_or("columns scratch not allocated")?;
         Ok(&c.final_h)
+    }
+
+    /// The `[rows][n_embd]` residual stream after the last layer of the last
+    /// `forward_columns` call.
+    pub fn column_residual(&self) -> Result<&Buffer, String> {
+        let c = self.cols.as_ref().ok_or("columns scratch not allocated")?;
+        Ok(&c.x)
     }
 
     /// The `[rows][n_vocab]` logits rows of the last `forward_columns` call.

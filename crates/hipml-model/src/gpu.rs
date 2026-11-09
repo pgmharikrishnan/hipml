@@ -347,7 +347,7 @@ impl<'a> GpuEngine<'a> {
         l.embed_row_q4_k_dev(self.embed.0, self.embed.1, &self.x, cfg.n_embd)?;
         mark(&mut self.trace, l, "embed")?;
 
-        for i in 0..self.layers.len() {
+        for i in 0..layer_limit(self.layers.len()) {
             let block = &self.layers[i];
             let block_out: &Buffer = match &block.kind {
                 BlockKind::Ssm(s) => {
@@ -447,6 +447,11 @@ impl<'a> GpuEngine<'a> {
         self.cfg.n_embd
     }
 
+    /// The residual stream after the last layer of the last plain decode step.
+    pub fn residual_x(&self) -> &Buffer {
+        &self.x
+    }
+
     /// The post-`output_norm` hidden row of the last plain decode step.
     pub fn final_hidden(&self) -> &Buffer {
         &self.final_h
@@ -499,4 +504,14 @@ fn deep_attention(
         attn.q_buf().as_ptr(),
         attn.attn_out().as_ptr(),
     )
+}
+
+/// How many blocks to run: all of them, or `HIPML_LAYERS` (a debug bisect hook
+/// that both `run_token` and `forward_columns` honour).
+pub(crate) fn layer_limit(total: usize) -> usize {
+    std::env::var("HIPML_LAYERS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|n| n.min(total))
+        .unwrap_or(total)
 }
