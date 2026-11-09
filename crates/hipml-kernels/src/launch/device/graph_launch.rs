@@ -61,9 +61,9 @@ impl Launcher {
     /// `x` is `[batch][k]`, `y` is `[batch][m]`. Measured (docs/review.md,
     /// WP33): the f32-from-LDS `_b` kernels stream 381 GB/s at B=2, 272 at B=4
     /// and 154 at B=8; the WMMA skinny GEMM is flat at ~410 GB/s over the whole
-    /// R range because R is padded to one 16-wide tile. So B >= 4 uses it and
-    /// B <= 3 keeps the `_b` kernels. `HIPML_BATCH_SKINNY=1` forces the skinny
-    /// path at any batch, `HIPML_BATCH_LEGACY=1` forces `_b`;
+    /// R range because R is padded to one 16-wide tile. The exact `_b` path is
+    /// the default (bit-identical); `HIPML_SKINNY=1`/`HIPML_BATCH_SKINNY=1`
+    /// opts into the faster WMMA tile, `HIPML_BATCH_LEGACY=1` forces `_b`;
     /// `HIPML_BATCH_SKINNY_TRACE=1` names every switched projection.
     ///
     /// Above 16 rows the tile runs once per 16-row group; each group is an
@@ -82,15 +82,14 @@ impl Launcher {
         if batch == 0 || batch > 32 {
             return Err(format!("batched GEMV: batch {batch} outside 1..=32"));
         }
-        /// Lowest batch size where one 16-wide WMMA tile beats `batch` columns
-        /// of the f32-from-LDS kernel. Measured crossover; below it the tile is
-        /// mostly padding.
-        const SKINNY_MIN_BATCH: usize = 4;
-        let skinny = if std::env::var_os("HIPML_BATCH_LEGACY").is_some() {
-            false
-        } else {
-            std::env::var_os("HIPML_BATCH_SKINNY").is_some() || batch >= SKINNY_MIN_BATCH
-        };
+        // Opt-in only. The exact `_b` kernels keep each row's accumulation
+        // order identical to the single-sequence GEMV, so the default batched
+        // path is bit-identical (gemv-check, column-check). The WMMA tile is
+        // measured faster from B=4 up but is not bit-identical, so it needs
+        // `HIPML_SKINNY=1` (or `HIPML_BATCH_SKINNY=1`); `HIPML_BATCH_LEGACY=1`
+        // forces the exact path even when one of those is set.
+        let skinny = std::env::var_os("HIPML_BATCH_LEGACY").is_none()
+            && (std::env::var_os("HIPML_BATCH_SKINNY").is_some() || crate::skinny_on());
         if skinny {
             if let Some(entry) = Self::skinny_for_kind(kind) {
                 let mut base = 0usize;

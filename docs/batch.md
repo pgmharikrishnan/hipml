@@ -33,10 +33,13 @@ The decode GEMV reads each weight byte once and now produces B outputs:
   order the single-sequence kernel does, so row b is bit-identical to a B=1
   launch on the same input.
 - `lm_head` uses the same Q6_K kernel over B rows.
-- The batched projections route through the WP33 skinny WMMA GEMM at B >= 4
-  (one 16-row tile per launch, so B=4..16 cost one weight pass; B=17..32 cost
-  two). B <= 3 keeps the f32-from-LDS `_b` kernels. Q5_K has no skinny entry and
-  keeps `_b` in groups of 8.
+- The batched projections default to the exact f32-from-LDS `_b` kernels, so a
+  row is bit-identical to a B=1 launch on the same input (gemv-check). Setting
+  `HIPML_SKINNY=1` (or `HIPML_BATCH_SKINNY=1`) routes them through the WP33
+  skinny WMMA GEMM instead: one 16-row tile per launch, so B=4..16 cost one
+  weight pass and B=17..32 cost two. Q5_K has no skinny entry and always keeps
+  `_b` in groups of 8. The measured table below used the opt-in skinny path;
+  the default exact path is reported separately.
 - Attention, the SSM recurrence and the KV append run **one launch per stage for
   all slots**: the slot index is `blockIdx.y`, the per-slot KV caches and SSM
   state are contiguous, and the per-slot position/seq pair is read from a
