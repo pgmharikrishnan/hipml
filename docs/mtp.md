@@ -44,33 +44,51 @@ weights are streamed once for the whole step:
 * every projection uses the batched GEMV (`gemv_*_b`), which keeps the
   single-sequence k-accumulation order per row, so column `c` is bit-identical
   to a one-column decode (proved by `gemv-check`, see below);
-* work that is genuinely sequential in time stays per column and runs the same
-  decode kernels: the GDN recurrence, the conv window, the KV append and causal
-  attention;
-* each GDN layer copies its recurrent state to `snap[c]` right after column
-  `c`; a rejected draft restores `snap[a]` and moves `pos`, and the KV rows past
+* the GDN chain (gates, conv, both L2 norms, recurrence and gated RMS norm),
+  the attention front end (q/gate split, head RMS norm, M-RoPE) and the KV
+  append are each **one launch over all R columns**; the kernels fold the row
+  index into the block index and keep the single-token expression order;
+* causal attention itself is one split-K launch over all R columns, with the
+  same fixed position partition (`per = ceil(n_ctx/splits)`) the one-column
+  launch uses, so a column with a shorter sequence folds into the same sweep
+  and contributes exactly zero past its position;
+* each GDN layer writes the recurrent state after every column but the last
+  into a `[columns][layers][state_len]` snapshot, one column stride per kernel;
+  a rejected draft restores column `a` and moves `pos`, and the KV rows past
   `pos` are simply overwritten by the next append;
 * after a step the drafter's KV is rewritten for the accepted positions from the
-  target's post-norm hidden state, matching the CPU reference's per-position
-  seeding, and the next draft is seeded from the last accepted column.
+  target's post-norm hidden state, and the next draft is seeded from the last
+  accepted column.
+
+Bit-identity is against the plain decode kernels, which are separate
+translation units: every mul+add in the conv, L2 norm, gated RMS norm, head RMS
+norm and GDN reductions uses explicit `__fmaf_rn` on both sides, and the
+L2-norm kernel indexes rows by the conv buffer's `conv_ch` stride. Before that
+the compiler contracted the two files differently, a verify column differed
+from a plain decode by a few ulps, and 13/128 greedy tokens flipped.
 
 `gemv-check` proves the exactness premise on the GPU: for Q4_K, Q5_K, Q6_K, Q8_0
-and the Q6_K head, **0 differing values** between the batched launch and R
-single launches at R=2 and R=4 (max |d| 0.000e0).
+and the Q6_K head, **0 differing values** between the batched launch and the
+row-tile decode entry at R=1, 2 and 4 (max |d| 0.000e0). `column-check`
+compares the whole pass: at R=1, 2 and 4, the residual stream, the post-norm
+hidden row and all `n_vocab` logits of every column are **bit-identical** to R
+plain decodes (0 differing values).
 
 ## Measured
 
 Radeon AI PRO R9700, `--kv f32`, 128 generated tokens per row, one process per
-prompt (plain decode first, then 1..3 drafts on fresh engines).
+prompt (plain decode first, then 1..3 drafts on fresh engines). Every row was
+run after the bit-identity fixes, so the `exact` column is again the honest
+128-token token-for-token comparison.
 
 ### Decode tok/s, by drafts
 
 | prompt | 0 | 1 | 2 | 3 |
 |---|---|---|---|---|
-| prose_explanation (373) | 28.10 | 34.82 | 34.66 | 29.56 |
-| json_tool_call (300) | 27.76 | 35.33 | 39.65 | **39.74** |
-| copy_200_words (285) | 27.84 | 37.79 | 44.58 | **49.00** |
-| code_edit (672) | 27.72 | 36.39 | 39.73 | 40.64 |
+| prose_explanation (373) | 29.23 | 41.82 | **42.58** | 36.96 |
+| json_tool_call (300) | 29.16 | 42.93 | 49.56 | **50.06** |
+| copy_200_words (285) | 29.16 | 45.86 | 55.40 | **61.12** |
+| code_edit (672) | 29.11 | 44.23 | **49.53** | 51.43 |
 
 Tokens per step and acceptance (`P(draft k | 1..k-1 correct)`):
 
@@ -86,20 +104,24 @@ Tokens per step and acceptance (`P(draft k | 1..k-1 correct)`):
 | code_edit | 1 | 1.924 | 0.924 | 128/128 |
 | code_edit | 3 | 3.342 | 0.895, 0.912, 0.806 | 128/128 |
 
-**Exactness**: all 12 speculative rows are token-identical to plain greedy
-decode for all 128 generated tokens, on all four prompts, at depth 0. No
-fallback to "argmax equal" was needed.
+**Exactness**: all speculative rows are token-identical to plain greedy decode
+for all 128 generated tokens, on all four prompts, at depth 0. `column-check`
+shows the mechanism is exact, not lucky: at R=1, 2 and 4 every column's residual
+stream, post-norm hidden row and `n_vocab` logits are bit-identical (0 differing
+values) to that many plain decodes.
 
 **No-accept downside**: a step that accepts nothing still costs the full step,
 so the floor is `ms/step / plain ms/step`:
 
 | drafts | ms/step | no-accept | breakdown |
 |---|---|---|---|
-| 1 | 52.1 | 1.46x | draft 2.7 + verify 49.3 + rollback 0.1 |
-| 2 | 65.4 | 1.84x | draft 5.3 + verify 59.7 + rollback 0.4 |
-| 3 | 81.1 | 2.28x | draft 8.0 + verify 72.5 + rollback 0.6 |
+| 1 | 43.4 | 1.27x | draft 2.7 + verify 40.6 + rollback 0.2 |
+| 2 | 53.3 | 1.56x | draft 5.2 + verify 47.6 + rollback 0.5 |
+| 3 | 64.9 | 1.89x | draft 7.7 + verify 56.5 + rollback 0.6 |
 
-This misses the <1.10x target: the verify pass, not the drafter, is the cost.
+This is down from 1.46x/1.84x/2.28x in WP30 but still misses the 1.12x target:
+the verify pass, not the drafter, is the cost. One extra column is 1.11x the
+one-column pass; two extra are 1.29x; three extra 1.54x.
 
 ### 8K context
 
@@ -107,60 +129,66 @@ This misses the <1.10x target: the verify pass, not the drafter, is the cost.
 
 | drafts | ms/step | tok/step | tok/s | accept | exact |
 |---|---|---|---|---|---|
-| 0 | 34.72 | 1.000 | 28.80 | - | - |
-| 1 | 51.02 | 1.537 | 30.12 | 0.561 | 64/64 |
-| 2 | 64.53 | 1.800 | 27.89 | 0.543, 0.526 | 64/64 |
+| 0 | 34.87 | 1.000 | 28.68 | - | - |
+| 1 | 48.22 | 1.537 | **31.87** | 0.561 | 64/64 |
+| 2 | 59.93 | 1.800 | 30.04 | 0.543, 0.526 | 64/64 |
+| 3 | 73.49 | 1.969 | 26.79 | 0.594, 0.526, 0.400 | 64/64 |
 
-At 8K the drafter's KV is 64 MiB and its prompt pass costs 1.2 s. Acceptance
-falls to 0.54 (the drafter is weaker on long-document continuation), so d1 is
-only 1.05x plain and d2 is below plain.
+At 8K the drafter's KV is 64 MiB and its prompt pass costs 1.16 s. Acceptance
+falls to ~0.55 (the drafter is weaker on long-document continuation), so d1 is
+1.11x plain, d2 1.05x, and d3 is **below plain** (0.93x). Reported honestly:
+speculation is not worth it at 8K with this drafter.
 
 ## Where the verify's time goes
 
-`column-bench` times `forward_columns` on its own and `--trace` folds the
-per-stage GPU time (prose prompt, 373 tokens, 2 columns):
+`column-bench` times `forward_columns` on its own (prose prompt, 373 tokens).
+Raw column throughput:
+
+| columns | ms/pass | ms/column | tok/s | vs 1 col |
+|---|---|---|---|---|
+| 1 | 36.59 | 36.59 | 27.3 | 1.00x |
+| 2 | 40.59 | 20.29 | 49.3 | 1.11x |
+| 3 | 47.38 | 15.79 | 63.3 | 1.29x |
+| 4 | 56.47 | 14.12 | 70.8 | 1.54x |
+
+The weight pass is ~32 ms; the second column is the cheapest (1.11x), the third
+and fourth add per-column work almost linearly. `--trace` at 2 columns:
 
 | stage | ms/pass | note |
 |---|---|---|
-| gate / up / post_norm | 7.1 / 7.3 / 6.4 | batched GEMV, 500-508 GB/s |
-| ssm_in / ssm_rec | 6.3 / 3.5 | GDN projections, 421 / 379 GB/s |
-| out_norm | 1.7 | head, 613 GB/s |
-| attn_in | 4.4 | q/k/v/qg GEMV + per-column split/rope |
-| **attn_mix** | **8.5** | f32 causal attention, per column |
-| attn_append | 1.9 | KV append, per column |
-| ssm_proj | 2.7 | GDN gates/conv/norm/recurrence, per column |
+| up / gate / post_norm | 7.67 / 7.04 / 6.38 | batched GEMV, 477-514 GB/s |
+| ssm_in / ssm_rec | 6.59 / 3.88 | GDN projections, 402 / 343 GB/s |
+| ssm_proj | 3.34 | gates + conv + norms + recurrence, one launch |
+| attn_in | 1.86 | q/k/v/qg GEMV + batched split/norm/rope |
+| out_norm | 1.70 | head, 614 GB/s |
+| attn_wo | 1.42 | gate + output GEMV |
+| attn_mix | 1.18 | f32 split-K causal attention, all columns |
+| lm_head | 0.13 | |
+| down / ssm_step / block / embed / attn_append | <0.05 each | |
+| sum | 41.3 | |
 
-The projections are the easy part: the batched GEMV costs **1.06-1.15x** one
-single GEMV at B=2 (`gemv-bench`), i.e. the second column is nearly free on
-weights. The pass costs 1.21x a one-column pass, and the extra is per-column
-sequential work:
+The batched f32 attention is now 1.18 ms/pass (was 8.5 ms when it ran per
+column with 12-block grids); the split grid is `ceil(n_ctx/32)` clamped to 64.
+The KV append is 0.007 ms. The remaining per-column cost is the GDN chain
+(`ssm_rec` 3.88 + part of `ssm_proj`), which is sequential in token order and
+cannot be weight-batched.
 
-* f32 causal attention is ~**0.5 us per cached position per column** (3.7 ms
-  per pass at 374 positions for 2 columns, ~10% of a plain token too). Its grid
-  is `n_kv x splits` with `splits = n_ctx / 128`, so at this context only 12
-  blocks run; the same kernel is ~40x faster per position on the quantized-KV
-  path, whose split count is derived from `seq`.
-* each `set_step` is a 32-byte async upload that costs **37 us** on this driver;
-  the per-column loops issue 6 per layer, i.e. ~3.5 ms per 2-column pass.
-* the GDN per-token chain (gates, conv, two l2norms, recurrence, gated norm)
-  runs once per column: 1.3 ms for the second column.
+## What is not verified / not done
 
-So the ceiling here is not the batched GEMV but the per-column kernels. The
-2-column pass streams its weights in 32.3 ms; if the per-column work went to
-~1 ms the pass would be ~33 ms and 1.85 tokens/step would be ~56 tok/s.
-
-The drafter's own cost is 2.7 ms per step for 253.6 MiB (94 GB/s): its block is
-small and launch-bound (one block plus the Q6_K head), not bandwidth-bound.
-
-## What is not verified
-
-* The 48 tok/s (prose) / 53 tok/s (JSON) targets are **not met**: 34.8 / 35.3
-  at one draft, best case 49.0 (verbatim copy, 3 drafts).
+* The prose ≥48 / JSON ≥53 tok/s targets are **not met** (42.6 / 50.1). copy
+  reaches 61.1 (target 65) and code 49.5. The gap is the verify pass, not
+  acceptance.
 * The 8K path is measured with `--kv q8` only; `--kv f32` at 8K was not run.
+  At 8K, 3 drafts is slower than plain.
 * Acceptance is measured on four fixtures, 128 tokens each; no longer-horizon
-  drift study, and no study of the drafter on prompts unlike the fixtures.
-* Rollback is exercised by every rejected draft, but the state snapshots are
-  not compared against a replayed prefix; exactness of the emitted ids over
-  128 tokens is the evidence.
-* No graph capture: the per-column loops issue ~1300 launches per column, and
-  that launch cost is inside every number above.
+  drift study.
+* Rollback restores the `[columns][layers]` snapshot and relies on the KV
+  overwrite; the state snapshot itself is not compared against a replayed
+  prefix. Exactness of the emitted ids over 128 tokens is the evidence.
+* The WP33 WMMA skinny quantized GEMM (`feat/skinny-wmma`) was **not adopted**
+  in this change: it is not bit-identical (max_abs ~1.6e-2) and the priority was
+  the exact path. Its measured cost curve (r=4 ≈ 0.93-1.05x of one column)
+  makes it the obvious next lever for the 65-80 tok/s class, behind a
+  `--skinny` switch with the 128-token divergence check. If it costs a token,
+  keep the exact batched GEMV as default.
+* No graph capture on the verify path; launch overhead is inside every number.
