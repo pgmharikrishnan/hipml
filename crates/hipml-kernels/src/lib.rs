@@ -342,88 +342,6 @@ pub const KERNELS: &[KernelSpec] = &[
             block: 128,
         },
     },
-    // Geometry sweep (Q4_K only). `rows`/`block` must match the template
-    // arguments in `gemm_skinny.hip`; kg1..kg6 = (RT, KW, THREADS).
-    KernelSpec {
-        name: "gemm_skinny_q4_kg1",
-        entry: "gemm_skinny_q4_kg1",
-        kind: KernelKind::RowTile {
-            rows: 16,
-            block: 128,
-        },
-    },
-    KernelSpec {
-        name: "gemm_skinny_q4_kg2",
-        entry: "gemm_skinny_q4_kg2",
-        kind: KernelKind::RowTile {
-            rows: 32,
-            block: 256,
-        },
-    },
-    KernelSpec {
-        name: "gemm_skinny_q4_kg3",
-        entry: "gemm_skinny_q4_kg3",
-        kind: KernelKind::RowTile {
-            rows: 32,
-            block: 128,
-        },
-    },
-    KernelSpec {
-        name: "gemm_skinny_q4_kg4",
-        entry: "gemm_skinny_q4_kg4",
-        kind: KernelKind::RowTile {
-            rows: 64,
-            block: 128,
-        },
-    },
-    KernelSpec {
-        name: "gemm_skinny_q4_kg5",
-        entry: "gemm_skinny_q4_kg5",
-        kind: KernelKind::RowTile {
-            rows: 64,
-            block: 256,
-        },
-    },
-    KernelSpec {
-        name: "gemm_skinny_q4_kg6",
-        entry: "gemm_skinny_q4_kg6",
-        kind: KernelKind::RowTile {
-            rows: 48,
-            block: 128,
-        },
-    },
-    KernelSpec {
-        name: "gemm_skinny_q4_ns",
-        entry: "gemm_skinny_q4_ns",
-        kind: KernelKind::RowTile {
-            rows: 32,
-            block: 128,
-        },
-    },
-    KernelSpec {
-        name: "gemm_skinny_q4_nc",
-        entry: "gemm_skinny_q4_nc",
-        kind: KernelKind::RowTile {
-            rows: 32,
-            block: 128,
-        },
-    },
-    KernelSpec {
-        name: "gemm_skinny_q4_nw",
-        entry: "gemm_skinny_q4_nw",
-        kind: KernelKind::RowTile {
-            rows: 32,
-            block: 128,
-        },
-    },
-    KernelSpec {
-        name: "gemm_skinny_q4_nl",
-        entry: "gemm_skinny_q4_nl",
-        kind: KernelKind::RowTile {
-            rows: 32,
-            block: 128,
-        },
-    },
     KernelSpec {
         name: "stream_read",
         entry: "stream_read",
@@ -690,9 +608,7 @@ pub fn stream_entry(name: &'static str) -> &'static str {
 /// no such kernel, e.g. Q5_K). `R <= 16` columns, `y[r, :] = W @ x[r, :]`.
 pub fn skinny_entry(name: &str) -> Option<&'static str> {
     Some(match name {
-        "gemv_q4_k" | "gemm_skinny_q4_k" | "gemm_skinny_q4_kg1" | "gemm_skinny_q4_kg2"
-        | "gemm_skinny_q4_kg3" | "gemm_skinny_q4_kg4" | "gemm_skinny_q4_kg5"
-        | "gemm_skinny_q4_kg6" => "gemm_skinny_q4_k",
+        "gemv_q4_k" | "gemm_skinny_q4_k" => "gemm_skinny_q4_k",
         "gemv_q6_k" | "gemm_skinny_q6_k" => "gemm_skinny_q6_k",
         "gemv_q8_0" | "gemm_skinny_q8_0" => "gemm_skinny_q8_0",
         _ => return None,

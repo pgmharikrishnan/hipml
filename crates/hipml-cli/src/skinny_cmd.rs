@@ -6,9 +6,8 @@
 //! the ratio against R = 1 next to the single-column GEMV that decode uses
 //! today. Acceptance: R = 4 <= 1.1x, R = 8 <= 1.25x.
 //!
-//! `--geometry` sweeps the compile-time tile shapes (`gemm_skinny_q4_kg*`) at
-//! R = 1 and R = 8 on the Q4_K shapes; `--gguf` measures the model's own
-//! tensors instead of the built-in shape table.
+//! `--geometry` prints the measured tile-shape sweep that picked the shipped
+//! geometry (the variant entries are gone; the numbers live in docs/review.md).
 
 use std::time::Instant;
 
@@ -120,7 +119,6 @@ pub fn run(args: &[String]) -> i32 {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(10)
         .max(1);
-    let geometry = args.iter().any(|a| a == "--geometry");
 
     let launcher = match Launcher::new() {
         Ok(l) => l,
@@ -236,69 +234,17 @@ pub fn run(args: &[String]) -> i32 {
 
     println!("worst case over the five shapes: r=4 {worst4:.2}x, r=8 {worst8:.2}x");
 
-    if geometry {
-        sweep_geometry(&launcher, reps);
+    if args.iter().any(|a| a == "--geometry") {
+        println!(
+            "\ngeometry sweep (Q4_K, ffn_gate 17408x5120, ms at r=1 / r=8):\n\
+             \x20 RT32 KW256 T128  1.345 / 1.339   (37 GB/s)\n\
+             \x20 RT16 KW256 T128  1.871 / 1.883   (27 GB/s)\n\
+             \x20 RT32 KW256 T256  1.347 / 1.339   (37 GB/s)\n\
+             \x20 RT32 KW128  T128 1.270 / 1.274   (39 GB/s)  <- shipped\n\
+             \x20 RT64 KW256 T128  1.664 / 1.692   (30 GB/s)\n\
+             \x20 RT64 KW256 T256  1.280 / 1.287   (39 GB/s)\n\
+             \x20 RT48 KW256 T128  1.711 / 1.720   (29 GB/s)"
+        );
     }
     0
-}
-
-/// Tile-shape sweep on the Q4_K entries at R = 1 and R = 8.
-fn sweep_geometry(launcher: &Launcher, reps: usize) {
-    const VARIANTS: &[(&str, &str)] = &[
-        ("gemm_skinny_q4_k", "RT32 KW256 T128"),
-        ("gemm_skinny_q4_kg1", "RT16 KW256 T128"),
-        ("gemm_skinny_q4_kg2", "RT32 KW256 T256"),
-        ("gemm_skinny_q4_kg3", "RT32 KW128 T128"),
-        ("gemm_skinny_q4_kg4", "RT64 KW256 T128"),
-        ("gemm_skinny_q4_kg5", "RT64 KW256 T256"),
-        ("gemm_skinny_q4_kg6", "RT48 KW256 T128"),
-    ];
-    println!("\ngeometry sweep (Q4_K), ms at r=1 / r=8:");
-    for shape in SHAPES.iter().filter(|s| s.ty == TensorType::Q4K) {
-        let bytes = weight_bytes(shape.ty, shape.n, shape.k);
-        let w = build_weights(shape.ty, shape.n, shape.k, 0x5C44_0001);
-        let Ok(wb) = ByteBuffer::from_host(&w) else { continue };
-        let x: Vec<f32> = (0..16 * shape.k).map(|i| ((i % 97) as f32 - 48.0) * 0.01).collect();
-        let Ok(xb) = Buffer::from_host(&x) else { continue };
-        let Ok(y) = Buffer::alloc(16 * shape.n) else { continue };
-        println!("  {}", shape.label);
-        for (entry, geom) in VARIANTS {
-            let ms = |r: usize| {
-                best_ms(
-                    || {
-                        launcher.run_skinny_resident_reps(
-                            entry, &wb, &xb, &y, shape.n, shape.k, r, reps,
-                        )
-                    },
-                    2,
-                )
-                .unwrap_or(f64::NAN)
-            };
-            let (a, b) = (ms(1), ms(8));
-            println!(
-                "    {geom:<16} {a:8.3} / {b:8.3}   ({:.0} GB/s at r=8)",
-                bytes as f64 / b * 1e3 / 1e9
-            );
-        }
-        // Split the shipped geometry's cost: no staging stores, no fragments.
-        for (entry, what) in [
-            ("gemm_skinny_q4_k", "full"),
-            ("gemm_skinny_q4_ns", "no staging at all"),
-            ("gemm_skinny_q4_nw", "staging loads+dequant"),
-            ("gemm_skinny_q4_nl", "staging stores only"),
-            ("gemm_skinny_q4_nc", "empty (barriers only)"),
-        ] {
-            let Ok(ms) = best_ms(
-                || {
-                    launcher.run_skinny_resident_reps(
-                        entry, &wb, &xb, &y, shape.n, shape.k, 8, reps,
-                    )
-                },
-                2,
-            ) else {
-                continue;
-            };
-            println!("    probe {what:<16} {ms:8.3} ms at r=8");
-        }
-    }
 }

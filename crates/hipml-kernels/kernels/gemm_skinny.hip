@@ -1,17 +1,24 @@
 // Skinny quantized GEMM on the matrix unit: R <= 16 activation rows against a
 // K x N quantized weight, `y[r, :] = W @ x[r, :]`.
 //
-// Why this kernel exists: the f32-from-LDS batch GEMV multiplies every column
-// separately, so its cost grows with R (1.90x at 4 columns, 2.95x at 8 while
-// it is still streaming the same 17 GB). Padding R to one 16-wide WMMA tile
-// makes the columns nearly free: the weight stream is read once and the matrix
-// unit does the column fan-out, so the step cost is the tile, not R.
+// Cost curve: padding R to one 16-wide WMMA tile makes the columns nearly free,
+// because the weight stream is read once and the matrix unit does the column
+// fan-out. Measured on the five production shapes, R=4 costs 0.99x and R=8
+// 1.00x of R=1 (see docs/review.md, WP33). That is the whole point: the
+// f32-from-LDS batch GEMV grows 1.90x at 4 columns and 2.95x at 8.
+//
+// It is *not* a throughput win, and it must not be used to replace a GEMV:
+// staging the dequantised weight through shared memory runs at ~40-68 GB/s of
+// weight against the single-column GEMV's 540-980 GB/s. The existing WMMA
+// prefill kernel has the same staging rate and hides it behind 256-token
+// compute; at 16 rows there is nothing to hide it behind. See the WP33 section
+// of docs/review.md for the probe breakdown.
 //
 // The layout fact this rests on: in `wmma_f32_16x16x16_f16` (wave32, gfx12) a
 // lane's B fragment element e is weight row `lane % 16`, k = `8*(lane/16) + e`
-// — eight consecutive k of one row, exactly one Q4_K sub-block row run, which
-// is what `pf_dequant8` produces. So a lane dequantises its own 8 values into
-// its B fragment, and the same 8 values serve all 16 token rows.
+// -- eight consecutive k of one row, exactly one Q4_K sub-block row run, which
+// is what `pws_prep`/`pws_finish` produce. So a lane dequantises its own 8
+// values into its B fragment, and the same 8 values serve all 16 token rows.
 //
 // Per block: PWS_RT output rows, staged as fp16 in shared one PWS_KW-wide k
 // tile at a time; warp w owns output rows [16w, 16w+16) and one 16x16
@@ -19,12 +26,6 @@
 // LDS.128 (one A fragment, one B fragment) and one WMMA. Weight bytes read are
 // independent of R; the only R-dependent work is the token-row staging and the
 // epilogue.
-//
-// Staging is the whole cost, so it is written for the memory system: four
-// threads per row, eight values each, and every load hoisted so a warp has
-// several in flight. The first version issued one load and waited, which put
-// the kernel at 20 GB/s against the GEMV's 630 on the same weights; see
-// `pws_prep`.
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -34,8 +35,10 @@
 #error "gemm_skinny: the gfx12 WMMA intrinsics are wave32 only"
 #endif
 
-// Shipped geometry. Every value is a template argument so the sweep entries
-// below can be one build; the defaults are the measured best.
+// Shipped geometry: 32 output rows, a 128-value k tile, 4 warps. Measured
+// against the alternatives (16/32/48/64 rows, 128/256 k, 4 vs 8 warps) on all
+// five shapes; the differences are within 10% except for the geometries whose
+// shared footprint costs a resident block.
 #ifndef PWS_RT
 #define PWS_RT 32      // output rows per block
 #endif
@@ -56,11 +59,11 @@ typedef float __attribute__((ext_vector_type(8))) pws_f8;
 
 // Branch-free Q4_K scale/min unpack from the three dwords at b+4, b+8, b+12.
 //
-// `pf_scale_min` branches on the sub-block index, which is per-lane here
-// (lane's 8 values sit in sub-block lane/4), so the compiler split every group
-// into two exec-masked blocks and drained the memory pipe at each boundary:
-// the ISA showed 80 `s_wait_loadcnt` in the loop body and the kernel ran at
-// 20 GB/s. Same arithmetic, three aligned dword loads, no divergent branch.
+// `pf_scale_min` branches on the sub-block index, which is per-lane here (a
+// lane's 8 values sit in one sub-block), so the compiler split every group into
+// two exec-masked blocks and drained the memory pipe at each boundary: the ISA
+// showed 80 `s_wait_loadcnt` in the loop body. Same arithmetic, three dword
+// arguments, no divergent branch.
 static __device__ __forceinline__ void pws_scale_min(int j, unsigned w0, unsigned w1,
                                                      unsigned w2, int* sc, int* mn)
 {
@@ -77,10 +80,8 @@ static __device__ __forceinline__ void pws_scale_min(int j, unsigned w0, unsigne
 //
 // The load and the arithmetic are separate calls on purpose. Written as one
 // function, every pass ended up in its own exec-masked block with an
-// `s_wait_loadcnt 0x0` after each load, so a warp had exactly one 8-byte load
-// in flight and the kernel ran at 20 GB/s while the GEMV on the same weights
-// ran at 630. Hoisting the loads into an array of these gives K of them in
-// flight, which is what the memory system needs.
+// `s_wait_loadcnt` after each load, so a warp had exactly one 8-byte load in
+// flight. Hoisting the loads into an array of these gives several in flight.
 //
 // Layout per KIND (the byte-level truth is `pf_dequant8`):
 //   Q4_K  r[0] = d | dmin, r[1..3] = the 12 scale bytes, r[4..5] = 8 nibbles
@@ -202,12 +203,7 @@ static __device__ __forceinline__ void pws_finish(const pws_raw& in, int within,
     }
 }
 
-// PROBE splits the block's cost for the bench: 0 runs everything, 1 skips the
-// staging entirely, 2 skips the fragment reads and the WMMA, 3 keeps the
-// staging loads and the dequant but drops the shared stores, 4 keeps the
-// shared stores but drops the global loads. Probes compute garbage; they exist
-// only to name the bottleneck.
-template <int KIND, int RT, int KW, int THR, int PROBE = 0>
+template <int KIND, int RT, int KW, int THR>
 static __device__ __forceinline__ void pws_body(
     const unsigned char* __restrict__ w,
     const float* __restrict__ x,
@@ -221,17 +217,13 @@ static __device__ __forceinline__ void pws_body(
     constexpr int NW = RT / 16;             // warp n-tiles (= compute warps)
     constexpr int XROW = KW / 4;            // threads per token row (float4)
     constexpr int XRP = THR / XROW;         // token rows staged per pass
-    // Weight staging: one warp reads one row's k-tile as one contiguous run,
-    // 8 values per lane. GPR is how many lanes cover a row (KW/8), so a warp
-    // covers 32/GPR rows per pass. Coalescing is the reason: 8 rows x 32 B per
-    // instruction (the rows-first layout) ran the staging at 24 GB/s, one row x
-    // 256 B per instruction is what the GEMV already does at 630 GB/s.
+    // Weight staging: one warp reads one row's k tile as one contiguous run,
+    // 8 values per lane. GPR is how many lanes cover a row (KW/8).
     constexpr int GPR = KW / 8;             // lanes per weight row
     constexpr int RPW = 32 / GPR;           // weight rows per warp per pass
     constexpr int PRP = (THR / 32) * RPW;   // weight rows staged per pass
     static_assert(RT % 16 == 0, "RT must be a multiple of the 16 tile");
     static_assert(KW % 32 == 0 && KW <= 256, "KW must be 32-aligned and <= 256");
-    static_assert(KW >= 64 || THR / 32 == 1, "small KW needs one warp per row");
     static_assert(16 % XRP == 0, "token staging must cover 16 rows");
     static_assert(RT % PRP == 0, "ragged weight staging");
 
@@ -242,7 +234,6 @@ static __device__ __forceinline__ void pws_body(
     const int lane = tid & 31;
     const int warp = tid >> 5;
     const int row_base = blockIdx.x * RT;
-    unsigned sink = 0;
     const size_t wrow = pf_row_bytes(k, KIND);
 
     // x staging: XROW threads per token row, four floats each.
@@ -253,7 +244,6 @@ static __device__ __forceinline__ void pws_body(
     const int wrow_l = warp * RPW + lane / GPR;
 
     auto stage = [&](int base) {
-        if (PROBE == 1) return;
         // Token rows: clamp to the last real row instead of predicating the
         // load. Rows >= r are computed and discarded, which is cheaper than a
         // per-lane branch around every global load. Hoisted in small groups:
@@ -263,24 +253,12 @@ static __device__ __forceinline__ void pws_body(
             constexpr int XB = XP < 4 ? XP : 4;
             for (int p0 = 0; p0 < XP; p0 += XB) {
                 float4 xv[XB];
-                if (PROBE != 4) {
 #pragma unroll
-                    for (int p = 0; p < XB; ++p) {
-                        const int rl = (p0 + p) * XRP + xt;
-                        const int gt = rl < r ? rl : r - 1;
-                        xv[p] = *reinterpret_cast<const float4*>(
-                            x + (size_t)gt * k + base + xc);
-                    }
-                } else {
-#pragma unroll
-                    for (int p = 0; p < XB; ++p)
-                        xv[p] = make_float4(0.f, 0.f, 0.f, 0.f);
-                }
-                if (PROBE == 3) {
-#pragma unroll
-                    for (int p = 0; p < XB; ++p)
-                        sink ^= __float_as_uint(xv[p].x) ^ __float_as_uint(xv[p].w);
-                    continue;
+                for (int p = 0; p < XB; ++p) {
+                    const int rl = (p0 + p) * XRP + xt;
+                    const int gt = rl < r ? rl : r - 1;
+                    xv[p] = *reinterpret_cast<const float4*>(
+                        x + (size_t)gt * k + base + xc);
                 }
 #pragma unroll
                 for (int p = 0; p < XB; ++p) {
@@ -300,16 +278,11 @@ static __device__ __forceinline__ void pws_body(
             static_assert(WP % WB == 0, "weight hoist group must divide the passes");
             for (int p0 = 0; p0 < WP; p0 += WB) {
                 pws_raw raw[WB];
-                if (PROBE != 4) {
 #pragma unroll
-                    for (int p = 0; p < WB; ++p) {
-                        const int g = row_base + (p0 + p) * PRP + wrow_l;
-                        const int gr = g < n ? g : n - 1;
-                        pws_prep<KIND>(w + (size_t)gr * wrow, base + wcol, raw[p]);
-                    }
-                } else {
-#pragma unroll
-                    for (int p = 0; p < WB; ++p) raw[p] = pws_raw{{0, 0, 0, 0, 0, 0}};
+                for (int p = 0; p < WB; ++p) {
+                    const int g = row_base + (p0 + p) * PRP + wrow_l;
+                    const int gr = g < n ? g : n - 1;
+                    pws_prep<KIND>(w + (size_t)gr * wrow, base + wcol, raw[p]);
                 }
                 const int within = (base + wcol) & 255;
 #pragma unroll
@@ -317,10 +290,6 @@ static __device__ __forceinline__ void pws_body(
                     const int rl = (p0 + p) * PRP + wrow_l;
                     float v[8];
                     pws_finish<KIND>(raw[p], within, v);
-                    if (PROBE == 3) {
-                        sink ^= __float_as_uint(v[0]) ^ __float_as_uint(v[7]);
-                        continue;
-                    }
                     pws_h8 hv;
 #pragma unroll
                     for (int i = 0; i < 8; ++i) hv[i] = (_Float16)v[i];
@@ -331,10 +300,9 @@ static __device__ __forceinline__ void pws_body(
     };
 
     // Independent WMMA chains. A single accumulator per warp runs the matrix
-    // unit at 1/8 of what the prefill kernel gets, because consecutive WMMA
-    // into the same accumulator are a dependency chain. Rotating the k16 steps
-    // through NACC accumulators costs one fold at the end and gives NACC
-    // instructions in flight.
+    // unit at a fraction of its throughput, because consecutive WMMA into the
+    // same accumulator are a dependency chain. Rotating the k16 steps through
+    // NACC accumulators costs one fold at the end.
     constexpr int NACC = (KW / 16) < PWS_NACC ? (KW / 16) : PWS_NACC;
     pws_f8 acc[NACC];
 #pragma unroll
@@ -353,7 +321,6 @@ static __device__ __forceinline__ void pws_body(
         stage(base);
         __syncthreads();
         if (warp < NW) {
-            if (PROBE == 2) continue;
 #pragma unroll
             for (int t = 0; t < KW / 16; ++t) {
                 const int kk = t * 16;
@@ -374,9 +341,6 @@ static __device__ __forceinline__ void pws_body(
 #pragma unroll
         for (int e = 0; e < 8; ++e) acc[0][e] += acc[t][e];
 
-    // Keep probe 3's loads alive without writing shared.
-    if (PROBE == 3 && tid == 0 && r > 0) y[(size_t)(n - 1)] += (float)sink * 0.0f;
-
     // Accumulator -> f32: this lane holds column (output row) `lane & 15` of
     // token rows 8*(lane>>4) + e.
     if (warp < NW) {
@@ -392,7 +356,8 @@ static __device__ __forceinline__ void pws_body(
     }
 }
 
-// The shipped entries: PWS_RT x PWS_KW, one per resident block format.
+// One entry per resident block format; `skinny_resident` checks the geometry
+// against `KernelKind::RowTile { rows = PWS_RT, block = PWS_THREADS }`.
 extern "C" __global__ void gemm_skinny_q4_k(
     const unsigned char* __restrict__ w,
     const float* __restrict__ x,
@@ -424,82 +389,4 @@ extern "C" __global__ void gemm_skinny_q8_0(
     int r)
 {
     pws_body<2, PWS_RT, PWS_KW, PWS_THREADS>(w, x, y, n, k, r);
-}
-
-// Geometry sweep on the Q4_K entry: same body, one build. Each is a manifest
-// row (`RowTile { rows = RT, block = THR }`) and runs the same parity case, so
-// a sweep cannot pick a geometry that no test covers. The winning geometry is
-// baked into PWS_* and the rest are removed.
-extern "C" __global__ void gemm_skinny_q4_kg1( // RT 16, KW 256
-    const unsigned char* __restrict__ w, const float* __restrict__ x,
-    float* __restrict__ y, int n, int k, int r)
-{
-    pws_body<0, 16, 256, 128>(w, x, y, n, k, r);
-}
-
-extern "C" __global__ void gemm_skinny_q4_kg2( // RT 32, KW 256, 8 warps
-    const unsigned char* __restrict__ w, const float* __restrict__ x,
-    float* __restrict__ y, int n, int k, int r)
-{
-    pws_body<0, 32, 256, 256>(w, x, y, n, k, r);
-}
-
-extern "C" __global__ void gemm_skinny_q4_kg3( // RT 32, KW 128
-    const unsigned char* __restrict__ w, const float* __restrict__ x,
-    float* __restrict__ y, int n, int k, int r)
-{
-    pws_body<0, 32, 128, 128>(w, x, y, n, k, r);
-}
-
-extern "C" __global__ void gemm_skinny_q4_kg4( // RT 64, KW 256
-    const unsigned char* __restrict__ w, const float* __restrict__ x,
-    float* __restrict__ y, int n, int k, int r)
-{
-    pws_body<0, 64, 256, 128>(w, x, y, n, k, r);
-}
-
-extern "C" __global__ void gemm_skinny_q4_kg5( // RT 64, KW 256, 8 warps
-    const unsigned char* __restrict__ w, const float* __restrict__ x,
-    float* __restrict__ y, int n, int k, int r)
-{
-    pws_body<0, 64, 256, 256>(w, x, y, n, k, r);
-}
-
-extern "C" __global__ void gemm_skinny_q4_kg6( // RT 48, KW 256
-    const unsigned char* __restrict__ w, const float* __restrict__ x,
-    float* __restrict__ y, int n, int k, int r)
-{
-    pws_body<0, 48, 256, 128>(w, x, y, n, k, r);
-}
-
-// Cost probes at the shipped geometry: `_ns` skips the staging stores, `_nc`
-// skips the fragment reads and the WMMA. Garbage results, timing only.
-extern "C" __global__ void gemm_skinny_q4_ns(
-    const unsigned char* __restrict__ w, const float* __restrict__ x,
-    float* __restrict__ y, int n, int k, int r)
-{
-    pws_body<0, 32, 128, 128, 1>(w, x, y, n, k, r);
-}
-
-extern "C" __global__ void gemm_skinny_q4_nc(
-    const unsigned char* __restrict__ w, const float* __restrict__ x,
-    float* __restrict__ y, int n, int k, int r)
-{
-    pws_body<0, 32, 128, 128, 2>(w, x, y, n, k, r);
-}
-
-// `_nw` keeps the loads and the dequant but drops the shared stores; `_nl`
-// keeps the stores but drops the loads.
-extern "C" __global__ void gemm_skinny_q4_nw(
-    const unsigned char* __restrict__ w, const float* __restrict__ x,
-    float* __restrict__ y, int n, int k, int r)
-{
-    pws_body<0, 32, 128, 128, 3>(w, x, y, n, k, r);
-}
-
-extern "C" __global__ void gemm_skinny_q4_nl(
-    const unsigned char* __restrict__ w, const float* __restrict__ x,
-    float* __restrict__ y, int n, int k, int r)
-{
-    pws_body<0, 32, 128, 128, 4>(w, x, y, n, k, r);
 }

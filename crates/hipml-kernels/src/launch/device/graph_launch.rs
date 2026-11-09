@@ -58,10 +58,12 @@ impl Launcher {
 
     /// `y[b][row] = W[row,:] . x[b][:]` for `batch` rows, one weight pass.
     ///
-    /// `x` is `[batch][k]`, `y` is `[batch][m]`. Up to 16 rows go through the
-    /// WMMA skinny GEMM (`gemm_skinny_*`); `HIPML_BATCH_LEGACY=1` forces the
-    /// f32-from-LDS `_b` kernels, which is the A/B and the fallback for batch
-    /// sizes above the 16-wide tile.
+    /// `x` is `[batch][k]`, `y` is `[batch][m]`. The f32-from-LDS `_b` kernels
+    /// are the default: they stream the weight at ~271 GB/s at B=4, whereas the
+    /// WMMA skinny GEMM stages the dequantised weight through shared memory at
+    /// only ~68 GB/s (see docs/review.md, WP33), so it is a 3-4x regression at
+    /// every batch size. `HIPML_BATCH_SKINNY=1` selects it for A/B work and for
+    /// the MTP verify path, where the cost curve is what matters.
     #[allow(clippy::too_many_arguments)]
     pub fn gemv_batched(
         &self,
@@ -76,7 +78,7 @@ impl Launcher {
         if batch == 0 || batch > 8 {
             return Err(format!("batched GEMV: batch {batch} outside 1..=8"));
         }
-        if batch <= 16 && std::env::var_os("HIPML_BATCH_LEGACY").is_none() {
+        if batch <= 16 && std::env::var_os("HIPML_BATCH_SKINNY").is_some() {
             if let Some(entry) = Self::skinny_for_kind(kind) {
                 return super::skinny_launch::skinny_resident(
                     &self.module,
