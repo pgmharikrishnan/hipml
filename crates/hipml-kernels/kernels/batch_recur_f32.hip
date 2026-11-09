@@ -132,6 +132,7 @@ extern "C" __global__ void gdn_ar_b(
     int sd,
     int qkv_stride,
     int vec_stride,
+    int out_stride,
     int state_stride)
 {
     const int h = blockIdx.x;
@@ -145,7 +146,7 @@ extern "C" __global__ void gdn_ar_b(
     const float* vs = v + (size_t)slot * qkv_stride;
     const float* gs = g + (size_t)slot * vec_stride;
     const float* bs = beta + (size_t)slot * vec_stride;
-    float* os = out + (size_t)slot * vec_stride;
+    float* os = out + (size_t)slot * out_stride;
     float* st = s + (size_t)slot * state_stride;
 
     const int hk = h % n_k;
