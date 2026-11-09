@@ -292,10 +292,16 @@ pub fn run(args: &[String]) -> i32 {
         }
     };
     report_run("spec", &a, &base, &spec, &seeds);
-    // Exactness over the full 256-token horizon, slot by slot.
+    // Exactness over the full 256-token horizon, slot by slot. An admission run
+    // stops a short window after the join, so it compares the shorter horizon.
     let mut exact_ok = true;
+    let mut horizon = 0usize;
     for b in 0..a.active {
-        let n = base.streams[b].len().min(a.tokens);
+        let n = spec.streams[b]
+            .len()
+            .min(base.streams[b].len())
+            .min(a.tokens);
+        horizon = n;
         let same = spec.streams[b]
             .iter()
             .zip(&base.streams[b])
@@ -306,7 +312,7 @@ pub fn run(args: &[String]) -> i32 {
             .iter()
             .zip(&base.streams[b])
             .position(|(x, y)| x != y);
-        if same != n || first.is_some() {
+        if same != n || first.is_some() || (a.admit_at.is_none() && n < a.tokens) {
             exact_ok = false;
             println!(
                 "exact slot {b}: {same}/{n}{}",
@@ -317,7 +323,12 @@ pub fn run(args: &[String]) -> i32 {
     println!(
         "exact: {}",
         if exact_ok {
-            format!("all {} slots reproduce the plain batched stream over {} tokens", a.active, a.tokens)
+            format!(
+                "all {} slots reproduce the plain batched stream over {} tokens{}",
+                a.active,
+                horizon,
+                if horizon < a.tokens { " (admission window)" } else { "" }
+            )
         } else {
             "TOKENS DIFFER".to_string()
         }
