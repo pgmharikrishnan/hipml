@@ -28,19 +28,66 @@ impl<'a> BatchEngine<'a> {
     /// (the one the single-sequence state has not appended yet) through
     /// `forward`, exactly as it would for a decode step.
     pub fn adopt(&mut self, src: &GpuEngine<'a>, pos: usize) -> Result<usize, String> {
+        let slot = self.active.len();
+        if slot >= self.slots {
+            return Err("adopt: slot pool exhausted".to_string());
+        }
+        self.copy_in(src, slot, pos)?;
+        debug_assert_eq!(slot, self.active.len());
+        self.active.push(slot);
+        Ok(slot)
+    }
+
+    /// Copy a prefilled state into `slot` without activating it.
+    ///
+    /// The row-block prefill uses this: several quiet slots are filled from
+    /// their prefix state, one `prefill_rows` call advances them, and only then
+    /// are they activated in the same index order, keeping the active set
+    /// dense. Quiet slots are the range `active.len()..` in gather order.
+    pub fn adopt_quiet(
+        &mut self,
+        src: &GpuEngine<'a>,
+        slot: usize,
+        pos: usize,
+    ) -> Result<(), String> {
+        if slot < self.active.len() || slot >= self.slots {
+            return Err(format!(
+                "adopt_quiet: slot {slot} outside {}..{}",
+                self.active.len(),
+                self.slots
+            ));
+        }
+        self.copy_in(src, slot, pos)
+    }
+
+    /// First slot a quiet adopt would use (the end of the dense active set).
+    pub fn next_slot(&self) -> usize {
+        self.active.len()
+    }
+
+    /// Activate the next quiet slot. `slot` must be `active.len()`.
+    pub fn activate_slot(&mut self, slot: usize) -> Result<(), String> {
+        if slot != self.active.len() {
+            return Err(format!(
+                "activate_slot: slot {slot} is not the next free index {}",
+                self.active.len()
+            ));
+        }
+        if slot >= self.slots {
+            return Err("activate_slot: slot pool exhausted".to_string());
+        }
+        self.active.push(slot);
+        Ok(())
+    }
+
+    /// Copy `src`'s live state into `slot` at `pos`, leaving `active` alone.
+    fn copy_in(&mut self, src: &GpuEngine<'a>, slot: usize, pos: usize) -> Result<(), String> {
         if src.layers.len() != self.layers.len() {
             return Err(format!(
                 "adopt: source has {} layers, batch has {}",
                 src.layers.len(),
                 self.layers.len()
             ));
-        }
-        // The batched kernels index KV, SSM state and positions by `grid.y`, so
-        // the active set must stay dense. A new request always takes the next
-        // index; `release` swaps the last slot down to keep it dense.
-        let slot = self.active.len();
-        if slot >= self.slots {
-            return Err("adopt: slot pool exhausted".to_string());
         }
         let l = self.model.launcher();
         let stream = l.stream();
@@ -97,9 +144,7 @@ impl<'a> BatchEngine<'a> {
         }
         l.synchronize()?;
         self.positions[slot] = pos;
-        debug_assert_eq!(slot, self.active.len());
-        self.active.push(slot);
-        Ok(slot)
+        Ok(())
     }
 
     /// Retire a slot, keeping the active set dense.

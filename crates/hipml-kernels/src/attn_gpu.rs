@@ -36,6 +36,8 @@ mod imp {
     mod chunk_kv;
     #[path = "attn_cols.rs"]
     mod cols;
+    #[path = "attn_rows.rs"]
+    mod rows;
 
     /// A weight payload that is either owned (the standalone parity path) or
     /// borrowed from the resident loader, so the graph never uploads the same

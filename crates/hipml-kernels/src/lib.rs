@@ -24,6 +24,8 @@ mod ssm_cols;
 mod ssm_batch_ops;
 #[cfg(feature = "hip")]
 mod ssm_chunk;
+#[cfg(feature = "hip")]
+mod ssm_rows;
 
 pub use attn_gpu::AttnLayer;
 #[cfg(feature = "hip")]

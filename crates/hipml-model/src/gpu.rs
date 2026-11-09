@@ -489,6 +489,20 @@ impl<'a> GpuEngine<'a> {
     pub fn state_at(&self, pos: usize) -> GpuState {
         GpuState { pos }
     }
+
+    /// Every SSM layer's carried state, layer by layer: the conv window then
+    /// the delta-net matrix. Used by `rows-check` to prove the row-block
+    /// recurrence is bit-identical to the single-sequence path.
+    pub fn ssm_state_host(&self) -> Result<Vec<f32>, String> {
+        let mut out = Vec::new();
+        for b in &self.layers {
+            if let BlockKind::Ssm(s) = &b.kind {
+                out.extend(s.conv_state_buf().to_host()?);
+                out.extend(s.s_state_buf().to_host()?);
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Quantized-KV decode attention for one layer at `pos`.

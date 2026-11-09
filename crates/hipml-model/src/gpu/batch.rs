@@ -26,6 +26,8 @@ mod forward;
 mod kv;
 #[path = "batch/adopt.rs"]
 mod adopt;
+#[path = "batch/rows.rs"]
+mod rows;
 
 /// Slot bookkeeping. Capacity is fixed when the engine is built; allocation
 /// just hands out the indices, so nothing in the forward path assumes slot 0
@@ -143,6 +145,11 @@ pub struct BatchEngine<'a> {
     pub trace: bool,
     /// Seconds per stage accumulated by `forward` when `trace` is on.
     pub stages: [f64; 9],
+    /// Row-block scratch, allocated on the first `prefill_rows`.
+    rows: Option<rows::RowScratch>,
+    /// Rows the last row block ran and its wall time in ms.
+    row_login: usize,
+    row_ms: f64,
 }
 
 impl<'a> BatchEngine<'a> {
@@ -253,6 +260,9 @@ impl<'a> BatchEngine<'a> {
             pos_buf: Buffer::alloc(2 * slots)?,
             trace: false,
             stages: [0.0; 9],
+            rows: None,
+            row_login: 0,
+            row_ms: 0.0,
         })
     }
 
