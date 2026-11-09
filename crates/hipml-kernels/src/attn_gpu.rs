@@ -328,7 +328,7 @@ mod imp {
 
         /// Head RMS norm and M-RoPE on explicit q/k pointers, so the prefill
         /// path can run the same kernels on row `t` of a chunk buffer.
-        fn norm_rope_at(
+        pub(crate) fn norm_rope_at(
             &self,
             l: &Launcher,
             q: *mut c_void,
@@ -506,12 +506,25 @@ mod imp {
                 return Err(format!("position {pos} beyond KV cache {}", d.n_ctx));
             }
             self.prepare_qkv(l, x)?;
+            self.append_at(l, self.k.as_ptr(), self.v.as_ptr())?;
+            self.attention(l)?;
+            self.apply_output(l)
+        }
 
+        /// Append explicit K/V rows at `step[0]` (the position lives in the
+        /// device step buffer, as in `forward_buf`).
+        pub fn append_at(
+            &self,
+            l: &Launcher,
+            k: *mut c_void,
+            v: *mut c_void,
+        ) -> Result<(), String> {
+            let d = self.dims;
             let append = self.module_kernel(l, "kv_append_f32")?;
             let mut p_kc = self.kv_k.as_ptr();
             let mut p_vc = self.kv_v.as_ptr();
-            let mut p_k = self.k.as_ptr();
-            let mut p_v = self.v.as_ptr();
+            let mut p_k = k;
+            let mut p_v = v;
             let mut p_step = l.step_buf().as_ptr();
             let mut width = d.width as i32;
             let mut params: [*mut c_void; 6] = [
@@ -526,10 +539,142 @@ mod imp {
                 LaunchConfig::linear(2 * d.width, 256),
                 &l.stream,
                 &mut params,
-            )?;
+            )
+        }
 
-            self.attention(l)?;
-            self.apply_output(l)
+        /// The K/V projections, k norm+rope and cache append for one row, with
+        /// no query: the MTP drafter's prompt prefill only needs the KV rows.
+        pub fn append_kv_only(&self, l: &Launcher, x: &Buffer, pos: usize) -> Result<(), String> {
+            let d = self.dims;
+            if pos >= d.n_ctx {
+                return Err(format!("position {pos} beyond KV cache {}", d.n_ctx));
+            }
+            self.gemv(l, &self.wk, x, &self.k, d.width)?;
+            self.gemv(l, &self.wv, x, &self.v, d.width)?;
+            self.norm_rope_at(l, self.q.as_ptr(), self.k.as_ptr())?;
+            self.append_at(l, self.k.as_ptr(), self.v.as_ptr())
+        }
+
+        /// Batched Q/K/V for `rows` columns of `x`, then the per-row split,
+        /// head norm and rope. `pos0 + c` is row `c`'s absolute position.
+        ///
+        /// One weight pass for all rows: the `_b` GEMVs are bit-identical per
+        /// row to the single-sequence GEMV, so the verify columns match a plain
+        /// decode.
+        #[allow(clippy::too_many_arguments)]
+        pub fn prepare_rows(
+            &self,
+            l: &Launcher,
+            x: &Buffer,
+            rows: usize,
+            qg: &Buffer,
+            q: &Buffer,
+            gate: &Buffer,
+            k: &Buffer,
+            v: &Buffer,
+            pos0: usize,
+        ) -> Result<(), String> {
+            let d = self.dims;
+            self.gemv_rows(l, &self.wq, x, qg, rows)?;
+            self.gemv_rows(l, &self.wk, x, k, rows)?;
+            self.gemv_rows(l, &self.wv, x, v, rows)?;
+            let split = self.module_kernel(l, "qg_split_f32")?;
+            for c in 0..rows {
+                l.set_step(pos0 + c, pos0 + c + 1, 0)?;
+                let mut p_qg = row_ptr(qg, c, 2 * d.n_head * d.head_dim);
+                let mut p_q = row_ptr(q, c, d.n_head * d.head_dim);
+                let mut p_g = row_ptr(gate, c, d.n_head * d.head_dim);
+                let mut nh = d.n_head as i32;
+                let mut hd = d.head_dim as i32;
+                let mut params: [*mut c_void; 5] = [
+                    &mut p_qg as *mut _ as *mut c_void,
+                    &mut p_q as *mut _ as *mut c_void,
+                    &mut p_g as *mut _ as *mut c_void,
+                    &mut nh as *mut _ as *mut c_void,
+                    &mut hd as *mut _ as *mut c_void,
+                ];
+                let cfg = LaunchConfig {
+                    grid: (d.n_head as u32, 1, 1),
+                    block: (256, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                split.launch(cfg, &l.stream, &mut params)?;
+                self.norm_rope_at(
+                    l,
+                    row_ptr(q, c, d.n_head * d.head_dim),
+                    row_ptr(k, c, d.width),
+                )?;
+            }
+            Ok(())
+        }
+
+        /// Append row `c`'s K/V at `pos` and run this row's causal attention.
+        /// `q_row`/`out_row` are device pointers to the batch's rows.
+        pub fn attend_row_at(
+            &self,
+            l: &Launcher,
+            q_row: *mut c_void,
+            out_row: *mut c_void,
+            pos: usize,
+        ) -> Result<(), String> {
+            l.set_step(pos, pos + 1, 0)?;
+            self.attention_at(l, q_row, out_row)
+        }
+
+        /// `y = Wo (aout * sigmoid(gate))` for `rows` rows: the gate per row,
+        /// then one batched weight pass for the output projection.
+        pub fn output_rows(
+            &self,
+            l: &Launcher,
+            aout: &Buffer,
+            gate: &Buffer,
+            y: &Buffer,
+            rows: usize,
+        ) -> Result<(), String> {
+            let d = self.dims;
+            let qgate = self.module_kernel(l, "q_gate_f32")?;
+            let n = d.n_head * d.head_dim;
+            for c in 0..rows {
+                let mut p_out = row_ptr(aout, c, n);
+                let mut p_gate = row_ptr(gate, c, n);
+                let mut p_y = row_ptr(aout, c, n);
+                let mut v_n = n as i32;
+                let mut params: [*mut c_void; 4] = [
+                    &mut p_out as *mut _ as *mut c_void,
+                    &mut p_gate as *mut _ as *mut c_void,
+                    &mut p_y as *mut _ as *mut c_void,
+                    &mut v_n as *mut _ as *mut c_void,
+                ];
+                qgate.launch(LaunchConfig::linear(n, 256), &l.stream, &mut params)?;
+            }
+            self.gemv_rows(l, &self.wo, aout, y, rows)
+        }
+
+        /// One projection over `rows` x-rows with a single weight pass, or
+        /// per-row GEMVs when the format has no `_b` kernel (F32 weights).
+        fn gemv_rows(
+            &self,
+            l: &Launcher,
+            w: &ResidentMat,
+            x: &Buffer,
+            y: &Buffer,
+            rows: usize,
+        ) -> Result<(), String> {
+            if let Some(kind) = crate::batch_kind_for(w.kind) {
+                return l.gemv_batched(kind, w.data_bytes(), x, y, w.rows, w.cols, rows);
+            }
+            for c in 0..rows {
+                let entry = w.entry()?;
+                l.run_quant_resident_ptr(
+                    entry,
+                    w.data_bytes(),
+                    row_ptr(x, c, w.cols),
+                    row_ptr(y, c, w.rows),
+                    w.rows,
+                    w.cols,
+                )?;
+            }
+            Ok(())
         }
 
         /// Causal attention for this token. Uses the split-K kernel when the
@@ -540,7 +685,7 @@ mod imp {
 
         /// Same launch over explicit q/out rows and a given sequence length, so
         /// a prefill chunk can attend from row `t` at `seq = pos + 1`.
-        fn attention_at(
+        pub fn attention_at(
             &self,
             l: &Launcher,
             q: *mut c_void,
@@ -689,6 +834,11 @@ mod imp {
             };
             kernel.launch(cfg, &l.stream, &mut params)
         }
+    }
+
+    /// Device pointer of row `row` of a `[rows][width]` f32 buffer.
+    fn row_ptr(buf: &Buffer, row: usize, width: usize) -> *mut c_void {
+        unsafe { (buf.as_ptr() as *mut u8).add(row * width * 4) as *mut c_void }
     }
 
 }
