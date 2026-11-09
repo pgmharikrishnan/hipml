@@ -141,3 +141,47 @@ tail or the stall it causes.
 * Next step, in order: prefill multiple cache-hit tails in one pass (they are
   independent sequences, so the single engine cannot do it today); make the
   small-M prefill tile cheaper than a full weight pass; then retest cells b/c.
+
+## WP46: where the fleet aggregate actually stops
+
+The exact-prefill merge (`feat/exact`) is in this tree: `oracle-gate` returns
+20/20 ids on `p2_math_169` (step 19 = 41020). Cell a is unchanged, so the fix
+did not move the single-stream path.
+
+Two concurrency changes were measured on that tree.
+
+**Finishing a cache-hit tail inside the batched step does not pay.** A 26-token
+tail was fed one row per batched step instead of taking the prefill engine for
+one tile. It removes the exclusive stall, but a tail then costs 26 weight
+passes instead of one: cell b TTFT p50 1.0 -> 2.7 s and aggregate 70.6 -> 61.8
+tok/s. It was reverted rather than tuned.
+
+**The batched decode step was the other half of the loss.** At B>=4 the exact
+`_b` GEMV gives way to the WMMA skinny tile by default in `serve`
+(`HIPML_BATCH_SKINNY`; B<4 and the lone MTP request keep the exact path, so
+cell a and the one-request token check are unchanged). Same box, same prompts,
+q8 KV:
+
+| cell | slots | engine | TTFT p50/p95 ms | per-stream tok/s | aggregate tok/s |
+|---|---:|---|---:|---:|---:|
+| a | 1 | hipml before | 2955 / 2963 | 38.3 | 38.3 |
+| a | 1 | hipml after | 2950 / 2967 | 38.2 | 38.2 |
+| a | 1 | llama | 2182 / 2194 | 30.0 | 30.0 |
+| b | 8 | hipml before | 1004 / 1715 | 10.1 | 70.6 |
+| b | 8 | hipml after | 985 / 1633 | 15.3 | **101.5** |
+| b | 8 | llama | 661 / 1345 | 12.3 | 92.3 |
+| c | 16 | hipml before | 1960 / 4086 | 5.2 | 71.1 |
+| c | 16 | hipml after | 1877 / 3435 | 11.9 | 138.6 |
+| c | 16 | llama | 1338 / 2951 | 13.6 | 211.3 |
+
+b now clears llama on aggregate and per-stream. c's per-stream is inside the
+20% band (11.9 vs 13.6) but its aggregate is not.
+
+The remaining c gap is the tail prefill, measured rather than inferred: 45
+interleaved tiles, **7.19 s of exclusive GPU time**, max stall 163 ms, against
+a 7.27 s median wave window. The decode steps themselves are already close to
+llama (11.9 vs 13.6 per stream). Removing the 2.4 s per wave projects
+`1008 / (7.27 - 2.40) = 207` tok/s, i.e. the aggregate gap is the serialized
+tail, not the batch decoder. The next step is a true multi-row prefill for the
+tails (one projection pass over N independent suffixes) — the scheduler has no
+such path today; the single-sequence prefill engine cannot express it.
