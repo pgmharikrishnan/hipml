@@ -109,13 +109,14 @@ extern "C" __global__ void l2norm_cols_f32(
     int heads,
     int dim,
     float eps,
-    int rows)
+    int rows,
+    int stride)
 {
     const int row = blockIdx.x / heads;
     const int h = blockIdx.x - row * heads;
     const int t = threadIdx.x;
-    const float* src = x + ((size_t)row * heads + h) * dim;
-    float* dst = y + ((size_t)row * heads + h) * dim;
+    const float* src = x + (size_t)row * (size_t)stride + (size_t)h * dim;
+    float* dst = y + (size_t)row * (size_t)stride + (size_t)h * dim;
 
     float acc = 0.0f;
     for (int i = t; i < dim; i += SC_L2_BLOCK) {

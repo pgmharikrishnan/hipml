@@ -129,13 +129,15 @@ impl<'a> SsmGpuLayer<'a> {
         let mut v_d = d.head_k as i32;
         let mut v_eps = d.eps;
         let mut v_rows = rows as i32;
-        let mut params: [*mut c_void; 6] = [
+        let mut v_stride = d.conv_ch as i32;
+        let mut params: [*mut c_void; 7] = [
             &mut p_x as *mut _ as *mut c_void,
             &mut p_y as *mut _ as *mut c_void,
             &mut v_h as *mut _ as *mut c_void,
             &mut v_d as *mut _ as *mut c_void,
             &mut v_eps as *mut _ as *mut c_void,
             &mut v_rows as *mut _ as *mut c_void,
+            &mut v_stride as *mut _ as *mut c_void,
         ];
         let cfg = LaunchConfig {
             grid: ((rows * d.n_k) as u32, 1, 1),
