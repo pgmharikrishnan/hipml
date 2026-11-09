@@ -105,6 +105,29 @@ pub const KERNELS: &[KernelSpec] = &[
         },
     },
     KernelSpec {
+        name: "gemv_q6_k_silu",
+        entry: "gemv_q6_k_silu",
+        // Same geometry as gemv_q6_k; the SwiGLU activation is an epilogue.
+        kind: KernelKind::RowTile {
+            rows: 16,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "gemv_q4_k_silu",
+        entry: "gemv_q4_k_silu",
+        kind: KernelKind::RowTile {
+            rows: 16,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "residual_rmsnorm_f32",
+        entry: "residual_rmsnorm_f32",
+        // One block for the whole row; the launcher sizes it.
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
         name: "gemv_q5_k",
         entry: "gemv_q5_k",
         // One row per warp, like gemv_q4_k_r1: Q5_K only appears as a

@@ -152,6 +152,47 @@ impl Launcher {
         kernel.launch(LaunchConfig::per_row(rows, 256), &self.stream, &mut params)
     }
 
+    /// `x1 = a + b; y = rmsnorm(x1, w)`, one block.
+    ///
+    /// Replaces `residual_buf` + `rmsnorm_buf` where the residual is only
+    /// materialised to be normalised: one launch instead of two, and the norm
+    /// is bit-identical to normalising the stored residual (same loop, same
+    /// tree, same expression).
+    pub fn residual_rmsnorm_buf(
+        &self,
+        a: &Buffer,
+        b: &Buffer,
+        x1: &Buffer,
+        w: &Buffer,
+        y: &Buffer,
+        n: usize,
+        eps: f32,
+    ) -> Result<(), String> {
+        let kernel = self.module.kernel("residual_rmsnorm_f32")?;
+        let mut p_a = a.as_ptr();
+        let mut p_b = b.as_ptr();
+        let mut p_x1 = x1.as_ptr();
+        let mut p_w = w.as_ptr();
+        let mut p_y = y.as_ptr();
+        let mut v_n = n as i32;
+        let mut v_eps = eps;
+        let mut params: [*mut c_void; 7] = [
+            &mut p_a as *mut _ as *mut c_void,
+            &mut p_b as *mut _ as *mut c_void,
+            &mut p_x1 as *mut _ as *mut c_void,
+            &mut p_w as *mut _ as *mut c_void,
+            &mut p_y as *mut _ as *mut c_void,
+            &mut v_n as *mut _ as *mut c_void,
+            &mut v_eps as *mut _ as *mut c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (1, 1, 1),
+            block: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        kernel.launch(cfg, &self.stream, &mut params)
+    }
+
     /// `y = a + b`, one thread per element.
     pub fn residual_buf(&self, a: &Buffer, b: &Buffer, y: &Buffer, n: usize) -> Result<(), String> {
         self.linear3("residual_add_f32", a, b, y, n)

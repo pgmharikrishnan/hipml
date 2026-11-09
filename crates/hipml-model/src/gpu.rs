@@ -332,6 +332,13 @@ impl<'a> GpuEngine<'a> {
         l.embed_row_q4_k_dev(self.embed.0, self.embed.1, &self.x, cfg.n_embd)?;
         mark(&mut self.trace, l, "embed")?;
 
+        // Layer 0's attention input. Every later full-attention layer reads the
+        // vector the previous layer's fused residual produced.
+        if matches!(self.layers[0].kind, BlockKind::Full { .. }) {
+            l.rmsnorm_buf(&self.x, &self.layers[0].attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
+            mark(&mut self.trace, l, "attn_in")?;
+        }
+
         for i in 0..self.layers.len() {
             let block = &self.layers[i];
             let block_out: &Buffer = match &block.kind {
@@ -347,15 +354,11 @@ impl<'a> GpuEngine<'a> {
                     s.output()
                 }
                 BlockKind::Full { attn, deep: None } => {
-                    l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
-                    mark(&mut self.trace, l, "attn_in")?;
                     attn.forward_buf(l, &self.t, pos)?;
                     mark(&mut self.trace, l, "block")?;
                     attn.output()
                 }
                 BlockKind::Full { attn, deep: Some(dk) } => {
-                    l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
-                    mark(&mut self.trace, l, "attn_in")?;
                     attn.prepare_qkv(l, &self.t)?;
                     // Quantize and append the new K/V row on the device: one
                     // launch instead of a readback and eight uploads.
@@ -375,23 +378,45 @@ impl<'a> GpuEngine<'a> {
                     attn.output()
                 }
             };
-            l.residual_buf(&self.x, block_out, &self.x1, cfg.n_embd)?;
-            l.rmsnorm_buf(&self.x1, &block.post_norm, &self.t, cfg.n_embd, cfg.eps)?;
+            // residual + post_attention_norm: one launch instead of two, and
+            // the norm is bit-identical to normalising the stored residual.
+            l.residual_rmsnorm_buf(
+                &self.x, block_out, &self.x1, &block.post_norm, &self.t, cfg.n_embd, cfg.eps,
+            )?;
             mark(&mut self.trace, l, "post_norm")?;
 
             block.gate.gemv(l, &self.t, &self.gate)?;
             mark(&mut self.trace, l, "gate")?;
-            block.up.gemv(l, &self.t, &self.up)?;
+            // up projection with SwiGLU in the epilogue (was up + silu_mul).
+            block.up.gemv_silu(l, &self.t, &self.gate, &self.act)?;
             mark(&mut self.trace, l, "up")?;
-            l.silu_mul_buf(&self.gate, &self.up, &self.act, cfg.n_ff)?;
             block.down.gemv(l, &self.act, &self.down)?;
             mark(&mut self.trace, l, "down")?;
-            l.residual_buf(&self.down, &self.x1, &self.x, cfg.n_embd)?;
+
+            // residual + the next attention norm (the last layer produces the
+            // output norm instead, so the standalone output_norm launch goes).
+            // An SSM layer normalises its own input, so the residual there is
+            // left alone.
+            match self.layers.get(i + 1) {
+                Some(next) if matches!(next.kind, BlockKind::Full { .. }) => {
+                    l.residual_rmsnorm_buf(
+                        &self.down, &self.x1, &self.x, &next.attn_norm, &self.t,
+                        cfg.n_embd, cfg.eps,
+                    )?;
+                }
+                Some(_) => {
+                    l.residual_buf(&self.down, &self.x1, &self.x, cfg.n_embd)?;
+                }
+                None => {
+                    l.residual_rmsnorm_buf(
+                        &self.down, &self.x1, &self.x, &self.output_norm, &self.final_h,
+                        cfg.n_embd, cfg.eps,
+                    )?;
+                }
+            }
         }
 
         st.pos += 1;
-        l.rmsnorm_buf(&self.x, &self.output_norm, &self.final_h, cfg.n_embd, cfg.eps)?;
-        mark(&mut self.trace, l, "out_norm")?;
         let out = self
             .model
             .tensor(crate::OUTPUT)
