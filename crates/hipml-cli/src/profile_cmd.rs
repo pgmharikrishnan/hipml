@@ -145,6 +145,23 @@ pub fn profile(args: &[String]) -> i32 {
         n_launch as f64 * per_launch.0 / 1e3,
         n_launch as f64 * per_launch.1 / 1e3
     );
+    // 1b. The 32-byte step upload the position-aware kernels read. The graph
+    // issues one per token; the verify's per-column loops issue several per
+    // layer, so its cost matters there.
+    let t = Instant::now();
+    for i in 0..512 {
+        if let Err(e) = l.set_step(i, i + 1, 0) {
+            eprintln!("gpu-profile: set_step: {e}");
+            return 1;
+        }
+    }
+    if let Err(e) = l.synchronize() {
+        eprintln!("gpu-profile: set_step sync: {e}");
+        return 1;
+    }
+    let step_us = t.elapsed().as_secs_f64() * 1e6 / 512.0;
+    println!("step upload:       {step_us:.3} us (async, 512 queued)");
+
     println!("embedding row:     {embed_ms:.3} ms");
     println!("logits readback:   {readback_ms:.3} ms ({} values)", cfg.n_vocab);
 

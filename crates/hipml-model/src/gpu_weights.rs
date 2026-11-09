@@ -231,6 +231,89 @@ pub fn check_batched_gemv(
     Ok((rows * m, diff, worst))
 }
 
+/// One timing sample for the batched GEMV.
+pub struct GemvTiming {
+    pub name: String,
+    pub kind: &'static str,
+    pub bytes: usize,
+    pub rows: usize,
+    pub single_ms: f64,
+    pub batched_ms: f64,
+}
+
+impl GemvTiming {
+    /// Weight bytes the batched launch streams per millisecond, in GB/s.
+    pub fn batched_gbs(&self) -> f64 {
+        self.bytes as f64 / (self.batched_ms * 1e6)
+    }
+
+    /// Weight bytes a `rows`-launch fallback streams per millisecond.
+    pub fn single_gbs(&self) -> f64 {
+        self.bytes as f64 / (self.single_ms * 1e6)
+    }
+
+    /// Batched cost relative to `rows` single launches.
+    pub fn ratio(&self) -> f64 {
+        self.batched_ms / self.single_ms.max(1e-9)
+    }
+}
+
+/// Time the batched GEMV against `rows` single launches on a resident tensor,
+/// `reps` times each, and report the fastest sample. This is the cost side of
+/// the verify pass: a `_b` launch that costs more than one single GEMV spends
+/// the extra column's budget on kernel overhead instead of weights.
+pub fn bench_batched_gemv(
+    model: &Model,
+    name: &str,
+    max_rows: usize,
+    reps: usize,
+) -> Result<Vec<GemvTiming>, String> {
+    use std::time::Instant;
+    let proj = Proj::of(model, name)?;
+    let bkind = hipml_kernels::batch_kind_entry(proj.entry)
+        .ok_or_else(|| format!("{name}: no batched GEMV"))?;
+    let (m, k) = (proj.rows, proj.cols);
+    let x = Buffer::from_host(&vec![0.125f32; max_rows * k])?;
+    let y = Buffer::alloc(max_rows * m)?;
+    let l = model.launcher();
+    let mut out = Vec::new();
+    for rows in 1..=max_rows {
+        let mut single = f64::MAX;
+        let mut batched = f64::MAX;
+        for _ in 0..reps {
+            let t = Instant::now();
+            for r in 0..rows {
+                let px = unsafe { (x.as_ptr() as *mut u8).add(r * k * 4) };
+                let py = unsafe { (y.as_ptr() as *mut u8).add(r * m * 4) };
+                l.run_quant_resident_ptr(
+                    hipml_kernels::stream_entry(proj.entry),
+                    proj.w,
+                    px as *mut std::ffi::c_void,
+                    py as *mut std::ffi::c_void,
+                    m,
+                    k,
+                )?;
+            }
+            l.synchronize()?;
+            single = single.min(t.elapsed().as_secs_f64() * 1e3);
+
+            let t = Instant::now();
+            l.gemv_batched(bkind, proj.w, &x, &y, m, k, rows)?;
+            l.synchronize()?;
+            batched = batched.min(t.elapsed().as_secs_f64() * 1e3);
+        }
+        out.push(GemvTiming {
+            name: name.to_string(),
+            kind: proj.entry,
+            bytes: proj.w.len(),
+            rows,
+            single_ms: single,
+            batched_ms: batched,
+        });
+    }
+    Ok(out)
+}
+
 /// Dequantize a resident Q5_K matrix once, for the fp16 prefill copy.
 fn dequant_q5_k(t: &DeviceTensor, rows: usize, cols: usize) -> Result<Vec<f32>, String> {
     use hipml_core::quant::{dequant_q5_k, Q5_K_BYTES, QK_K};

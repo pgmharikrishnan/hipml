@@ -139,7 +139,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
 /// Read a token-id array out of a JSON object (`"ids":[...]`) or a bare array.
 /// The fixture is written by `bench/prepare_fixture.py`, so a flat integer
 /// array is the only shape that has to work; no serde in this crate.
-fn read_ids_file(path: &str) -> Result<Vec<u32>, String> {
+pub(crate) fn read_ids_file(path: &str) -> Result<Vec<u32>, String> {
     let s = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
     let start = s
         .find("\"ids\"")

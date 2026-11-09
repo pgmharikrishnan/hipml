@@ -34,6 +34,12 @@ mod sweep_cmd;
 mod quant_cmd;
 #[cfg(feature = "hip")]
 mod ssm_cmd;
+#[cfg(feature = "hip")]
+mod column_cmd;
+#[cfg(feature = "hip")]
+mod gemv_cmd;
+#[cfg(feature = "hip")]
+mod spec_cmd;
 
 /// What happened to one case.
 enum Outcome {
@@ -73,6 +79,14 @@ fn main() {
         "gdn-parity" => std::process::exit(gdn_parity::run(&args[1..])),
         #[cfg(feature = "hip")]
         "ssm" => std::process::exit(ssm_cmd::ssm(&args[1..])),
+        #[cfg(feature = "hip")]
+        "spec-bench" => std::process::exit(spec_cmd::bench(&args[1..])),
+        #[cfg(feature = "hip")]
+        "column-bench" => std::process::exit(column_cmd::bench(&args[1..])),
+        #[cfg(feature = "hip")]
+        "gemv-check" => std::process::exit(gemv_cmd::gemv_check(&args[1..])),
+        #[cfg(feature = "hip")]
+        "gemv-bench" => std::process::exit(gemv_cmd::gemv_bench(&args[1..])),
         "mtp-accept" => std::process::exit(mtp_cmd::run(&args[1..])),
         "attn-parity" => std::process::exit(attn_cmd::parity(&args[1..])),
         "attn-bench" => std::process::exit(attn_cmd::bench(&args[1..])),
