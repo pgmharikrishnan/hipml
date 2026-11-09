@@ -422,7 +422,7 @@ impl<'a> SsmGpuLayer<'a> {
         rows: usize,
         l: &Launcher,
     ) -> Result<(), String> {
-        if rows > 1 {
+        if rows > 1 && std::env::var_os("HIPML_BATCH_F32_LEGACY").is_none() {
             let kernel = self.module.kernel("gemv_f32_b")?;
             let mut p_w = w;
             let mut p_x = x.as_ptr();
