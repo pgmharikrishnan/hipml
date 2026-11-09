@@ -11,7 +11,8 @@ pub struct DeepKv {
     pub dtype: KvDtype,
     pub seq: usize,
     /// Decode-attention entry id: 4/5 are the warp-per-KV-head variants
-    /// (`attn_decode_kv_w2`/`w4`), 0/1 the staged kernels.
+    /// (`attn_decode_kv_w2`/`w4`), 7/13/14 the three-heads-per-warp variants
+    /// (`s2`/`s4`/`s1`), 0/1 the staged kernels.
     pub kernel: usize,
     n_kv: usize,
     head_dim: usize,
@@ -42,7 +43,7 @@ impl DeepKv {
         // warp kernel's lane map covers; every other case keeps the staged one.
         let group = cfg.n_head / cfg.n_head_kv;
         let kernel = if dtype == KvDtype::Q8 && cfg.head_dim == 256 && group <= 8 {
-            5
+            13
         } else {
             dtype.id()
         };
