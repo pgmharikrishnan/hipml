@@ -201,8 +201,8 @@ static __device__ __forceinline__ void pww2_dequant8(const pww2_u4& r,
     }
 }
 
-template <int KIND, bool XHALF>
-static __device__ __forceinline__ void pww2_body(
+template <int KIND, bool XHALF, bool SPLIT>
+static __device__ __forceinline__ void pww2_body_impl(
     const unsigned char* __restrict__ w,
     const void* __restrict__ x,
     float* __restrict__ y,
@@ -213,6 +213,8 @@ static __device__ __forceinline__ void pww2_body(
     int k1,
     int accumulate)
 {
+    const int kb = SPLIT ? k0 : 0;
+    const int ke = SPLIT ? k1 : k;
     __shared__ __align__(16) _Float16 shx[PWW2_BUF * PWW2_TT * PWW2_XS];
     __shared__ __align__(16) _Float16 shw[PWW2_BUF * PWW2_RT * PWW2_WS];
 
@@ -390,10 +392,10 @@ static __device__ __forceinline__ void pww2_body(
     };
 
 #if PWW2_PF >= 1
-    stage(shx, shw, k0);
+    stage(shx, shw, kb);
     __syncthreads();
-    for (int base = k0, b = 0; base < k1; base += PWW2_KW, b ^= 1) {
-        const bool more = base + PWW2_KW < k1;
+    for (int base = kb, b = 0; base < ke; base += PWW2_KW, b ^= 1) {
+        const bool more = base + PWW2_KW < ke;
 #if PWW2_PF >= 3
         // x-only pipeline: the fp16 activation run is the widest global stream
         // in the tile, and it needs no conversion, so hold just that array in
@@ -437,7 +439,7 @@ static __device__ __forceinline__ void pww2_body(
         __syncthreads();
     }
 #else
-    for (int base = k0; base < k1; base += PWW2_KW) {
+    for (int base = kb; base < ke; base += PWW2_KW) {
         __syncthreads();
         stage(shx, shw, base);
         __syncthreads();
@@ -457,67 +459,94 @@ static __device__ __forceinline__ void pww2_body(
                 const int r = gr + j * 16;
                 if (gt < tokens && r < m) {
                     const size_t o = (size_t)gt * m + r;
-                    if (accumulate) y[o] += acc[i * PWW2_NRG + j][e];
+                    if (SPLIT && accumulate) y[o] += acc[i * PWW2_NRG + j][e];
                     else y[o] = acc[i * PWW2_NRG + j][e];
                 }
             }
         }
 }
 
+template <int KIND, bool XHALF>
+static __device__ __forceinline__ void pww2_body(
+    const unsigned char* __restrict__ w,
+    const void* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k,
+    int tokens)
+{
+    pww2_body_impl<KIND, XHALF, false>(w, x, y, m, k, tokens, 0, k, 0);
+}
+
+template <int KIND, bool XHALF>
+static __device__ __forceinline__ void pww2_body_split(
+    const unsigned char* __restrict__ w,
+    const void* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k,
+    int tokens,
+    int k0,
+    int k1,
+    int accumulate)
+{
+    pww2_body_impl<KIND, XHALF, true>(w, x, y, m, k, tokens, k0, k1, accumulate);
+}
+
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q4_k_w2(const unsigned char* __restrict__ w,
                                            const float* __restrict__ x,
                                            float* __restrict__ y, int m, int k, int tokens)
 {
-    pww2_body<0, false>(w, x, y, m, k, tokens, 0, k, 0);
+    pww2_body<0, false>(w, x, y, m, k, tokens);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q6_k_w2(const unsigned char* __restrict__ w,
                                            const float* __restrict__ x,
                                            float* __restrict__ y, int m, int k, int tokens)
 {
-    pww2_body<1, false>(w, x, y, m, k, tokens, 0, k, 0);
+    pww2_body<1, false>(w, x, y, m, k, tokens);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q8_0_w2(const unsigned char* __restrict__ w,
                                            const float* __restrict__ x,
                                            float* __restrict__ y, int m, int k, int tokens)
 {
-    pww2_body<2, false>(w, x, y, m, k, tokens, 0, k, 0);
+    pww2_body<2, false>(w, x, y, m, k, tokens);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_halfw_w2(const unsigned char* __restrict__ w,
                                             const float* __restrict__ x,
                                             float* __restrict__ y, int m, int k, int tokens)
 {
-    pww2_body<3, false>(w, x, y, m, k, tokens, 0, k, 0);
+    pww2_body<3, false>(w, x, y, m, k, tokens);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q4_k_w2h(const unsigned char* __restrict__ w,
                                             const void* __restrict__ x,
                                             float* __restrict__ y, int m, int k, int tokens)
 {
-    pww2_body<0, true>(w, x, y, m, k, tokens, 0, k, 0);
+    pww2_body<0, true>(w, x, y, m, k, tokens);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q6_k_w2h(const unsigned char* __restrict__ w,
                                             const void* __restrict__ x,
                                             float* __restrict__ y, int m, int k, int tokens)
 {
-    pww2_body<1, true>(w, x, y, m, k, tokens, 0, k, 0);
+    pww2_body<1, true>(w, x, y, m, k, tokens);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q8_0_w2h(const unsigned char* __restrict__ w,
                                             const void* __restrict__ x,
                                             float* __restrict__ y, int m, int k, int tokens)
 {
-    pww2_body<2, true>(w, x, y, m, k, tokens, 0, k, 0);
+    pww2_body<2, true>(w, x, y, m, k, tokens);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_halfw_w2h(const unsigned char* __restrict__ w,
                                              const void* __restrict__ x,
                                              float* __restrict__ y, int m, int k, int tokens)
 {
-    pww2_body<3, true>(w, x, y, m, k, tokens, 0, k, 0);
+    pww2_body<3, true>(w, x, y, m, k, tokens);
 }
 
 // Split-K variants: same body over a k slice. The launcher runs [0,ks) with
@@ -529,7 +558,7 @@ extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) pref
                                                float* __restrict__ y, int m, int k, int tokens,
                                                int k0, int k1, int accumulate)
 {
-    pww2_body<0, true>(w, x, y, m, k, tokens, k0, k1, accumulate);
+    pww2_body_split<0, true>(w, x, y, m, k, tokens, k0, k1, accumulate);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q6_k_w2h_sk(const unsigned char* __restrict__ w,
@@ -537,7 +566,7 @@ extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) pref
                                                float* __restrict__ y, int m, int k, int tokens,
                                                int k0, int k1, int accumulate)
 {
-    pww2_body<1, true>(w, x, y, m, k, tokens, k0, k1, accumulate);
+    pww2_body_split<1, true>(w, x, y, m, k, tokens, k0, k1, accumulate);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q8_0_w2h_sk(const unsigned char* __restrict__ w,
@@ -545,7 +574,7 @@ extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) pref
                                                float* __restrict__ y, int m, int k, int tokens,
                                                int k0, int k1, int accumulate)
 {
-    pww2_body<2, true>(w, x, y, m, k, tokens, k0, k1, accumulate);
+    pww2_body_split<2, true>(w, x, y, m, k, tokens, k0, k1, accumulate);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_halfw_w2h_sk(const unsigned char* __restrict__ w,
@@ -553,5 +582,5 @@ extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) pref
                                                 float* __restrict__ y, int m, int k, int tokens,
                                                 int k0, int k1, int accumulate)
 {
-    pww2_body<3, true>(w, x, y, m, k, tokens, k0, k1, accumulate);
+    pww2_body_split<3, true>(w, x, y, m, k, tokens, k0, k1, accumulate);
 }
