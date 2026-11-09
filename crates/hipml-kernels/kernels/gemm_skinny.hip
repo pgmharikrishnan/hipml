@@ -49,35 +49,32 @@
 typedef _Float16 __attribute__((ext_vector_type(8))) pws_h8;
 typedef float __attribute__((ext_vector_type(8))) pws_f8;
 
-// The eight quant payload bytes of one row run, fetched with the widest load the
-// address alignment allows.
+// Eight payload bytes of one row run, one load.
 //
-// This is the difference between 32 GB/s and the memory system's number: as
-// eight scalar byte loads, one warp instruction touches eight rows x 4 of 32
-// bytes, so a block issues 8x too many sector requests and every one is mostly
-// waste. As one 64-bit load per eight values the same instruction requests
-// eight sectors, each fully used.
+// This is the difference between 18 GB/s and the memory system's number. Written
+// as eight scalar byte loads, one warp instruction touches eight rows with 4 of
+// 32 bytes used; worse, each load lands in its own basic block, so the compiler
+// drains the memory pipe between them (`s_wait_loadcnt` five times per load).
+// The width is fixed per format, not per address: Q4_K/Q6_K payload runs are
+// 8-aligned whenever the row stride is (the launcher checks that), and Q8_0's
+// runs start 2 bytes into a 34-byte block, so it loads four 16-bit halves.
+template <int KIND>
 static __device__ __forceinline__ void pws_load8_bytes(const unsigned char* __restrict__ p,
                                                        unsigned int* w)
 {
-    const size_t a = (size_t)p;
-    if ((a & 7) == 0) {
+    if (KIND == 0) {
+        // Q4_K payload runs are 8-aligned by construction: 256-value blocks of
+        // 144 bytes, block offsets in the payload of 16 + 32k + 8k.
         const uint2 v = *reinterpret_cast<const uint2*>(p);
         w[0] = v.x;
         w[1] = v.y;
-    } else if ((a & 3) == 0) {
-        const unsigned int* d = reinterpret_cast<const unsigned int*>(p);
-        w[0] = d[0];
-        w[1] = d[1];
-    } else if ((a & 1) == 0) {
+    } else {
+        // Q6_K blocks are 210 bytes and Q8_0 payloads start at byte 2 of a
+        // 34-byte block, so both are only guaranteed 2-aligned: four 16-bit
+        // loads. All in one basic block, which is what keeps them pipelined.
         const unsigned short* s = reinterpret_cast<const unsigned short*>(p);
         w[0] = (unsigned int)s[0] | ((unsigned int)s[1] << 16);
         w[1] = (unsigned int)s[2] | ((unsigned int)s[3] << 16);
-    } else {
-        w[0] = 0;
-        w[1] = 0;
-#pragma unroll
-        for (int i = 0; i < 8; ++i) w[i >> 2] |= (unsigned int)p[i] << (8 * (i & 3));
     }
 }
 
@@ -103,7 +100,7 @@ static __device__ __forceinline__ void pws_dequant8(const unsigned char* __restr
         const float scale = d * (float)sc;
         const float minv = dmin * (float)mn;
         const bool high = (sub & 1) != 0;
-        pws_load8_bytes(b + 16 + (sub >> 1) * 32 + part * 8, w0);
+        pws_load8_bytes<0>(b + 16 + (sub >> 1) * 32 + part * 8, w0);
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
             const int byte = (int)((w0[i >> 2] >> (8 * (i & 3))) & 0xFF);
@@ -126,8 +123,8 @@ static __device__ __forceinline__ void pws_dequant8(const unsigned char* __restr
         const int qh_off = 128 + hf * 32 + is * 16 + l0;
         const int shift = 2 * group;
         const bool high = group >= 2;
-        pws_load8_bytes(b + ql_off, w0);
-        pws_load8_bytes(b + qh_off, w1);
+        pws_load8_bytes<1>(b + ql_off, w0);
+        pws_load8_bytes<1>(b + qh_off, w1);
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
             const int qb = (int)((w0[i >> 2] >> (8 * (i & 3))) & 0xFF);
@@ -140,7 +137,7 @@ static __device__ __forceinline__ void pws_dequant8(const unsigned char* __restr
         const int part = (v & 31) >> 3;
         const unsigned char* b = rp + (size_t)blk * PF_Q8_0_BLOCK_BYTES;
         const float d = __half2float(*reinterpret_cast<const __half*>(b));
-        pws_load8_bytes(b + 2 + part * 8, w0);
+        pws_load8_bytes<2>(b + 2 + part * 8, w0);
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
             const int q = (int)((w0[i >> 2] >> (8 * (i & 3))) & 0xFF);
@@ -178,7 +175,7 @@ static __device__ __forceinline__ void pws_body(
     static_assert(KW % 32 == 0 && KW <= 256, "KW must be 32-aligned and <= 256");
     static_assert(KW >= 64 || THR / 32 == 1, "small KW needs one warp per row");
     static_assert(16 % XRP == 0, "token staging must cover 16 rows");
-    static_assert(RT % PRP == 0 || RT < PRP, "ragged weight staging");
+    static_assert(RT % PRP == 0, "ragged weight staging");
 
     __shared__ __align__(16) _Float16 shx[16 * XS];
     __shared__ __align__(16) _Float16 shw[RT * WS];
@@ -198,35 +195,31 @@ static __device__ __forceinline__ void pws_body(
 
     auto stage = [&](int base) {
         if (PROBE == 1) return;
+        // Token rows: clamp to the last real row instead of predicating the
+        // load. Rows >= r are computed and discarded, which is cheaper than a
+        // per-lane branch around every global load.
 #pragma unroll
         for (int p = 0; p < 16 / XRP; ++p) {
             const int rl = p * XRP + xt;
-            float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
-            // k is a multiple of 32, so a float4 is wholly inside or outside the
-            // last (partial) k-tile.
-            if (rl < r && base + xc < k)
-                v = *reinterpret_cast<const float4*>(x + (size_t)rl * k + base + xc);
+            const int gt = rl < r ? rl : r - 1;
+            const float4 v =
+                *reinterpret_cast<const float4*>(x + (size_t)gt * k + base + xc);
             __half2* dst = reinterpret_cast<__half2*>(shx + rl * XS + xc);
             dst[0] = __floats2half2_rn(v.x, v.y);
             dst[1] = __floats2half2_rn(v.z, v.w);
         }
+        // Weight rows: same clamp. `k` is a multiple of 256 and KW <= 256, so
+        // every tile is whole and no k bound is needed.
 #pragma unroll
         for (int p = 0; p < RT; p += PRP) {
             const int rl = p + wrow_l;
-            if (rl >= RT) continue;
-            const int gr = row_base + rl;
-            const int kc = wcol;
+            const int gr = row_base + rl < n ? row_base + rl : n - 1;
+            float v[8];
+            pws_dequant8<KIND>(w + (size_t)gr * wrow, base + wcol, v);
             pws_h8 hv;
-            if (gr < n && base + kc < k) {
-                float v[8];
-                pws_dequant8<KIND>(w + (size_t)gr * wrow, base + kc, v);
 #pragma unroll
-                for (int i = 0; i < 8; ++i) hv[i] = (_Float16)v[i];
-            } else {
-#pragma unroll
-                for (int i = 0; i < 8; ++i) hv[i] = (_Float16)0.0f;
-            }
-            *reinterpret_cast<pws_h8*>(shw + rl * WS + kc) = hv;
+            for (int i = 0; i < 8; ++i) hv[i] = (_Float16)v[i];
+            *reinterpret_cast<pws_h8*>(shw + rl * WS + wcol) = hv;
         }
     };
 

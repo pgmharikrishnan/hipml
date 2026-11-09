@@ -34,6 +34,16 @@ pub fn skinny_resident(
     if k % 32 != 0 {
         return Err(format!("{name}: k={k} must be a multiple of 32"));
     }
+    // The staging loads are branch-free, so the contract is checked here: whole
+    // k tiles (KW <= 256) and 8-aligned quant payload runs. Row strides are
+    // (k/256)*144 or (k/256)*210, both 8-aligned at every production k.
+    if k % 256 != 0 {
+        return Err(format!("{name}: k={k} must be a multiple of 256"));
+    }
+    let q8 = name.contains("q8_0");
+    if !q8 && (k / 256) * 144 % 8 != 0 {
+        return Err(format!("{name}: k={k} leaves an unaligned quant row"));
+    }
     let kernel = module.kernel(name)?;
     let mut p_w = w.as_ptr();
     let mut p_x = x.as_ptr();
