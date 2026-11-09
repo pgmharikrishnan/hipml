@@ -5,11 +5,10 @@
 //! `src/unicode.cpp`): the text is mapped through the GPT-2 byte encoder, split
 //! with the `tokenizer.ggml.pre = "qwen35"` pattern, then merged by rank.
 //!
-//! Scope: the pretokenizer is exact for ASCII. Non-ASCII is handled through the
-//! same byte-encoded codepoints, but the general-category tables are Rust's
-//! approximations (`char::is_alphabetic` for `\p{L}`, a combining-range test for
-//! `\p{M}`) rather than llama.cpp's generated table. Prompts in the acceptance
-//! set are ASCII; this is called out as unverified for other scripts.
+//! The general-category tests (`\p{L}`, `\p{N}`, `\p{M}`, `\s`) read the same
+//! generated table llama.cpp uses (`unicode_tables`, from `unicode-data.cpp`),
+//! not Rust's `char::is_alphabetic`/`is_numeric` approximations: the splitter
+//! must agree with the reference tokenizer on every script, not only ASCII.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Seek};
@@ -349,29 +348,13 @@ struct Flags {
 }
 
 fn flags(c: char) -> Flags {
+    let b = super::unicode_tables::bits(c);
     Flags {
-        letter: c.is_alphabetic(),
-        number: c.is_numeric(),
-        mark: is_mark(c),
-        whitespace: c.is_whitespace(),
+        letter: b & super::unicode_tables::LETTER != 0,
+        number: b & super::unicode_tables::NUMBER != 0,
+        mark: b & super::unicode_tables::MARK != 0,
+        whitespace: b & super::unicode_tables::WHITESPACE != 0,
     }
-}
-
-/// Approximate `\p{M}` (combining marks). Exact for ASCII (no marks).
-fn is_mark(c: char) -> bool {
-    let u = c as u32;
-    (0x0300..=0x036F).contains(&u)
-        || (0x0483..=0x0489).contains(&u)
-        || (0x0591..=0x05BD).contains(&u)
-        || (0x0610..=0x061A).contains(&u)
-        || (0x064B..=0x065F).contains(&u)
-        || (0x0900..=0x0903).contains(&u)
-        || (0x093A..=0x094F).contains(&u)
-        || (0x0E31..=0x0E4E).contains(&u)
-        || (0x1AB0..=0x1AFF).contains(&u)
-        || (0x1DC0..=0x1DFF).contains(&u)
-        || (0x20D0..=0x20FF).contains(&u)
-        || (0xFE20..=0xFE2F).contains(&u)
 }
 
 /// The `tokenizer.ggml.pre = "qwen35"` splitter, port of
