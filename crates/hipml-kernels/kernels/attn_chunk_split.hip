@@ -257,14 +257,23 @@ extern "C" __global__ void attn_chunk_split_f16(
 
         // ---- causal mask + online softmax (log2 units) --------------------
         // `kg < hi` keeps a slice from admitting the next slice's keys: the
-        // last tile stages duplicated rows when `hi - base < 16`.
+        // last tile stages duplicated rows when `hi - base < 16`. Both bounds
+        // are warp-uniform, so an interior tile skips the mask entirely: every
+        // query of the warp is at or after the tile's last key.
         const float sl2 = scale * SC_LOG2E;
+        const bool interior =
+            (base + SC_KT <= hi) && (base + SC_KT - 1 <= pos0 + tq);
         float p[8];
+        if (interior) {
 #pragma unroll
-        for (int e = 0; e < 8; ++e) {
-            const int kg = base + lrow + e;
-            const float s = (s0[e] + s1[e]) * sl2;
-            p[e] = (kg <= qglob && kg < hi) ? s : SC_NEG_INF;
+            for (int e = 0; e < 8; ++e) p[e] = (s0[e] + s1[e]) * sl2;
+        } else {
+#pragma unroll
+            for (int e = 0; e < 8; ++e) {
+                const int kg = base + lrow + e;
+                const float s = (s0[e] + s1[e]) * sl2;
+                p[e] = (kg <= qglob && kg < hi) ? s : SC_NEG_INF;
+            }
         }
         float mreg = p[0];
 #pragma unroll
