@@ -24,6 +24,41 @@ static size_t row_bytes(const char* kind, int k) {
     return (size_t)k * 2;
 }
 
+// Pseudo-random payload with finite scale fields, so the comparison is over
+// real numbers: the raw byte pattern used for timing decodes to NaN/inf halfs
+// and would make every value compare equal through NaN.
+static void fill_weights(const char* kind, std::vector<unsigned char>& w, int k, int m) {
+    for (size_t i = 0; i < w.size(); ++i) w[i] = (unsigned char)(i * 37 + 11);
+    const unsigned char one[2] = {0x00, 0x3C};  // _Float16 1.0
+    if (!strncmp(kind, "half", 4)) {
+        for (size_t i = 0; i + 1 < w.size(); i += 2) { w[i] = 0x00; w[i + 1] = 0x2C; }  // 0.0625
+        return;
+    }
+    const size_t rb = row_bytes(kind, k);
+    for (int r = 0; r < m; ++r) {
+        unsigned char* row = w.data() + (size_t)r * rb;
+        if (!strncmp(kind, "q4k", 3)) {
+            for (int b = 0; b < k / 256; ++b) {
+                unsigned char* blk = row + (size_t)b * PF_Q4K_BLOCK_BYTES;
+                blk[0] = one[0]; blk[1] = one[1];
+                blk[2] = 0; blk[3] = 0;
+                for (int j = 4; j < 16; ++j) blk[j] = 1;
+            }
+        } else if (!strncmp(kind, "q6k", 3)) {
+            for (int b = 0; b < k / 256; ++b) {
+                unsigned char* blk = row + (size_t)b * PF_Q6K_BLOCK_BYTES;
+                for (int j = 192; j < 208; ++j) blk[j] = 1;
+                blk[208] = one[0]; blk[209] = one[1];
+            }
+        } else {
+            for (int b = 0; b < k / 32; ++b) {
+                unsigned char* blk = row + (size_t)b * PF_Q8_0_BLOCK_BYTES;
+                blk[0] = one[0]; blk[1] = one[1];
+            }
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     const char* kind = argc > 1 ? argv[1] : "q6k";
     const int m = argc > 2 ? atoi(argv[2]) : 5120;
@@ -32,7 +67,7 @@ int main(int argc, char** argv) {
 
     const size_t wb = row_bytes(kind, k) * (size_t)m;
     std::vector<unsigned char> w(wb);
-    for (size_t i = 0; i < wb; ++i) w[i] = (unsigned char)(i * 37 + 11);
+    fill_weights(kind, w, k, m);
     std::vector<float> x((size_t)tokens * k);
     for (size_t i = 0; i < x.size(); ++i) x[i] = (float)((int)(i % 97) - 48) * 0.01f;
     std::vector<float> y1((size_t)tokens * m, 0.f), y2((size_t)tokens * m, 0.f);

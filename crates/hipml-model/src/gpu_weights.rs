@@ -36,6 +36,17 @@ fn prefill_entry(gemv: &str) -> Result<&'static str, String> {
     })
 }
 
+/// The fp16-activation variant of the same entry (reads a converted copy of the
+/// activation tile, half the stream).
+fn prefill_entry_half(gemv: &str) -> Result<&'static str, String> {
+    Ok(match gemv {
+        "gemv_q4_k" => "prefill_q4_k_w2h",
+        "gemv_q6_k" => "prefill_q6_k_w2h",
+        "gemv_q8_0" => "prefill_q8_0_w2h",
+        other => return Err(format!("{other}: no fp16-activation prefill kernel")),
+    })
+}
+
 pub(crate) fn mat_kind(ty: TensorType) -> Result<Kind, String> {
     Ok(match ty {
         TensorType::F32 => Kind::F32,
@@ -140,6 +151,33 @@ impl<'a> Proj<'a> {
         }
         let e = prefill_entry(self.entry)?;
         l.run_prefill_resident(e, self.w, x, y, self.rows, self.cols, tokens)
+    }
+
+    /// The same projection, reading an fp16 copy of the activation tile that the
+    /// caller has already converted (`prefill_xhalf`). Only the `_w2h` entries
+    /// exist for it, so this requires the v2 prefill kernels.
+    pub(crate) fn gemm_half(
+        &self,
+        l: &Launcher,
+        xh: &Buffer,
+        y: &Buffer,
+        tokens: usize,
+    ) -> Result<(), String> {
+        if let Some(half) = &self.q5_half {
+            return hipml_kernels::prefill_resident(
+                l.module(),
+                l.stream(),
+                "prefill_halfw_w2h",
+                half,
+                xh,
+                y,
+                self.rows,
+                self.cols,
+                tokens,
+            );
+        }
+        let e = prefill_entry_half(self.entry)?;
+        l.run_prefill_resident(e, self.w, xh, y, self.rows, self.cols, tokens)
     }
 
     pub(crate) fn bytes(&self) -> usize {

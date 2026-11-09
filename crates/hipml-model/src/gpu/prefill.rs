@@ -102,6 +102,9 @@ pub(crate) struct Chunk {
     pub v: Buffer,
     pub aout: Buffer,
     pub y: Buffer,
+    /// fp16 copy of the activation tile, converted once per projection. Holds
+    /// `tokens * max(n_embd, n_ff)` halves, i.e. half that many 4-byte words.
+    pub xh: Buffer,
 }
 
 impl Chunk {
@@ -127,6 +130,7 @@ impl Chunk {
             v: zeros(tokens * w)?,
             aout: zeros(tokens * qd)?,
             y: zeros(tokens * n)?,
+            xh: zeros((tokens * n.max(ff) + 1) / 2)?,
         })
     }
 
@@ -144,7 +148,8 @@ impl Chunk {
             + self.k.len()
             + self.v.len()
             + self.aout.len()
-            + self.y.len()) * 4
+            + self.y.len()
+            + self.xh.len()) * 4
             + self.ssm.bytes()
     }
 }
@@ -280,10 +285,34 @@ impl<'a> GpuEngine<'a> {
                 r.lap(l, |r| &mut r.elementwise_ms);
             }
 
-            block.gate.gemm(l, &c.t, &c.gate, n_tok)?;
-            block.up.gemm(l, &c.t, &c.up, n_tok)?;
-            l.silu_mul_buf(&c.gate, &c.up, &c.act, n_tok * cfg.n_ff)?;
-            block.down.gemm(l, &c.act, &c.down, n_tok)?;
+            if ::hipml_kernels::prefill_v2() {
+                // One fp16 copy of the activation tile per projection: the same
+                // tile is staged once per output row tile inside the GEMM, so
+                // halving its bytes is the cheapest win in the ffn shapes.
+                ::hipml_kernels::prefill_xhalf(
+                    l.module(),
+                    l.stream(),
+                    &c.t,
+                    &c.xh,
+                    n_tok * cfg.n_embd,
+                )?;
+                block.gate.gemm_half(l, &c.xh, &c.gate, n_tok)?;
+                block.up.gemm_half(l, &c.xh, &c.up, n_tok)?;
+                l.silu_mul_buf(&c.gate, &c.up, &c.act, n_tok * cfg.n_ff)?;
+                ::hipml_kernels::prefill_xhalf(
+                    l.module(),
+                    l.stream(),
+                    &c.act,
+                    &c.xh,
+                    n_tok * cfg.n_ff,
+                )?;
+                block.down.gemm_half(l, &c.xh, &c.down, n_tok)?;
+            } else {
+                block.gate.gemm(l, &c.t, &c.gate, n_tok)?;
+                block.up.gemm(l, &c.t, &c.up, n_tok)?;
+                l.silu_mul_buf(&c.gate, &c.up, &c.act, n_tok * cfg.n_ff)?;
+                block.down.gemm(l, &c.act, &c.down, n_tok)?;
+            }
             l.residual_buf(&c.down, &c.x1, &c.x, n_tok * n)?;
             if let Some(r) = rep.as_mut() {
                 r.lap(l, |r| &mut r.ffn_gemm_ms);

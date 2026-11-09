@@ -22,7 +22,7 @@ pub(crate) mod device {
     #[path = "prefill_launch.rs"]
     mod prefill_launch;
 
-    pub use prefill_launch::{gemm_rows_f32, prefill_resident};
+    pub use prefill_launch::{gemm_rows_f32, prefill_resident, prefill_xhalf};
     #[path = "quant_launch.rs"]
     mod quant_launch;
     #[path = "stream_launch.rs"]

@@ -150,6 +150,31 @@ pub fn gemm_rows_f32(
     kernel.launch(cfg, stream, &mut params)
 }
 
+/// Convert a `[tokens, k]` f32 activation tile to fp16, once per projection.
+///
+/// The tiled GEMM stages the activation tile once per output row tile, which is
+/// the widest stream in the ffn shapes (`tokens*k*4 * m/ROW_TILE` bytes). A
+/// single fp16 copy halves it; the GEMM's staging does the same
+/// `floats2half2_rn` conversion either way, so the result is bit-identical.
+pub fn prefill_xhalf(
+    module: &Module,
+    stream: &Stream,
+    x: &Buffer,
+    xh: &Buffer,
+    n: usize,
+) -> Result<(), String> {
+    let kernel = module.kernel("prefill_xhalf")?;
+    let mut p_x = x.as_ptr();
+    let mut p_h = xh.as_ptr();
+    let mut v_n = n as i32;
+    let mut params: [*mut c_void; 3] = [
+        &mut p_x as *mut _ as *mut c_void,
+        &mut p_h as *mut _ as *mut c_void,
+        &mut v_n as *mut _ as *mut c_void,
+    ];
+    kernel.launch(LaunchConfig::linear(n, 256), stream, &mut params)
+}
+
 /// Tiled prefill GEMM over a resident weight payload.
 ///
 /// Free function as well as a `Launcher` method because the gated-delta-net and

@@ -25,10 +25,11 @@ pub use attn_gpu::AttnLayer;
 #[cfg(feature = "hip")]
 pub mod launch_kv;
 pub use launch::{
-    prefill_entry_for, prefill_half, prefill_path, set_prefill_half, set_prefill_path, PrefillPath,
+    prefill_entry_for, prefill_half, prefill_path, prefill_v2, set_prefill_half, set_prefill_path,
+    PrefillPath,
 };
 #[cfg(feature = "hip")]
-pub use launch::{gemm_rows_f32, prefill_resident};
+pub use launch::{gemm_rows_f32, prefill_resident, prefill_xhalf};
 #[cfg(feature = "hip")]
 pub use launch::{gemv_job_tiles, GemvJob, ReadJob};
 #[cfg(feature = "hip")]
@@ -357,6 +358,11 @@ pub const KERNELS: &[KernelSpec] = &[
             tokens: 256,
             block: 256,
         },
+    },
+    KernelSpec {
+        name: "prefill_xhalf",
+        entry: "prefill_xhalf",
+        kind: KernelKind::Linear { block: 256 },
     },
     KernelSpec {
         name: "gemm_f32",
