@@ -293,31 +293,31 @@ fn prefill_split(
     }
     let kernel = module.kernel(name)?;
     let cfg = LaunchConfig::prefill(m, tokens, rpb, tpb, block);
-    let mut p_w = w.as_ptr();
-    let mut p_x = x.as_ptr();
-    let mut p_y = y.as_ptr();
-    let mut v_m = m as i32;
-    let mut v_k = k as i32;
-    let mut v_tokens = tokens as i32;
-    let mut v_k0 = 0i32;
-    let mut v_k1 = ks as i32;
-    let mut v_acc = 0i32;
-    let mut params: [*mut c_void; 9] = [
-        &mut p_w as *mut _ as *mut c_void,
-        &mut p_x as *mut _ as *mut c_void,
-        &mut p_y as *mut _ as *mut c_void,
-        &mut v_m as *mut _ as *mut c_void,
-        &mut v_k as *mut _ as *mut c_void,
-        &mut v_tokens as *mut _ as *mut c_void,
-        &mut v_k0 as *mut _ as *mut c_void,
-        &mut v_k1 as *mut _ as *mut c_void,
-        &mut v_acc as *mut _ as *mut c_void,
-    ];
-    kernel.launch(cfg, stream, &mut params)?;
-    v_k0 = ks as i32;
-    v_k1 = k as i32;
-    v_acc = 1;
-    kernel.launch(cfg, stream, &mut params)
+    let mut launch = |k0: usize, k1: usize, acc: i32| -> Result<(), String> {
+        let mut p_w = w.as_ptr();
+        let mut p_x = x.as_ptr();
+        let mut p_y = y.as_ptr();
+        let mut v_m = m as i32;
+        let mut v_k = k as i32;
+        let mut v_tokens = tokens as i32;
+        let mut v_k0 = k0 as i32;
+        let mut v_k1 = k1 as i32;
+        let mut v_acc = acc;
+        let mut params: [*mut c_void; 9] = [
+            &mut p_w as *mut _ as *mut c_void,
+            &mut p_x as *mut _ as *mut c_void,
+            &mut p_y as *mut _ as *mut c_void,
+            &mut v_m as *mut _ as *mut c_void,
+            &mut v_k as *mut _ as *mut c_void,
+            &mut v_tokens as *mut _ as *mut c_void,
+            &mut v_k0 as *mut _ as *mut c_void,
+            &mut v_k1 as *mut _ as *mut c_void,
+            &mut v_acc as *mut _ as *mut c_void,
+        ];
+        kernel.launch(cfg, stream, &mut params)
+    };
+    launch(0, ks, 0)?;
+    launch(ks, k, 1)
 }
 
 /// Tiled prefill GEMM over a resident weight payload.
