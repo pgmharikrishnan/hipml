@@ -157,7 +157,7 @@ pub fn launch_ptrs(
     // and the engine both take it, so `parity --deep` exercises what runs.
     // Id 6 keeps the staged kernel reachable for A/B.
     let dtype = if dtype == 0 && head_dim == 256 && group <= 8 {
-        13
+        4
     } else {
         dtype
     };

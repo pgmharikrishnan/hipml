@@ -11,8 +11,8 @@ pub struct DeepKv {
     pub dtype: KvDtype,
     pub seq: usize,
     /// Decode-attention entry id: 4/5 are the warp-per-KV-head variants
-    /// (`attn_decode_kv_w2`/`w4`), 7/13/14 the three-heads-per-warp variants
-    /// (`s2`/`s4`/`s1`), 0/1 the staged kernels.
+    /// (`attn_decode_kv_w2`/`w4`, the whole GQA group in one warp), 7/13/14 the
+    /// three-heads-per-warp variants (`s2`/`s4`/`s1`), 0/1 the staged kernels.
     pub kernel: usize,
     n_kv: usize,
     head_dim: usize,
@@ -25,11 +25,13 @@ pub struct DeepKv {
 /// Split-count ceiling. The scratch is sized for the largest of the two
 /// policies below, so one allocation serves both.
 ///
-/// The staged kernel is measured best at 64 splits (12.34 ms for 3.24 GiB,
-/// 282 GB/s); more blocks do not help it because it is limited by its own
-/// per-row work. The warp kernel is one warp per (KV head, split), so it wants
-/// four times as many tasks to put 16 warps on each CU, and its partials are
-/// small against the cache read (128 splits add ~0.16 ms of reduce traffic).
+/// The staged kernel is measured best at 64 splits (12.58 ms for 3.24 GiB,
+/// 277 GB/s at 256 splits, 12.34 ms at 64); more blocks do not help it because
+/// it is limited by its own per-row work. The whole-group warp kernel (`w2`) is
+/// one warp per (KV head, split) and measured 8.32 ms (418 GB/s) at 256 splits,
+/// against 8.81 ms for the two-warp `s4` variant and 10.4 ms for `s1`; 384
+/// splits are level with 256 for `w2` and worse for the others. The partials
+/// are small against the cache read (256 splits add ~0.3 ms of reduce traffic).
 pub(super) const MAX_SPLITS: usize = 256;
 const STAGED_SPLITS: usize = 64;
 const WARP_SPLITS: usize = 256;
@@ -43,7 +45,7 @@ impl DeepKv {
         // warp kernel's lane map covers; every other case keeps the staged one.
         let group = cfg.n_head / cfg.n_head_kv;
         let kernel = if dtype == KvDtype::Q8 && cfg.head_dim == 256 && group <= 8 {
-            13
+            4
         } else {
             dtype.id()
         };
