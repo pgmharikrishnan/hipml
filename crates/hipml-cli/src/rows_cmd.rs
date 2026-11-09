@@ -226,6 +226,9 @@ fn main_run(a: &Args) -> Result<(), String> {
     }
 
     // Decode the same stream in the batch and compare every id.
+    for b in 0..a.slots {
+        batch.activate_slot(b)?;
+    }
     let mut feeds = firsts.clone();
     let mut matched = 0usize;
     for step in 1..a.decode {
