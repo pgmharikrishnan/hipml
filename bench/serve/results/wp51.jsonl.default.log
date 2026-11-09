@@ -1,0 +1,5 @@
+hipml serve on http://127.0.0.1:8093 | 851 tensors, 16.01 GiB resident + 0.00 GiB drafter
+slots 16 x ctx 2048 | chunk 256 | drafts 0 | prefix cache 16 entries / 2048 MiB
+admission: 48 in flight (16 slots + 32 queued) | 64 connections | batch exact: no (WMMA tile at B>=4)
+serve: warm-up 276 ms
+serve: connection: An established connection was aborted by the software in your host machine. (os error 10053)

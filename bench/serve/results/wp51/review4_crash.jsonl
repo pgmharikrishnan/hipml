@@ -1,0 +1,10 @@
+{"tag": "wp51", "test": "load", "secs": 17.9, "ctx": 4096, "slots": 2, "drafts": 1}
+{"tag": "wp51", "test": "deep_json", "response": "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 58\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"json: nesting deeper than 64 at 64\"}}", "healthy_after": true}
+{"tag": "wp51", "test": "id_past_vocab", "status": 400, "body": {"error": {"message": "prompt id 10000000 is outside the 248320-token vocabulary"}}, "healthy_after": true}
+{"tag": "wp51", "test": "prompt_plus_max_over_ctx", "status": 200, "body": "{'content': \"\\nWe need answer user: Ray-triangle test with M\u00f6ller-Trumbore. Need derive and result. Need compute hit/miss and where. Need be careful with conventions. Let's do math precisely.\\n\\nTriangle vertices:\\nv0 = [-2.1, -1.84, 0.65]\\nv1 = [-2.74, 2.6, -0.24]\\nv2 = [-1.48, -1.23, 2.91]\\n\\nRay ", "healthy_after": true}
+{"tag": "wp51", "test": "prompt_over_ctx", "status": 500, "body": "{'error': {'message': 'admit: prompt 4106 + 1 tokens exceeds the 4096 token slot'}}", "healthy_after": true}
+{"tag": "wp51", "test": "huge_content_length", "response": "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 42\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"bad content-length\"}}", "healthy_after": true}
+{"tag": "wp51", "test": "long_request_line", "response": "<recv error ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None)>", "healthy_after": true}
+{"tag": "wp51", "test": "chunked_body", "response": "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 85\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"chunked request bodies are not supported; send Content-Length\"}}", "healthy_after": true}
+{"tag": "wp51", "test": "lone_surrogate", "response": "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 51\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"json: expected '\\\\\\\\' at 17\"}}", "healthy_after": true}
+{"tag": "wp51", "test": "server_exit", "code": null}

@@ -1,0 +1,76 @@
+{"tag": "isolation", "test": "baseline_load", "secs": 8.6}
+{"tag": "isolation", "test": "baseline_run", "wall_s": 6.53, "statuses": [200, 200, 200, 200], "tokens": [24, 24, 24, 24], "errors": [null, null, null, null], "metrics": {"hipml_requests_failed_total": 0.0, "hipml_job_errors_total": 0.0, "hipml_slot_faults_total": 0.0, "hipml_batch_resets_total": 0.0}}
+{"tag": "isolation", "test": "fault_load", "secs": 8.6}
+{"tag": "isolation", "test": "fault_run", "wall_s": 6.17, "statuses": [200, 200, 200, 200], "tokens": [2, 24, 3, 4], "errors": ["decode step: injected fault (HIPML_FAULT_SLOT)", null, "decode step: injected fault (HIPML_FAULT_SLOT)", "decode step: injected fault (HIPML_FAULT_SLOT)"], "metrics": {"hipml_requests_failed_total": 3.0, "hipml_job_errors_total": 3.0, "hipml_slot_faults_total": 3.0, "hipml_batch_resets_total": 0.0}}
+{"tag": "isolation", "test": "isolation", "failed_requests": [0, 2, 3], "intact_requests": [1], "match_reference": [true], "lengths": [2, 24, 3, 4], "ok": false}
+{"tag": "isolation", "test": "after_load", "secs": 8.6}
+{"tag": "isolation", "test": "survives_after_fault", "statuses": [200, 200, 200, 200], "first_status": 200, "slot_faults": 3.0, "job_errors": 3.0, "batch_resets": 0.0, "healthy": true}
+{"tag": "isolation", "test": "solo_after_fault", "status": 200, "tokens": 8}
+{"tag": "isolation", "test": "baseline_load", "secs": 8.6}
+{"tag": "isolation", "test": "baseline_run", "wall_s": 6.75, "statuses": [200, 200, 200, 200], "tokens": [24, 24, 24, 24], "errors": [null, null, null, null], "metrics": {"hipml_requests_failed_total": 0.0, "hipml_job_errors_total": 0.0, "hipml_slot_faults_total": 0.0, "hipml_batch_resets_total": 0.0}}
+{"tag": "isolation", "test": "fault_load", "secs": 8.6}
+{"tag": "isolation", "test": "fault_run", "wall_s": 6.6, "statuses": [200, 200, 200, 200], "tokens": [24, 3, 24, 24], "errors": [null, "decode step: injected fault (HIPML_FAULT_SLOT)", null, null], "metrics": {"hipml_requests_failed_total": 1.0, "hipml_job_errors_total": 1.0, "hipml_slot_faults_total": 1.0, "hipml_batch_resets_total": 0.0}}
+{"tag": "isolation", "test": "isolation", "failed_requests": [1], "intact_requests": [0, 2, 3], "match_reference": [true, true, true], "lengths": [24, 3, 24, 24], "ok": true}
+{"tag": "isolation", "test": "after_load", "secs": 8.6}
+{"tag": "isolation", "test": "survives_after_fault", "statuses": [200, 200, 200, 200], "first_status": 200, "slot_faults": 1.0, "job_errors": 1.0, "batch_resets": 0.0, "healthy": true}
+{"tag": "isolation", "test": "solo_after_fault", "status": 200, "tokens": 8}
+{"tag": "backpressure", "test": "bounded_load", "secs": 8.6, "max_queue": 4}
+{"tag": "backpressure", "test": "backpressure_bounded", "wall_s": 9.79, "streams": 20, "busy_503": 20, "other": 0, "all_answered": true, "retry_after_present": true, "rejected_counter": 20.0, "inflight_max": 20.0, "inflight_now": 0.0, "healthy": true, "ok": true}
+{"tag": "backpressure", "test": "default_load", "secs": 8.6, "max_queue": null}
+{"tag": "backpressure", "test": "backpressure_default", "wall_s": 14.27, "streams": 40, "busy_503": 0, "other": 0, "all_answered": true, "retry_after_present": true, "rejected_counter": 0.0, "inflight_max": 48.0, "inflight_now": 0.0, "healthy": true, "ok": true}
+{"tag": "sampling", "test": "load", "secs": 8.6}
+{"tag": "sampling", "test": "temperature_0", "status": 200, "tokens": 24}
+{"tag": "sampling", "test": "temperature_absent", "status": 200, "match_reference": true}
+{"tag": "sampling", "test": "temperature_1", "status": 400, "body": "{'error': {'message': 'temperature 1 is not supported: this server is greedy-only (temperature must be 0 or absent). Sampling is refused rather than silently ignored.'}}", "ok": true}
+{"tag": "sampling", "test": "temperature_0_7", "status": 400, "ok": true}
+{"tag": "sampling", "test": "plan_error", "error": "TypeError(\"completion() got multiple values for argument 'n'\")"}
+{"tag": "sampling", "test": "load", "secs": 10.7}
+{"tag": "sampling", "test": "temperature_0", "status": 200, "tokens": 24}
+{"tag": "sampling", "test": "temperature_absent", "status": 200, "match_reference": true}
+{"tag": "sampling", "test": "temperature_1", "status": 400, "body": "{'error': {'message': 'temperature 1 is not supported: this server is greedy-only (temperature must be 0 or absent). Sampling is refused rather than silently ignored.'}}", "ok": true}
+{"tag": "sampling", "test": "temperature_0_7", "status": 400, "ok": true}
+{"tag": "sampling", "test": "n_2", "status": 400, "body": "{'error': {'message': 'n 2 is not supported: this server is greedy-only and returns one choice per request.'}}", "ok": true}
+{"tag": "sampling", "test": "top_p_seed", "status": 200, "match_reference": true}
+{"tag": "sampling", "test": "chat_temperature", "status": 400, "body": "{'error': {'message': 'temperature 0.7 is not supported: this server is greedy-only (temperature must be 0 or absent). Sampling is refused rather than silently ignored.'}}", "ok": true}
+{"tag": "sampling", "test": "chat_temperature_0", "status": 200, "content": "The user said \""}
+{"tag": "warmup", "test": "first_request_warm", "load_s": 8.6, "ttft_200_ms": 4715.0, "ttft_2000_ms": 1870.0, "tokens": 8, "status": 200, "warmup_ms": 0.0}
+{"tag": "warmup", "test": "plan_error", "error": "OSError(22, 'Invalid argument')"}
+{"tag": "warmup", "test": "first_request_warm", "load_s": 8.6, "ttft_200_ms": 4797.0, "ttft_2000_ms": 1869.0, "tokens": 8, "status": 200, "warmup_ms": 0.0}
+{"tag": "warmup", "test": "first_request_cold", "load_s": 8.6, "ttft_200_ms": 4331.0, "ttft_2000_ms": 1874.0, "tokens": 8, "status": 200, "warmup_ms": 0.0}
+{"tag": "warmup", "test": "first_request_warm", "load_s": 13.0, "ttft_200_ms": 210.0, "ttft_2000_ms": 1870.0, "tokens": 8, "status": 200, "warmup_ms": 269.0}
+{"tag": "warmup", "test": "first_request_cold", "load_s": 12.8, "ttft_200_ms": 238.0, "ttft_2000_ms": 1861.0, "tokens": 8, "status": 200, "warmup_ms": 0.0}
+{"tag": "exact", "test": "exact_tile_4slots", "load_s": 13.0, "streams": 4, "aggregate_tok_s": 67.7, "per_stream_p50": 17.6, "ttft_p50_ms": 1426.0, "batch_exact": 0.0, "tile_steps": 58.0, "errors": []}
+{"tag": "exact", "test": "exact_exact_4slots", "load_s": 13.1, "streams": 4, "aggregate_tok_s": 66.3, "per_stream_p50": 17.2, "ttft_p50_ms": 1431.0, "batch_exact": 1.0, "tile_steps": 0.0, "errors": []}
+{"tag": "exact", "test": "exact_tile_8slots", "load_s": 13.1, "streams": 8, "aggregate_tok_s": 107.1, "per_stream_p50": 13.3, "ttft_p50_ms": 2498.0, "batch_exact": 0.0, "tile_steps": 70.0, "errors": []}
+{"tag": "exact", "test": "exact_exact_8slots", "load_s": 13.0, "streams": 8, "aggregate_tok_s": 75.3, "per_stream_p50": 9.4, "ttft_p50_ms": 2510.0, "batch_exact": 1.0, "tile_steps": 0.0, "errors": []}
+{"tag": "exact", "test": "single_mtp", "rates": [39.0, 38.9, 39.0], "p50": 39.0, "ttft_p50_ms": 251.0}
+{"tag": "isolation", "test": "baseline_load", "secs": 13.1}
+{"tag": "isolation", "test": "baseline_run", "wall_s": 1.97, "statuses": [200, 200, 200, 200], "tokens": [24, 24, 24, 24], "errors": [null, null, null, null], "metrics": {"hipml_requests_failed_total": 0.0, "hipml_job_errors_total": 0.0, "hipml_slot_faults_total": 0.0, "hipml_batch_resets_total": 0.0}}
+{"tag": "isolation", "test": "fault_load", "secs": 13.0}
+{"tag": "isolation", "test": "fault_run", "wall_s": 1.84, "statuses": [200, 200, 200, 200], "tokens": [24, 24, 24, 3], "errors": [null, null, null, "decode step: injected fault (HIPML_FAULT_SLOT)"], "metrics": {"hipml_requests_failed_total": 1.0, "hipml_job_errors_total": 1.0, "hipml_slot_faults_total": 1.0, "hipml_batch_resets_total": 0.0}}
+{"tag": "isolation", "test": "isolation", "failed_requests": [3], "intact_requests": [0, 1, 2], "match_reference": [true, true, true], "lengths": [24, 24, 24, 3], "ok": true}
+{"tag": "isolation", "test": "after_load", "secs": 13.0}
+{"tag": "isolation", "test": "survives_after_fault", "statuses": [200, 200, 200, 200], "first_status": 200, "slot_faults": 1.0, "job_errors": 1.0, "batch_resets": 0.0, "healthy": true}
+{"tag": "isolation", "test": "solo_after_fault", "status": 200, "tokens": 8}
+{"tag": "backpressure", "test": "bounded_load", "secs": 13.1, "max_queue": 4}
+{"tag": "backpressure", "test": "backpressure_bounded", "wall_s": 5.12, "streams": 20, "busy_503": 20, "other": 0, "all_answered": true, "retry_after_present": true, "rejected_counter": 20.0, "inflight_max": 20.0, "inflight_now": 0.0, "healthy": true, "ok": true}
+{"tag": "backpressure", "test": "default_load", "secs": 13.2, "max_queue": null}
+{"tag": "backpressure", "test": "backpressure_default", "wall_s": 9.7, "streams": 40, "busy_503": 0, "other": 0, "all_answered": true, "retry_after_present": true, "rejected_counter": 0.0, "inflight_max": 48.0, "inflight_now": 0.0, "healthy": true, "ok": true}
+{"tag": "sampling", "test": "load", "secs": 13.0}
+{"tag": "sampling", "test": "temperature_0", "status": 200, "tokens": 24}
+{"tag": "sampling", "test": "temperature_absent", "status": 200, "match_reference": true}
+{"tag": "sampling", "test": "temperature_1", "status": 400, "body": "{'error': {'message': 'temperature 1 is not supported: this server is greedy-only (temperature must be 0 or absent). Sampling is refused rather than silently ignored.'}}", "ok": true}
+{"tag": "sampling", "test": "temperature_0_7", "status": 400, "ok": true}
+{"tag": "sampling", "test": "n_2", "status": 400, "body": "{'error': {'message': 'n 2 is not supported: this server is greedy-only and returns one choice per request.'}}", "ok": true}
+{"tag": "sampling", "test": "top_p_seed", "status": 200, "match_reference": true}
+{"tag": "sampling", "test": "chat_temperature", "status": 400, "body": "{'error': {'message': 'temperature 0.7 is not supported: this server is greedy-only (temperature must be 0 or absent). Sampling is refused rather than silently ignored.'}}", "ok": true}
+{"tag": "sampling", "test": "chat_temperature_0", "status": 200, "content": "The user said \""}
+{"tag": "scopes", "test": "batch_fault", "statuses": [200, 200, 200, 200], "errors": [false, false, false, true], "resets": 1.0, "job_errors": 1.0, "healthy": true}
+{"tag": "scopes", "test": "after_batch_reset", "status": 200, "tokens": 8, "healthy": true, "server_up": true}
+{"tag": "scopes", "test": "device_drain", "waves": [{"statuses": [200, 200, 200, 200], "errors": [true, true, true, true], "tokens": [0, 1, 1, 1]}, {"statuses": "server already exited"}], "exit_code": 1, "resets": null}
+{"tag": "scopes", "test": "batch_fault", "statuses": [200, 200, 200, 200], "errors": [true, true, true, true], "resets": 1.0, "job_errors": 4.0, "healthy": true}
+{"tag": "scopes", "test": "after_batch_reset", "status": 200, "tokens": 1, "healthy": true, "server_up": true}
+{"tag": "scopes", "test": "device_drain", "waves": [{"statuses": [200, 200, 200, 200], "errors": [true, true, true, true], "tokens": [0, 1, 1, 1]}, {"statuses": "server already exited"}], "exit_code": 1, "resets": null}
+{"tag": "scopes", "test": "batch_fault", "statuses": [200, 200, 200, 200], "errors": [true, true, true, true], "resets": 1.0, "job_errors": 4.0, "healthy": true}
+{"tag": "scopes", "test": "after_batch_reset", "status": 200, "tokens": 8, "healthy": true, "server_up": true}
+{"tag": "scopes", "test": "device_drain", "waves": [{"statuses": [200, 200, 200, 200], "errors": [true, true, true, true], "tokens": [1, 1, 0, 1]}, {"statuses": "server already exited"}], "exit_code": 1, "resets": null}

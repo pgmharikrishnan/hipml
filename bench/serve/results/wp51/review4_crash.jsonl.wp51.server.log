@@ -1,0 +1,9 @@
+hipml serve on http://127.0.0.1:8093 | 851 tensors, 16.01 GiB resident + 0.25 GiB drafter
+slots 2 x ctx 4096 | chunk 256 | drafts 1 | prefix cache 16 entries / 2048 MiB
+admission: 6 in flight (2 slots + 4 queued) | 64 connections | batch exact: no (WMMA tile at B>=4)
+serve: warm-up 272 ms
+serve: connection: An established connection was aborted by the software in your host machine. (os error 10053)
+serve: admit: prompt 4106 + 1 tokens exceeds the 4096 token slot (job failed; engine keeps serving)
+serve: connection: bad content-length
+serve: connection: request line too long
+serve: connection: chunked request bodies are not supported; send Content-Length

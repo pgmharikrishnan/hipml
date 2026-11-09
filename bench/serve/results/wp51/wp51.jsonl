@@ -1,0 +1,8 @@
+{"tag": "headers", "test": "stream_header", "status": 200, "exact": "0", "tile_min": "4"}
+{"tag": "headers", "test": "json_header", "status": 200, "exact": "0", "metric_exact": 0.0, "tile_steps": 0.0}
+{"tag": "headers", "test": "tile_used_at_4", "statuses": [200, 200, 200, 200], "tile_steps": 4.0, "exact_header": ["0", "0", "0", "0"]}
+{"tag": "headers", "test": "legacy_header", "status": 200, "exact": "1", "metric_exact": 1.0, "tile_steps": 0.0}
+{"tag": "headers", "test": "stream_header", "status": 200, "exact": "0", "tile_min": "4"}
+{"tag": "headers", "test": "json_header", "status": 200, "exact": "0", "metric_exact": 0.0, "tile_steps": 0.0}
+{"tag": "headers", "test": "tile_used_at_4", "statuses": [200, 200, 200, 200], "tile_steps": 4.0, "exact_header": ["0", "0", "0", "0"]}
+{"tag": "headers", "test": "legacy_header", "status": 200, "exact": "1", "metric_exact": 1.0, "tile_steps": 0.0}
