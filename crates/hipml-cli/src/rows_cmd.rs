@@ -150,8 +150,7 @@ fn main_run(a: &Args) -> Result<(), String> {
         .map(|(b, e)| (b, e.tail.as_slice()))
         .collect();
     let firsts = batch.prefill_rows(&tails)?;
-    let (rows, ms) = batch.last_row_block();
-    println!(
+    let (rows, ms) = batch.last_row_block();    println!(
         "row block: {} tails, {} rows, {:.2} ms ({:.3} ms/tail, {:.2} row/ms)",
         firsts.len(),
         rows,
@@ -201,6 +200,13 @@ fn main_run(a: &Args) -> Result<(), String> {
                 state.len(),
                 e.ssm.len()
             );
+            if std::env::var_os("HIPML_ROWS_DEBUG").is_some() {
+                let at = first_bad.unwrap_or(0);
+                let lo = at.saturating_sub(4);
+                let hi = (at + 8).min(state.len());
+                println!("  rows {lo}..{hi}: {:?}", &state[lo..hi]);
+                println!("  tile {lo}..{hi}: {:?}", &e.ssm[lo..hi]);
+            }
             ok = false;
             continue;
         }
