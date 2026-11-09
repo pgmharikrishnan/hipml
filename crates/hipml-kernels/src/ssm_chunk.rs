@@ -124,6 +124,12 @@ impl<'a> SsmGpuLayer<'a> {
                 }
             };
         }
+        if trace {
+            // Drain the projections queued before this call so the first lap
+            // measures the gates kernel, not the GEMMs ahead of it.
+            self.stream.synchronize()?;
+            t0 = std::time::Instant::now();
+        }
 
         // gates
         {
