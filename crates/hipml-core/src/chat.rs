@@ -138,7 +138,7 @@ pub fn render(
         out.push_str("# Tools\n\nYou have access to the following functions:\n\n<tools>");
         for tool in &opts.tools {
             out.push('\n');
-            out.push_str(tool);
+            out.push_str(&tojson(tool));
         }
         out.push_str("\n</tools>");
         out.push_str(TOOL_RULES);
@@ -239,6 +239,42 @@ pub fn render(
     Ok(out)
 }
 
+/// `tool | tojson` as llama.cpp's renderer emits it: single-line JSON with
+/// `", "` between members and `": "` after a key, key order preserved. The GGUF
+/// template only says `tojson`; the byte format comes from the runtime, so this
+/// is the normalisation that makes the rendered prompt byte-identical.
+/// Strings are copied verbatim (escapes untouched); whitespace outside strings
+/// is collapsed.
+pub fn tojson(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 8);
+    let mut in_str = false;
+    let mut escaped = false;
+    for c in raw.chars() {
+        if in_str {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_str = true;
+                out.push(c);
+            }
+            ':' => out.push_str(": "),
+            ',' => out.push_str(", "),
+            c if c.is_whitespace() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Reject a template this renderer was not written against. The markers are
 /// the branch points used above; they are all present in the Qwen3.8-27B template and
 /// absent from a plain ChatML template.
@@ -325,5 +361,17 @@ mod tests {
     fn rejects_unknown_template() {
         let err = render("plain chatml", &[Message::new("user", "hi")], &ChatOptions::default());
         assert!(matches!(err, Err(ChatError::Unsupported(_))));
+    }
+
+    #[test]
+    fn tojson_matches_llama_spacing() {
+        assert_eq!(
+            tojson(r#"{"type":"function","n":[1,2]}"#),
+            r#"{"type": "function", "n": [1, 2]}"#
+        );
+        assert_eq!(
+            tojson(r#"{"s":"a, b: c","e":"x\"y"}"#),
+            r#"{"s": "a, b: c", "e": "x\"y"}"#
+        );
     }
 }

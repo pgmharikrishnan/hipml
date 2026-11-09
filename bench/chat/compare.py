@@ -110,6 +110,8 @@ def build_longdoc(target=8192):
     tmpl = os.path.join(CHAT, "04_longdoc_qa.tmpl")
     doc = open(os.path.join(ROOT, "bench", "prompts", "longdoc.txt"),
                encoding="utf-8").read()
+    # The source document is ~7.7K tokens; repeat it so an 8K prompt is reachable.
+    doc = doc * 4
     text = open(tmpl, encoding="utf-8").read()
     base = text.replace("@@DOC@@", "")
     # Token count is monotone in the prefix length; bisect characters.
@@ -135,7 +137,7 @@ def build_longdoc(target=8192):
 
 
 # ---------------------------------------------------------------------- llama
-def start_llama(log_path):
+def start_llama(log_path, kv="q8_0"):
     env = dict(os.environ)
     env["HIP_PATH"] = r"C:\rocm-sdk\_rocm_sdk_core"
     env["HIPML_ARCH"] = "gfx1201"
@@ -143,7 +145,7 @@ def start_llama(log_path):
     log = open(log_path, "w", encoding="utf-8")
     proc = subprocess.Popen(
         [LLAMA, "-m", MODEL, "-c", "16384", "-ngl", "999",
-         "-ctk", "q8_0", "-ctv", "q8_0", "--host", "127.0.0.1",
+         "-ctk", kv, "-ctv", kv, "--host", "127.0.0.1",
          "--port", "8092", "--jinja", "--reasoning-format", "none"],
         stdout=log, stderr=log, env=env)
     for _ in range(180):
@@ -312,6 +314,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tokens", type=int, default=256)
     ap.add_argument("--kv", default="q8")
+    ap.add_argument("--llama-kv", default="q8_0")
     ap.add_argument("--n-probs", type=int, default=32)
     args = ap.parse_args()
     os.makedirs(OUT, exist_ok=True)
@@ -320,7 +323,7 @@ def main():
     proc = log = None
     try:
         print("starting llama-server on 8092")
-        proc, log = start_llama(os.path.join(OUT, "llama.log"))
+        proc, log = start_llama(os.path.join(OUT, "llama.log"), args.llama_kv)
         llama = llama_phase(convs, args.tokens, args.n_probs)
     finally:
         stop_llama(proc, log)
