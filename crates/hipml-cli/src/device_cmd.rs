@@ -38,6 +38,12 @@ struct Args {
     json: bool,
     stage_report: bool,
     graph: bool,
+    /// Print the `k` most likely ids (with log-probabilities) at every sampled
+    /// position. Diagnostics only: the host readback per step is not the
+    /// decode loop's cost and must not be reported as a timing.
+    topk: usize,
+    /// Write the prefill's final logit row as raw little-endian f32.
+    dump: Option<String>,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -55,6 +61,8 @@ fn parse(args: &[String]) -> Result<Args, String> {
         json: false,
         stage_report: false,
         graph: false,
+        topk: 0,
+        dump: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -123,6 +131,16 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--graph" => {
                 a.graph = true;
                 i += 1;
+            }
+            "--topk" => {
+                a.topk = need(i)?
+                    .parse()
+                    .map_err(|e| format!("bad --topk: {e}"))?;
+                i += 2;
+            }
+            "--dump-logits" => {
+                a.dump = Some(need(i)?.to_string());
+                i += 2;
             }
             other => return Err(format!("unknown argument {other}")),
         }
@@ -243,19 +261,20 @@ pub fn generate(args: &[String]) -> i32 {
     }
 
     // The chunked graph is the default: a prompt tile is batched GEMMs plus a
-    // chunked recurrence, not N decode steps. `--chunk 0` (or --compare-cpu,
-    // which needs the logit vector) keeps the token loop as the reference.
+    // chunked recurrence, not N decode steps. `--chunk 0` keeps the token loop
+    // as the reference. `--compare-cpu` also compares against the production
+    // chunked path by default: the token loop agreeing with the oracle says
+    // nothing about the path every benchmark number is measured on.
     let chunk = match a.chunk {
         Some(0) => None,
         Some(n) => Some(n),
-        None if a.compare_cpu => None,
         None => Some(2048),
     };
-    if chunk.is_some() && a.compare_cpu {
-        eprintln!(
-            "generate: --chunk returns only the sampled id; --compare-cpu needs the token loop"
-        );
-        return 2;
+    if !a.json {
+        match chunk {
+            Some(n) => println!("prefill:    chunked, {n}-token tiles"),
+            None => println!("prefill:    token loop (one decode step per prompt id)"),
+        }
     }
 
     let mut reps: Vec<Rep> = Vec::with_capacity(a.reps);
@@ -302,6 +321,19 @@ pub fn generate(args: &[String]) -> i32 {
                     return 1;
                 }
             }
+            // The last chunk leaves its final row's logits resident; the argmax
+            // above already ran on them. A host copy is only needed for the
+            // oracle comparison and top-k printing, and must not leak into the
+            // reported prefill time.
+            if a.compare_cpu || a.topk > 0 || a.dump.is_some() {
+                logits = match engine.logits().to_host() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("generate: chunk logits: {e}");
+                        return 1;
+                    }
+                };
+            }
         } else {
             logits = match first_logits(&mut engine, &mut st, &prompt_ids) {
                 Ok(v) => v,
@@ -312,6 +344,15 @@ pub fn generate(args: &[String]) -> i32 {
             };
         }
         let prefill_s = t_prefill.elapsed().as_secs_f64();
+
+        if let Some(path) = &a.dump {
+            let bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+            if std::fs::write(path, &bytes).is_err() {
+                eprintln!("generate: cannot write {path}");
+            } else {
+                println!("logits:     {} values -> {path}", logits.len());
+            }
+        }
 
         if a.compare_cpu {
             match cpu_first_logits(&a.gguf, &prompt_ids) {
@@ -330,9 +371,18 @@ pub fn generate(args: &[String]) -> i32 {
                         argmax_f32(&logits),
                         argmax_f32(&cpu)
                     );
+                    // The ordering is what changes a sampled id, so report the
+                    // gap the two leaders keep on each side, not just max |d|.
+                    let k = a.topk.max(3);
+                    println!("  device top{}: {}", k, fmt_top(&logits, k));
+                    println!("  cpu    top{}: {}", k, fmt_top(&cpu, k));
                 }
                 Err(e) => eprintln!("compare-cpu: {e}"),
             }
+        }
+
+        if a.topk > 0 {
+            println!("  (topk: timings exclude the per-step host logit readback)");
         }
 
         if a.graph {
@@ -354,8 +404,18 @@ pub fn generate(args: &[String]) -> i32 {
             Some(id) => id,
             None => argmax_f32(&logits) as u32,
         };
+        // The prefill logits belong to the step that samples `next`, so they
+        // print first and are then replaced by each decode step's logits.
+        let mut step_logits: Option<Vec<f32>> = if a.topk > 0 {
+            Some(std::mem::take(&mut logits))
+        } else {
+            None
+        };
         for i in 0..a.tokens {
             ids.push(next);
+            if let (Some(lg), true) = (&step_logits, !a.json) {
+                println!("  [{i}] {next} top{}: {}", a.topk, fmt_top(lg, a.topk));
+            }
             if i + 1 < a.tokens {
                 let t = Instant::now();
                 let got = if a.graph {
@@ -371,11 +431,22 @@ pub fn generate(args: &[String]) -> i32 {
                     }
                 };
                 decode_s += t.elapsed().as_secs_f64();
+                step_logits = if a.topk > 0 {
+                    match engine.logits().to_host() {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            eprintln!("generate: decode logits: {e}");
+                            return 1;
+                        }
+                    }
+                } else {
+                    None
+                };
             }
         }
         let steps = a.tokens.saturating_sub(1);
         if !a.json {
-            if a.reps == 1 {
+            if a.reps == 1 && a.topk == 0 {
                 for (i, id) in ids.iter().enumerate() {
                     println!("  [{i}] {id}");
                 }
@@ -532,4 +603,16 @@ fn cpu_first_logits(path: &str, prompt: &[u32]) -> Result<Vec<f32>, String> {
         logits = m.forward_token(id, &mut st);
     }
     Ok(logits)
+}
+
+/// `id logprob, id logprob, ...` for the `k` largest logits. Logits and
+/// log-probabilities differ by one constant across engines, so the gap between
+/// two ids is directly comparable even though only logprobs are printed.
+fn fmt_top(logits: &[f32], k: usize) -> String {
+    use hipml_core::gen::top_logprobs;
+    top_logprobs(logits, k)
+        .iter()
+        .map(|(id, lp)| format!("{id} {lp:.4}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }

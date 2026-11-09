@@ -16,6 +16,10 @@ struct Args {
     ctx: Option<usize>,
     topk: usize,
     logprobs: bool,
+    /// Write the first sampled position's full logit row as raw little-endian
+    /// f32. Lets a GPU run be compared with a once-computed oracle row without
+    /// paying the token-loop pass again.
+    dump: Option<String>,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -26,6 +30,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
     let mut ctx = None;
     let mut topk = 0usize;
     let mut logprobs = false;
+    let mut dump = None;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&str, String> {
@@ -65,6 +70,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 logprobs = true;
                 i += 1;
             }
+            "--dump-logits" => {
+                dump = Some(need(i)?.to_string());
+                i += 2;
+            }
             // `--cpu` is the default oracle path; accept the flag so a script
             // can say which path it means.
             "--cpu" => i += 1,
@@ -79,6 +88,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         ctx,
         topk,
         logprobs,
+        dump,
     })
 }
 
@@ -161,6 +171,12 @@ pub fn generate(args: &[String]) -> i32 {
         if a.topk > 0 && i == 0 {
             for (idx, lp) in top_logprobs(logits, a.topk) {
                 println!("        {idx:6} logprob {lp:.6}");
+            }
+        }
+        if let (Some(path), 0) = (&a.dump, i) {
+            let bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+            if std::fs::write(path, &bytes).is_err() {
+                eprintln!("  dump-logits: cannot write {path}");
             }
         }
         let _ = std::io::stdout().flush();
