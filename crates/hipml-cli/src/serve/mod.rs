@@ -149,8 +149,9 @@ pub fn run(args: &[String]) -> i32 {
     // Batched decode at B>=4 uses the WMMA skinny GEMV by default: it is
     // measured ~1.5x faster than the exact `_b` kernels at the slot counts a
     // fleet uses. B<4 keeps the exact path (the tile pads R to 16 and loses
-    // there), and so does the lone MTP request, so a single stream is
-    // unchanged. `HIPML_BATCH_LEGACY=1` restores the exact batched path.
+    // there), and so does the lone MTP request (its verify is a batch of
+    // 1 + drafts columns and holds `hipml_kernels::exact_scope`), so a
+    // single stream is unchanged. `HIPML_BATCH_LEGACY=1` restores the exact batched path.
     if std::env::var_os("HIPML_BATCH_LEGACY").is_none() {
         std::env::set_var("HIPML_BATCH_SKINNY", "1");
     }

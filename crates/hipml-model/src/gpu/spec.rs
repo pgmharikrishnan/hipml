@@ -140,6 +140,14 @@ impl<'a> GpuEngine<'a> {
         if next as usize >= self.cfg.n_vocab {
             return Err(format!("seed token {next} outside the vocabulary"));
         }
+        // The verify appends 1 + drafts KV rows at `st.pos..`. Near the end of
+        // the cache, draft fewer: nothing checks the row index on the device,
+        // and a row at `n_ctx` lands in the next head (or past the buffer).
+        // Fewer drafts cannot change the emitted ids.
+        if st.pos >= self.n_ctx {
+            return Err(format!("position {} is past ctx {}", st.pos, self.n_ctx));
+        }
+        let drafts = drafts.min(self.n_ctx - st.pos - 1);
 
         // 1. Draft recursively from the current position's hidden state.
         let q = st.pos.saturating_sub(1);

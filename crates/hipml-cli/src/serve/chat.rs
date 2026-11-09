@@ -61,9 +61,14 @@ pub fn chat(tok: &Tokenizer, template: &str, messages: &[Message]) -> Result<Pro
         return Err("rendered conversation is empty".to_string());
     }
 
+    // Only the last two message boundaries. Every cut ends a prefill tile
+    // (one full weight pass, ~150 ms) and captures a state, so cutting at
+    // every message made a 200-message history cost 30 s to first token and
+    // flush the whole prefix cache. The next turn of the same conversation
+    // reuses the deepest cut; the one before covers a regenerated reply.
     let mut cuts = Vec::new();
     let plain = opts(false);
-    for k in 1..messages.len() {
+    for k in messages.len().saturating_sub(2).max(1)..messages.len() {
         let Ok(text) = render(template, &messages[..k], &plain) else {
             continue;
         };
@@ -95,6 +100,9 @@ pub fn chat(tok: &Tokenizer, template: &str, messages: &[Message]) -> Result<Pro
 /// Byte offset just past the special token that closes the turn carrying
 /// `content` (and past one trailing newline).
 fn end_of_turn(text: &str, content: &str) -> Option<usize> {
+    // The template trims message content, so a system prompt sent with a
+    // trailing newline or space would never be found untrimmed.
+    let content = content.trim();
     if content.is_empty() {
         return None;
     }
@@ -120,9 +128,15 @@ pub fn completion(tok: &Tokenizer, body: &Value) -> Result<Prompt, String> {
             if items.iter().any(|v| v.as_arr().is_some()) {
                 return Err("batched prompts are not supported; send one array of ids".to_string());
             }
+            // An id past the vocabulary would index past the embedding table
+            // on the device; reject it here, before the scheduler sees it.
+            let vocab = tok.tokens.len() as u64;
             let mut ids = Vec::with_capacity(items.len());
             for it in items {
                 let n = it.as_u64().ok_or("prompt ids must be non-negative integers")?;
+                if n >= vocab {
+                    return Err(format!("prompt id {n} is outside the {vocab}-token vocabulary"));
+                }
                 ids.push(n as u32);
             }
             ids
@@ -156,6 +170,13 @@ mod tests {
         let sys = "be brief";
         let text = "<|im_start|>system\nbe brief<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n";
         let cut = end_of_turn(text, sys).unwrap();
+        assert_eq!(&text[..cut], "<|im_start|>system\nbe brief<|im_end|>\n");
+    }
+
+    #[test]
+    fn system_turn_is_found_when_the_template_trimmed_it() {
+        let text = "<|im_start|>system\nbe brief<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n";
+        let cut = end_of_turn(text, "be brief \n").unwrap();
         assert_eq!(&text[..cut], "<|im_start|>system\nbe brief<|im_end|>\n");
     }
 }

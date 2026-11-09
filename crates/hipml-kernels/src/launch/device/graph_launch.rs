@@ -90,6 +90,7 @@ impl Launcher {
         // forces the exact path even when one of those is set. Below B=4 the
         // tile pads R to 16 and loses, so it is only used where it wins.
         let skinny = batch >= 4
+            && !crate::exact_forced()
             && std::env::var_os("HIPML_BATCH_LEGACY").is_none()
             && (std::env::var_os("HIPML_BATCH_SKINNY").is_some() || crate::skinny_on());
         if skinny {

@@ -74,8 +74,13 @@ impl Value {
     }
 }
 
+/// Deepest array/object nesting accepted. The parser recurses per level, and a
+/// connection thread's stack overflow aborts the whole process, so a body of
+/// `[[[[...` must be an error, not a crash. Real chat bodies nest < 10 deep.
+const MAX_DEPTH: usize = 64;
+
 pub fn parse(text: &str) -> Result<Value, String> {
-    let mut p = Parser { b: text.as_bytes(), i: 0 };
+    let mut p = Parser { b: text.as_bytes(), i: 0, depth: 0 };
     let v = p.value()?;
     p.ws();
     if p.i != p.b.len() {
@@ -87,6 +92,7 @@ pub fn parse(text: &str) -> Result<Value, String> {
 struct Parser<'a> {
     b: &'a [u8],
     i: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -112,8 +118,19 @@ impl Parser<'_> {
     fn value(&mut self) -> Result<Value, String> {
         self.ws();
         match self.peek() {
-            Some(b'{') => self.object(),
-            Some(b'[') => self.array(),
+            Some(b'{' | b'[') => {
+                if self.depth >= MAX_DEPTH {
+                    return Err(format!("nesting deeper than {MAX_DEPTH} at {}", self.i));
+                }
+                self.depth += 1;
+                let v = if self.peek() == Some(b'{') {
+                    self.object()
+                } else {
+                    self.array()
+                };
+                self.depth -= 1;
+                v
+            }
             Some(b'"') => Ok(Value::Str(self.string()?)),
             Some(b't') => self.literal("true", Value::Bool(true)),
             Some(b'f') => self.literal("false", Value::Bool(false)),
@@ -188,6 +205,9 @@ impl Parser<'_> {
                                 self.eat(b'\\')?;
                                 self.eat(b'u')?;
                                 let lo = self.hex4()?;
+                                if !(0xDC00..0xE000).contains(&lo) {
+                                    return Err("bad surrogate pair".to_string());
+                                }
                                 let cp = 0x10000
                                     + (((hi - 0xD800) as u32) << 10)
                                     + (lo - 0xDC00) as u32;
@@ -324,6 +344,19 @@ mod tests {
         let v = parse(r#"{"n_predict":-1}"#).unwrap();
         assert_eq!(v.get("n_predict").and_then(Value::as_i64), Some(-1));
         assert_eq!(v.get("n_predict").and_then(Value::as_u64), None);
+    }
+
+    #[test]
+    fn rejects_deep_nesting_without_overflowing() {
+        let deep = "[".repeat(200_000);
+        assert!(parse(&deep).is_err());
+        let ok = format!("{}{}", "[".repeat(MAX_DEPTH), "]".repeat(MAX_DEPTH));
+        assert!(parse(&ok).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_lone_high_surrogate() {
+        assert!(parse(r#""\ud800\u0041""#).is_err());
     }
 
     #[test]
