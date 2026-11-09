@@ -83,8 +83,10 @@ impl Launcher {
         skinny_resident(&self.module, &self.stream, name, w, x, y, n, k, r)
     }
 
-    /// Time `reps` launches over resident buffers (no upload, no download).
-    /// The bench uses this so a 75 MB weight is uploaded once per shape.
+    /// Time `reps` launches over resident buffers (no upload, no download) and
+    /// return the mean per-launch seconds. The bench uses this so a 75 MB
+    /// weight is uploaded once per shape; returning the loop total instead is
+    /// how an earlier version of the cost curve over-reported by `reps`.
     #[allow(clippy::too_many_arguments)]
     pub fn run_skinny_resident_reps(
         &self,
@@ -103,7 +105,7 @@ impl Launcher {
             skinny_resident(&self.module, &self.stream, name, w, x, y, n, k, r)?;
         }
         self.stream.synchronize()?;
-        Ok(start.elapsed().as_secs_f64())
+        Ok(start.elapsed().as_secs_f64() / reps as f64)
     }
 
     /// Upload `w`/`x`, launch `reps` times, return `y` and the launch-loop
@@ -119,22 +121,6 @@ impl Launcher {
         reps: usize,
     ) -> Result<(Vec<f32>, f64), String> {
         self.skinny_launch(name, w, x, n, k, r, reps, true)
-    }
-
-    /// Same launch without the download: the bench's per-shape timing.
-    #[allow(clippy::too_many_arguments)]
-    pub fn run_skinny_time(
-        &self,
-        name: &str,
-        w: &[u8],
-        x: &[f32],
-        n: usize,
-        k: usize,
-        r: usize,
-        reps: usize,
-    ) -> Result<f64, String> {
-        self.skinny_launch(name, w, x, n, k, r, reps, false)
-            .map(|(_, secs)| secs)
     }
 
     #[allow(clippy::too_many_arguments)]

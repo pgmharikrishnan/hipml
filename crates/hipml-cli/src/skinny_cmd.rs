@@ -236,14 +236,14 @@ pub fn run(args: &[String]) -> i32 {
 
     if args.iter().any(|a| a == "--geometry") {
         println!(
-            "\ngeometry sweep (Q4_K, ffn_gate 17408x5120, ms at r=1 / r=8):\n\
-             \x20 RT32 KW256 T128  1.345 / 1.339   (37 GB/s)\n\
-             \x20 RT16 KW256 T128  1.871 / 1.883   (27 GB/s)\n\
-             \x20 RT32 KW256 T256  1.347 / 1.339   (37 GB/s)\n\
-             \x20 RT32 KW128  T128 1.270 / 1.274   (39 GB/s)  <- shipped\n\
-             \x20 RT64 KW256 T128  1.664 / 1.692   (30 GB/s)\n\
-             \x20 RT64 KW256 T256  1.280 / 1.287   (39 GB/s)\n\
-             \x20 RT48 KW256 T128  1.711 / 1.720   (29 GB/s)"
+            "\ngeometry sweep (Q4_K ffn_gate 17408x5120, ms at r=1 / r=8, GB/s at r=1):\n\
+             \x20 RT32 KW128  T128 0.127 / 0.127   394   <- shipped\n\
+             \x20 RT64 KW256  T256 0.128 / 0.129   391\n\
+             \x20 RT32 KW256  T128 0.135 / 0.134   372\n\
+             \x20 RT32 KW256  T256 0.135 / 0.134   372\n\
+             \x20 RT64 KW256  T128 0.166 / 0.169   301\n\
+             \x20 RT48 KW256  T128 0.171 / 0.172   293\n\
+             \x20 RT16 KW256  T128 0.187 / 0.188   268"
         );
     }
     0
