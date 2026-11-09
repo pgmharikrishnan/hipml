@@ -135,7 +135,7 @@ fn main_run(a: &Args) -> Result<(), String> {
         if !prefix.is_empty() {
             single.prefill_tile(&prefix, &mut st, cap, false)?;
         }
-        batch.adopt_quiet(&single, batch.next_slot(), st.pos)?;
+        batch.adopt_quiet(&single, batch.next_slot() + b, st.pos)?;
         if std::env::var_os("HIPML_ROWS_DEBUG").is_some() {
             let got = batch.slot_ssm_state_host(b)?;
             let want = single.ssm_state_host()?;
