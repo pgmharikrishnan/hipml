@@ -116,9 +116,10 @@ the first-step logits and the kernel-level fp16 budgets are in
 hipml generate --gguf C:\models\Qwen3.8-27B-Q4_K_M.gguf `
   --ids 760,6511,314,9338,369 --tokens 20 --device
 hipml generate ... --device --compare-cpu        # loads the CPU oracle too
-hipml generate ... --device                     # chunked prefill (chunk 512)
+hipml generate ... --device                     # chunked prefill (chunk 2048)
 hipml generate ... --device --chunk 256          # explicit tile
 hipml generate ... --device --chunk 0            # token-loop prefill
+hipml generate ... --device --topk 5             # per-step log-prob view
 
 # the oracle itself, no GPU build needed
 hipml generate ... --cpu

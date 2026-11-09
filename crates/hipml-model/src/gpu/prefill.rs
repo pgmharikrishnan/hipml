@@ -372,7 +372,7 @@ impl<'a> GpuEngine<'a> {
         if let Some(r) = rep.as_mut() {
             r.lap(l, |r| &mut r.elementwise_ms);
         }
-        for i in 0..self.layers.len() {
+        for i in 0..layer_limit(self.layers.len()) {
             let block = &self.layers[i];
             let block_out: &Buffer = match &block.kind {
                 BlockKind::Ssm(s) => {

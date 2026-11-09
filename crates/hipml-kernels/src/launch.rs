@@ -8,6 +8,43 @@
 use hipml_core::parity::OpCase;
 use hipml_core::tensor::Tensor;
 
+/// Grid for the warp-per-output `gemm_rows_f32` kernel: one warp per
+/// `(token, output row)` pair, eight warps (256 threads) per block.
+///
+/// Kept outside the `hip` gate so the launch shape has a host-side regression
+/// test. The first version passed the *block count* to `LaunchConfig::linear`,
+/// which divides by the block size again: a 1-token chunk launched one block
+/// instead of six and 40 of the 48 SSM alpha/beta rows were never written.
+pub fn gemm_rows_grid(tokens: usize, m: usize) -> (usize, usize) {
+    const WARPS: usize = 8;
+    const THREADS: usize = WARPS * 32;
+    let warps = tokens * m;
+    ((warps + WARPS - 1) / WARPS, THREADS)
+}
+
+/// Number of k slices for a prefill GEMM whose row tile is only a few blocks.
+///
+/// The fp16 tile is 128 output rows x 256 tokens, so a 64-row SSM projection
+/// over a 2048-token chunk is 8 blocks: on a 64-block card the matrix units
+/// idle and the projection costs ~0.8 s of a 100K prefill. Slicing k across
+/// `blockIdx.z` fills a wave instead. Only the alpha/beta path uses this, so
+/// the rule can stay blunt: one wave, at most eight slices, each slice a whole
+/// number of 64-value k-tiles.
+pub fn prefill_slices(m: usize, k: usize, tokens: usize) -> usize {
+    let blocks = m.div_ceil(128) * tokens.div_ceil(256);
+    if blocks >= 32 {
+        return 1;
+    }
+    let mut n = 1;
+    while n < 8 && blocks * n < 64 {
+        n *= 2;
+    }
+    while n > 1 && (k / n) % 64 != 0 {
+        n /= 2;
+    }
+    n
+}
+
 #[cfg(feature = "hip")]
 pub(crate) mod device {
     use super::*;
@@ -25,8 +62,8 @@ pub(crate) mod device {
 
     pub use prefill_launch::{
         gemm_rows_f32, prefill_entry_for_half, prefill_has_xhalf, prefill_resident,
-        prefill_resident_half, prefill_resident_split_half, prefill_should_split,
-        prefill_xhalf,
+        prefill_resident_half, prefill_resident_slices, prefill_resident_split_half,
+        prefill_should_split, prefill_xhalf,
     };
     #[path = "quant_launch.rs"]
     mod quant_launch;
@@ -559,7 +596,7 @@ pub(crate) mod device {
 }
 
 #[cfg(feature = "hip")]
-pub use device::{gemm_rows_f32, prefill_resident, prefill_xhalf};
+pub use device::{gemm_rows_f32, prefill_resident, prefill_resident_slices, prefill_xhalf};
 #[cfg(feature = "hip")]
 pub use device::{
     prefill_entry_for_half, prefill_has_xhalf, prefill_resident_half,
@@ -798,4 +835,58 @@ pub fn prefill_entry_for(name: &str) -> Option<&'static str> {
         (PrefillPath::Wmma, "prefill_halfw") => "prefill_halfw_w",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{gemm_rows_grid, prefill_slices};
+
+    /// Every `(token, row)` output must get its own warp: the grid has to cover
+    /// `tokens * m` warps. A launcher that treats the block count as a thread
+    /// count (the WP42 bug) covers 256x fewer and leaves the tail of the SSM
+    /// alpha/beta vectors unwritten.
+    #[test]
+    fn gemm_rows_grid_covers_every_output() {
+        for (tokens, m) in [(1, 48), (1, 1), (4, 48), (169, 48), (2048, 48), (512, 5120)] {
+            let (blocks, threads) = gemm_rows_grid(tokens, m);
+            let warps = blocks * (threads / 32);
+            assert!(
+                warps >= tokens * m,
+                "grid covers {warps} warps, needs {}",
+                tokens * m
+            );
+            assert!(
+                warps - tokens * m < 8,
+                "grid over-launches {} warps for {} outputs",
+                warps - tokens * m,
+                tokens * m
+            );
+            assert_eq!(threads, 256);
+        }
+    }
+
+    /// The SSM alpha/beta shape fills a wave; the ffn shapes that already have
+    /// enough blocks must not be sliced (each slice would add a launch and a
+    /// reduce for no work).
+    #[test]
+    fn prefill_slices_fills_a_wave_only_when_starved() {
+        // 64 rows x a 2048-token chunk, k = 5120: 8 blocks -> 8 slices.
+        assert_eq!(prefill_slices(64, 5120, 2048), 8);
+        // 256 tokens: one block, still eight slices (8 blocks).
+        assert_eq!(prefill_slices(64, 5120, 256), 8);
+        // A 1024-token chunk is 4 blocks, eight slices still fit one wave.
+        assert_eq!(prefill_slices(64, 5120, 1024), 8);
+        // 128 rows x 2048 tokens is 8 blocks as well, and slicing still pays.
+        assert_eq!(prefill_slices(128, 5120, 2048), 8);
+        // k must divide into whole 64-value tiles; 5120 / 8 = 640 is one.
+        for (m, k, tokens) in [(64, 5120, 2048), (64, 6144, 512), (256, 5120, 2048)] {
+            let n = prefill_slices(m, k, tokens);
+            assert!(n >= 1 && n <= 8);
+            assert_eq!(k % n, 0, "k={k} n={n}");
+            assert_eq!((k / n) % 64, 0, "k={k} n={n}");
+        }
+        // Enough blocks already (40 of a 64-block wave is not starved): no
+        // split, so the ffn shapes keep their single-pass kernel.
+        assert_eq!(prefill_slices(5120, 5120, 2048), 1);
+    }
 }

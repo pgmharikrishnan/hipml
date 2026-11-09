@@ -89,3 +89,95 @@ Sources of the residual difference, in likely order of size:
 4. RoPE angles built in f64 here, f32 in llama.cpp.
 
 None of these change a ranking in 60 tokens across the three prompts.
+
+## Depth parity: the CPU f32 oracle gate
+
+The table above prefills token by token. Every benchmark number comes from the
+chunked path (`--chunk 2048`), and until WP42 nothing compared that path with an
+independent oracle at depth: `attn-parity`, `gemv-check` and `spec-bench` all
+compare a kernel with a kernel, or the GPU with itself.
+
+`hipml oracle-gate` fills the gap. It runs hipml's own CPU f32 engine (no GPU,
+the same arithmetic as `--no-device`) and the production GPU chunk path on the
+same ids, for the same number of greedy steps, and compares the id streams and
+the prefill logits.
+
+```
+hipml oracle-gate --gguf C:\models\Qwen3.8-27B-Q4_K_M.gguf \
+  --ids-file bench/fixtures/p2_math_169.ids --steps 20 --chunk 2048 --kv q8
+```
+
+It exits non-zero when the streams disagree and the oracle's margin at the
+first disagreement is at least `--tol-nats` (default 0.05 nats); a smaller
+margin is a near-tie that fp16 prefill operands and q8 KV may reorder.
+
+### What it found
+
+169 prompt tokens, q8 KV, max |logit difference| at the last prefill row
+against the CPU f32 oracle:
+
+| hypothesis | measurement | verdict |
+|---|---|---|
+| the chunked prefill is the faithful path | chunk vs oracle **9.74** (rms 1.77) | false |
+| the oracle is wrong | GPU token loop vs oracle **0.0001** | false |
+| KV size / context length | 0.192 with f32 KV, 1 layer | false |
+| `HIPML_PREFILL_F32`, split-K, token steps | no change | false |
+| the SSM alpha/beta projection | `HIPML_CHUNK_GEMV=2` (one f32 row per launch) 0.192 → 0.00027; alpha/beta up to 12.19 off with 40 of 48 rows **zero**; qkv identical | **true** |
+
+`gemm_rows_f32` passed a block count to `LaunchConfig::linear`, which divides
+by the block size again, so a 48-row projection launched 8 blocks and left the
+rest of the output untouched. `cd2c6d6` added `gemm_rows_grid` (with a host
+unit test that every output row is covered) and a tiled f32 `prefill_f32`
+kernel for the chunk path; the token loop was never affected.
+
+### Drift after the fix
+
+| path | worst logit error vs the CPU oracle (169 tokens) |
+|---|---|
+| token loop, f32 weights | 0.0001 |
+| chunk, f32 weights + f32 KV | 0.0165 |
+| chunk, quantized weights + q8 KV | 0.113 |
+| chunk, quantized weights + q8 KV + fp16 alpha/beta | 0.128 |
+| shipped: the same, k-sliced eight ways | 0.161 |
+
+The last row is the shipped path. The two alpha/beta tensors are raw f32 (not
+quantized), so the chunk keeps an fp16 copy of each made at load and runs them
+through the same fp16-activation WMMA kernel as qkv/z; the exact f32 tiled GEMM
+stays behind `HIPML_PREFILL_F32`.
+
+That trade costs 0.04 of worst-case logit (0.16 against the f32 projection's
+0.12, both dominated by the q8 KV cache) and it does not move a token: the gate
+returns **20/20 ids identical** (step 19 = 41020, the oracle's pick).
+
+### Cost of the projection
+
+The f32 tile cost 3.4 s of a 100K prefill, and the first fp16 version still cost
+0.82 s: 64 output rows is half a 128-row tile and a 2048-token chunk is eight
+token tiles, so the projection launched **8 blocks on a 64-block card** and ran
+at ~7 TFLOPS. `prefill_halfw_w2h_sn` stacks eight k slices along `blockIdx.z`
+(`prefill_slices` picks the count for one wave) and `reduce_slices_f32` sums the
+partials in slice order, so the result stays deterministic. Measured on the same
+binary with the projection skipped as the floor, 100K prefill:
+
+| build | 100K prefill | 8K prefill |
+|---|---|---|
+| alpha/beta skipped (floor, same binary) | 107.57-107.73 s | 6.52-6.64 s |
+| f32 tiled projection | 110.90 s | 6.84 s |
+| fp16, single pass (8 blocks) | 108.50 s | 6.61 s |
+| fp16, eight k slices (shipped) | 107.94-108.08 s | 6.59-6.63 s |
+
+The shipped projection is inside the floor's own run-to-run band. End to end,
+`bench/run.sh --engine hipml --prompt code_edit` (medians; 0 and 8K are three
+cold reps, 32K and 100K one):
+
+| depth | TTFT | decode | WP41 (TTFT / decode) |
+|---:|---:|---:|---|
+| 0 (672 tokens) | 0.560 s | 29.3 tok/s | 0.561 s / 29.2 tok/s |
+| 8192 | 6.598 s | 28.6 tok/s | 6.541 s / 28.8 tok/s |
+| 32768 | 28.73 s | 27.0 tok/s | 28.647 s / 27.0 tok/s |
+| 100000 | 108.00 s | 23.4 tok/s | 107.777 s / 23.4 tok/s |
+
+The 0.2-0.9% spread against the WP41 table is the same ±0.5 s / ±30 ms band
+that two consecutive runs of one binary show here (107.56 → 108.08 s at 100K,
+6.52 → 6.64 s at 8K), and it is the reason the projection is benchmarked
+against a skip-alpha build of itself rather than against last week's table.

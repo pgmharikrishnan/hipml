@@ -25,6 +25,8 @@ mod gen_cmd;
 mod kv_cmds;
 mod load_cmd;
 mod mtp_cmd;
+#[cfg(feature = "hip")]
+mod oracle_gate;
 mod prefill_cmd;
 #[cfg(feature = "hip")]
 mod profile_cmd;
@@ -162,6 +164,8 @@ fn main() {
             let deep = args.iter().any(|a| a == "--deep");
             std::process::exit(parity(filter.as_deref(), deep));
         }
+        #[cfg(feature = "hip")]
+        "oracle-gate" => std::process::exit(oracle_gate::run(&args[1..])),
         "help" | "--help" | "-h" => help(),
         other => {
             eprintln!("unknown command: {other}\n");
@@ -188,7 +192,9 @@ fn help() {
          \x20 decode-bench  stream every Q4_K/Q6_K/Q8_0 tensor through GEMV once\n\
          \x20 generate  --gguf PATH --text \"prompt\" --tokens 20   greedy decode\n\
          \x20           --device uses the chunked prefill graph (--chunk N, default 2048);\n\
-         \x20           --chunk 0 keeps the token loop, and --compare-cpu implies it\n\
+         \x20           --chunk 0 keeps the token loop; --compare-cpu compares the\n\
+         \x20           production chunk path (or --chunk 0) with the CPU oracle;\n\
+         \x20           --topk K prints the top-K log-probs at every sampled position\n\
          \x20 load      load every tensor into VRAM and verify residency\n\
          \x20 logits    run lm_head on a 5120-value f32 vector file\n\
          \x20 prefill-bench time the tiled prefill GEMM at Qwen3.8-27B shapes, M=512/2048\n\
@@ -198,6 +204,8 @@ fn help() {
          \x20 attn-parity --gguf PATH   GPU full-attention block vs CPU reference\n\
          \x20 attn-bench  --gguf PATH   per-layer time at depths 0/8192/100000\n\
          \x20 gpu-bench --gguf PATH [--prefill N] [--depth D --kv q8]\n\
+         \x20 oracle-gate --gguf PATH --ids-file F --steps N  CPU oracle vs the\n\
+         \x20           production chunked path, step by step (exit 1 on a real split)\n\
          \x20 gpu-profile --gguf PATH  launch cost, host round-trips, graph token\n\
          \x20 bench-kv  quantized-KV decode attention: depth x q8/q4 x 1 head / 16 layers\n\
          \x20           --depths 1024,8192,32768,100000 --reps 3\n\

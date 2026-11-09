@@ -29,13 +29,14 @@ pub use attn_gpu::AttnLayer;
 #[cfg(feature = "hip")]
 pub mod launch_kv;
 pub use launch::{
-    prefill_entry_for, prefill_half, prefill_path, prefill_v2, set_prefill_half, set_prefill_path,
-    PrefillPath,
+    prefill_entry_for, prefill_half, prefill_path, prefill_slices, prefill_v2, set_prefill_half,
+    set_prefill_path, PrefillPath,
 };
 #[cfg(feature = "hip")]
 pub use launch::{
     gemm_rows_f32, prefill_entry_for_half, prefill_has_xhalf, prefill_resident,
-    prefill_resident_half, prefill_resident_split_half, prefill_should_split, prefill_xhalf,
+    prefill_resident_half, prefill_resident_slices, prefill_resident_split_half,
+    prefill_should_split, prefill_xhalf,
 };
 #[cfg(feature = "hip")]
 pub use launch::{gemv_job_tiles, GemvJob, ReadJob};
@@ -248,6 +249,18 @@ pub const KERNELS: &[KernelSpec] = &[
         entry: "dequant_q4_k_f32",
         // One 256-thread block per Q4_K super-block, one output value per thread.
         kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "prefill_f32",
+        entry: "prefill_f32",
+        // Raw-f32 sibling of prefill_q4_k (the SSM alpha/beta projections):
+        // 256 tokens x 64 rows. RR=2 gives 32 row groups, so 1024 threads: the
+        // 48-row tail would otherwise leave most of the card idle.
+        kind: KernelKind::Prefill {
+            rows: 64,
+            tokens: 256,
+            block: 1024,
+        },
     },
     KernelSpec {
         name: "prefill_q4_k",
@@ -470,6 +483,18 @@ pub const KERNELS: &[KernelSpec] = &[
             block: 256,
         },
     },
+    // n-slice variant of the same geometry (see `prefill_slices`): the SSM
+    // alpha/beta projections are 64 rows wide, so one row tile is 8 blocks and
+    // the card idles. Slices stack along `blockIdx.z`.
+    KernelSpec {
+        name: "prefill_halfw_w2h_sn",
+        entry: "prefill_halfw_w2h_sn",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
     KernelSpec {
         name: "prefill_xhalf",
         entry: "prefill_xhalf",
@@ -589,6 +614,11 @@ pub const KERNELS: &[KernelSpec] = &[
     KernelSpec {
         name: "residual_add_f32",
         entry: "residual_add_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "reduce_slices_f32",
+        entry: "reduce_slices_f32",
         kind: KernelKind::Linear { block: 256 },
     },
     KernelSpec {

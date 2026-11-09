@@ -3,10 +3,10 @@
 use std::time::Instant;
 
 use hipml_core::gen::{greedy_with_stop, logprob_of, top_logprobs};
-use std::io::Write;
 use hipml_core::gguf::Gguf;
 use hipml_core::model::Model;
 use hipml_core::tokenizer::Tokenizer;
+use std::io::Write;
 
 struct Args {
     gguf: String,
@@ -19,6 +19,10 @@ struct Args {
     logprobs: bool,
     stop_ids: Vec<u32>,
     stop_eos: bool,
+    /// Write the first sampled position's full logit row as raw little-endian
+    /// f32. Lets a GPU run be compared with a once-computed oracle row without
+    /// paying the token-loop pass again.
+    dump: Option<String>,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -32,6 +36,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
     let mut logprobs = false;
     let mut stop_ids = Vec::new();
     let mut stop_eos = false;
+    let mut dump = None;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&str, String> {
@@ -88,6 +93,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
                     .collect::<Result<_, _>>()?;
                 i += 2;
             }
+            "--dump-logits" => {
+                dump = Some(need(i)?.to_string());
+                i += 2;
+            }
             // `--cpu` is the default oracle path; accept the flag so a script
             // can say which path it means.
             "--cpu" => i += 1,
@@ -105,6 +114,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         logprobs,
         stop_ids,
         stop_eos,
+        dump,
     })
 }
 
@@ -189,24 +199,44 @@ pub fn generate(args: &[String]) -> i32 {
 
     let t1 = Instant::now();
     let mut steps_done = 0usize;
-    let out = greedy_with_stop(&model, &tok, &prompt_ids, a.tokens, n_ctx, &stop_ids, |i, id, logits| {
-        steps_done = i + 1;
-        if a.logprobs {
-            println!("  [{i}] {id} logprob {:.6}", logprob_of(logits, id as usize));
-        } else {
-            println!("  [{i}] {id}");
-        }
-        if a.topk > 0 && i == 0 {
-            for (idx, lp) in top_logprobs(logits, a.topk) {
-                println!("        {idx:6} logprob {lp:.6}");
+    let out = greedy_with_stop(
+        &model,
+        &tok,
+        &prompt_ids,
+        a.tokens,
+        n_ctx,
+        &stop_ids,
+        |i, id, logits| {
+            steps_done = i + 1;
+            if a.logprobs {
+                println!(
+                    "  [{i}] {id} logprob {:.6}",
+                    logprob_of(logits, id as usize)
+                );
+            } else {
+                println!("  [{i}] {id}");
             }
-        }
-        let _ = std::io::stdout().flush();
-    });
+            if a.topk > 0 && i == 0 {
+                for (idx, lp) in top_logprobs(logits, a.topk) {
+                    println!("        {idx:6} logprob {lp:.6}");
+                }
+            }
+            if let (Some(path), 0) = (&a.dump, i) {
+                let bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+                if std::fs::write(path, &bytes).is_err() {
+                    eprintln!("  dump-logits: cannot write {path}");
+                }
+            }
+            let _ = std::io::stdout().flush();
+        },
+    );
     let secs = t1.elapsed().as_secs_f64();
     let steps = (prompt_ids.len() + steps_done.saturating_sub(1)) as f64;
     println!("gen ids:    {:?}", out.ids);
-    println!("steps:      {steps:.0} tokens in {secs:.1}s ({:.2}s/token)", secs / steps.max(1.0));
+    println!(
+        "steps:      {steps:.0} tokens in {secs:.1}s ({:.2}s/token)",
+        secs / steps.max(1.0)
+    );
     println!("text:       {}", out.text);
     println!("stopped:    {}", out.stopped);
     0

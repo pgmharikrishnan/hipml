@@ -201,7 +201,12 @@ static __device__ __forceinline__ void pww2_dequant8(const pww2_u4& r,
     }
 }
 
-template <int KIND, bool XHALF, bool SPLIT>
+// SPLIT: two slices, the first writing `y` and the second `scratch` (WP36).
+// NS: `n` equal slices stacked along blockIdx.z; slice 0 writes `y` and slice
+// `z > 0` writes `scratch` at `(z - 1) * tokens * m`, so the caller sums them
+// in order. NS exists for the 64-row SSM projections, where one row tile is so
+// few blocks that the matrix units idle.
+template <int KIND, bool XHALF, bool SPLIT = false, bool NS = false>
 static __device__ __forceinline__ void pww2_body_impl(
     const unsigned char* __restrict__ w,
     const void* __restrict__ x,
@@ -213,9 +218,11 @@ static __device__ __forceinline__ void pww2_body_impl(
     int ks)
 {
     const int z = SPLIT ? (int)blockIdx.z : 0;
-    const int kb = SPLIT ? (z ? ks : 0) : 0;
-    const int ke = SPLIT ? (z ? k : ks) : k;
-    float* __restrict__ out = SPLIT ? (z ? scratch : y) : y;
+    const int kb = NS ? z * ks : (SPLIT ? (z ? ks : 0) : 0);
+    const int ke = NS ? ((kb + ks < k) ? kb + ks : k) : (SPLIT ? (z ? k : ks) : k);
+    float* __restrict__ out =
+        NS ? (z ? scratch + (size_t)(z - 1) * tokens * m : y)
+           : (SPLIT ? (z ? scratch : y) : y);
     __shared__ __align__(16) _Float16 shx[PWW2_BUF * PWW2_TT * PWW2_XS];
     __shared__ __align__(16) _Float16 shw[PWW2_BUF * PWW2_RT * PWW2_WS];
 
@@ -492,6 +499,20 @@ static __device__ __forceinline__ void pww2_body_split(
     pww2_body_impl<KIND, XHALF, true>(w, x, y, scratch, m, k, tokens, ks);
 }
 
+template <int KIND, bool XHALF>
+static __device__ __forceinline__ void pww2_body_slice(
+    const unsigned char* __restrict__ w,
+    const void* __restrict__ x,
+    float* __restrict__ y,
+    float* __restrict__ scratch,
+    int m,
+    int k,
+    int tokens,
+    int ks)
+{
+    pww2_body_impl<KIND, XHALF, true, true>(w, x, y, scratch, m, k, tokens, ks);
+}
+
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q4_k_w2(const unsigned char* __restrict__ w,
                                            const float* __restrict__ x,
                                            float* __restrict__ y, int m, int k, int tokens)
@@ -582,4 +603,15 @@ extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) pref
                                                 int ks)
 {
     pww2_body_split<3, true>(w, x, y, scratch, m, k, tokens, ks);
+}
+
+// n equal k slices in one launch: `blockIdx.z` selects the slice, `ks` is its
+// width. Slice 0 writes `y`, the rest write `scratch` in z order; the host sums
+// them with `reduce_slices_f32`.
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_halfw_w2h_sn(const unsigned char* __restrict__ w,
+                                                const void* __restrict__ x,
+                                                float* __restrict__ y, float* __restrict__ scratch, int m, int k, int tokens,
+                                                int ks)
+{
+    pww2_body_slice<3, true>(w, x, y, scratch, m, k, tokens, ks);
 }
