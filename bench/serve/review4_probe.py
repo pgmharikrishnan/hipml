@@ -378,7 +378,49 @@ def plan_stress(a, rec):
     rec("metrics_end", **{k: v for k, v in end.items() if "active" in k or "queue" in k})
 
 
-PLANS = {"exact": plan_exact, "crash": plan_crash, "stress": plan_stress}
+def plan_recheck(a, rec):
+    """The three hold-3 regressions, after their fixes."""
+    p = fixture_ids()
+    m0 = metrics()
+    s = socket.create_connection(("127.0.0.1", PORT))
+    s.sendall(http_post_bytes("/completion", json.dumps(
+        {"prompt": p, "n_predict": 3000, "ignore_eos": True}).encode()))
+    time.sleep(2.0)
+    s.close()
+    t = wait_idle(30)
+    m1 = metrics()
+    rec("disconnect_non_stream", idle_after_s=t,
+        cancelled=m1.get("hipml_requests_cancelled_total", 0) - m0.get("hipml_requests_cancelled_total", 0))
+
+    shared_sys = "You are a careful reviewer. " * 120
+    for user in ("Say hello.", "Name a colour."):
+        m0 = metrics()
+        st, js, dt = post("/v1/chat/completions", {
+            "messages": [{"role": "system", "content": shared_sys},
+                         {"role": "user", "content": user}], "max_tokens": 8})
+        m1 = metrics()
+        rec("shared_system_" + user.split()[0].lower(), status=st, secs=dt,
+            hits=m1.get("hipml_prefix_hits_total", 0) - m0.get("hipml_prefix_hits_total", 0),
+            hit_tokens=m1.get("hipml_prefix_hit_tokens_total", 0) - m0.get("hipml_prefix_hit_tokens_total", 0))
+
+    for n_msgs in (20, 200):
+        msgs = [{"role": "system", "content": "Be brief."}]
+        for i in range(n_msgs):
+            msgs.append({"role": "user" if i % 2 == 0 else "assistant",
+                         "content": f"turn {i}: please consider item {i * 13} and reply."})
+        if msgs[-1]["role"] != "user":
+            msgs.append({"role": "user", "content": "done?"})
+        m0 = metrics()
+        st, js, dt = post("/v1/chat/completions", {"messages": msgs, "max_tokens": 1})
+        m1 = metrics()
+        rec(f"chat_{n_msgs}_messages", status=st, secs=dt,
+            prompt_tokens=js.get("usage", {}).get("prompt_tokens") if isinstance(js, dict) else None,
+            captures=m1.get("hipml_prefix_captures_total", 0) - m0.get("hipml_prefix_captures_total", 0))
+    rec("metrics_end", **{k: v for k, v in metrics().items() if "prompt_tokens" in k or "requests" in k})
+
+
+PLANS = {"exact": plan_exact, "crash": plan_crash, "stress": plan_stress,
+         "recheck": plan_recheck}
 
 
 def main():
