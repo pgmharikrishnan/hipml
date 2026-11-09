@@ -283,6 +283,81 @@ pub const KERNELS: &[KernelSpec] = &[
             block: 512,
         },
     },
+    // Occupancy shape (WP32): 128 tokens x 64 rows, 256 threads, 4
+    // accumulators per warp. 84 VGPRs, three blocks per CU instead of one.
+    // The geometry must match the PWW2_* defines in `prefill_wmma2.hip`.
+    KernelSpec {
+        name: "prefill_q4_k_w2",
+        entry: "prefill_q4_k_w2",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_q6_k_w2",
+        entry: "prefill_q6_k_w2",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_q8_0_w2",
+        entry: "prefill_q8_0_w2",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_halfw_w2",
+        entry: "prefill_halfw_w2",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_q4_k_w2h",
+        entry: "prefill_q4_k_w2h",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_q6_k_w2h",
+        entry: "prefill_q6_k_w2h",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_q8_0_w2h",
+        entry: "prefill_q8_0_w2h",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_halfw_w2h",
+        entry: "prefill_halfw_w2h",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
     KernelSpec {
         name: "gemm_f32",
         entry: "gemm_f32",

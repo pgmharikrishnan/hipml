@@ -718,15 +718,29 @@ pub fn prefill_half() -> bool {
     prefill_path() != PrefillPath::F32
 }
 
+/// The occupancy-shape prefill kernels (`prefill_wmma2.hip`). Opt-in with
+/// `HIPML_PREFILL_V2=1` while the shape is still being measured; they keep the
+/// shipped kernel's k order, so switching between them is a performance
+/// decision and not a numeric one.
+pub fn prefill_v2() -> bool {
+    static V2: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V2.get_or_init(|| std::env::var_os("HIPML_PREFILL_V2").is_some())
+}
+
 /// The entry point a base (f32) prefill kernel name maps to on the active path.
 /// `None` means the f32 kernel is the one to launch.
 pub fn prefill_entry_for(name: &str) -> Option<&'static str> {
+    let w2 = prefill_v2();
     Some(match (prefill_path(), name) {
         (PrefillPath::F32, _) => return None,
         (PrefillPath::Dot2, "prefill_q4_k") => "prefill_q4_k_h",
         (PrefillPath::Dot2, "prefill_q6_k") => "prefill_q6_k_h",
         (PrefillPath::Dot2, "prefill_q8_0") => "prefill_q8_0_h",
         (PrefillPath::Dot2, "prefill_halfw") => "prefill_halfw_h",
+        (PrefillPath::Wmma, "prefill_q4_k") if w2 => "prefill_q4_k_w2",
+        (PrefillPath::Wmma, "prefill_q6_k") if w2 => "prefill_q6_k_w2",
+        (PrefillPath::Wmma, "prefill_q8_0") if w2 => "prefill_q8_0_w2",
+        (PrefillPath::Wmma, "prefill_halfw") if w2 => "prefill_halfw_w2",
         (PrefillPath::Wmma, "prefill_q4_k") => "prefill_q4_k_w",
         (PrefillPath::Wmma, "prefill_q6_k") => "prefill_q6_k_w",
         (PrefillPath::Wmma, "prefill_q8_0") => "prefill_q8_0_w",
