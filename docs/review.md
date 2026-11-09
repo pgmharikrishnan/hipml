@@ -240,7 +240,7 @@ only about 0.4 s (attention is 0.8 s). No numbers on that branch yet.
 | Idea | Verdict | Evidence |
 |---|---|---|
 | Chunk 1024/2048 to raise GEMM waves at 512 | **Done**, -0.42 s at 8K | measured above |
-| Prefill GEMM pipeline (62-68 → 100+ TFLOPS) | Largest shallow-prefill lever: 8K 7.40 → about 6.0 s | 5.1 s of GEMM at 8K, 35-43% of the measured WMMA ceiling |
+| Prefill GEMM pipeline (62-68 → 100+ TFLOPS) | **Done for Q4_K** (109 TFLOPS) and 95 for Q6_K: 8K 7.40 → **6.61 s** | 4.4 s of GEMM at 8K; the 256×128/16-accumulator tile is the register-file ceiling, and staging (38%, load latency) does not overlap without spilling (see benchmarks WP32) |
 | Decode attention at depth (q8 split kernel to bandwidth) | +14% decode at 100K (21.2 → about 25), +6% at 32K | measured +13.7 ms at 100K against 5.5 ms of KV bytes |
 | Fusing norm / gate / SiLU into GEMV prologue and epilogue | up to +8% decode (5.6 ms ramp → about 3) | ramp measured; fusion is not in the refuted list |
 | fp16 instead of q8 KV for prefill | worse: doubles the bytes of a memory-bound loop | 65.5 KB vs 34.8 KB per token |

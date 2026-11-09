@@ -222,6 +222,108 @@ is above the fp32 peak, so an fp32 prefill cannot match it by construction, and
 it needs the matrix unit — which is what WP17 added (below, and measured against
 the instruction's own ceiling as well as the two vendor numbers).
 
+### WP32: the occupancy shape, and the fp16 activation tile
+
+The WP17 shape spends 115 VGPRs on 8 accumulators per warp and runs one
+512-thread block per CU; the staging phase of a k-tile is serialized against the
+multiply, so a third of the kernel is a memory-latency phase with only 16 warps
+to hide it. `prefill_wmma2.hip` trades warp tile for reuse: **256 tokens × 128
+rows per block, 256 threads, 64×64 per warp, 16 accumulators**. A 64×64 warp
+tile is 4× the reuse of 32×64 (the dequant is paid once per 64 tokens instead of
+32) and the block still owns 32768 output elements, which is exactly the
+register file (128 f32 accumulators/thread + 62 for the rest, 190 VGPRs,
+`__launch_bounds__(256, 1)`, no spills). **32768 outputs is the largest f32 tile
+this register file can hold**, so the shape is at its own ceiling.
+
+Because the shape is register-saturated, the activation tile is the one stream
+that can still be halved: `prefill_xhalf` converts it once per projection and
+the `_w2h` entries read fp16. The conversion is the same `floats2half2_rn` the
+kernel already applies while staging, so the GEMM output is **bit-identical**
+(`scripts/probe_wmma_cmp.cpp`: 0 differing bits over q4k/q6k/q8/half at
+t=200/333/256 and 17408×5120).
+
+#### Shape and pipeline sweep
+
+`scripts/probe_wmma2.cpp`, M=2048, fp16 activation, `--reps 6` (µs includes one
+cold launch). The shipped shape is the E0 row.
+
+| lever | tile | threads | VGPR (spills) | q6k TFLOPS | q4k TFLOPS | verdict |
+| --- | --- | ---: | --- | ---: | ---: | --- |
+| v1 (shipped, WP17) | 256×128, 8 acc | 512 | 115 (0) | 66–76 | 68–76 | reference |
+| E0 k-tile 32 | 256×128, 16 acc | 256 | 190 (0) | **95.0** | **108.9** | **kept, default** |
+| E0 + 512 threads / 8 acc | 256×128, 8 acc | 512 | 173 (—) | does not launch (>128 VGPR) | | rejected |
+| E0 k-tile 64 | 256×128, 16 acc | 256 | 216 (0) | 87.2 | 94.1 | −10%, rejected |
+| E0 PF=1, double buffer | 256×128, 16 acc | 256 | 216 (0) | 79.7 | 87.8 | −16%, rejected |
+| E0 PF=2, x+w in registers | 256×128, 16 acc | 256 | 256 (43) | 25 | — | rejected |
+| E0 PF=3, x only in registers | 256×128, 16 acc | 256 | 256 (0) | 80.8 | 82.3 | −15%, rejected |
+| F0 half-height | 256×64, 16 acc | 128 | 190 (0) | 80.2 | 87.5 | −18%, rejected |
+
+PF=3 fits (the fp16 x array is 16 VGPRs, so it does not spill) and still loses:
+the prefetched load is consumed right after the multiply, and with 8 warps there
+is nothing left to cover that stall. The 512-thread variants cannot hold the
+16-accumulator warp tile at all (128 VGPR cap). The half-height block fits two
+blocks per CU but halves the reuse, which costs more than the extra block buys.
+
+The staging/multiply split at E0, M=2048 Q6_K: 3781 µs base → 2345 µs with
+`PWW2_PROBE_NO_STAGE` (**155.7 TFLOPS**), i.e. **staging 38%, multiply 62%**.
+Removing the dequant ALU changes nothing, so the staging cost is load latency,
+not arithmetic — and the same measurement says a perfect overlap would be worth
+at most 1.6×. Every overlap attempt above lost to register pressure instead.
+
+#### At the engine's actual tile (2048-token chunks)
+
+| shape | tokens | blocks | waves | q6k TFLOPS | q4k TFLOPS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 17408×5120 (ffn up/down) | 512 | 272 | 8.5 | 81.7 | 94.8 |
+| 17408×5120 | 2048 | 1088 | 34 | 95.0 | 108.9 |
+| 17408×5120 | 8192 | 4352 | 136 | 94.0 | 108.5 |
+| 5120×17408 (ffn gate) | 512 | 80 | 2.5 | 73.0 | 67.8 |
+| 5120×17408 | 2048 | 320 | 10 | 95.7 | 107.0 |
+| 5120×17408 | 8192 | 1280 | 40 | 69.1 | 106.2 |
+
+The last row is a probe artifact, not an engine case: at 8192 tokens that
+tensor's fp16 activation tile is 285 MB, which no longer fits L2 with the weight
+stream, and the k=17408 Q6_K sweep falls to 69 TFLOPS. The engine chunks at
+2048, where the same shape measures 95.7.
+
+#### The fp16 activation copy, applied to every projection
+
+`prefill_xhalf` + the `_w2h` entries now cover the ffn, the SSM projections
+(`wqkv`, `wgate`, and `out`) and attention q/k/v. One conversion per projection,
+shared by every output row tile of that projection. Whole-model effect at 8K:
+
+| stage (8192 tokens) | v2, fp16 ffn only | v2 + ssm/attn fp16 |
+| --- | ---: | ---: |
+| gemm ffn | 3199 | 3226 |
+| gemm ssm | 920 | **738** |
+| gemm attn | 284 | **213** |
+| seq ssm | 1519 | 1486 |
+| seq attn | 814 | 845 |
+| elementwise | 194 | 186 |
+| total prefill | 6.83 s | **6.61 s** |
+
+(The shipped v1 kernel measures 7.30 s at the same prompt; the stage ledger is
+only kept on the v2 path.) The x-half path is bit-identical, so it is not an
+accuracy trade.
+
+#### Results
+
+| metric | shipped | WP32 | target |
+| --- | ---: | ---: | ---: |
+| FFN GEMM, 8K shapes (Q4_K / Q6_K) | 68–76 / 66–76 TFLOPS | **108.9 / 95.0** | ≥100 |
+| 512-token prefill | 1081 tok/s | **1181 tok/s** | ≥1300 |
+| 8K TTFT | 7.30 s | **6.61 s** | ≤6.0 s |
+| 32K prefill | 32.47 s (1009 tok/s) | **31.49 s** (1041 tok/s) | no regression |
+| 100K prefill | 149.75 s (684 tok/s) | **140.30 s** (730 tok/s) | no regression |
+
+Q4_K clears 100 TFLOPS; Q6_K sits at 95, which is 61% of the staging-free
+ceiling and 54% of the register-only WMMA probe (174–188). The remaining TTFT
+and 512-token gaps are not in this kernel any more: at 8K the ffn is 3226 ms of
+6610, and `seq ssm` + `seq attn` (2331 ms) plus the residual/rmsnorm pass
+(186 ms) are untouched by it. At 512 tokens the ffn GEMMs are wave-starved
+(2.5 waves for `ffn_gate`), which is what split-K would address and this shape
+cannot.
+
 ### WP19: the accumulator index, and what the loop actually costs
 
 The WP17 kernel was computing **half of every GEMM**. The multiply wrote
