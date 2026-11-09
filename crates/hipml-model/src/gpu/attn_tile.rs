@@ -122,6 +122,21 @@ pub(super) fn deep_attention_ptr(
     q_ptr: *mut std::ffi::c_void,
     out_ptr: *mut std::ffi::c_void,
 ) -> Result<(), String> {
+    deep_attention_ptr_on(l, cfg, dk, pos, q_ptr, out_ptr, false)
+}
+
+/// Same launch on the main or side stream: the batch path splits its per-slot
+/// attention across both so the small kernels overlap.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn deep_attention_ptr_on(
+    l: &Launcher,
+    cfg: &Config,
+    dk: &DeepKv,
+    pos: usize,
+    q_ptr: *mut std::ffi::c_void,
+    out_ptr: *mut std::ffi::c_void,
+    side: bool,
+) -> Result<(), String> {
     if dk.dtype == KvDtype::Q4 && cfg.head_dim > 256 {
         return Err("q4 KV: head_dim above 256 is not covered".to_string());
     }
@@ -135,8 +150,12 @@ pub(super) fn deep_attention_ptr(
     let splits = dk.splits(seq);
     launch_kv::launch_ptrs(
         l.module(),
-        l.stream(),
-        l.step_buf(),
+        if side { l.stream2() } else { l.stream() },
+        // Each stream carries its own position, so the side stream must read
+        // the side step buffer (the KV append above already used it).
+        if side { l.step_side_buf() } else { l.step_buf() },
+        // Decode-attention entry id (warp-per-KV-head variants included); the
+        // batch path shares the same selector as the single-stream path.
         dk.kernel,
         q_ptr,
         &dk.k,

@@ -45,9 +45,9 @@ impl PrefillCase {
 
     pub fn row_bytes(&self) -> usize {
         match self.name {
-            "prefill_q4_k" => self.k / QK_K * Q4_K_BYTES,
-            "prefill_q6_k" => self.k / QK_K * Q6_K_BYTES,
-            "prefill_q8_0" => self.k / 32 * Q8_0_BYTES,
+            "prefill_q4_k" | "gemm_skinny_q4_k" => self.k / QK_K * Q4_K_BYTES,
+            "prefill_q6_k" | "gemm_skinny_q6_k" => self.k / QK_K * Q6_K_BYTES,
+            "prefill_q8_0" | "gemm_skinny_q8_0" => self.k / 32 * Q8_0_BYTES,
             _ => 0,
         }
     }
@@ -169,6 +169,114 @@ pub fn prefill_cases() -> Vec<PrefillCase> {
     ]
 }
 
+/// Skinny quantized GEMM parity: `R <= 16` activation rows, the same reference
+/// (`ops::gemm_q*_k`) and the same block layouts as prefill, but a 16-row
+/// WMMA token tile with an fp16 operand path. `m` is deliberately not a
+/// multiple of any sweep geometry so the row tail is covered.
+///
+/// The tolerance is the fp16-operand budget, not `Tol::DEFAULT`: the fragment
+/// conversion loses ~1e-3 relative before the accumulation order changes.
+pub fn skinny_cases() -> Vec<PrefillCase> {
+    // fp16 operands: ~1e-2 absolute on a 512-term dot, and a near-zero output
+    // moves the ratio by an order of magnitude. O(1) below a layout bug, which
+    // swaps or zeroes whole token rows.
+    let small = Tol::new(5e-2, 5e-1);
+    // Production k (5120 terms): the same few 1e-2 relative to the output scale.
+    let large = Tol::new(2.5e-1, 5e-2);
+    vec![
+        PrefillCase {
+            name: "gemm_skinny_q4_k",
+            label: "skinny_q4_k 200x512 r=1",
+            tol: small,
+            seed: 0x5C11_0001,
+            m: 200,
+            k: 512,
+            tokens: 1,
+            build: build_q4_k,
+            inputs: inputs_q4_k,
+        },
+        PrefillCase {
+            name: "gemm_skinny_q4_k",
+            label: "skinny_q4_k 200x512 r=3",
+            tol: small,
+            seed: 0x5C11_0002,
+            m: 200,
+            k: 512,
+            tokens: 3,
+            build: build_q4_k,
+            inputs: inputs_q4_k,
+        },
+        PrefillCase {
+            name: "gemm_skinny_q4_k",
+            label: "skinny_q4_k 200x512 r=16",
+            tol: small,
+            seed: 0x5C11_0003,
+            m: 200,
+            k: 512,
+            tokens: 16,
+            build: build_q4_k,
+            inputs: inputs_q4_k,
+        },
+        PrefillCase {
+            name: "gemm_skinny_q6_k",
+            label: "skinny_q6_k 200x512 r=2",
+            tol: small,
+            seed: 0x5C11_0004,
+            m: 200,
+            k: 512,
+            tokens: 2,
+            build: build_q6_k,
+            inputs: inputs_q6_k,
+        },
+        PrefillCase {
+            name: "gemm_skinny_q6_k",
+            label: "skinny_q6_k 200x512 r=16",
+            tol: small,
+            seed: 0x5C11_0005,
+            m: 200,
+            k: 512,
+            tokens: 16,
+            build: build_q6_k,
+            inputs: inputs_q6_k,
+        },
+        PrefillCase {
+            name: "gemm_skinny_q8_0",
+            label: "skinny_q8_0 200x512 r=4",
+            tol: small,
+            seed: 0x5C11_0006,
+            m: 200,
+            k: 512,
+            tokens: 4,
+            build: build_q8_0,
+            inputs: inputs_q8_0,
+        },
+        PrefillCase {
+            name: "gemm_skinny_q8_0",
+            label: "skinny_q8_0 200x512 r=16",
+            tol: small,
+            seed: 0x5C11_0007,
+            m: 200,
+            k: 512,
+            tokens: 16,
+            build: build_q8_0,
+            inputs: inputs_q8_0,
+        },
+        // One production-size dot (5120 terms) so a k-tile or fragment-layout
+        // bug that only shows at full k cannot pass on the small cases.
+        PrefillCase {
+            name: "gemm_skinny_q4_k",
+            label: "skinny_q4_k 5120x5120 r=4",
+            tol: large,
+            seed: 0x5C11_0008,
+            m: 5120,
+            k: 5120,
+            tokens: 4,
+            build: build_q4_k,
+            inputs: inputs_q4_k,
+        },
+    ]
+}
+
 /// The three Qwen3.8-27B ffn shapes at the prompt length being measured. These are
 /// timed only; parity at the same shapes would need minutes of host reference.
 pub fn qwen38_prefill_cases(tokens: usize) -> Vec<PrefillCase> {
@@ -224,6 +332,19 @@ mod tests {
         let gemv = crate::quant::gemv_q4_k(&w, &x, m, k);
         let gemm = ops::gemm_q4_k(&w, &x, 1, m, k);
         compare(&gemv, &gemm, crate::parity::Tol::TIGHT).expect("1-token GEMM == GEMV");
+    }
+
+    #[test]
+    fn skinny_cases_are_deterministic_and_sized() {
+        for case in skinny_cases() {
+            assert!(case.tokens >= 1 && case.tokens <= 16, "{}: r", case.label);
+            let (w, x, y) = case.reference();
+            assert_eq!(w.len(), case.weight_bytes(), "{}: w", case.label);
+            assert_eq!(x.len(), case.tokens * case.k, "{}: x", case.label);
+            assert_eq!(y.len(), case.tokens * case.m, "{}: y", case.label);
+            let (w2, x2, y2) = case.reference();
+            assert_eq!((w, x, y), (w2, x2, y2));
+        }
     }
 
     #[test]

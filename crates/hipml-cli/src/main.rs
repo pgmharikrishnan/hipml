@@ -4,7 +4,7 @@
 //! reference here is not a kernel hipml can use.
 
 use hipml_core::parity::{
-    bench_cases, cases, compare, deep_cases, prefill_cases, quant_cases, OpCase,
+    bench_cases, cases, compare, deep_cases, prefill_cases, quant_cases, skinny_cases, OpCase,
 };
 use hipml_core::tensor::Tensor;
 use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
@@ -12,6 +12,8 @@ use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
 mod attn_cmd;
 #[cfg(feature = "hip")]
 mod cache_cmd;
+#[cfg(feature = "hip")]
+mod batch_cmd;
 #[cfg(feature = "hip")]
 mod device_cmd;
 #[cfg(feature = "hip")]
@@ -34,6 +36,8 @@ mod sweep_cmd;
 mod quant_cmd;
 #[cfg(feature = "hip")]
 mod ssm_cmd;
+#[cfg(feature = "hip")]
+mod skinny_cmd;
 
 /// What happened to one case.
 enum Outcome {
@@ -60,6 +64,15 @@ fn main() {
         "matbench" => std::process::exit(gen_cmd::matbench(&args[1..])),
         "prefill-bench" => std::process::exit(prefill_cmd::bench(&args[1..])),
         "prefill-model" => std::process::exit(prefill_cmd::model(&args[1..])),
+        "skinny-bench" => {
+            #[cfg(feature = "hip")]
+            std::process::exit(skinny_cmd::run(&args[1..]));
+            #[cfg(not(feature = "hip"))]
+            {
+                eprintln!("skinny-bench needs a build with `--features hip`");
+                std::process::exit(2);
+            }
+        }
         "cache-bench" => {
             #[cfg(feature = "hip")]
             std::process::exit(cache_cmd::bench(&args[1..]));
@@ -77,6 +90,15 @@ fn main() {
         "attn-parity" => std::process::exit(attn_cmd::parity(&args[1..])),
         "attn-bench" => std::process::exit(attn_cmd::bench(&args[1..])),
         "bench-kv" => std::process::exit(kv_cmds::bench_kv(&args[1..])),
+        "batch-bench" => {
+            #[cfg(feature = "hip")]
+            std::process::exit(batch_cmd::run(&args[1..]));
+            #[cfg(not(feature = "hip"))]
+            {
+                eprintln!("batch-bench needs a build with `--features hip`");
+                std::process::exit(2);
+            }
+        }
         "gpu-bench" => {
             #[cfg(feature = "hip")]
             std::process::exit(gpu_bench_cmd::bench(&args[1..]));
@@ -305,22 +327,26 @@ fn parity(filter: Option<&str>, deep: bool) -> i32 {
     }
 
     // Tiled prefill GEMM: same contract, multi-token output.
-    for case in prefill_cases() {
+    for case in prefill_cases().into_iter().chain(skinny_cases()) {
         if let Some(f) = filter {
             if !case.name.contains(f) && !case.label.contains(f) {
                 continue;
             }
         }
+        let skinny = case.name.starts_with("gemm_skinny");
         // The half kernels are the shipped path; the f32 rows stay as the
         // reference. fp16 inputs lose ~1e-3 of relative precision, so the
         // comparison uses a looser budget that still catches a layout bug (O(1)).
-        let half = ::hipml_kernels::prefill_half();
+        let half = skinny || ::hipml_kernels::prefill_half();
         let entry = ::hipml_kernels::prefill_entry_for(case.name).unwrap_or(case.name);
         // fp16 operands cost ~1e-3 relative. At 64x512 that is a few 1e-2
         // absolute; at 17408x5120 a near-zero output from 5120 products can
         // move by ~0.1, which is still 1e-3 of the output scale. Both budgets
         // are far below a layout bug (O(1) on O(100) values).
-        let tol = if half {
+        let tol = if skinny {
+            // The skinny cases carry their own fp16 budget, chosen per shape.
+            case.tol
+        } else if half {
             if case.m > 4096 {
                 hipml_core::parity::Tol::new(2.5e-1, 5e-2)
             } else if case.tokens > 16 {
@@ -339,7 +365,12 @@ fn parity(filter: Option<&str>, deep: bool) -> i32 {
             Err(e) => Outcome::Skip(e.clone()),
             Ok(l) => {
                 let (w, x, expected) = case.reference();
-                match l.run_prefill_reps(entry, &w, &x, case.m, case.k, case.tokens, 1) {
+                let launch = if skinny {
+                    l.run_skinny_reps(entry, &w, &x, case.m, case.k, case.tokens, 1)
+                } else {
+                    l.run_prefill_reps(entry, &w, &x, case.m, case.k, case.tokens, 1)
+                };
+                match launch {
                     Err(e) => Outcome::Fail(format!("launch failed: {e}")),
                     Ok((actual, _)) => match compare(&expected, &actual, tol) {
                         Ok(stats) => Outcome::Pass(format!(

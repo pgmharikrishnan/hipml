@@ -18,6 +18,11 @@ mod imp {
     use hipml_hip::{Buffer, ByteBuffer, LaunchConfig};
     use std::ffi::c_void;
 
+    /// Device pointer of row `row` of a `[rows][width]` f32 buffer.
+    fn row_ptr(buf: &Buffer, row: usize, width: usize) -> *mut c_void {
+        unsafe { (buf.as_ptr() as *mut u8).add(row * width * 4) as *mut c_void }
+    }
+
     /// Upper bound on sequence splits; the partial buffers are sized for it.
     const MAX_SPLITS: usize = 64;
     /// Must match SPLIT_TILE in attn_decode_split_f32.hip.
@@ -459,6 +464,98 @@ mod imp {
             self.norm_and_rope(l)
         }
 
+        /// Batched Q/K/V projections for `rows` x-vectors: one pass over each
+        /// weight. `qg` is `[rows][2*n_head*head_dim]`, `k`/`v` are
+        /// `[rows][width]`. The split, head norm and rope are per row because
+        /// every row has its own position (see `split_rope_rows`).
+        pub fn qkv_rows(
+            &self,
+            l: &Launcher,
+            x: &Buffer,
+            qg: &Buffer,
+            k: &Buffer,
+            v: &Buffer,
+            rows: usize,
+        ) -> Result<(), String> {
+            let d = self.dims;
+            self.gemv_batched(l, &self.wq, x, qg, 2 * d.n_head * d.head_dim, rows)?;
+            self.gemv_batched(l, &self.wk, x, k, d.width, rows)?;
+            self.gemv_batched(l, &self.wv, x, v, d.width, rows)
+        }
+
+        /// Per-row q-gate split, head RMS norm and M-RoPE at each row's own
+        /// position. `positions[b]` is row `b`'s token position.
+        #[allow(clippy::too_many_arguments)]
+        pub fn split_rope_rows(
+            &self,
+            l: &Launcher,
+            qg: &Buffer,
+            k: &Buffer,
+            q: &Buffer,
+            gate: &Buffer,
+            positions: &[usize],
+        ) -> Result<(), String> {
+            let d = self.dims;
+            let qw = d.n_head * d.head_dim;
+            let split = self.module_kernel(l, "qg_split_f32")?;
+            for (b, &pos) in positions.iter().enumerate() {
+                l.set_step(pos, pos + 1, 0)?;
+                let mut p_qg = row_ptr(qg, b, 2 * qw);
+                let mut p_q = row_ptr(q, b, qw);
+                let mut p_gate = row_ptr(gate, b, qw);
+                let mut nh = d.n_head as i32;
+                let mut hd = d.head_dim as i32;
+                let mut params: [*mut c_void; 5] = [
+                    &mut p_qg as *mut _ as *mut c_void,
+                    &mut p_q as *mut _ as *mut c_void,
+                    &mut p_gate as *mut _ as *mut c_void,
+                    &mut nh as *mut _ as *mut c_void,
+                    &mut hd as *mut _ as *mut c_void,
+                ];
+                let cfg = LaunchConfig {
+                    grid: (d.n_head as u32, 1, 1),
+                    block: (256, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                split.launch(cfg, &l.stream, &mut params)?;
+                self.norm_rope_at(l, row_ptr(q, b, qw), row_ptr(k, b, d.width))?;
+            }
+            Ok(())
+        }
+
+        /// Batched attention-output projection: gate each row of `out` and run
+        /// one pass over `W_o` into `y` (`[rows][n_embd]`).
+        pub fn out_rows(
+            &self,
+            l: &Launcher,
+            out: &Buffer,
+            gate: &Buffer,
+            y: &Buffer,
+            rows: usize,
+        ) -> Result<(), String> {
+            let d = self.dims;
+            let qw = d.n_head * d.head_dim;
+            let gate_k = self.module_kernel(l, "q_gate_f32")?;
+            let mut n = qw as i32;
+            for b in 0..rows {
+                let mut p_out = row_ptr(out, b, qw);
+                let mut p_gate = row_ptr(gate, b, qw);
+                let mut p_y = p_out;
+                let mut params: [*mut c_void; 4] = [
+                    &mut p_out as *mut _ as *mut c_void,
+                    &mut p_gate as *mut _ as *mut c_void,
+                    &mut p_y as *mut _ as *mut c_void,
+                    &mut n as *mut _ as *mut c_void,
+                ];
+                gate_k.launch(
+                    LaunchConfig::linear(qw, 256),
+                    &l.stream,
+                    &mut params,
+                )?;
+            }
+            self.gemv_batched(l, &self.wo, out, y, d.n_embd, rows)
+        }
+
         /// `out = W_o (attn_out * gate)` — the tail shared by both KV paths.
         pub fn apply_output(&self, l: &Launcher) -> Result<(), String> {
             let d = self.dims;
@@ -659,6 +756,23 @@ mod imp {
             l.module.kernel(name)
         }
 
+        fn gemv_batched(
+            &self,
+            l: &Launcher,
+            w: &ResidentMat,
+            x: &Buffer,
+            y: &Buffer,
+            m: usize,
+            rows: usize,
+        ) -> Result<(), String> {
+            if w.rows != m {
+                return Err(format!("gemv_batched: {} rows, launch says {m}", w.rows));
+            }
+            let kind = crate::batch_kind_for(w.kind)
+                .ok_or_else(|| format!("attention weight {:?}: no batched GEMV", w.kind))?;
+            l.gemv_batched(kind, w.data.bytes(), x, y, m, w.cols, rows)
+        }
+
         fn gemv(
             &self,
             l: &Launcher,
@@ -814,6 +928,44 @@ impl AttnLayer {
 
     pub fn attn_out(&self) -> &hipml_hip::Buffer {
         unreachable!()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn qkv_rows(
+        &self,
+        _l: &crate::Launcher,
+        _x: &hipml_hip::Buffer,
+        _qg: &hipml_hip::Buffer,
+        _k: &hipml_hip::Buffer,
+        _v: &hipml_hip::Buffer,
+        _rows: usize,
+    ) -> Result<(), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_rope_rows(
+        &self,
+        _l: &crate::Launcher,
+        _qg: &hipml_hip::Buffer,
+        _k: &hipml_hip::Buffer,
+        _q: &hipml_hip::Buffer,
+        _gate: &hipml_hip::Buffer,
+        _positions: &[usize],
+    ) -> Result<(), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn out_rows(
+        &self,
+        _l: &crate::Launcher,
+        _out: &hipml_hip::Buffer,
+        _gate: &hipml_hip::Buffer,
+        _y: &hipml_hip::Buffer,
+        _rows: usize,
+    ) -> Result<(), String> {
+        Err("hipml was built without the `hip` feature".to_string())
     }
 
     pub fn zero_kv(&self) -> Result<(), String> {

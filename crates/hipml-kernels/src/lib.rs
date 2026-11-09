@@ -36,8 +36,29 @@ pub use launch::{
 #[cfg(feature = "hip")]
 pub use launch::{gemv_job_tiles, GemvJob, ReadJob};
 #[cfg(feature = "hip")]
+pub use launch::{GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
+#[cfg(feature = "hip")]
 pub use launch::{GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80};
 pub use launch::Launcher;
+
+/// The batched-GEMV kind for a resident matrix kind, when one exists.
+#[cfg(feature = "hip")]
+pub fn batch_kind_for(kind: hipml_core::mat::Kind) -> Option<i32> {
+    use hipml_core::mat::Kind;
+    Some(match kind {
+        Kind::Q4K => launch::GEMV_B_Q4K,
+        Kind::Q6K => launch::GEMV_B_Q6K,
+        Kind::Q5K => launch::GEMV_B_Q5K,
+        Kind::Q8_0 => launch::GEMV_B_Q80,
+        Kind::F32 => return None,
+    })
+}
+
+/// Without the `hip` feature no batched kernel exists.
+#[cfg(not(feature = "hip"))]
+pub fn batch_kind_for(_kind: hipml_core::mat::Kind) -> Option<i32> {
+    None
+}
 
 /// How a kernel is gridded.
 #[derive(Clone, Copy, Debug)]
@@ -416,6 +437,34 @@ pub const KERNELS: &[KernelSpec] = &[
         entry: "gemm_rows_f32",
         kind: KernelKind::Linear { block: 256 },
     },
+    // Skinny quantized GEMM: R <= 16 activation rows, one 16-wide WMMA tile in
+    // the token dimension, `PWS_RT` output rows x `PWS_KW` k values per block.
+    // The bench and the MTP verify share these; every kind runs the same
+    // parity case.
+    KernelSpec {
+        name: "gemm_skinny_q4_k",
+        entry: "gemm_skinny_q4_k",
+        kind: KernelKind::RowTile {
+            rows: 32,
+            block: 128,
+        },
+    },
+    KernelSpec {
+        name: "gemm_skinny_q6_k",
+        entry: "gemm_skinny_q6_k",
+        kind: KernelKind::RowTile {
+            rows: 32,
+            block: 128,
+        },
+    },
+    KernelSpec {
+        name: "gemm_skinny_q8_0",
+        entry: "gemm_skinny_q8_0",
+        kind: KernelKind::RowTile {
+            rows: 32,
+            block: 128,
+        },
+    },
     KernelSpec {
         name: "stream_read",
         entry: "stream_read",
@@ -676,6 +725,17 @@ pub fn stream_entry(name: &'static str) -> &'static str {
         "gemv_q6_k" => "gemv_q6_k_r1",
         other => other,
     }
+}
+
+/// The skinny-GEMM entry for a resident block format (`None` for formats with
+/// no such kernel, e.g. Q5_K). `R <= 16` columns, `y[r, :] = W @ x[r, :]`.
+pub fn skinny_entry(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "gemv_q4_k" | "gemm_skinny_q4_k" => "gemm_skinny_q4_k",
+        "gemv_q6_k" | "gemm_skinny_q6_k" => "gemm_skinny_q6_k",
+        "gemv_q8_0" | "gemm_skinny_q8_0" => "gemm_skinny_q8_0",
+        _ => return None,
+    })
 }
 
 pub fn spec(name: &str) -> Option<&'static KernelSpec> {
