@@ -47,6 +47,18 @@ impl Value {
         })
     }
 
+    /// Exact integer value, including negatives (`n_predict: -1` means "until
+    /// the context is full" in llama's API).
+    pub fn as_i64(&self) -> Option<i64> {
+        self.as_f64().and_then(|n| {
+            if n.is_finite() && n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+                Some(n as i64)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Value::Bool(b) => Some(*b),

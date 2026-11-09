@@ -29,8 +29,7 @@ fn max_tokens(v: &Value, prompt: usize, ctx: usize) -> usize {
         .get("max_tokens")
         .or_else(|| v.get("max_completion_tokens"))
         .or_else(|| v.get("n_predict"))
-        .and_then(Value::as_u64)
-        .map(|n| n as i64)
+        .and_then(Value::as_i64)
         .unwrap_or(128);
     let room = ctx.saturating_sub(prompt).max(1);
     if n <= 0 {

@@ -35,7 +35,13 @@ impl<'a> BatchEngine<'a> {
                 self.layers.len()
             ));
         }
-        let slot = self.pool.alloc().ok_or("adopt: slot pool exhausted")?;
+        // The batched kernels index KV, SSM state and positions by `grid.y`, so
+        // the active set must stay dense. A new request always takes the next
+        // index; `release` swaps the last slot down to keep it dense.
+        let slot = self.active.len();
+        if slot >= self.slots {
+            return Err("adopt: slot pool exhausted".to_string());
+        }
         let l = self.model.launcher();
         let stream = l.stream();
         let result = (|| -> Result<(), String> {
@@ -87,24 +93,78 @@ impl<'a> BatchEngine<'a> {
             Ok(())
         })();
         if let Err(e) = result {
-            self.pool.free(slot);
             return Err(e);
         }
         l.synchronize()?;
         self.positions[slot] = pos;
+        debug_assert_eq!(slot, self.active.len());
         self.active.push(slot);
         Ok(slot)
     }
 
-    /// Retire a slot. Its buffers stay allocated for the next request; the next
-    /// `adopt` overwrites every word it reads.
-    pub fn release(&mut self, slot: usize) -> Result<(), String> {
+    /// Retire a slot, keeping the active set dense.
+    ///
+    /// The kernels address per-slot state by `grid.y`, so the last active slot
+    /// is copied down into the freed index. Returns the old index that moved
+    /// (always greater than `slot`), so the caller can move its own bookkeeping
+    /// too. Buffers stay allocated; the next `adopt` overwrites every word it
+    /// reads at the new tail.
+    pub fn release(&mut self, slot: usize) -> Result<Option<usize>, String> {
         let Some(i) = self.active.iter().position(|&s| s == slot) else {
             return Err(format!("release: slot {slot} is not active"));
         };
+        let last = *self.active.last().expect("non-empty");
         self.active.remove(i);
-        self.positions[slot] = 0;
-        self.pool.free(slot);
+        if slot == last {
+            self.positions[slot] = 0;
+            return Ok(None);
+        }
+        self.copy_slot(last, slot)?;
+        self.positions[slot] = self.positions[last];
+        self.positions[last] = 0;
+        self.model.launcher().synchronize()?;
+        Ok(Some(last))
+    }
+
+    /// Device-to-device copy of one slot's live KV rows and SSM state.
+    fn copy_slot(&self, from: usize, to: usize) -> Result<(), String> {
+        let l = self.model.launcher();
+        let stream = l.stream();
+        let pos = self.positions[from];
+        for b in &self.layers {
+            match &b.kind {
+                BatchKind::Full(f) => {
+                    let bytes = f.kv.row();
+                    if bytes % 4 != 0 {
+                        return Err(format!("release: KV row {bytes} B is not word aligned"));
+                    }
+                    let row = bytes / 4;
+                    let slot_words = f.kv.slot_bytes() / 4;
+                    let head_stride = f.kv.seq * row;
+                    let per = pos * row;
+                    let src = from * slot_words;
+                    let dst = to * slot_words;
+                    for h in 0..f.kv.n_kv {
+                        let o = h * head_stride;
+                        f.kv.k.copy_range_on(&f.kv.k, src + o, dst + o, per, stream)?;
+                        f.kv.v.copy_range_on(&f.kv.v, src + o, dst + o, per, stream)?;
+                    }
+                }
+                BatchKind::Ssm(d) => {
+                    let (conv_len, state_len) = d.inst.state_lens();
+                    let cw = d.conv_state.len() / self.slots;
+                    let sw = d.s_state.len() / self.slots;
+                    d.conv_state.copy_range_on(
+                        &d.conv_state,
+                        from * cw,
+                        to * cw,
+                        conv_len,
+                        stream,
+                    )?;
+                    d.s_state.copy_range_on(&d.s_state, from * sw, to * sw, state_len, stream)?;
+                }
+            }
+        }
         Ok(())
     }
 

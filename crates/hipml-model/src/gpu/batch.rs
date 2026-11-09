@@ -134,7 +134,6 @@ pub struct BatchEngine<'a> {
     arg_v: Buffer,
     arg_i: Buffer,
     arg_out: Buffer,
-    pool: SlotPool,
     positions: Vec<usize>,
     active: Vec<usize>,
     /// `[slots][2]` i32 of (position, seq), written once per forward step; the
@@ -249,7 +248,6 @@ impl<'a> BatchEngine<'a> {
             arg_v: zeros(slots * ARGMAX_PARTS)?,
             arg_i: zeros(slots * ARGMAX_PARTS)?,
             arg_out: zeros(slots)?,
-            pool: SlotPool::new(slots),
             positions: vec![0; slots],
             active: Vec::new(),
             pos_buf: Buffer::alloc(2 * slots)?,
@@ -258,16 +256,15 @@ impl<'a> BatchEngine<'a> {
         })
     }
 
-    /// Allocate `n` slots, lowest indices first; the forward path then uses
-    /// exactly those. Also used by the benchmark to reserve the whole pool.
+    /// Activate the first `n` slots. The batched kernels address KV, SSM state
+    /// and positions by `grid.y`, so the active set is always dense: `active[i]
+    /// == i`.
     pub fn activate(&mut self, n: usize) -> Result<(), String> {
         if n > self.slots {
             return Err(format!("activate {n}: only {} slots", self.slots));
         }
         self.active.clear();
-        for _ in 0..n {
-            self.active.push(self.pool.alloc().ok_or("slot pool exhausted")?);
-        }
+        self.active.extend(0..n);
         Ok(())
     }
 

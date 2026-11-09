@@ -69,7 +69,10 @@ pub fn run(
 
         // Start one prefill when the engine is free. A request is only allowed
         // to become speculative when it is alone and nothing is queued.
-        if prefill.is_none() && spec.is_none() && !queue.is_empty() {
+        let alone_next = slots.iter().all(|s| s.is_none()) && queue.len() == 1;
+        let can_admit =
+            (alone_next && cfg.mtp) || batch.available_slots() > 0;
+        if prefill.is_none() && spec.is_none() && !queue.is_empty() && can_admit {
             let job = queue.pop_front().expect("checked");
             let alone = slots.iter().all(|s| s.is_none()) && queue.is_empty();
             let mode = if alone && cfg.mtp { Mode::Spec } else { Mode::Batch };
@@ -254,9 +257,15 @@ pub fn run(
                     retire.push((slot, "length"));
                 }
             }
+            // Release from the highest index down. A lower release swaps the
+            // last active slot into the freed index, and all unprocessed
+            // retirees are below it, so no retiring entry ever moves.
+            retire.sort_unstable_by(|a, b| b.0.cmp(&a.0));
             for (slot, finish) in retire {
                 take_active(&mut slots, slot, finish, &metrics);
-                batch.release(slot)?;
+                if let Some(from) = batch.release(slot)? {
+                    slots[slot] = slots[from].take();
+                }
             }
         }
     }
