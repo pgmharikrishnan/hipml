@@ -43,11 +43,28 @@ pub const GEMV_B_Q5K: i32 = 2;
 pub const GEMV_B_Q80: i32 = 3;
 
 impl Launcher {
+    /// The skinny-GEMM entry for a batched kind, when the format has one.
+    fn skinny_for_kind(kind: i32) -> Option<&'static str> {
+        Some(match kind {
+            GEMV_B_Q4K => "gemm_skinny_q4_k",
+            GEMV_B_Q6K => "gemm_skinny_q6_k",
+            GEMV_B_Q80 => "gemm_skinny_q8_0",
+            _ => return None,
+        })
+    }
+
     /// `y[b][row] = W[row,:] . x[b][:]` for `batch` rows, one weight pass.
     ///
-    /// `x` is `[batch][k]`, `y` is `[batch][m]`. The `_b` kernels keep each
-    /// row's accumulation order identical to the single-sequence GEMV, so this
-    /// is a throughput change, not a numerics change.
+    /// `x` is `[batch][k]`, `y` is `[batch][m]`. Measured (docs/review.md,
+    /// WP33): the f32-from-LDS `_b` kernels stream 381 GB/s at B=2, 272 at B=4
+    /// and 154 at B=8; the WMMA skinny GEMM is flat at ~400 GB/s over the whole
+    /// R range because R is padded to one 16-wide tile. So B >= 4 uses it and
+    /// B <= 3 keeps the `_b` kernels. `HIPML_BATCH_SKINNY=1` forces the skinny
+    /// path at any batch, `HIPML_BATCH_LEGACY=1` forces `_b`;
+    /// `HIPML_BATCH_SKINNY_TRACE=1` names every switched projection.
+    ///
+    /// Above 16 rows the tile runs once per 16-row group; each group is an
+    /// independent weight pass, so cost scales with `ceil(batch / 16)`.
     #[allow(clippy::too_many_arguments)]
     pub fn gemv_batched(
         &self,
@@ -59,8 +76,50 @@ impl Launcher {
         k: usize,
         batch: usize,
     ) -> Result<(), String> {
-        if batch == 0 || batch > 8 {
-            return Err(format!("batched GEMV: batch {batch} outside 1..=8"));
+        if batch == 0 || batch > 32 {
+            return Err(format!("batched GEMV: batch {batch} outside 1..=32"));
+        }
+        /// Lowest batch size where one 16-wide WMMA tile beats `batch` columns
+        /// of the f32-from-LDS kernel. Measured crossover; below it the tile is
+        /// mostly padding.
+        const SKINNY_MIN_BATCH: usize = 4;
+        let skinny = if std::env::var_os("HIPML_BATCH_LEGACY").is_some() {
+            false
+        } else {
+            std::env::var_os("HIPML_BATCH_SKINNY").is_some() || batch >= SKINNY_MIN_BATCH
+        };
+        if skinny {
+            if let Some(entry) = Self::skinny_for_kind(kind) {
+                let mut base = 0usize;
+                while base < batch {
+                    let r = (batch - base).min(16);
+                    if std::env::var_os("HIPML_BATCH_SKINNY_TRACE").is_some() {
+                        eprintln!("[skinny] {entry} m={m} k={k} r={r} row0={base}");
+                    }
+                    let px = unsafe {
+                        (x.as_ptr() as *mut u8).add(base * k * 4) as *const _
+                    };
+                    let py = unsafe {
+                        (y.as_ptr() as *mut u8).add(base * m * 4) as *const _
+                    };
+                    super::skinny_launch::skinny_resident_rows(
+                        &self.module,
+                        &self.stream,
+                        entry,
+                        w,
+                        px,
+                        py,
+                        m,
+                        k,
+                        r,
+                    )?;
+                    base += r;
+                }
+                return Ok(());
+            }
+        }
+        if batch > 8 {
+            return Err(format!("legacy batched GEMV covers at most 8 rows, got {batch}"));
         }
         let (entry, rows, tile) = match kind {
             GEMV_B_Q4K => ("gemv_q4_k_b", 16usize, if batch <= 4 { 1024 } else { 512 }),

@@ -314,6 +314,33 @@ pub const KERNELS: &[KernelSpec] = &[
         entry: "gemm_rows_f32",
         kind: KernelKind::Linear { block: 256 },
     },
+    // Skinny quantized GEMM (WP33): R <= 16 activation rows against one 16-wide
+    // WMMA tile. `rows` must equal the kernel's `PWS_RT` (32) or the launch grid
+    // silently halves.
+    KernelSpec {
+        name: "gemm_skinny_q4_k",
+        entry: "gemm_skinny_q4_k",
+        kind: KernelKind::RowTile {
+            rows: 32,
+            block: 128,
+        },
+    },
+    KernelSpec {
+        name: "gemm_skinny_q6_k",
+        entry: "gemm_skinny_q6_k",
+        kind: KernelKind::RowTile {
+            rows: 32,
+            block: 128,
+        },
+    },
+    KernelSpec {
+        name: "gemm_skinny_q8_0",
+        entry: "gemm_skinny_q8_0",
+        kind: KernelKind::RowTile {
+            rows: 32,
+            block: 128,
+        },
+    },
     KernelSpec {
         name: "stream_read",
         entry: "stream_read",
@@ -569,6 +596,17 @@ pub fn stream_entry(name: &'static str) -> &'static str {
         "gemv_q6_k" => "gemv_q6_k_r1",
         other => other,
     }
+}
+
+/// The skinny-GEMM entry for a resident block format (`None` for formats with
+/// no such kernel, e.g. Q5_K). `R <= 16` columns, `y[r, :] = W @ x[r, :]`.
+pub fn skinny_entry(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "gemv_q4_k" | "gemm_skinny_q4_k" => "gemm_skinny_q4_k",
+        "gemv_q6_k" | "gemm_skinny_q6_k" => "gemm_skinny_q6_k",
+        "gemv_q8_0" | "gemm_skinny_q8_0" => "gemm_skinny_q8_0",
+        _ => return None,
+    })
 }
 
 pub fn spec(name: &str) -> Option<&'static KernelSpec> {

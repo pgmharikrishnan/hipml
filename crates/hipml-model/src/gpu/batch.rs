@@ -147,8 +147,8 @@ impl<'a> BatchEngine<'a> {
         kv_mode: KvMode,
         slots: usize,
     ) -> Result<BatchEngine<'a>, String> {
-        if slots == 0 || slots > 8 {
-            return Err(format!("slots={slots}: batched kernels cover 1..=8"));
+        if slots == 0 || slots > 32 {
+            return Err(format!("slots={slots}: batched kernels cover 1..=32"));
         }
         if kv_mode == KvMode::F32 {
             return Err("batch decode needs --kv q8 or q4 (the f32 cache is the single-stream oracle)".to_string());

@@ -26,6 +26,8 @@ pub(crate) mod device {
     pub use prefill_launch::{gemm_rows_f32, prefill_resident};
     #[path = "quant_launch.rs"]
     mod quant_launch;
+    #[path = "skinny_launch.rs"]
+    mod skinny_launch;
     #[path = "stream_launch.rs"]
     mod stream_launch;
     pub use stream_launch::ReadJob;
