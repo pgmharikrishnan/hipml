@@ -118,9 +118,6 @@ impl Launcher {
                 return Ok(());
             }
         }
-        if batch > 8 && Self::skinny_for_kind(kind).is_some() {
-            return Err(format!("skinny GEMV did not handle batch {batch}"));
-        }
         let (entry, rows, tile, tid) = match kind {
             GEMV_B_Q4K => ("gemv_q4_k_b", 16usize, 1024usize, 256u32),
             GEMV_B_Q6K => ("gemv_q6_k_b", 16, 1024, 256),
