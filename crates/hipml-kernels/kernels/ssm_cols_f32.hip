@@ -13,9 +13,11 @@
 //   ssm_gate_norm_cols_f32 one block per (row, head)
 //
 // `gdn_cols_f32` and `ssm_conv1d_cols_f32` also write the recurrent state after
-// column `r < rows-1` into a snapshot scratch (`[rows-1][state_len]`), which is
-// what a rejected draft restores. The snapshot is the same state the previous
-// path memcpy'd after each column, written where it is produced.
+// column `r < rows-1` into a snapshot scratch, which is what a rejected draft
+// restores. The snapshots are `[columns][layers][state_len]`: a layer's base
+// pointer plus `snap_stride` floats per column. The value written is the same
+// state the previous path memcpy'd after each column, written where it is
+// produced.
 
 #include <hip/hip_runtime.h>
 
@@ -60,6 +62,7 @@ extern "C" __global__ void ssm_conv1d_cols_f32(
     float* __restrict__ state,
     float* __restrict__ y,
     float* __restrict__ snap,
+    int snap_stride,
     int channels,
     int d_conv,
     int rows)
@@ -69,7 +72,6 @@ extern "C" __global__ void ssm_conv1d_cols_f32(
 
     const int hist = d_conv - 1;
     const float* wc = w + (size_t)c * d_conv;
-    const size_t conv_len = (size_t)hist * channels;
 
     for (int tok = 0; tok < rows; ++tok) {
         const float* xr = x + (size_t)tok * channels;
@@ -93,7 +95,7 @@ extern "C" __global__ void ssm_conv1d_cols_f32(
         y[(size_t)tok * channels + c] = v / (1.0f + expf(-v));
 
         if (snap != 0 && tok + 1 < rows) {
-            float* sp = snap + (size_t)tok * conv_len;
+            float* sp = snap + (size_t)tok * (size_t)snap_stride;
             for (int k = 0; k < hist; ++k) {
                 sp[(size_t)k * channels + c] = state[(size_t)k * channels + c];
             }
@@ -149,6 +151,7 @@ extern "C" __global__ void gdn_cols_f32(
     const float* __restrict__ beta,
     float* __restrict__ out,
     float* __restrict__ snap,
+    int snap_stride,
     int n_v,
     int n_k,
     int qkv_stride,
@@ -210,7 +213,7 @@ extern "C" __global__ void gdn_cols_f32(
             }
 
             if (snap != 0 && tok + 1 < rows) {
-                float* sp = snap + (size_t)tok * (size_t)n_v * head_len +
+                float* sp = snap + (size_t)tok * (size_t)snap_stride +
                             (size_t)h * head_len + (size_t)j * sd;
                 #pragma unroll
                 for (int t = 0; t < SC_MAXV; ++t) {

@@ -437,6 +437,11 @@ impl<'a> GpuEngine<'a> {
         &self.logits
     }
 
+    /// Vocabulary width (`n_vocab`), the row width of `logits`.
+    pub fn n_vocab(&self) -> usize {
+        self.cfg.n_vocab
+    }
+
     /// The post-`output_norm` hidden row of the last plain decode step.
     pub fn final_hidden(&self) -> &Buffer {
         &self.final_h

@@ -11,9 +11,9 @@ impl<'a> SsmGpuLayer<'a> {
     /// gated RMS norm over `rows` columns.
     ///
     /// `conv_snap` / `s_snap` receive the carried state after each column but
-    /// the last (`[rows-1][state_len]`), or may be null when `rows == 1`. They
-    /// are written by the kernels that produce the state, so the verify pass
-    /// needs no per-column memcpy.
+    /// the last, or may be null when `rows == 1`. They are `[columns][layers]`
+    /// blocks with `snap_layers` layers, written by the kernels that produce the
+    /// state, so the verify pass needs no per-column memcpy.
     #[allow(clippy::too_many_arguments)]
     pub fn recurrent_cols(
         &self,
@@ -29,14 +29,17 @@ impl<'a> SsmGpuLayer<'a> {
         gated: &Buffer,
         conv_snap: *mut c_void,
         s_snap: *mut c_void,
+        snap_layers: usize,
     ) -> Result<(), String> {
         let d = &self.dims;
+        let conv_stride = snap_layers * (d.d_conv - 1) * d.conv_ch;
+        let s_stride = snap_layers * d.n_v * d.head_v * d.head_v;
         self.gates_cols(rows, alpha, beta, g, beta_sig)?;
-        self.conv_cols(rows, qkv, conv, conv_snap)?;
+        self.conv_cols(rows, qkv, conv, conv_snap, conv_stride)?;
         let base = conv.as_ptr();
         self.l2norm_cols(base, 0, rows)?;
         self.l2norm_cols(base, d.key_dim(), rows)?;
-        self.gdn_cols(rows, conv, g, beta_sig, o, s_snap)?;
+        self.gdn_cols(rows, conv, g, beta_sig, o, s_snap, s_stride)?;
         self.gate_norm_cols(rows, o, z, gated)
     }
 
@@ -81,6 +84,7 @@ impl<'a> SsmGpuLayer<'a> {
         qkv: &Buffer,
         conv: &Buffer,
         snap: *mut c_void,
+        snap_stride: usize,
     ) -> Result<(), String> {
         let d = &self.dims;
         let kernel = self.module.kernel("ssm_conv1d_cols_f32")?;
@@ -89,15 +93,17 @@ impl<'a> SsmGpuLayer<'a> {
         let mut p_state = self.conv_state.as_ptr();
         let mut p_y = conv.as_ptr();
         let mut p_snap = snap;
+        let mut v_stride = snap_stride as i32;
         let mut v_c = d.conv_ch as i32;
         let mut v_k = d.d_conv as i32;
         let mut v_rows = rows as i32;
-        let mut params: [*mut c_void; 8] = [
+        let mut params: [*mut c_void; 9] = [
             &mut p_x as *mut _ as *mut c_void,
             &mut p_w as *mut _ as *mut c_void,
             &mut p_state as *mut _ as *mut c_void,
             &mut p_y as *mut _ as *mut c_void,
             &mut p_snap as *mut _ as *mut c_void,
+            &mut v_stride as *mut _ as *mut c_void,
             &mut v_c as *mut _ as *mut c_void,
             &mut v_k as *mut _ as *mut c_void,
             &mut v_rows as *mut _ as *mut c_void,
@@ -147,6 +153,7 @@ impl<'a> SsmGpuLayer<'a> {
         beta: &Buffer,
         o: &Buffer,
         snap: *mut c_void,
+        snap_stride: usize,
     ) -> Result<(), String> {
         let d = &self.dims;
         let kernel = self.module.kernel("gdn_cols_f32")?;
@@ -156,22 +163,24 @@ impl<'a> SsmGpuLayer<'a> {
         let mut p_beta = beta.as_ptr();
         let mut p_out = o.as_ptr();
         let mut p_snap = snap;
+        let mut v_stride = snap_stride as i32;
         let mut v_nv = d.n_v as i32;
         let mut v_nk = d.n_k as i32;
-        let mut v_stride = d.conv_ch as i32;
+        let mut v_qkv = d.conv_ch as i32;
         let mut v_key = d.key_dim() as i32;
         let mut v_sd = d.head_v as i32;
         let mut v_rows = rows as i32;
-        let mut params: [*mut c_void; 12] = [
+        let mut params: [*mut c_void; 13] = [
             &mut p_s as *mut _ as *mut c_void,
             &mut p_qkv as *mut _ as *mut c_void,
             &mut p_g as *mut _ as *mut c_void,
             &mut p_beta as *mut _ as *mut c_void,
             &mut p_out as *mut _ as *mut c_void,
             &mut p_snap as *mut _ as *mut c_void,
+            &mut v_stride as *mut _ as *mut c_void,
             &mut v_nv as *mut _ as *mut c_void,
             &mut v_nk as *mut _ as *mut c_void,
-            &mut v_stride as *mut _ as *mut c_void,
+            &mut v_qkv as *mut _ as *mut c_void,
             &mut v_key as *mut _ as *mut c_void,
             &mut v_sd as *mut _ as *mut c_void,
             &mut v_rows as *mut _ as *mut c_void,

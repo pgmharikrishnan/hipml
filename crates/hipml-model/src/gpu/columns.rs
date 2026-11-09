@@ -62,11 +62,14 @@ pub(crate) struct Cols {
     pub arg_out: Buffer,
 }
 
-/// The recurrent state of every GDN layer after one verify column.
+/// The recurrent state of every GDN layer after every verify column.
 ///
-/// Both buffers are layer-major: `[n_ssm][state_len]`, so a stage kernel gets
-/// one pointer per layer and writes the column's row in place.
+/// Layout is `[cols][n_ssm][state_len]`: a stage kernel gets the layer's base
+/// pointer (`snap + layer*len`) and one column stride (`n_ssm*len`), so it
+/// writes each column's row in place and the verify pass needs no per-column
+/// memcpy.
 pub struct Snap {
+    pub cols: usize,
     pub conv: Buffer,
     pub s: Buffer,
 }
@@ -122,17 +125,14 @@ impl Cols {
 }
 
 impl<'a> GpuEngine<'a> {
-    /// Allocate `count` recurrent-state snapshots (one per rollback column).
-    pub fn alloc_snapshots(&self, count: usize) -> Result<Vec<Snap>, String> {
+    /// Allocate a snapshot set for up to `count` verify columns.
+    pub fn alloc_snapshots(&self, count: usize) -> Result<Snap, String> {
         let (n_ssm, conv_len, st_len) = self.snap_lens()?;
-        let mut out = Vec::with_capacity(count);
-        for _ in 0..count {
-            out.push(Snap {
-                conv: Buffer::alloc((n_ssm * conv_len).max(1))?,
-                s: Buffer::alloc((n_ssm * st_len).max(1))?,
-            });
-        }
-        Ok(out)
+        Ok(Snap {
+            cols: count,
+            conv: Buffer::alloc((count * n_ssm * conv_len).max(1))?,
+            s: Buffer::alloc((count * n_ssm * st_len).max(1))?,
+        })
     }
 
     /// `(SSM layers, conv-window floats per layer, delta-net floats per layer)`.
@@ -154,17 +154,30 @@ impl<'a> GpuEngine<'a> {
         Ok((n, conv, st))
     }
 
-    /// Restore every GDN layer from `snap`, stream-ordered.
-    pub fn restore_ssm(&self, snap: &Snap) -> Result<(), String> {
+    /// Restore every GDN layer's state from column `col` of `snap`,
+    /// stream-ordered.
+    pub fn restore_ssm(&self, snap: &Snap, col: usize) -> Result<(), String> {
+        let (n_ssm, _, _) = self.snap_lens()?;
+        if col >= snap.cols {
+            return Err(format!("snapshot column {col} beyond {}", snap.cols));
+        }
         let l = self.model.launcher();
         let mut i = 0;
         for b in &self.layers {
             if let BlockKind::Ssm(s) = &b.kind {
                 let (cl, sl) = s.state_lens();
-                s.conv_state_buf()
-                    .copy_from_device_on_at(&snap.conv, i * cl, cl, l.stream())?;
-                s.s_state_buf()
-                    .copy_from_device_on_at(&snap.s, i * sl, sl, l.stream())?;
+                s.conv_state_buf().copy_from_device_on_at(
+                    &snap.conv,
+                    (col * n_ssm + i) * cl,
+                    cl,
+                    l.stream(),
+                )?;
+                s.s_state_buf().copy_from_device_on_at(
+                    &snap.s,
+                    (col * n_ssm + i) * sl,
+                    sl,
+                    l.stream(),
+                )?;
                 i += 1;
             }
         }
@@ -180,32 +193,29 @@ impl<'a> GpuEngine<'a> {
         &mut self,
         tokens: &[u32],
         st: &mut GpuState,
-        snaps: &mut [Snap],
+        snaps: &mut Snap,
     ) -> Result<Vec<u32>, String> {
         let rows = tokens.len();
         if rows == 0 {
             return Err("no columns".to_string());
         }
         self.ensure_cols(rows)?;
-        if rows > 1 && snaps.len() < rows - 1 {
-            return Err(format!("{} snapshots for {rows} columns", snaps.len()));
+        if rows > 1 && snaps.cols < rows - 1 {
+            return Err(format!("{} snapshot columns for {rows} columns", snaps.cols));
         }
         let cfg = self.cfg.clone();
         let n = cfg.n_embd;
         let pos0 = st.pos;
         let l = self.model.launcher();
         let embed = self.embed;
-        let (conv_len, st_len) = {
-            let (_, cl, sl) = self.snap_lens()?;
-            (cl, sl)
-        };
+        let (n_ssm, conv_len, st_len) = self.snap_lens()?;
         let snap_conv = if rows > 1 {
-            snaps[0].conv.as_ptr()
+            snaps.conv.as_ptr()
         } else {
             std::ptr::null_mut()
         };
         let snap_s = if rows > 1 {
-            snaps[0].s.as_ptr()
+            snaps.s.as_ptr()
         } else {
             std::ptr::null_mut()
         };
@@ -243,6 +253,7 @@ impl<'a> GpuEngine<'a> {
                         &c.s_gated,
                         conv_snap,
                         s_snap,
+                        n_ssm,
                     )?;
                     ssm_idx += 1;
                     super::trace::mark(&mut self.trace, l, "ssm_rec")?;

@@ -138,7 +138,7 @@ pub fn bench(args: &[String]) -> i32 {
                 return 1;
             }
         };
-        let mut snaps = match engine.alloc_snapshots(cols) {
+        let mut snaps = match engine.alloc_snapshots(cols.saturating_sub(1).max(1)) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("column-bench: snapshots: {e}");
@@ -323,7 +323,7 @@ fn check(model: &Model, prompt: &[u32], a: &Args, n_ctx: usize, chunk: usize) ->
                 return 1;
             }
         };
-        nv = got.len() / a.cols;
+        nv = col_eng.n_vocab();
         for (r, want) in reference.iter().enumerate() {
             let have = &got[r * nv..(r + 1) * nv];
             rows += 1;

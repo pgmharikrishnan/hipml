@@ -169,7 +169,7 @@ impl<'a> GpuEngine<'a> {
             // 6. Roll back to the state after column `a`, then move `pos` to
             //    the first position the next step will append.
             if a < drafts {
-                self.restore_ssm(&snaps[a])?;
+                self.restore_ssm(&snaps, a)?;
             }
             st.pos = pos0 + a + 1;
 
