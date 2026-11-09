@@ -62,6 +62,22 @@ mod tests {
     }
 
     #[test]
+    fn preserve_thinking_false_keeps_the_post_query_turn() {
+        // `loop.index0 > last_query_index` in the template: an assistant turn
+        // after the last real user query keeps its <think> block.
+        let msgs = [
+            Message::new("user", "q"),
+            Message::assistant_with_reasoning("a", "why"),
+        ];
+        let opts = ChatOptions {
+            preserve_thinking: false,
+            ..ChatOptions::default()
+        };
+        let out = render(TEMPLATE, &msgs, &opts).unwrap();
+        assert!(out.contains("<|im_start|>assistant\n<think>\nwhy\n</think>\n\na"));
+    }
+
+    #[test]
     fn tool_calls_follow_content() {
         let call = ToolCall {
             name: "get_weather".into(),
