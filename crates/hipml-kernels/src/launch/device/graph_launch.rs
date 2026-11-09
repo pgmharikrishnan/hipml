@@ -58,12 +58,13 @@ impl Launcher {
 
     /// `y[b][row] = W[row,:] . x[b][:]` for `batch` rows, one weight pass.
     ///
-    /// `x` is `[batch][k]`, `y` is `[batch][m]`. The f32-from-LDS `_b` kernels
-    /// are the default: they stream the weight at ~271 GB/s at B=4, whereas the
-    /// WMMA skinny GEMM stages the dequantised weight through shared memory at
-    /// only ~68 GB/s (see docs/review.md, WP33), so it is a 3-4x regression at
-    /// every batch size. `HIPML_BATCH_SKINNY=1` selects it for A/B work and for
-    /// the MTP verify path, where the cost curve is what matters.
+    /// `x` is `[batch][k]`, `y` is `[batch][m]`. Measured (docs/review.md,
+    /// WP33): the f32-from-LDS `_b` kernels stream 381 GB/s at B=2, 272 at B=4
+    /// and 154 at B=8; the WMMA skinny GEMM is flat at ~410 GB/s over the whole
+    /// R range because R is padded to one 16-wide tile. So B >= 4 uses it and
+    /// B <= 3 keeps the `_b` kernels. `HIPML_BATCH_SKINNY=1` forces the skinny
+    /// path at any batch, `HIPML_BATCH_LEGACY=1` forces `_b`;
+    /// `HIPML_BATCH_SKINNY_TRACE=1` names every switched projection.
     #[allow(clippy::too_many_arguments)]
     pub fn gemv_batched(
         &self,
@@ -78,10 +79,17 @@ impl Launcher {
         if batch == 0 || batch > 8 {
             return Err(format!("batched GEMV: batch {batch} outside 1..=8"));
         }
-        if batch <= 16 && std::env::var_os("HIPML_BATCH_SKINNY").is_some() {
+        /// Lowest batch size where one 16-wide WMMA tile beats `batch` columns
+        /// of the f32-from-LDS kernel. Measured crossover; below it the tile is
+        /// mostly padding.
+        const SKINNY_MIN_BATCH: usize = 4;
+        let skinny = if std::env::var_os("HIPML_BATCH_LEGACY").is_some() {
+            false
+        } else {
+            std::env::var_os("HIPML_BATCH_SKINNY").is_some() || batch >= SKINNY_MIN_BATCH
+        };
+        if skinny && batch <= 16 {
             if let Some(entry) = Self::skinny_for_kind(kind) {
-                // One line per call, for the A/B: a silent fall-through has
-                // burned this before, so the log names every switched entry.
                 if std::env::var_os("HIPML_BATCH_SKINNY_TRACE").is_some() {
                     eprintln!("[skinny] {entry} m={m} k={k} r={batch}");
                 }
