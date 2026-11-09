@@ -19,6 +19,8 @@ pub mod ssm_launch;
 #[cfg(feature = "hip")]
 mod ssm_ops;
 #[cfg(feature = "hip")]
+mod ssm_cols;
+#[cfg(feature = "hip")]
 mod ssm_chunk;
 
 pub use attn_gpu::AttnLayer;
@@ -58,6 +60,32 @@ pub fn batch_kind_for(kind: hipml_core::mat::Kind) -> Option<i32> {
 #[cfg(not(feature = "hip"))]
 pub fn batch_kind_for(_kind: hipml_core::mat::Kind) -> Option<i32> {
     None
+}
+
+/// The batched-GEMV kind for a resident GEMV entry name.
+#[cfg(feature = "hip")]
+pub fn batch_kind_entry(entry: &str) -> Option<i32> {
+    use launch::{GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
+    Some(match entry {
+        "gemv_q4_k" => GEMV_B_Q4K,
+        "gemv_q6_k" => GEMV_B_Q6K,
+        "gemv_q5_k" => GEMV_B_Q5K,
+        "gemv_q8_0" => GEMV_B_Q80,
+        _ => return None,
+    })
+}
+
+/// Without the `hip` feature no batched kernel exists.
+#[cfg(not(feature = "hip"))]
+pub fn batch_kind_entry(_entry: &str) -> Option<i32> {
+    None
+}
+
+/// Whether the opt-in WMMA skinny verify path is on (`HIPML_SKINNY=1`).
+/// Cached: the verify pass asks once per projection.
+pub fn skinny_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("HIPML_SKINNY").is_some())
 }
 
 /// How a kernel is gridded.
@@ -194,6 +222,24 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "gemv_q8_0",
         entry: "gemv_q8_0",
         kind: KernelKind::PerRow { block: 256 },
+    },
+    // WP33 WMMA skinny GEMM: `R <= 16` activation rows in one weights pass.
+    // `rows` must equal the kernel's PWS_RT (32), block its PWS_THREADS (128);
+    // a mismatch silently halves the grid.
+    KernelSpec {
+        name: "gemm_skinny_q4_k",
+        entry: "gemm_skinny_q4_k",
+        kind: KernelKind::RowTile { rows: 32, block: 128 },
+    },
+    KernelSpec {
+        name: "gemm_skinny_q6_k",
+        entry: "gemm_skinny_q6_k",
+        kind: KernelKind::RowTile { rows: 32, block: 128 },
+    },
+    KernelSpec {
+        name: "gemm_skinny_q8_0",
+        entry: "gemm_skinny_q8_0",
+        kind: KernelKind::RowTile { rows: 32, block: 128 },
     },
     KernelSpec {
         name: "dequant_q4_k_f32",
@@ -437,34 +483,6 @@ pub const KERNELS: &[KernelSpec] = &[
         entry: "gemm_rows_f32",
         kind: KernelKind::Linear { block: 256 },
     },
-    // Skinny quantized GEMM: R <= 16 activation rows, one 16-wide WMMA tile in
-    // the token dimension, `PWS_RT` output rows x `PWS_KW` k values per block.
-    // The bench and the MTP verify share these; every kind runs the same
-    // parity case.
-    KernelSpec {
-        name: "gemm_skinny_q4_k",
-        entry: "gemm_skinny_q4_k",
-        kind: KernelKind::RowTile {
-            rows: 32,
-            block: 128,
-        },
-    },
-    KernelSpec {
-        name: "gemm_skinny_q6_k",
-        entry: "gemm_skinny_q6_k",
-        kind: KernelKind::RowTile {
-            rows: 32,
-            block: 128,
-        },
-    },
-    KernelSpec {
-        name: "gemm_skinny_q8_0",
-        entry: "gemm_skinny_q8_0",
-        kind: KernelKind::RowTile {
-            rows: 32,
-            block: 128,
-        },
-    },
     KernelSpec {
         name: "stream_read",
         entry: "stream_read",
@@ -702,6 +720,66 @@ pub const KERNELS: &[KernelSpec] = &[
     // a second of work; `hipml parity --deep` runs it.
     kv_case("attn_decode_kv_q8_hd256_s100000", "attn_decode_kv_q8"),
     kv_case("attn_decode_kv_q4_hd256_s100000", "attn_decode_kv_q4"),
+    // R-column verify: one launch per stage for all of a step's columns. The
+    // f32 path is `attn_decode_cols_f32` + `attn_reduce_cols_f32`; the GDN
+    // chain is the `*_cols_*` family. They are checked end to end by
+    // `column-bench --check`, which compares each verify column against the
+    // one-column decode at the same position, bit for bit.
+    KernelSpec {
+        name: "attn_decode_cols_f32",
+        entry: "attn_decode_cols_f32",
+        kind: KernelKind::SplitK,
+    },
+    KernelSpec {
+        name: "attn_reduce_cols_f32",
+        entry: "attn_reduce_cols_f32",
+        kind: KernelKind::SplitK,
+    },
+    KernelSpec {
+        name: "kv_append_cols_f32",
+        entry: "kv_append_cols_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "qg_split_cols_f32",
+        entry: "qg_split_cols_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
+    KernelSpec {
+        name: "head_rmsnorm_cols_f32",
+        entry: "head_rmsnorm_cols_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
+    KernelSpec {
+        name: "mrope_cols_f32",
+        entry: "mrope_cols_f32",
+        kind: KernelKind::PerHead { block: 32 },
+    },
+    KernelSpec {
+        name: "ssm_gates_cols_f32",
+        entry: "ssm_gates_cols_f32",
+        kind: KernelKind::Linear { block: 64 },
+    },
+    KernelSpec {
+        name: "ssm_conv1d_cols_f32",
+        entry: "ssm_conv1d_cols_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "l2norm_cols_f32",
+        entry: "l2norm_cols_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
+    KernelSpec {
+        name: "gdn_cols_f32",
+        entry: "gdn_cols_f32",
+        kind: KernelKind::PerHead { block: 128 },
+    },
+    KernelSpec {
+        name: "ssm_gate_norm_cols_f32",
+        entry: "ssm_gate_norm_cols_f32",
+        kind: KernelKind::PerHead { block: 256 },
+    },
 ];
 
 const fn kv_case(name: &'static str, entry: &'static str) -> KernelSpec {

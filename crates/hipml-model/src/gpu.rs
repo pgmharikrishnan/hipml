@@ -57,10 +57,19 @@ mod batch;
 pub use batch::{BatchEngine, SlotPool};
 #[path = "gpu/prefix.rs"]
 mod prefix;
+#[path = "gpu/columns.rs"]
+mod columns;
+#[path = "gpu/mtp.rs"]
+mod mtp;
+#[path = "gpu/spec.rs"]
+mod spec;
 
 use layers::{build_attn, build_ssm};
 use trace::mark;
 
+pub use columns::Snap;
+pub use mtp::MtpGpu;
+pub use spec::{SpecRun, SpecStats};
 pub use prefill::PrefillReport;
 pub use prefix::PrefixHit;
 
@@ -128,6 +137,8 @@ pub struct GpuState {
 pub struct GpuEngine<'a> {
     model: &'a Model,
     pub cfg: Config,
+    /// Positions the caches were sized for.
+    pub n_ctx: usize,
     pub kv_mode: KvMode,
     layers: Vec<Block<'a>>,
     output_norm: Buffer,
@@ -156,6 +167,8 @@ pub struct GpuEngine<'a> {
     pub trace: Option<Trace>,
     /// Prefix snapshots (SSM recurrent state + f32 KV rows), when enabled.
     prefix: Option<hipml_core::prefix_cache::PrefixCache<prefix::Snapshot>>,
+    /// R-column verify scratch, allocated on first use and reused after.
+    cols: Option<columns::Cols>,
 }
 
 /// Blocks the device argmax reduces over before the one-block fold. 64 blocks
@@ -236,6 +249,7 @@ impl<'a> GpuEngine<'a> {
         Ok(GpuEngine {
             model,
             cfg: cfg.clone(),
+            n_ctx,
             kv_mode,
             layers,
             output_norm,
@@ -256,6 +270,7 @@ impl<'a> GpuEngine<'a> {
             graph: None,
             trace: None,
             prefix: None,
+            cols: None,
         })
     }
 
@@ -335,7 +350,7 @@ impl<'a> GpuEngine<'a> {
         l.embed_row_q4_k_dev(self.embed.0, self.embed.1, &self.x, cfg.n_embd)?;
         mark(&mut self.trace, l, "embed")?;
 
-        for i in 0..self.layers.len() {
+        for i in 0..layer_limit(self.layers.len()) {
             let block = &self.layers[i];
             let block_out: &Buffer = match &block.kind {
                 BlockKind::Ssm(s) => {
@@ -352,7 +367,13 @@ impl<'a> GpuEngine<'a> {
                 BlockKind::Full { attn, deep: None } => {
                     l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
                     mark(&mut self.trace, l, "attn_in")?;
-                    attn.forward_buf(l, &self.t, pos)?;
+                    attn.prepare_qkv(l, &self.t)?;
+                    mark(&mut self.trace, l, "attn_append")?;
+                    attn.append_at(l, attn.k_buf().as_ptr(), attn.v_buf().as_ptr())?;
+                    mark(&mut self.trace, l, "attn_mix")?;
+                    attn.attention_at(l, attn.q_buf().as_ptr(), attn.attn_out().as_ptr(), pos)?;
+                    mark(&mut self.trace, l, "attn_wo")?;
+                    attn.apply_output(l)?;
                     mark(&mut self.trace, l, "block")?;
                     attn.output()
                 }
@@ -414,6 +435,31 @@ impl<'a> GpuEngine<'a> {
         self.model
     }
 
+    /// The logits row of the last plain decode step (`[n_vocab]`).
+    pub fn logits(&self) -> &Buffer {
+        &self.logits
+    }
+
+    /// Vocabulary width (`n_vocab`), the row width of `logits`.
+    pub fn n_vocab(&self) -> usize {
+        self.cfg.n_vocab
+    }
+
+    /// Hidden width (`n_embd`), the row width of `final_hidden`.
+    pub fn n_embd(&self) -> usize {
+        self.cfg.n_embd
+    }
+
+    /// The residual stream after the last layer of the last plain decode step.
+    pub fn residual_x(&self) -> &Buffer {
+        &self.x
+    }
+
+    /// The post-`output_norm` hidden row of the last plain decode step.
+    pub fn final_hidden(&self) -> &Buffer {
+        &self.final_h
+    }
+
     /// Resident attention-cache bytes at the configured depth.
     pub fn kv_bytes(&self, depth: usize) -> usize {
         self.layers
@@ -461,4 +507,14 @@ fn deep_attention(
         attn.q_buf().as_ptr(),
         attn.attn_out().as_ptr(),
     )
+}
+
+/// How many blocks to run: all of them, or `HIPML_LAYERS` (a debug bisect hook
+/// that both `run_token` and `forward_columns` honour).
+pub(crate) fn layer_limit(total: usize) -> usize {
+    std::env::var("HIPML_LAYERS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|n| n.min(total))
+        .unwrap_or(total)
 }

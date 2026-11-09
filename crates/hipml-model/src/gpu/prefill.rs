@@ -206,12 +206,41 @@ impl<'a> GpuEngine<'a> {
         Ok((last, rep.unwrap_or_default()))
     }
 
+    /// Same prefill, but also write every token's post-`output_norm` hidden
+    /// state into `capture` at its absolute row. The speculative driver seeds
+    /// the MTP drafter from these rows.
+    pub fn prefill_chunked_capture(
+        &mut self,
+        tokens: &[u32],
+        st: &mut GpuState,
+        chunk: usize,
+        capture: &Buffer,
+    ) -> Result<u32, String> {
+        let chunk = chunk.min(tokens.len()).max(1);
+        self.ensure_chunk(chunk)?;
+        let mut last = 0u32;
+        for tile in tokens.chunks(chunk) {
+            last = self.forward_chunk_capture(tile, st, &mut None, Some(capture))?;
+        }
+        Ok(last)
+    }
+
     /// One chunk through the whole graph. `st.pos` advances by the chunk length.
     fn forward_chunk(
         &mut self,
         tokens: &[u32],
         st: &mut GpuState,
         rep: &mut Option<PrefillReport>,
+    ) -> Result<u32, String> {
+        self.forward_chunk_capture(tokens, st, rep, None)
+    }
+
+    fn forward_chunk_capture(
+        &mut self,
+        tokens: &[u32],
+        st: &mut GpuState,
+        rep: &mut Option<PrefillReport>,
+        capture: Option<&Buffer>,
     ) -> Result<u32, String> {
         let n_tok = tokens.len();
         let pos0 = st.pos;
@@ -361,6 +390,14 @@ impl<'a> GpuEngine<'a> {
             if let Some(r) = rep.as_mut() {
                 r.lap(l, |r| &mut r.elementwise_ms);
             }
+        }
+
+        // Every row's post-norm hidden state, for the speculative drafter.
+        if let Some(cap) = capture {
+            let dst = unsafe {
+                (cap.as_ptr() as *mut u8).add(pos0 * n * 4) as *mut std::ffi::c_void
+            };
+            l.rmsnorm_ptr(c.x.as_ptr(), &self.output_norm, dst, n, cfg.eps, n_tok)?;
         }
 
         // The chunk's last row is the only one that needs logits.

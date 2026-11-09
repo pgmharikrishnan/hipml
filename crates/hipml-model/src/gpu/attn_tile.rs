@@ -146,7 +146,9 @@ pub(super) fn deep_attention_ptr_on(
     }
     // Chunked prefill is not graph-captured, so size the grid to the positions
     // that exist. The fixed `dk.seq` split count is only needed when the grid
-    // becomes part of a captured graph (the decode path).
+    // becomes part of a captured graph (the decode path). The decode-attention
+    // policy in `DeepKv::splits` picks the warp kernel's 256-part ceiling for
+    // the w2 entry and the staged kernel's 64 otherwise.
     let splits = dk.splits(seq);
     launch_kv::launch_ptrs(
         l.module(),

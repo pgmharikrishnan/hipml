@@ -32,6 +32,14 @@ pub fn skinny_resident(
         crate::KernelKind::RowTile { rows, block } => (rows, block),
         _ => return Err(format!("{name}: not a skinny GEMM kernel")),
     };
+    // The grid row tile is the kernel's PWS_RT; a manifest row count that
+    // disagrees silently halves the grid and looks like a speedup with wrong
+    // output. `gemm_skinny.hip` ships PWS_RT=32, PWS_THREADS=128.
+    assert_eq!(
+        (rows, block),
+        (32, 128),
+        "{name}: manifest geometry must match gemm_skinny.hip's PWS_RT/PWS_THREADS"
+    );
     if k % 32 != 0 {
         return Err(format!("{name}: k={k} must be a multiple of 32"));
     }

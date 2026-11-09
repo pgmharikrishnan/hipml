@@ -367,6 +367,17 @@ impl Launcher {
         }
     }
 
+    /// [`Launcher::residual_buf`] on raw pointers, for one row of a batch.
+    pub fn residual_ptr(
+        &self,
+        a: *mut c_void,
+        b: *mut c_void,
+        y: *mut c_void,
+        n: usize,
+    ) -> Result<(), String> {
+        self.linear3_ptr("residual_add_f32", a, b, y, n)
+    }
+
     /// `y = silu(gate) * up`, one thread per element.
     pub fn silu_mul_buf(
         &self,
@@ -376,6 +387,39 @@ impl Launcher {
         n: usize,
     ) -> Result<(), String> {
         self.linear3("silu_mul_f32", gate, up, y, n)
+    }
+
+    /// [`Launcher::silu_mul_buf`] on raw pointers, for one row of a batch.
+    pub fn silu_mul_ptr(
+        &self,
+        gate: *mut c_void,
+        up: *mut c_void,
+        y: *mut c_void,
+        n: usize,
+    ) -> Result<(), String> {
+        self.linear3_ptr("silu_mul_f32", gate, up, y, n)
+    }
+
+    fn linear3_ptr(
+        &self,
+        name: &str,
+        a: *mut c_void,
+        b: *mut c_void,
+        y: *mut c_void,
+        n: usize,
+    ) -> Result<(), String> {
+        let kernel = self.module.kernel(name)?;
+        let mut p_a = a;
+        let mut p_b = b;
+        let mut p_y = y;
+        let mut v_n = n as i32;
+        let mut params: [*mut c_void; 4] = [
+            &mut p_a as *mut _ as *mut c_void,
+            &mut p_b as *mut _ as *mut c_void,
+            &mut p_y as *mut _ as *mut c_void,
+            &mut v_n as *mut _ as *mut c_void,
+        ];
+        kernel.launch(LaunchConfig::linear(n, 256), &self.stream, &mut params)
     }
 
     /// `out = a * b` elementwise for the two linear kernels above.

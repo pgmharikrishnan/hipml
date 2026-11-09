@@ -25,9 +25,9 @@ extern "C" __global__ void ssm_conv1d_f32(
 
     float acc = 0.0f;
     for (int k = 0; k < hist; ++k) {
-        acc += state[(size_t)k * channels + c] * wc[k];
+        acc = __fmaf_rn(state[(size_t)k * channels + c], wc[k], acc);
     }
-    acc += x[c] * wc[hist];
+    acc = __fmaf_rn(x[c], wc[hist], acc);
     y[c] = acc;
 
     // Slide left, then append the current token. Read-before-write is per

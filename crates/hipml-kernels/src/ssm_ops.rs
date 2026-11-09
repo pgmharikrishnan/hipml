@@ -26,6 +26,95 @@ impl<'a> SsmGpuLayer<'a> {
         Ok(())
     }
 
+    /// The four input projections for `rows` columns, one weight pass each.
+    /// `x`, `qkv`, `z`, `alpha` and `beta` are `[rows][..]` buffers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn project_rows(
+        &self,
+        l: &crate::Launcher,
+        x: &Buffer,
+        rows: usize,
+        qkv: &Buffer,
+        z: &Buffer,
+        alpha: &Buffer,
+        beta: &Buffer,
+    ) -> Result<(), String> {
+        let d = &self.dims;
+        self.gemv_rows(l, &self.wqkv, x, qkv, d.conv_ch, d.n_embd, rows)?;
+        self.gemv_rows(l, &self.wgate, x, z, d.inner(), d.n_embd, rows)?;
+        self.gemv_rows(l, &self.alpha_w, x, alpha, d.n_v, d.n_embd, rows)?;
+        self.gemv_rows(l, &self.beta_w, x, beta, d.n_v, d.n_embd, rows)
+    }
+
+    /// The output projection for `rows` columns.
+    pub fn out_rows(
+        &self,
+        l: &crate::Launcher,
+        gated: &Buffer,
+        out: &Buffer,
+        rows: usize,
+    ) -> Result<(), String> {
+        let d = &self.dims;
+        self.gemv_rows(l, &self.wout, gated, out, d.n_embd, d.inner(), rows)
+    }
+
+    /// One projection over `rows` x-rows: the `_b` kernel when the format has
+    /// one, otherwise a GEMV per row (f32 alpha/beta are tiny).
+    #[allow(clippy::too_many_arguments)]
+    fn gemv_rows(
+        &self,
+        l: &crate::Launcher,
+        w: &SsmWeight<'_>,
+        x: &Buffer,
+        y: &Buffer,
+        m: usize,
+        k: usize,
+        rows: usize,
+    ) -> Result<(), String> {
+        match w {
+            SsmWeight::Quant(b, entry) => {
+                if crate::skinny_on() {
+                    if let Some(name) = crate::skinny_entry(entry) {
+                        return l.run_skinny_resident(name, b, x, y, m, k, rows);
+                    }
+                }
+                if let Some(kind) = crate::batch_kind_entry(entry) {
+                    return l.gemv_batched(kind, b, x, y, m, k, rows);
+                }
+                for c in 0..rows {
+                    l.run_quant_resident_ptr(
+                        entry,
+                        b,
+                        offset(x.as_ptr(), c * k),
+                        offset(y.as_ptr(), c * m),
+                        m,
+                        k,
+                    )?;
+                }
+                Ok(())
+            }
+            SsmWeight::F32(b) => {
+                for c in 0..rows {
+                    let mut p_w = b.as_ptr();
+                    let mut p_x = offset(x.as_ptr(), c * k);
+                    let mut p_y = offset(y.as_ptr(), c * m);
+                    let mut v_m = m as i32;
+                    let mut v_k = k as i32;
+                    let mut params: [*mut c_void; 5] = [
+                        &mut p_w as *mut _ as *mut c_void,
+                        &mut p_x as *mut _ as *mut c_void,
+                        &mut p_y as *mut _ as *mut c_void,
+                        &mut v_m as *mut _ as *mut c_void,
+                        &mut v_k as *mut _ as *mut c_void,
+                    ];
+                    self.k_gemv
+                        .launch(LaunchConfig::per_row(m, 256), self.stream, &mut params)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Everything except the projections: gates, conv, norm, recurrence,
     /// gated RMS norm. This is the compute the recurrent block adds on top of
     /// streaming the weights.
@@ -126,7 +215,7 @@ impl<'a> SsmGpuLayer<'a> {
     }
 
     /// `g = softplus(alpha + dt_bias) * a`, `beta_sig = sigmoid(beta)`.
-    pub(crate) fn gates_at(
+    pub fn gates_at(
         &self,
         alpha: *mut c_void,
         beta: *mut c_void,
@@ -160,7 +249,7 @@ impl<'a> SsmGpuLayer<'a> {
 
     /// `conv_out = silu(conv1d(qkv, state))` in two launches, mirroring the
     /// reference's conv-then-activate pair.
-    pub(crate) fn conv_at(&self, qkv: *mut c_void, conv_out: *mut c_void) -> Result<(), String> {
+    pub fn conv_at(&self, qkv: *mut c_void, conv_out: *mut c_void) -> Result<(), String> {
         let d = &self.dims;
         let mut p_x = qkv;
         let mut p_w = self.conv_w.as_ptr();
@@ -204,7 +293,7 @@ impl<'a> SsmGpuLayer<'a> {
     }
 
     /// In place: the kernel drops `__restrict__` on its two pointers.
-    pub(crate) fn l2norm_at_ptr(
+    pub fn l2norm_at_ptr(
         &self,
         base: *mut c_void,
         off: usize,
@@ -241,7 +330,7 @@ impl<'a> SsmGpuLayer<'a> {
     }
 
     /// One gated-delta-net step over the q|k|v rows of `conv_out`.
-    pub(crate) fn gdn_at(
+    pub fn gdn_at(
         &self,
         conv_out: *mut c_void,
         g: *mut c_void,
@@ -288,7 +377,7 @@ impl<'a> SsmGpuLayer<'a> {
     }
 
     /// `gated = rmsnorm(o, norm) * silu(z)`.
-    pub(crate) fn gate_norm_at(
+    pub fn gate_norm_at(
         &self,
         o: *mut c_void,
         z: *mut c_void,

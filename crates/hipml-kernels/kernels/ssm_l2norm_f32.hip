@@ -26,7 +26,7 @@ extern "C" __global__ void l2norm_f32(
 
     float acc = 0.0f;
     for (int i = t; i < dim; i += L2_BLOCK) {
-        acc += src[i] * src[i];
+        acc = __fmaf_rn(src[i], src[i], acc);
     }
 
     __shared__ float s[L2_BLOCK];
