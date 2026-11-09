@@ -452,6 +452,11 @@ impl<'a> BatchEngine<'a> {
                 block.down.gemm(l, &r.act, &r.down, m)?;
             }
             l.residual_buf(&r.down, &r.x1, &r.x, m * n)?;
+            // Fold the next layer's input norm into the bottom residual, the
+            // way `prefill` does: `t` is then that layer's projection input.
+            if let Some(next) = self.layers.get(i + 1) {
+                l.rmsnorm_rows(&r.x, &next.attn_norm, &r.t, n, cfg.eps, m)?;
+            }
             mark!("ffn");
         }
 
