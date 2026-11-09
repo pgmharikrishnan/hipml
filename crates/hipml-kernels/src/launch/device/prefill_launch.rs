@@ -195,7 +195,8 @@ pub fn prefill_xhalf(
 /// `None` means the path has no converted-activation kernel (f32 or fp16 dot2),
 /// so callers must keep passing the f32 tile.
 pub fn prefill_entry_for_half(name: &str) -> Option<&'static str> {
-    Some(match crate::prefill_entry_for(name)? {
+    let name = crate::prefill_entry_for(name).unwrap_or(name);
+    Some(match name {
         "prefill_q4_k_w2" => "prefill_q4_k_w2h",
         "prefill_q6_k_w2" => "prefill_q6_k_w2h",
         "prefill_q8_0_w2" => "prefill_q8_0_w2h",
