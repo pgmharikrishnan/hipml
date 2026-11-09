@@ -213,20 +213,17 @@ impl<'a> BatchEngine<'a> {
         if total == 0 || total > 128 {
             return Err(format!("verify: {total} rows outside 1..=128"));
         }
-        // Mirror the plain batched step this column would have been: it sizes
-        // the cache split count from the largest position in the batch, so
-        // every column `c` uses `(max_position + c + 1) / 64` for all slots.
-        let max_len = lens.iter().copied().max().unwrap_or(0);
-        let max_pos = self
-            .active
-            .iter()
-            .map(|&s| self.positions[s])
-            .max()
-            .unwrap_or(0);
-        let splits_of: Vec<usize> = (0..max_len)
-            .map(|c| ((max_pos + c + 1) / 64).clamp(1, MAX_SPLITS))
-            .collect();
-        let split_max = splits_of.iter().copied().max().unwrap_or(1);
+        // Each column is the plain batched step it would have been: slot `b`'s
+        // column `c` sits at that slot's position `p0 + c`, and a plain step at
+        // position `p` sizes the cache split count from `(p + 1) / 64`. Slots
+        // advance independently, so this is per slot, not per column.
+        let mut split_max = 1usize;
+        for (bi, &slot) in self.active.iter().enumerate() {
+            let p0 = self.positions[slot];
+            for c in 0..lens[bi] {
+                split_max = split_max.max(((p0 + c + 1) / 64).clamp(1, MAX_SPLITS));
+            }
+        }
         self.ensure_verify(total, split_max)?;
         let cfg = self.cfg.clone();
         let l = self.model.launcher();
@@ -261,7 +258,6 @@ impl<'a> BatchEngine<'a> {
             &lens,
             &base,
             &positions,
-            &splits_of,
             total,
         );
         self.verify = Some(s);
@@ -285,7 +281,6 @@ impl<'a> BatchEngine<'a> {
         lens: &[usize],
         base: &[usize],
         positions: &[usize],
-        splits_of: &[usize],
         m: usize,
     ) -> Result<Vec<u32>, String> {
         let l = self.model.launcher();
@@ -314,6 +309,7 @@ impl<'a> BatchEngine<'a> {
                     let slot_words = dk.slot_bytes() / 4;
                     for b in 0..cols.len() {
                         let slot = self.active[b];
+                        let start = self.positions[slot];
                         let len = lens[b];
                         let first = base[b];
                         // Append every column first, then attend: column c sees
@@ -333,14 +329,16 @@ impl<'a> BatchEngine<'a> {
                             len,
                         )?;
                         // One launch per group of columns whose cache split
-                        // count is the same. The count is a function of the
-                        // column index, so every column is the same arithmetic
-                        // a plain step at that position runs.
+                        // count is the same. The count is a function of this
+                        // slot's position, so every column is the same
+                        // arithmetic a plain step at that position runs.
                         let mut c0 = 0usize;
                         while c0 < len {
-                            let splits = splits_of[c0];
+                            let splits = ((start + c0 + 1) / 64).clamp(1, MAX_SPLITS);
                             let mut c1 = c0 + 1;
-                            while c1 < len && splits_of[c1] == splits {
+                            while c1 < len
+                                && ((start + c1 + 1) / 64).clamp(1, MAX_SPLITS) == splits
+                            {
                                 c1 += 1;
                             }
                             l.attn_decode_rows_ptr(
@@ -470,15 +468,15 @@ impl<'a> BatchEngine<'a> {
                     }
                     let slot = self.active[b];
                     let src = slot * snap.cols * n_ssm;
-                    ssm.conv_state.copy_range_on(
-                        &snap.conv,
+                    snap.conv.copy_range_on(
+                        &ssm.conv_state,
                         src * cl + a * n_ssm * cl + ssm_idx * cl,
                         slot * conv_stride,
                         cl,
                         l.stream(),
                     )?;
-                    ssm.s_state.copy_range_on(
-                        &snap.s,
+                    snap.s.copy_range_on(
+                        &ssm.s_state,
                         src * sl + a * n_ssm * sl + ssm_idx * sl,
                         slot * s_stride,
                         sl,
@@ -515,6 +513,6 @@ impl<'a> BatchEngine<'a> {
             return Err(format!("verify hidden row {row} beyond {}", s.cap));
         }
         let l = self.model.launcher();
-        dst.copy_range_on(&s.final_h, row * width, dst_row * width, width, l.stream())
+        s.final_h.copy_range_on(dst, row * width, dst_row * width, width, l.stream())
     }
 }

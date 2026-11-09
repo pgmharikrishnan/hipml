@@ -186,8 +186,7 @@ impl<'a> MtpBatch<'a> {
             if slot >= self.slots {
                 return Err(format!("seed hidden: slot {slot} outside {}", self.slots));
             }
-            self.hnext
-                .copy_range_on(src, row * width, slot * width, width, l.stream())?;
+            src.copy_range_on(&self.hnext, row * width, slot * width, width, l.stream())?;
         }
         Ok(())
     }
@@ -220,9 +219,9 @@ impl<'a> MtpBatch<'a> {
         l.rmsnorm_rows(&self.hnext, &self.hnorm, &self.hn, n, cfg.eps, b)?;
         let stream = l.stream();
         for i in 0..b {
-            self.cat.copy_range_on(&self.en, i * n, i * 2 * n, n, stream)?;
-            self.cat
-                .copy_range_on(&self.hn, i * n, i * 2 * n + n, n, stream)?;
+            self.en.copy_range_on(&self.cat, i * n, i * 2 * n, n, stream)?;
+            self.hn
+                .copy_range_on(&self.cat, i * n, i * 2 * n + n, n, stream)?;
         }
         self.eh_proj.gemm_batched(l, &self.cat, &self.x, b)?;
         l.rmsnorm_rows(&self.x, &self.attn_norm, &self.t, n, cfg.eps, b)?;
@@ -333,14 +332,13 @@ impl<'a> MtpBatch<'a> {
         l.rmsnorm_rows(&self.emb, &self.enorm, &self.en, n, cfg.eps, total)?;
         // Gather the selected hidden rows into a contiguous tile, then norm.
         for (i, &row) in hidden_rows.iter().enumerate() {
-            self.hn
-                .copy_range_on(hidden, row * width, i * n, n, l.stream())?;
+            hidden.copy_range_on(&self.hn, row * width, i * n, n, l.stream())?;
         }
         l.rmsnorm_rows(&self.hn, &self.hnorm, &self.t, n, cfg.eps, total)?;
         for i in 0..total {
-            self.cat.copy_range_on(&self.en, i * n, i * 2 * n, n, l.stream())?;
-            self.cat
-                .copy_range_on(&self.t, i * n, i * 2 * n + n, n, l.stream())?;
+            self.en.copy_range_on(&self.cat, i * n, i * 2 * n, n, l.stream())?;
+            self.t
+                .copy_range_on(&self.cat, i * n, i * 2 * n + n, n, l.stream())?;
         }
         self.eh_proj.gemm_batched(l, &self.cat, &self.x, total)?;
         l.rmsnorm_rows(&self.x, &self.attn_norm, &self.t, n, cfg.eps, total)?;
