@@ -197,7 +197,7 @@ extern "C" __global__ void gemv_q6_k(
     int k)
 {
     __shared__ __align__(16) float sx[Q6K_K_TILE];
-    q6k_tile<Q6K_ROWS_PER_WARP>(w, x, y, m, k, sx, blockIdx.x);
+    q6k_tile<Q6K_ROWS_PER_WARP>(w, x, y, m, k, sx, blockIdx.x, nullptr);
 }
 
 extern "C" __global__ void gemv_q6_k_r1(
@@ -208,5 +208,5 @@ extern "C" __global__ void gemv_q6_k_r1(
     int k)
 {
     __shared__ __align__(16) float sx[Q6K_K_TILE];
-    q6k_tile<1>(w, x, y, m, k, sx, blockIdx.x);
+    q6k_tile<1>(w, x, y, m, k, sx, blockIdx.x, nullptr);
 }
