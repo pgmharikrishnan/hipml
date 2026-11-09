@@ -21,10 +21,10 @@
 // epilogue.
 //
 // Staging is the whole cost, so it is written for the memory system: four
-// threads per row, eight values each, and the eight payload bytes fetched with
-// the widest load the address alignment allows (one 64-bit load for Q4_K). As
-// eight scalar byte loads a warp instruction touched eight rows with 4 of 32
-// bytes used and the kernel ran at 32 GB/s; see `pws_load8_bytes`.
+// threads per row, eight values each, and every load hoisted so a warp has
+// several in flight. The first version issued one load and waited, which put
+// the kernel at 20 GB/s against the GEMV's 630 on the same weights; see
+// `pws_prep`.
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -40,107 +40,163 @@
 #define PWS_RT 32      // output rows per block
 #endif
 #ifndef PWS_KW
-#define PWS_KW 256     // k values per shared tile
+#define PWS_KW 128     // k values per shared tile
 #endif
 #ifndef PWS_THREADS
 #define PWS_THREADS 128
+#endif
+// Independent WMMA chains per warp. More than a handful buys nothing once
+// blocks are resident and costs a register per accumulator element.
+#ifndef PWS_NACC
+#define PWS_NACC 4
 #endif
 
 typedef _Float16 __attribute__((ext_vector_type(8))) pws_h8;
 typedef float __attribute__((ext_vector_type(8))) pws_f8;
 
-// Eight payload bytes of one row run, one load.
+// Branch-free Q4_K scale/min unpack from the three dwords at b+4, b+8, b+12.
 //
-// This is the difference between 18 GB/s and the memory system's number. Written
-// as eight scalar byte loads, one warp instruction touches eight rows with 4 of
-// 32 bytes used; worse, each load lands in its own basic block, so the compiler
-// drains the memory pipe between them (`s_wait_loadcnt` five times per load).
-// The width is fixed per format, not per address: Q4_K/Q6_K payload runs are
-// 8-aligned whenever the row stride is (the launcher checks that), and Q8_0's
-// runs start 2 bytes into a 34-byte block, so it loads four 16-bit halves.
-template <int KIND>
-static __device__ __forceinline__ void pws_load8_bytes(const unsigned char* __restrict__ p,
-                                                       unsigned int* w)
+// `pf_scale_min` branches on the sub-block index, which is per-lane here
+// (lane's 8 values sit in sub-block lane/4), so the compiler split every group
+// into two exec-masked blocks and drained the memory pipe at each boundary:
+// the ISA showed 80 `s_wait_loadcnt` in the loop body and the kernel ran at
+// 20 GB/s. Same arithmetic, three aligned dword loads, no divergent branch.
+static __device__ __forceinline__ void pws_scale_min(int j, unsigned w0, unsigned w1,
+                                                     unsigned w2, int* sc, int* mn)
 {
-    if (KIND == 0) {
-        // Q4_K payload runs are 8-aligned by construction: 256-value blocks of
-        // 144 bytes, block offsets in the payload of 16 + 32k + 8k.
-        const uint2 v = *reinterpret_cast<const uint2*>(p);
-        w[0] = v.x;
-        w[1] = v.y;
-    } else {
-        // Q6_K blocks are 210 bytes and Q8_0 payloads start at byte 2 of a
-        // 34-byte block, so both are only guaranteed 2-aligned: four 16-bit
-        // loads. All in one basic block, which is what keeps them pipelined.
-        const unsigned short* s = reinterpret_cast<const unsigned short*>(p);
-        w[0] = (unsigned int)s[0] | ((unsigned int)s[1] << 16);
-        w[1] = (unsigned int)s[2] | ((unsigned int)s[3] << 16);
-    }
+    const int k = j & 3;
+    const unsigned ba = (w0 >> (8 * k)) & 0xFF; // b[4+k]
+    const unsigned bb = (w1 >> (8 * k)) & 0xFF; // b[8+k]
+    const unsigned bc = (w2 >> (8 * k)) & 0xFF; // b[12+k]
+    const bool lo = j < 4;
+    *sc = (int)(lo ? (ba & 63) : ((bc & 0xF) | ((ba >> 6) << 4)));
+    *mn = (int)(lo ? (bb & 63) : ((bc >> 4) | ((bb >> 6) << 4)));
 }
 
-// `pf_dequant8` with wide payload loads: same arithmetic, same block layouts,
-// eight contiguous values per lane. Only the load width differs, which is why
-// the parity cases compare it to the same CPU reference.
-template <int KIND>
-static __device__ __forceinline__ void pws_dequant8(const unsigned char* __restrict__ rp,
-                                                    int v, float* out)
+// The raw words for eight contiguous values of one row, loaded by `pws_prep`.
+//
+// The load and the arithmetic are separate calls on purpose. Written as one
+// function, every pass ended up in its own exec-masked block with an
+// `s_wait_loadcnt 0x0` after each load, so a warp had exactly one 8-byte load
+// in flight and the kernel ran at 20 GB/s while the GEMV on the same weights
+// ran at 630. Hoisting the loads into an array of these gives K of them in
+// flight, which is what the memory system needs.
+//
+// Layout per KIND (the byte-level truth is `pf_dequant8`):
+//   Q4_K  r[0] = d | dmin, r[1..3] = the 12 scale bytes, r[4..5] = 8 nibbles
+//   Q6_K  r[0..1] = ql, r[2..3] = qh, r[4] = d, r[5] = sub-block scale
+//   Q8_0  r[0..1] = the 8 quants, r[2] = d
+struct pws_raw {
+    unsigned r[6];
+};
+
+static __device__ __forceinline__ unsigned pws_u16pair(const unsigned char* p)
 {
-    unsigned int w0[2];
-    unsigned int w1[2];
+    const unsigned short* s = reinterpret_cast<const unsigned short*>(p);
+    return (unsigned)s[0] | ((unsigned)s[1] << 16);
+}
+
+// Eight values starting at value index `v` (a multiple of 8): load only.
+template <int KIND>
+static __device__ __forceinline__ void pws_prep(const unsigned char* __restrict__ rp,
+                                                int v, pws_raw& out)
+{
     if (KIND == 0) {
+        // 144-byte blocks, 16-aligned rows: the 16-byte header and the 8-byte
+        // nibble run are both naturally aligned, so each is one load.
         const int blk = v >> 8;
         const int within = v & 255;
         const int sub = within >> 5;
         const int part = (within & 31) >> 3;
         const unsigned char* b = rp + (size_t)blk * PF_Q4K_BLOCK_BYTES;
-        const float d = __half2float(*reinterpret_cast<const __half*>(b));
-        const float dmin = __half2float(*reinterpret_cast<const __half*>(b + 2));
-        int sc, mn;
-        pf_scale_min(sub, b + 4, &sc, &mn);
-        const float scale = d * (float)sc;
-        const float minv = dmin * (float)mn;
-        const bool high = (sub & 1) != 0;
-        pws_load8_bytes<0>(b + 16 + (sub >> 1) * 32 + part * 8, w0);
-#pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            const int byte = (int)((w0[i >> 2] >> (8 * (i & 3))) & 0xFF);
-            const int q = high ? (byte >> 4) : (byte & 0xF);
-            out[i] = scale * (float)q - minv;
-        }
+        const uint4 h = *reinterpret_cast<const uint4*>(b);
+        const uint2 q =
+            *reinterpret_cast<const uint2*>(b + 16 + (sub >> 1) * 32 + part * 8);
+        out.r[0] = h.x;
+        out.r[1] = h.y;
+        out.r[2] = h.z;
+        out.r[3] = h.w;
+        out.r[4] = q.x;
+        out.r[5] = q.y;
     } else if (KIND == 1) {
+        // 210-byte blocks: only 2-aligned, so the runs are read as u16 pairs.
         const int blk = v >> 8;
         const int within = v & 255;
         const int j = within >> 4;
         const int l0 = within & 15;
         const unsigned char* b = rp + (size_t)blk * PF_Q6K_BLOCK_BYTES;
-        const float d = __half2float(*reinterpret_cast<const __half*>(b + 208));
-        const float scale = d * (float)(signed char)b[192 + j];
         const int hf = j >> 3;
         const int s = j & 7;
         const int group = s >> 1;
         const int is = s & 1;
         const int ql_off = hf * 64 + (group & 1) * 32 + is * 16 + l0;
         const int qh_off = 128 + hf * 32 + is * 16 + l0;
-        const int shift = 2 * group;
-        const bool high = group >= 2;
-        pws_load8_bytes<1>(b + ql_off, w0);
-        pws_load8_bytes<1>(b + qh_off, w1);
+        out.r[0] = pws_u16pair(b + ql_off);
+        out.r[1] = pws_u16pair(b + ql_off + 4);
+        out.r[2] = pws_u16pair(b + qh_off);
+        out.r[3] = pws_u16pair(b + qh_off + 4);
+        out.r[4] = (unsigned)*(reinterpret_cast<const unsigned short*>(b + 208));
+        out.r[5] = (unsigned)b[192 + j];
+    } else {
+        // 34-byte blocks: payload starts 2 bytes in, so u16 pairs again.
+        const int blk = v >> 5;
+        const int part = (v & 31) >> 3;
+        const unsigned char* b = rp + (size_t)blk * PF_Q8_0_BLOCK_BYTES;
+        const unsigned char* p = b + 2 + part * 8;
+        out.r[0] = pws_u16pair(p);
+        out.r[1] = pws_u16pair(p + 4);
+        out.r[2] = (unsigned)*(reinterpret_cast<const unsigned short*>(b));
+    }
+}
+
+// The same eight values, arithmetic only. `within` is `(base + wcol) & 255`.
+template <int KIND>
+static __device__ __forceinline__ void pws_finish(const pws_raw& in, int within,
+                                                  float* out)
+{
+    if (KIND == 0) {
+        const int sub = within >> 5;
+        const float d =
+            __half2float(__ushort_as_half((unsigned short)(in.r[0] & 0xFFFFu)));
+        const float dmin =
+            __half2float(__ushort_as_half((unsigned short)(in.r[0] >> 16)));
+        int sc, mn;
+        pws_scale_min(sub, in.r[1], in.r[2], in.r[3], &sc, &mn);
+        const float scale = d * (float)sc;
+        const float minv = dmin * (float)mn;
+        const bool high = (sub & 1) != 0;
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
-            const int qb = (int)((w0[i >> 2] >> (8 * (i & 3))) & 0xFF);
-            const int hb = ((int)((w1[i >> 2] >> (8 * (i & 3))) & 0xFF) >> shift) & 3;
+            const unsigned word = in.r[4 + (i >> 2)];
+            const int byte = (int)((word >> (8 * (i & 3))) & 0xFF);
+            const int q = high ? (byte >> 4) : (byte & 0xF);
+            out[i] = scale * (float)q - minv;
+        }
+    } else if (KIND == 1) {
+        const int j = within >> 4;
+        const int s = j & 7;
+        const int group = s >> 1;
+        const float d =
+            __half2float(__ushort_as_half((unsigned short)(in.r[4] & 0xFFFFu)));
+        const float scale = d * (float)(signed char)in.r[5];
+        const int shift = 2 * group;
+        const bool high = group >= 2;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const unsigned qword = in.r[i >> 2];
+            const unsigned hword = in.r[2 + (i >> 2)];
+            const int qb = (int)((qword >> (8 * (i & 3))) & 0xFF);
+            const int hb = ((int)((hword >> (8 * (i & 3))) & 0xFF) >> shift) & 3;
             const int nib = high ? (qb >> 4) : (qb & 0xF);
             out[i] = scale * (float)((nib | (hb << 4)) - 32);
         }
     } else {
-        const int blk = v >> 5;
-        const int part = (v & 31) >> 3;
-        const unsigned char* b = rp + (size_t)blk * PF_Q8_0_BLOCK_BYTES;
-        const float d = __half2float(*reinterpret_cast<const __half*>(b));
-        pws_load8_bytes<2>(b + 2 + part * 8, w0);
+        const float d =
+            __half2float(__ushort_as_half((unsigned short)(in.r[2] & 0xFFFFu)));
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
-            const int q = (int)((w0[i >> 2] >> (8 * (i & 3))) & 0xFF);
+            const unsigned word = in.r[i >> 2];
+            const int q = (int)((word >> (8 * (i & 3))) & 0xFF);
             out[i] = d * (float)(signed char)q;
         }
     }
@@ -197,29 +253,56 @@ static __device__ __forceinline__ void pws_body(
         if (PROBE == 1) return;
         // Token rows: clamp to the last real row instead of predicating the
         // load. Rows >= r are computed and discarded, which is cheaper than a
-        // per-lane branch around every global load.
+        // per-lane branch around every global load. Hoisted in small groups:
+        // the point is several loads in flight, not all of them at once.
+        {
+            constexpr int XP = 16 / XRP;            // one float4 per pass
+            constexpr int XB = XP < 4 ? XP : 4;
+            for (int p0 = 0; p0 < XP; p0 += XB) {
+                float4 xv[XB];
 #pragma unroll
-        for (int p = 0; p < 16 / XRP; ++p) {
-            const int rl = p * XRP + xt;
-            const int gt = rl < r ? rl : r - 1;
-            const float4 v =
-                *reinterpret_cast<const float4*>(x + (size_t)gt * k + base + xc);
-            __half2* dst = reinterpret_cast<__half2*>(shx + rl * XS + xc);
-            dst[0] = __floats2half2_rn(v.x, v.y);
-            dst[1] = __floats2half2_rn(v.z, v.w);
+                for (int p = 0; p < XB; ++p) {
+                    const int rl = (p0 + p) * XRP + xt;
+                    const int gt = rl < r ? rl : r - 1;
+                    xv[p] = *reinterpret_cast<const float4*>(
+                        x + (size_t)gt * k + base + xc);
+                }
+#pragma unroll
+                for (int p = 0; p < XB; ++p) {
+                    const int rl = (p0 + p) * XRP + xt;
+                    __half2* dst =
+                        reinterpret_cast<__half2*>(shx + rl * XS + xc);
+                    dst[0] = __floats2half2_rn(xv[p].x, xv[p].y);
+                    dst[1] = __floats2half2_rn(xv[p].z, xv[p].w);
+                }
+            }
         }
         // Weight rows: same clamp. `k` is a multiple of 256 and KW <= 256, so
-        // every tile is whole and no k bound is needed.
+        // every k tile is whole and no k bound is needed.
+        {
+            constexpr int WP = RT / PRP;
+            constexpr int WB = (WP % 4 == 0) ? 4 : ((WP % 2 == 0) ? 2 : 1);
+            static_assert(WP % WB == 0, "weight hoist group must divide the passes");
+            for (int p0 = 0; p0 < WP; p0 += WB) {
+                pws_raw raw[WB];
 #pragma unroll
-        for (int p = 0; p < RT; p += PRP) {
-            const int rl = p + wrow_l;
-            const int gr = row_base + rl < n ? row_base + rl : n - 1;
-            float v[8];
-            pws_dequant8<KIND>(w + (size_t)gr * wrow, base + wcol, v);
-            pws_h8 hv;
+                for (int p = 0; p < WB; ++p) {
+                    const int g = row_base + (p0 + p) * PRP + wrow_l;
+                    const int gr = g < n ? g : n - 1;
+                    pws_prep<KIND>(w + (size_t)gr * wrow, base + wcol, raw[p]);
+                }
+                const int within = (base + wcol) & 255;
 #pragma unroll
-            for (int i = 0; i < 8; ++i) hv[i] = (_Float16)v[i];
-            *reinterpret_cast<pws_h8*>(shw + rl * WS + wcol) = hv;
+                for (int p = 0; p < WB; ++p) {
+                    const int rl = (p0 + p) * PRP + wrow_l;
+                    float v[8];
+                    pws_finish<KIND>(raw[p], within, v);
+                    pws_h8 hv;
+#pragma unroll
+                    for (int i = 0; i < 8; ++i) hv[i] = (_Float16)v[i];
+                    *reinterpret_cast<pws_h8*>(shw + rl * WS + wcol) = hv;
+                }
+            }
         }
     };
 
@@ -228,7 +311,7 @@ static __device__ __forceinline__ void pws_body(
     // into the same accumulator are a dependency chain. Rotating the k16 steps
     // through NACC accumulators costs one fold at the end and gives NACC
     // instructions in flight.
-    constexpr int NACC = (KW / 16) < 8 ? (KW / 16) : 8;
+    constexpr int NACC = (KW / 16) < PWS_NACC ? (KW / 16) : PWS_NACC;
     pws_f8 acc[NACC];
 #pragma unroll
     for (int t = 0; t < NACC; ++t)
@@ -368,12 +451,12 @@ extern "C" __global__ void gemm_skinny_q4_ns(
     const unsigned char* __restrict__ w, const float* __restrict__ x,
     float* __restrict__ y, int n, int k, int r)
 {
-    pws_body<0, 32, 256, 128, 1>(w, x, y, n, k, r);
+    pws_body<0, 32, 128, 128, 1>(w, x, y, n, k, r);
 }
 
 extern "C" __global__ void gemm_skinny_q4_nc(
     const unsigned char* __restrict__ w, const float* __restrict__ x,
     float* __restrict__ y, int n, int k, int r)
 {
-    pws_body<0, 32, 256, 128, 2>(w, x, y, n, k, r);
+    pws_body<0, 32, 128, 128, 2>(w, x, y, n, k, r);
 }
