@@ -74,3 +74,14 @@
 {"tag": "scopes", "test": "batch_fault", "statuses": [200, 200, 200, 200], "errors": [true, true, true, true], "resets": 1.0, "job_errors": 4.0, "healthy": true}
 {"tag": "scopes", "test": "after_batch_reset", "status": 200, "tokens": 8, "healthy": true, "server_up": true}
 {"tag": "scopes", "test": "device_drain", "waves": [{"statuses": [200, 200, 200, 200], "errors": [true, true, true, true], "tokens": [1, 1, 0, 1]}, {"statuses": "server already exited"}], "exit_code": 1, "resets": null}
+{"tag": "iso_final", "test": "baseline_load", "secs": 13.2}
+{"tag": "iso_final", "test": "baseline_run", "wall_s": 1.96, "statuses": [200, 200, 200, 200], "tokens": [24, 24, 24, 24], "errors": [null, null, null, null], "metrics": {"hipml_requests_failed_total": 0.0, "hipml_job_errors_total": 0.0, "hipml_slot_faults_total": 0.0, "hipml_batch_resets_total": 0.0}}
+{"tag": "iso_final", "test": "fault_load", "secs": 13.1}
+{"tag": "iso_final", "test": "fault_run", "wall_s": 1.84, "statuses": [200, 200, 200, 200], "tokens": [24, 24, 24, 3], "errors": [null, null, null, "decode step: injected fault (HIPML_FAULT_SLOT)"], "metrics": {"hipml_requests_failed_total": 1.0, "hipml_job_errors_total": 1.0, "hipml_slot_faults_total": 1.0, "hipml_batch_resets_total": 0.0}}
+{"tag": "iso_final", "test": "isolation", "failed_requests": [3], "intact_requests": [0, 1, 2], "match_reference": [true, true, true], "lengths": [24, 24, 24, 3], "ok": true}
+{"tag": "iso_final", "test": "after_load", "secs": 13.1}
+{"tag": "iso_final", "test": "survives_after_fault", "statuses": [200, 200, 200, 200], "first_status": 200, "slot_faults": 1.0, "job_errors": 1.0, "batch_resets": 0.0, "healthy": true}
+{"tag": "iso_final", "test": "solo_after_fault", "status": 200, "tokens": 8}
+{"tag": "scopes_final", "test": "batch_fault", "statuses": [200, 200, 200, 200], "errors": [true, true, true, true], "resets": 1.0, "job_errors": 4.0, "healthy": true}
+{"tag": "scopes_final", "test": "after_batch_reset", "status": 200, "tokens": 8, "healthy": true, "server_up": true}
+{"tag": "scopes_final", "test": "device_drain", "waves": [{"statuses": [200, 200, 200, 200], "errors": [true, true, true, true], "tokens": [0, 1, 1, 1]}, {"statuses": "server already exited"}], "exit_code": 1, "resets": null}
