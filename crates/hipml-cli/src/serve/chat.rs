@@ -118,9 +118,39 @@ pub fn chat(tok: &Tokenizer, template: &str, messages: &[Message]) -> Result<Pro
             }
         }
     }
+    // This template refuses to render a conversation with no user turn, so the
+    // system-only prefix above is absent exactly when the shared system prompt
+    // is what we want to cache. Recover the end of each system turn from the
+    // full render: it closes with a special token, which is a stable token
+    // boundary, plus the newline that starts the next turn.
+    for m in messages.iter().filter(|m| m.role == "system") {
+        if let Some(cut) = end_of_turn(&text, &m.content) {
+            let prefix = tok.encode_special(&text[..cut]);
+            if !prefix.is_empty() && prefix.len() < ids.len() && ids.starts_with(&prefix) {
+                cuts.push(prefix.len());
+            }
+        }
+    }
     cuts.sort_unstable();
     cuts.dedup();
     Ok(Prompt { ids, cuts })
+}
+
+/// Byte offset just past the special token that closes the turn carrying
+/// `content` (and past one trailing newline).
+fn end_of_turn(text: &str, content: &str) -> Option<usize> {
+    if content.is_empty() {
+        return None;
+    }
+    let start = text.find(content)? + content.len();
+    let rest = &text[start..];
+    let lt = rest.find('<')?;
+    let gt = rest[lt..].find('>')?;
+    let mut cut = start + lt + gt + 1;
+    if text[cut..].starts_with('\n') {
+        cut += 1;
+    }
+    Some(cut)
 }
 
 /// `/completion`: a raw prompt string or an array of token ids.
@@ -150,4 +180,17 @@ pub fn completion(tok: &Tokenizer, body: &Value) -> Result<Prompt, String> {
         ids: ids.clone(),
         cuts: vec![ids.len()],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::end_of_turn;
+
+    #[test]
+    fn system_turn_ends_after_the_close_marker() {
+        let sys = "be brief";
+        let text = "<|im_start|>system\nbe brief<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n";
+        let cut = end_of_turn(text, sys).unwrap();
+        assert_eq!(&text[..cut], "<|im_start|>system\nbe brief<|im_end|>\n");
+    }
 }
