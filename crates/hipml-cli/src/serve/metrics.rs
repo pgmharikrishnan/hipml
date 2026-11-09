@@ -74,7 +74,7 @@ impl Metrics {
         c("hipml_requests_done_total", "Requests completed", "counter", s.requests_done.to_string());
         c("hipml_requests_cancelled_total", "Requests ended early (client gone or stop string)", "counter", s.requests_cancelled.to_string());
         c("hipml_requests_failed_total", "Requests ended with an error", "counter", s.requests_failed.to_string());
-        c("hipml_active_slots", "Requests decoding (batch slots plus a lone MTP request)", "gauge", s.active_slots.to_string());
+        c("hipml_active_slots", "Requests prefilling or decoding (batch slots, a lone MTP request, the prefill)", "gauge", s.active_slots.to_string());
         c("hipml_queue_depth", "Requests waiting for admission", "gauge", s.queue_depth.to_string());
         c("hipml_prompt_tokens_total", "Prompt tokens processed", "counter", s.prompt_tokens.to_string());
         c("hipml_generated_tokens_total", "Tokens generated", "counter", s.generated_tokens.to_string());

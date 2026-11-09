@@ -72,7 +72,9 @@ pub fn run(
         let before = queue.len();
         queue.retain(|j| j.cancelled().is_none());
         let dropped = (before - queue.len()) as u64;
-        let live = slots.iter().filter(|s| s.is_some()).count() + spec.is_some() as usize;
+        let live = slots.iter().filter(|s| s.is_some()).count()
+            + spec.is_some() as usize
+            + prefill.is_some() as usize;
         metrics.update(|s| {
             s.requests_cancelled += dropped;
             s.active_slots = live as u64;
@@ -169,6 +171,7 @@ pub fn run(
                             }
                         }
                         if gathered.is_empty() {
+                            metrics.update(|s| s.prompt_tokens += plen as u64);
                             prefill = Some(pf);
                         } else {
                             // Let the queued request keep its place; the block
