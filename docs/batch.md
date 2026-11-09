@@ -50,9 +50,9 @@ measured inside each run.
 
 | B | aggregate tok/s | per stream | ms/step | weight GB/s | B x single |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 45.82 | 22.91 | 43.64 | 386 | 0.76x |
-| 4 | **63.98** | 15.99 | 62.52 | 269 | 0.53x |
-| 8 | 72.31 | 9.04 | 110.63 | 152 | 0.30x |
+| 2 | 44.5 | 22.3 | 44.9 | 375 | 0.74x |
+| 4 | **64.4** | 16.1 | 62.1 | 271 | 0.53x |
+| 8 | 68.6 | 8.6 | 116.6 | 144 | 0.28x |
 
 Single-stream reference: 30.0-30.2 tok/s (33.1-33.3 ms/step). The batched path
 at B=1 is slower than the production single-stream kernels (20.6 tok/s,
@@ -63,7 +63,7 @@ there is only one row.
 Token parity (`--check`, distinct token stream per slot, 16 greedy steps): all
 4 slots reproduce the B=1 path, 16/16 ids each, on the default (unsplit) step.
 
-Mixed depth `0,1024,8192,32768`: 58.71 tok/s aggregate (68.13 ms/step,
+Mixed depth `0,1024,8192,32768`: 58.7 tok/s aggregate (68.1 ms/step,
 247 GB/s).
 
 ### Against llama.cpp at equal B
@@ -72,9 +72,9 @@ Same model file, q8_0 K/V, `-np B`, B concurrent greedy requests:
 
 | B | hipml batch | llama.cpp | hipml / llama |
 | ---: | ---: | ---: | ---: |
-| 2 | 45.82 | 56.33 | 0.81 |
-| 4 | 63.98 | 87.34 | 0.73 |
-| 8 | 72.31 | 101.26 | 0.71 |
+| 2 | 44.5 | 56.3 | 0.79 |
+| 4 | 64.4 | 87.3 | 0.74 |
+| 8 | 68.6 | 101.3 | 0.68 |
 
 llama.cpp's np8 client-overlap figure was 88.96 tok/s; its server clock says
 101.26.
@@ -103,9 +103,9 @@ so read the shares, not the absolute values):
 | final (lm_head + argmax) | 2.07 | 2.8% |
 
 The FFN batched GEMV is the single biggest kernel, and the batched GEMV family
-as a whole runs at 269 GB/s at B=4 against 469 GB/s for the single-stream
-kernel (15.68 GB in 33.1 ms). The per-slot SSM recurrence and attention together
-are ~14 ms of the 62.5 ms step.
+as a whole runs at 271 GB/s at B=4 against 469 GB/s for the single-stream
+kernel (15.68 GiB in 33.1 ms): a ~1.5x efficiency loss. The per-slot SSM
+recurrence and attention together are ~14 ms of the 62.1 ms step.
 
 ## What is not verified
 
