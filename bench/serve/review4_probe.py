@@ -381,6 +381,7 @@ def plan_stress(a, rec):
 def plan_recheck(a, rec):
     """The three hold-3 regressions, after their fixes."""
     p = fixture_ids()
+    completion(p, 8)  # warm: the first request pays one-time kernel setup
     m0 = metrics()
     s = socket.create_connection(("127.0.0.1", PORT))
     s.sendall(http_post_bytes("/completion", json.dumps(
