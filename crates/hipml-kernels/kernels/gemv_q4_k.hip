@@ -217,7 +217,7 @@ extern "C" __global__ void gemv_q4_k(
     int k)
 {
     __shared__ __align__(16) float sx[Q4K_K_TILE];
-    q4k_tile<Q4K_ROWS_PER_WARP, false>(w, x, y, m, k, sx, blockIdx.x, nullptr);
+    q4k_tile<Q4K_ROWS_PER_WARP, false>(w, x, y, m, k, sx, blockIdx.x);
 }
 
 extern "C" __global__ void gemv_q4_k_r1(
@@ -228,7 +228,7 @@ extern "C" __global__ void gemv_q4_k_r1(
     int k)
 {
     __shared__ __align__(16) float sx[Q4K_K_TILE];
-    q4k_tile<1, false>(w, x, y, m, k, sx, blockIdx.x, nullptr);
+    q4k_tile<1, false>(w, x, y, m, k, sx, blockIdx.x);
 }
 
 // One row per warp, one 128-bit load per 16 values: the A/B entry for the
@@ -241,7 +241,7 @@ extern "C" __global__ void gemv_q4_k_u4(
     int k)
 {
     __shared__ __align__(16) float sx[Q4K_K_TILE];
-    q4k_tile<1, true>(w, x, y, m, k, sx, blockIdx.x, nullptr);
+    q4k_tile<1, true>(w, x, y, m, k, sx, blockIdx.x);
 }
 
 // Streaming-load A/B: `gemv_q4_k_r1` with `buffer_load_dwordx4` + sc1 on the
@@ -254,7 +254,7 @@ extern "C" __global__ void gemv_q4_k_nt(
     int k)
 {
     __shared__ __align__(16) float sx[Q4K_K_TILE];
-    q4k_tile<1, true, true>(w, x, y, m, k, sx, blockIdx.x, nullptr);
+    q4k_tile<1, true, true>(w, x, y, m, k, sx, blockIdx.x);
 }
 
 // Split-K partial pass: grid (row tiles, splits), each block accumulates a
