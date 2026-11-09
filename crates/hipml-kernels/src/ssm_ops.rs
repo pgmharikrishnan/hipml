@@ -408,7 +408,9 @@ impl<'a> SsmGpuLayer<'a> {
         }
     }
 
-    /// Per-row f32 GEMV for the small wide-and-short projections.
+    /// Per-row f32 GEMV for the small wide-and-short projections. The batched
+    /// engine runs one launch for all rows; the per-row loop below remains for
+    /// the single-row case (parity).
     #[allow(clippy::too_many_arguments)]
     fn f32_rows(
         &self,
@@ -420,6 +422,29 @@ impl<'a> SsmGpuLayer<'a> {
         rows: usize,
         l: &Launcher,
     ) -> Result<(), String> {
+        if rows > 1 {
+            let kernel = self.module.kernel("gemv_f32_b")?;
+            let mut p_w = w;
+            let mut p_x = x.as_ptr();
+            let mut p_y = y.as_ptr();
+            let mut v_m = m as i32;
+            let mut v_k = k as i32;
+            let mut v_xs = k as i32;
+            let mut params: [*mut c_void; 6] = [
+                &mut p_w as *mut _ as *mut c_void,
+                &mut p_x as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut v_m as *mut _ as *mut c_void,
+                &mut v_k as *mut _ as *mut c_void,
+                &mut v_xs as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: (m as u32, rows as u32, 1),
+                block: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            return kernel.launch(cfg, l.stream(), &mut params);
+        }
         for r in 0..rows {
             let mut p_w = w;
             let mut p_x = row_ptr(x, r, k);

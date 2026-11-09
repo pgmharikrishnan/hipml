@@ -7,6 +7,7 @@
 //! overlap instead of serialising.
 
 use super::*;
+use super::deep_kv::MAX_SPLITS;
 use std::time::Instant;
 
 impl<'a> BatchEngine<'a> {
@@ -21,6 +22,13 @@ impl<'a> BatchEngine<'a> {
         let cfg = self.cfg.clone();
         let n = cfg.n_embd;
         let positions: Vec<usize> = self.active.iter().map(|&s| self.positions[s]).collect();
+        // `[slots][2]` = (position, seq) for the batched append/rope/attention.
+        let mut pos_bytes = vec![0u8; 8 * b];
+        for (i, &p) in positions.iter().enumerate() {
+            pos_bytes[i * 8..i * 8 + 4].copy_from_slice(&(p as i32).to_le_bytes());
+            pos_bytes[i * 8 + 4..i * 8 + 8].copy_from_slice(&((p as i32) + 1).to_le_bytes());
+        }
+        self.pos_buf.upload_bytes_async(0, &pos_bytes, l.stream())?;
 
         // Stage timing: `stage!(i)` closes the previous bucket and opens `i`.
         let trace = self.trace;
@@ -52,65 +60,57 @@ impl<'a> BatchEngine<'a> {
                 BatchKind::Full(f) => {
                     stage!(1);
                     f.attn.qkv_rows(l, &self.t, &f.qg, &f.k, &f.v, b)?;
-                    f.attn.split_rope_rows(l, &f.qg, &f.k, &f.q, &f.gate, &positions)?;
+                    f.attn.split_rope_rows(
+                        l,
+                        &f.qg,
+                        &f.k,
+                        &f.q,
+                        &f.gate,
+                        &positions,
+                        &self.pos_buf,
+                    )?;
                     stage!(2);
-                    let width = cfg.n_head_kv * cfg.head_dim;
                     let qw = cfg.n_head * cfg.head_dim;
-                    // Slot parity picks the stream (see the SSM split): the
-                    // side stream has its own step buffer so the KV appends do
-                    // not race on one position.
-                    let split = self.overlap && b > 1;
-                    if split {
-                        l.fork()?;
-                    }
-                    for bi in 0..b {
-                        let slot = self.active[bi];
-                        let pos = positions[bi];
-                        let dk = &f.deep[slot];
-                        // Only alternate streams when the step actually forked,
-                        // otherwise odd slots would run unsynchronised on the
-                        // side stream.
-                        let side = split && bi % 2 == 1;
-                        if side {
-                            l.set_step_side(pos, pos + 1, 0)?;
-                            l.kv_encode_ptr_on(
-                                l.stream2(),
-                                l.step_side_buf(),
-                                dk.dtype.id(),
-                                row_ptr(&f.k, bi, width),
-                                row_ptr(&f.v, bi, width),
-                                &dk.k,
-                                &dk.v,
-                                cfg.n_head_kv,
-                                cfg.head_dim,
-                                dk.seq,
-                            )?;
-                        } else {
-                            l.set_step(pos, pos + 1, 0)?;
-                            l.kv_encode_ptr(
-                                dk.dtype.id(),
-                                row_ptr(&f.k, bi, width),
-                                row_ptr(&f.v, bi, width),
-                                &dk.k,
-                                &dk.v,
-                                cfg.n_head_kv,
-                                cfg.head_dim,
-                                dk.seq,
-                            )?;
-                        }
-                        super::attn_tile::deep_attention_ptr_on(
-                            l,
-                            &cfg,
-                            dk,
-                            pos,
-                            row_ptr(&f.q, bi, qw),
-                            row_ptr(&f.out, bi, qw),
-                            side,
-                        )?;
-                    }
-                    if self.overlap && b > 1 {
-                        l.join()?;
-                    }
+                    // One append and one split-K attention for every slot; the
+                    // per-slot position and contiguous cache are read from the
+                    // slot index on grid.y.
+                    let dk = &f.kv;
+                    let seq_max = positions.iter().max().copied().unwrap_or(0) + 1;
+                    let splits = (seq_max / 64).clamp(1, MAX_SPLITS);
+                    l.kv_encode_batch(
+                        dk.dtype.id(),
+                        &f.k,
+                        &f.v,
+                        &dk.k,
+                        &dk.v,
+                        cfg.n_head_kv,
+                        cfg.head_dim,
+                        dk.seq,
+                        &self.pos_buf,
+                        dk.slot_bytes(),
+                        b,
+                    )?;
+                    l.attn_decode_batch(
+                        dk.dtype.id(),
+                        &self.pos_buf,
+                        &f.q,
+                        &dk.k,
+                        &dk.v,
+                        &dk.part_acc,
+                        &dk.part_ml,
+                        &f.out,
+                        cfg.n_head,
+                        cfg.n_head_kv,
+                        cfg.head_dim,
+                        dk.seq,
+                        1.0f32 / (cfg.head_dim as f32).sqrt(),
+                        splits,
+                        dk.slot_bytes(),
+                        dk.acc_slot(),
+                        dk.ml_slot(),
+                        qw,
+                        b,
+                    )?;
                     stage!(3);
                     f.attn.out_rows(l, &f.out, &f.gate, &f.y, b)?;
                     stage!(7);
@@ -118,28 +118,25 @@ impl<'a> BatchEngine<'a> {
                 }
                 BatchKind::Ssm(s) => {
                     stage!(4);
-                    s.per_slot[0].gemvs_batched(
-                        l, &self.t, &s.qkv, &s.z, &s.alpha, &s.beta, b,
-                    )?;
+                    s.inst.gemvs_batched(l, &self.t, &s.qkv, &s.z, &s.alpha, &s.beta, b)?;
                     stage!(5);
-                    let d = SsmDims::from_config(&cfg);
-                    for bi in 0..b {
-                        let slot = self.active[bi];
-                        let inst = &s.per_slot[slot];
-                        inst.recurrent_at(
-                            row_ptr(&s.qkv, bi, d.conv_ch),
-                            row_ptr(&s.z, bi, d.inner()),
-                            row_ptr(&s.alpha, bi, d.n_v),
-                            row_ptr(&s.beta, bi, d.n_v),
-                            row_ptr(&s.g, bi, d.n_v),
-                            row_ptr(&s.beta_sig, bi, d.n_v),
-                            row_ptr(&s.conv, bi, d.conv_ch),
-                            row_ptr(&s.o, bi, d.inner()),
-                            row_ptr(&s.gated, bi, d.inner()),
-                        )?;
-                    }
+                    s.inst.recurrent_batched(
+                        l,
+                        &s.qkv,
+                        &s.z,
+                        &s.alpha,
+                        &s.beta,
+                        &s.g,
+                        &s.beta_sig,
+                        &s.conv,
+                        &s.o,
+                        &s.gated,
+                        &s.conv_state,
+                        &s.s_state,
+                        b,
+                    )?;
                     stage!(6);
-                    s.per_slot[0].output_gemv_batched(l, &s.gated, &s.out, b)?;
+                    s.inst.output_gemv_batched(l, &s.gated, &s.out, b)?;
                     stage!(7);
                     &s.out
                 }

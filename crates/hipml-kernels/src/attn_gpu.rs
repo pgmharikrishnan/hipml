@@ -18,11 +18,6 @@ mod imp {
     use hipml_hip::{Buffer, ByteBuffer, LaunchConfig};
     use std::ffi::c_void;
 
-    /// Device pointer of row `row` of a `[rows][width]` f32 buffer.
-    fn row_ptr(buf: &Buffer, row: usize, width: usize) -> *mut c_void {
-        unsafe { (buf.as_ptr() as *mut u8).add(row * width * 4) as *mut c_void }
-    }
-
     /// Upper bound on sequence splits; the partial buffers are sized for it.
     const MAX_SPLITS: usize = 64;
     /// Must match SPLIT_TILE in attn_decode_split_f32.hip.
@@ -489,33 +484,133 @@ mod imp {
             q: &Buffer,
             gate: &Buffer,
             positions: &[usize],
+            pos_buf: &Buffer,
         ) -> Result<(), String> {
             let d = self.dims;
             let qw = d.n_head * d.head_dim;
-            let split = self.module_kernel(l, "qg_split_f32")?;
-            for (b, &pos) in positions.iter().enumerate() {
-                l.set_step(pos, pos + 1, 0)?;
-                let mut p_qg = row_ptr(qg, b, 2 * qw);
-                let mut p_q = row_ptr(q, b, qw);
-                let mut p_gate = row_ptr(gate, b, qw);
-                let mut nh = d.n_head as i32;
-                let mut hd = d.head_dim as i32;
-                let mut params: [*mut c_void; 5] = [
-                    &mut p_qg as *mut _ as *mut c_void,
-                    &mut p_q as *mut _ as *mut c_void,
-                    &mut p_gate as *mut _ as *mut c_void,
-                    &mut nh as *mut _ as *mut c_void,
-                    &mut hd as *mut _ as *mut c_void,
-                ];
-                let cfg = LaunchConfig {
-                    grid: (d.n_head as u32, 1, 1),
-                    block: (256, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                split.launch(cfg, &l.stream, &mut params)?;
-                self.norm_rope_at(l, row_ptr(q, b, qw), row_ptr(k, b, d.width))?;
-            }
-            Ok(())
+            let rows = positions.len();
+            // The device `pos_buf` is `[rows][2]` (position, seq), written once
+            // per step; these launches read it and are slot-indexed on grid.y.
+            let split = self.module_kernel(l, "qg_split_b")?;
+            let mut p_qg = qg.as_ptr();
+            let mut p_q = q.as_ptr();
+            let mut p_gate = gate.as_ptr();
+            let mut nh = d.n_head as i32;
+            let mut hd = d.head_dim as i32;
+            let mut params: [*mut c_void; 5] = [
+                &mut p_qg as *mut _ as *mut c_void,
+                &mut p_q as *mut _ as *mut c_void,
+                &mut p_gate as *mut _ as *mut c_void,
+                &mut nh as *mut _ as *mut c_void,
+                &mut hd as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: (d.n_head as u32, rows as u32, 1),
+                block: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            split.launch(cfg, &l.stream, &mut params)?;
+
+            // Head RMS norm: q then k.
+            let norm = self.module_kernel(l, "head_rmsnorm_b")?;
+            let mut eps = d.eps;
+            let mut p_x = q.as_ptr();
+            let mut p_w = self.q_norm.as_ptr();
+            let mut p_y = q.as_ptr();
+            let mut v_nh = d.n_head as i32;
+            let mut v_stride = qw as i32;
+            let mut params: [*mut c_void; 7] = [
+                &mut p_x as *mut _ as *mut c_void,
+                &mut p_w as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut v_nh as *mut _ as *mut c_void,
+                &mut hd as *mut _ as *mut c_void,
+                &mut eps as *mut _ as *mut c_void,
+                &mut v_stride as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: (d.n_head as u32, rows as u32, 1),
+                block: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            norm.launch(cfg, &l.stream, &mut params)?;
+
+            let mut p_x = k.as_ptr();
+            let mut p_w = self.k_norm.as_ptr();
+            let mut p_y = k.as_ptr();
+            let mut v_nh = d.n_kv as i32;
+            let mut v_stride = d.width as i32;
+            let mut params: [*mut c_void; 7] = [
+                &mut p_x as *mut _ as *mut c_void,
+                &mut p_w as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut v_nh as *mut _ as *mut c_void,
+                &mut hd as *mut _ as *mut c_void,
+                &mut eps as *mut _ as *mut c_void,
+                &mut v_stride as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: (d.n_kv as u32, rows as u32, 1),
+                block: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            norm.launch(cfg, &l.stream, &mut params)?;
+
+            // M-RoPE at each row's own position.
+            let rope = self.module_kernel(l, "mrope_b")?;
+            let mut p_pos = pos_buf.as_ptr();
+            let mut v_nrot = d.n_rot as i32;
+            let mut s0 = d.sections[0] as i32;
+            let mut s1 = d.sections[1] as i32;
+            let mut s2 = d.sections[2] as i32;
+            let mut s3 = d.sections[3] as i32;
+            let mut base = d.rope_base;
+            let mut p_in = q.as_ptr();
+            let mut p_out = q.as_ptr();
+            let mut v_nh = d.n_head as i32;
+            let mut hd = d.head_dim as i32;
+            let mut params: [*mut c_void; 11] = [
+                &mut p_in as *mut _ as *mut c_void,
+                &mut p_out as *mut _ as *mut c_void,
+                &mut v_nh as *mut _ as *mut c_void,
+                &mut hd as *mut _ as *mut c_void,
+                &mut v_nrot as *mut _ as *mut c_void,
+                &mut s0 as *mut _ as *mut c_void,
+                &mut s1 as *mut _ as *mut c_void,
+                &mut s2 as *mut _ as *mut c_void,
+                &mut s3 as *mut _ as *mut c_void,
+                &mut p_pos as *mut _ as *mut c_void,
+                &mut base as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: (d.n_head as u32, rows as u32, 1),
+                block: (32, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            rope.launch(cfg, &l.stream, &mut params)?;
+
+            let mut p_in = k.as_ptr();
+            let mut p_out = k.as_ptr();
+            let mut v_nh = d.n_kv as i32;
+            let mut params: [*mut c_void; 11] = [
+                &mut p_in as *mut _ as *mut c_void,
+                &mut p_out as *mut _ as *mut c_void,
+                &mut v_nh as *mut _ as *mut c_void,
+                &mut hd as *mut _ as *mut c_void,
+                &mut v_nrot as *mut _ as *mut c_void,
+                &mut s0 as *mut _ as *mut c_void,
+                &mut s1 as *mut _ as *mut c_void,
+                &mut s2 as *mut _ as *mut c_void,
+                &mut s3 as *mut _ as *mut c_void,
+                &mut p_pos as *mut _ as *mut c_void,
+                &mut base as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: (d.n_kv as u32, rows as u32, 1),
+                block: (32, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            rope.launch(cfg, &l.stream, &mut params)
         }
 
         /// Batched attention-output projection: gate each row of `out` and run
@@ -531,23 +626,19 @@ mod imp {
             let d = self.dims;
             let qw = d.n_head * d.head_dim;
             let gate_k = self.module_kernel(l, "q_gate_f32")?;
-            let mut n = qw as i32;
-            for b in 0..rows {
-                let mut p_out = row_ptr(out, b, qw);
-                let mut p_gate = row_ptr(gate, b, qw);
-                let mut p_y = p_out;
-                let mut params: [*mut c_void; 4] = [
-                    &mut p_out as *mut _ as *mut c_void,
-                    &mut p_gate as *mut _ as *mut c_void,
-                    &mut p_y as *mut _ as *mut c_void,
-                    &mut n as *mut _ as *mut c_void,
-                ];
-                gate_k.launch(
-                    LaunchConfig::linear(qw, 256),
-                    &l.stream,
-                    &mut params,
-                )?;
-            }
+            // `out` and `gate` are `[rows][qw]` row-major and the op is pure
+            // elementwise, so one launch covers every row.
+            let mut n = (rows * qw) as i32;
+            let mut p_out = out.as_ptr();
+            let mut p_gate = gate.as_ptr();
+            let mut p_y = p_out;
+            let mut params: [*mut c_void; 4] = [
+                &mut p_out as *mut _ as *mut c_void,
+                &mut p_gate as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut n as *mut _ as *mut c_void,
+            ];
+            gate_k.launch(LaunchConfig::linear(rows * qw, 256), &l.stream, &mut params)?;
             self.gemv_batched(l, &self.wo, out, y, d.n_embd, rows)
         }
 
@@ -947,6 +1038,7 @@ impl AttnLayer {
         _q: &hipml_hip::Buffer,
         _gate: &hipml_hip::Buffer,
         _positions: &[usize],
+        _pos_buf: &hipml_hip::Buffer,
     ) -> Result<(), String> {
         Err("hipml was built without the `hip` feature".to_string())
     }

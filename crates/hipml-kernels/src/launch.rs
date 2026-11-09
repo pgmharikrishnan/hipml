@@ -28,6 +28,8 @@ pub(crate) mod device {
     mod quant_launch;
     #[path = "skinny_launch.rs"]
     mod skinny_launch;
+    #[path = "batch_launch.rs"]
+    mod batch_launch;
     #[path = "stream_launch.rs"]
     mod stream_launch;
     pub use stream_launch::ReadJob;
