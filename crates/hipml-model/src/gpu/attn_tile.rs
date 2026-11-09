@@ -123,7 +123,16 @@ fn row_ptr(buf: &Buffer, t: usize, width: usize) -> *mut std::ffi::c_void {
 /// and anything shorter bit-identical to the mono path: its chunks all sit
 /// below the gate. `HIPML_ATTN_SPLITS` sets the count; 1 keeps the mono kernel
 /// everywhere.
-fn split_count(splits: usize, pos0: usize) -> usize {
+/// `HIPML_ATTN_SPLITS`: key splits for a deep chunk (default 8, 1 disables).
+pub(super) fn env_splits() -> usize {
+    std::env::var("HIPML_ATTN_SPLITS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(8)
+        .clamp(1, 32)
+}
+
+pub(super) fn split_count(splits: usize, pos0: usize) -> usize {
     if splits <= 1 {
         return 1;
     }
