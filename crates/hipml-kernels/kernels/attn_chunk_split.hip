@@ -242,6 +242,7 @@ extern "C" __global__ void attn_chunk_split_f16(
         sc_f8 s0, s1;
 #pragma unroll
         for (int e = 0; e < 8; ++e) { s0[e] = 0.0f; s1[e] = 0.0f; }
+        if (dh == 0) { /* PROBE: dh=1 skips QK */
 #pragma unroll
         for (int dd = 0; dd < 8; ++dd) {
             const sc_h8 ka =
@@ -253,6 +254,7 @@ extern "C" __global__ void attn_chunk_split_f16(
             const sc_h8 ka =
                 *reinterpret_cast<const sc_h8*>(sk + frow * SC_KST + dd * 16 + koff);
             s1 = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(ka, qt[dd], s1);
+        }
         }
 
         // ---- causal mask + online softmax (log2 units) --------------------
