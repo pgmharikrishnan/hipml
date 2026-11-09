@@ -6,6 +6,14 @@ use std::sync::Mutex;
 pub struct Stats {
     pub requests_total: u64,
     pub requests_done: u64,
+    /// Requests ended early: client gone, or a stop string matched.
+    pub requests_cancelled: u64,
+    /// Requests that ended with an error event (admission or prefill).
+    pub requests_failed: u64,
+    /// Live occupancy, refreshed every scheduler iteration, so a leaked slot
+    /// or a stuck queue is visible from outside.
+    pub active_slots: u64,
+    pub queue_depth: u64,
     pub prompt_tokens: u64,
     pub generated_tokens: u64,
     pub decode_steps: u64,
@@ -64,6 +72,10 @@ impl Metrics {
         };
         c("hipml_requests_total", "Requests admitted", "counter", s.requests_total.to_string());
         c("hipml_requests_done_total", "Requests completed", "counter", s.requests_done.to_string());
+        c("hipml_requests_cancelled_total", "Requests ended early (client gone or stop string)", "counter", s.requests_cancelled.to_string());
+        c("hipml_requests_failed_total", "Requests ended with an error", "counter", s.requests_failed.to_string());
+        c("hipml_active_slots", "Requests decoding (batch slots plus a lone MTP request)", "gauge", s.active_slots.to_string());
+        c("hipml_queue_depth", "Requests waiting for admission", "gauge", s.queue_depth.to_string());
         c("hipml_prompt_tokens_total", "Prompt tokens processed", "counter", s.prompt_tokens.to_string());
         c("hipml_generated_tokens_total", "Tokens generated", "counter", s.generated_tokens.to_string());
         c("hipml_decode_steps_total", "Scheduler decode steps", "counter", s.decode_steps.to_string());

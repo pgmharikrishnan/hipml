@@ -7,10 +7,10 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::channel;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hipml_core::tokenizer::Tokenizer;
 
@@ -21,6 +21,11 @@ use super::metrics::Metrics;
 use super::sched::{Job, SchedCfg};
 
 const MAX_BODY: usize = 32 * 1024 * 1024;
+/// A client that opens a socket and never finishes its request would
+/// otherwise hold a thread forever.
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_HEADERS: usize = 100;
+const MAX_LINE: u64 = 16 * 1024;
 
 pub struct Shared {
     pub tok: Arc<Tokenizer>,
@@ -56,7 +61,11 @@ struct Request {
 
 fn handle(shared: Arc<Shared>, mut stream: TcpStream) -> Result<(), String> {
     let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let req = read_request(&mut stream)?;
+    // Generation can legitimately wait minutes for its first token; the
+    // timeout only guards the request read.
+    let _ = stream.set_read_timeout(None);
     let path = req.path.clone();
     match (req.method.as_str(), path.as_str()) {
         ("GET", "/health") | ("GET", "/v1/health") => {
@@ -120,7 +129,7 @@ fn tokenize(shared: &Shared, stream: &mut TcpStream, req: &Request) -> Result<()
 fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
     let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
     let mut line = String::new();
-    reader.read_line(&mut line).map_err(|e| e.to_string())?;
+    (&mut reader).take(MAX_LINE).read_line(&mut line).map_err(|e| e.to_string())?;
     if line.is_empty() {
         return Err("empty request".to_string());
     }
@@ -131,9 +140,13 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
 
     let mut length = 0usize;
     let mut expect_continue = false;
-    loop {
+    let mut chunked = false;
+    for count in 0.. {
+        if count == MAX_HEADERS {
+            return Err("too many headers".to_string());
+        }
         let mut h = String::new();
-        let n = reader.read_line(&mut h).map_err(|e| e.to_string())?;
+        let n = (&mut reader).take(MAX_LINE).read_line(&mut h).map_err(|e| e.to_string())?;
         if n == 0 || h == "\r\n" || h == "\n" {
             break;
         }
@@ -144,8 +157,14 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
                 length = v.parse().map_err(|_| "bad content-length")?;
             } else if k == "expect" && v.eq_ignore_ascii_case("100-continue") {
                 expect_continue = true;
+            } else if k == "transfer-encoding" && v.to_ascii_lowercase().contains("chunked") {
+                chunked = true;
             }
         }
+    }
+    if chunked {
+        // Not implemented; say so instead of parsing an empty body.
+        return Err("chunked request bodies are not supported; send Content-Length".to_string());
     }
     if length > MAX_BODY {
         return Err(format!("body too large: {length}"));
@@ -286,7 +305,7 @@ pub fn now_unix() -> u64 {
 #[allow(clippy::too_many_arguments)]
 pub fn new_job(shared: &Shared, prompt: chat::Prompt, max_tokens: usize, ignore_eos: bool,
                stop_strings: &[String], stop_ids: Vec<u32>, drafts: usize, cache: bool)
-    -> Result<(u64, std::sync::mpsc::Receiver<super::sched::Event>, Instant), String>
+    -> Result<(u64, std::sync::mpsc::Receiver<super::sched::Event>, Instant, Arc<AtomicU8>), String>
 {
     let (tx, rx) = channel();
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed) + 1;
@@ -302,6 +321,7 @@ pub fn new_job(shared: &Shared, prompt: chat::Prompt, max_tokens: usize, ignore_
     }
     stops.sort_unstable();
     stops.dedup();
+    let cancel = Arc::new(AtomicU8::new(0));
     let job = Job {
         prompt: prompt.ids,
         cuts: prompt.cuts,
@@ -310,11 +330,12 @@ pub fn new_job(shared: &Shared, prompt: chat::Prompt, max_tokens: usize, ignore_
         drafts,
         cache,
         tx,
+        cancel: cancel.clone(),
     };
     let at = Instant::now();
     shared
         .jobs
         .send(job)
         .map_err(|_| "scheduler is not running".to_string())?;
-    Ok((id, rx, at))
+    Ok((id, rx, at, cancel))
 }

@@ -19,7 +19,9 @@
 //! `BatchEngine` slot (KV rows plus SSM conv window and delta-net matrix), so a
 //! request keeps exactly the tokens it would have produced on either path.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::time::Instant;
 
 use hipml_core::gen::argmax_f32;
@@ -44,6 +46,26 @@ pub struct Job {
     /// unconditional, so a later request can still reuse this one's prefix.
     pub cache: bool,
     pub tx: Sender<Event>,
+    /// Set by the connection thread: [`CANCEL_STOP`] when a stop string
+    /// matched in the decoded text, [`CANCEL_GONE`] when the client went away.
+    /// The scheduler checks it at every tile and step, so a request ends
+    /// within one step instead of running to `max_tokens` (or through a whole
+    /// long prefill) for nobody.
+    pub cancel: Arc<AtomicU8>,
+}
+
+pub const CANCEL_STOP: u8 = 1;
+pub const CANCEL_GONE: u8 = 2;
+
+impl Job {
+    /// The finish reason if the connection asked this request to end.
+    fn cancelled(&self) -> Option<&'static str> {
+        match self.cancel.load(Ordering::Relaxed) {
+            0 => None,
+            CANCEL_STOP => Some("stop"),
+            _ => Some("cancelled"),
+        }
+    }
 }
 
 pub enum Event {

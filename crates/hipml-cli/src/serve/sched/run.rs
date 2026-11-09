@@ -18,8 +18,22 @@ fn take_active(
 ) {
     if let Some(a) = slots[slot].take() {
         send_done(&a.job.tx, &a.job, finish, a.emitted, a.prefill_ms, a.hit_tokens);
+        finished(metrics, finish);
+    }
+}
+
+fn finished(metrics: &Metrics, finish: &str) {
+    if finish == "cancelled" {
+        metrics.update(|s| s.requests_cancelled += 1);
+    } else {
         metrics.update(|s| s.requests_done += 1);
     }
+}
+
+fn fail(metrics: &Metrics, tx: &Sender<Event>, what: &str, e: String) {
+    eprintln!("serve: {what}: {e}");
+    let _ = tx.send(Event::Error(e));
+    metrics.update(|s| s.requests_failed += 1);
 }
 
 pub fn run(
@@ -54,6 +68,16 @@ pub fn run(
             metrics.update(|s| s.requests_total += 1);
             queue.push_back(j);
         }
+        // A request whose client left while it waited never reaches the GPU.
+        let before = queue.len();
+        queue.retain(|j| j.cancelled().is_none());
+        let dropped = (before - queue.len()) as u64;
+        let live = slots.iter().filter(|s| s.is_some()).count() + spec.is_some() as usize;
+        metrics.update(|s| {
+            s.requests_cancelled += dropped;
+            s.active_slots = live as u64;
+            s.queue_depth = queue.len() as u64;
+        });
         let busy = prefill.is_some()
             || spec.is_some()
             || slots.iter().any(|s| s.is_some());
@@ -139,8 +163,7 @@ pub fn run(
                                     continue;
                                 }
                                 Err(e) => {
-                                    eprintln!("serve: row adopt: {e}");
-                                    let _ = tx.send(Event::Error(e));
+                                    fail(&metrics, &tx, "row adopt", e);
                                     continue;
                                 }
                             }
@@ -155,10 +178,7 @@ pub fn run(
                         }
                         break;
                     }
-                    Err(e) => {
-                        eprintln!("serve: admit: {e}");
-                        let _ = tx.send(Event::Error(e));
-                    }
+                    Err(e) => fail(&metrics, &tx, "admit", e),
                 }
             }
 
@@ -205,9 +225,8 @@ pub fn run(
                         }
                     }
                     Err(e) => {
-                        eprintln!("serve: row prefill: {e}");
                         for g in gathered.drain(..) {
-                            let _ = g.job.tx.send(Event::Error(e.clone()));
+                            fail(&metrics, &g.job.tx, "row prefill", e.clone());
                         }
                     }
                 }
@@ -230,19 +249,23 @@ pub fn run(
                     metrics.update(|s| s.prompt_tokens += plen as u64);
                     prefill = Some(pf);
                 }
-                Err(e) => {
-                    eprintln!("serve: admit: {e}");
-                    let _ = tx.send(Event::Error(e));
-                }
+                Err(e) => fail(&metrics, &tx, "admit", e),
             }
         }
 
         // One prefill tile, then the batch keeps going on the next line.
         if let Some(pf) = prefill.as_mut() {
+            if pf.job.cancelled().is_some() {
+                // The client left mid-prefill: a 100K prompt would otherwise
+                // hold the engine for ~2 minutes for nobody.
+                prefill = None;
+                metrics.update(|s| s.requests_cancelled += 1);
+                continue;
+            }
             let batch_active = slots.iter().any(|s| s.is_some());
             if let Err(e) = prefill_step(pf, &mut engine, &cfg, batch_active, &metrics) {
-                eprintln!("serve: prefill: {e}");
-                prefill = None;
+                let pf = prefill.take().expect("checked");
+                fail(&metrics, &pf.job.tx, "prefill", e);
                 continue;
             }
             if pf.job.prompt.len() == pf.done {
@@ -324,6 +347,10 @@ pub fn run(
                     prefill_ms: sp.prefill_ms,
                     hit_tokens: sp.hit_tokens,
                 });
+            } else if let Some(reason) = spec.as_ref().and_then(|sp| sp.job.cancelled()) {
+                let sp = spec.take().expect("checked");
+                send_done(&sp.job.tx, &sp.job, reason, sp.emitted, sp.prefill_ms, sp.hit_tokens);
+                finished(&metrics, reason);
             } else {
                 let sp = spec.as_mut().expect("checked");
                 let drafter = mtp.as_mut().ok_or("MTP drafter is not loaded")?;
@@ -341,27 +368,32 @@ pub fn run(
                     s.spec_drafted += sp.job.drafts as u64;
                     s.spec_accepted += step.accepted as u64;
                 });
-                let mut stop = false;
+                // The reason is the first of these the emitted ids reach: a
+                // step can carry a stop id past `max_tokens`, and that request
+                // finished on length, not on the stop.
+                let mut finish = None;
                 for id in step.ids {
-                    if !sp.job.tx.send(Event::Tokens(vec![id])).is_ok() {
-                        stop = true;
+                    if sp.job.tx.send(Event::Tokens(vec![id])).is_err() {
+                        finish = Some("cancelled");
                         break;
                     }
                     sp.next = id;
                     sp.emitted += 1;
                     metrics.update(|s| s.generated_tokens += 1);
                     if sp.job.stop_ids.contains(&id) {
-                        stop = true;
+                        finish = Some("stop");
                         break;
                     }
                     if sp.emitted >= sp.job.max_tokens {
-                        stop = true;
+                        finish = Some("length");
                         break;
                     }
                 }
-                if stop || step.stopped {
+                if finish.is_none() && step.stopped {
+                    finish = Some("stop");
+                }
+                if let Some(finish) = finish {
                     let sp = spec.take().expect("checked");
-                    let finish = if step.stopped { "stop" } else { "length" };
                     send_done(
                         &sp.job.tx,
                         &sp.job,
@@ -370,7 +402,7 @@ pub fn run(
                         sp.prefill_ms,
                         sp.hit_tokens,
                     );
-                    metrics.update(|s| s.requests_done += 1);
+                    finished(&metrics, finish);
                 }
             }
         }
@@ -391,6 +423,10 @@ pub fn run(
             for (i, &slot) in order.iter().enumerate() {
                 let a = slots[slot].as_mut().expect("active slot has a job");
                 let id = ids[i];
+                if let Some(reason) = a.job.cancelled() {
+                    retire.push((slot, reason));
+                    continue;
+                }
                 if a.job.tx.send(Event::Tokens(vec![id])).is_err() {
                     retire.push((slot, "cancelled"));
                     continue;
