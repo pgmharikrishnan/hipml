@@ -230,6 +230,96 @@ pub fn prefill_resident_half(
     prefill_resident(module, stream, name, w, xh, y, m, k, tokens)
 }
 
+/// Split-K entry for a converted-activation kernel, when the shape is
+/// wave-starved. `None` means the shape runs the single-pass kernel.
+fn split_entry(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "prefill_q4_k_w2h" => "prefill_q4_k_w2h_sk",
+        "prefill_q6_k_w2h" => "prefill_q6_k_w2h_sk",
+        "prefill_q8_0_w2h" => "prefill_q8_0_w2h_sk",
+        "prefill_halfw_w2h" => "prefill_halfw_w2h_sk",
+        _ => return None,
+    })
+}
+
+/// Whether a shape should split its k range in two. The v2 tile is 128 rows x
+/// 256 tokens, so `blocks` tiles are `blocks / 64` waves on this card. Below
+/// three waves the matrix units idle at the end of every chunk; at 512 tokens
+/// `ffn_gate` (5120x17408) is 80 blocks = 2.5 waves, while the 2048-token
+/// chunks used by 8K and deeper prompts are 320 blocks and stay single-pass.
+/// The lower bound keeps tiny projections (k/v, 16 blocks) on one launch: two
+/// halves of 16 blocks would still be under one wave and only add a pass.
+fn should_split(m: usize, k: usize, tokens: usize) -> bool {
+    if std::env::var_os("HIPML_SPLITK").map_or(false, |v| v == "0") {
+        return false;
+    }
+    // Both halves must end on a 32-value k-tile boundary and the Q4_K/Q6_K
+    // block format needs 256 values per block; 64 is the common multiple.
+    if k < 4096 || k % 64 != 0 {
+        return false;
+    }
+    let blocks = m.div_ceil(128) * tokens.div_ceil(256);
+    blocks >= 32 && blocks < 3 * 64
+}
+
+/// Launch the split-K pair: `[0, ks)` overwrites `y`, `[ks, k)` adds into it.
+/// The two launches are ordered on one stream, so the sum is deterministic and
+/// needs no atomics or reduce pass.
+#[allow(clippy::too_many_arguments)]
+fn prefill_split(
+    module: &Module,
+    stream: &Stream,
+    name: &str,
+    w: &ByteBuffer,
+    x: &Buffer,
+    y: &Buffer,
+    m: usize,
+    k: usize,
+    tokens: usize,
+) -> Result<(), String> {
+    let spec = crate::spec(name).ok_or_else(|| format!("{name} is not in the manifest"))?;
+    let (rpb, tpb, block) = match spec.kind {
+        crate::KernelKind::Prefill {
+            rows,
+            tokens,
+            block,
+        } => (rows, tokens, block),
+        _ => return Err(format!("{name}: not a prefill kernel")),
+    };
+    // A 256-value split point keeps every k-tile of both halves whole.
+    let ks = (k / 2) & !255usize;
+    if ks == 0 || ks >= k {
+        return Err(format!("{name}: k={k} cannot be split"));
+    }
+    let kernel = module.kernel(name)?;
+    let cfg = LaunchConfig::prefill(m, tokens, rpb, tpb, block);
+    let mut p_w = w.as_ptr();
+    let mut p_x = x.as_ptr();
+    let mut p_y = y.as_ptr();
+    let mut v_m = m as i32;
+    let mut v_k = k as i32;
+    let mut v_tokens = tokens as i32;
+    let mut v_k0 = 0i32;
+    let mut v_k1 = ks as i32;
+    let mut v_acc = 0i32;
+    let mut params: [*mut c_void; 9] = [
+        &mut p_w as *mut _ as *mut c_void,
+        &mut p_x as *mut _ as *mut c_void,
+        &mut p_y as *mut _ as *mut c_void,
+        &mut v_m as *mut _ as *mut c_void,
+        &mut v_k as *mut _ as *mut c_void,
+        &mut v_tokens as *mut _ as *mut c_void,
+        &mut v_k0 as *mut _ as *mut c_void,
+        &mut v_k1 as *mut _ as *mut c_void,
+        &mut v_acc as *mut _ as *mut c_void,
+    ];
+    kernel.launch(cfg, stream, &mut params)?;
+    v_k0 = ks as i32;
+    v_k1 = k as i32;
+    v_acc = 1;
+    kernel.launch(cfg, stream, &mut params)
+}
+
 /// Tiled prefill GEMM over a resident weight payload.
 ///
 /// Free function as well as a `Launcher` method because the gated-delta-net and
@@ -259,6 +349,11 @@ pub fn prefill_resident(
     };
     if k % 64 != 0 {
         return Err(format!("{name}: k={k} must be a multiple of the 64-value k-tile"));
+    }
+    if let Some(sk) = split_entry(name) {
+        if should_split(m, k, tokens) {
+            return prefill_split(module, stream, sk, w, x, y, m, k, tokens);
+        }
     }
     let kernel = module.kernel(name)?;
     let mut p_w = w.as_ptr();

@@ -362,6 +362,45 @@ pub const KERNELS: &[KernelSpec] = &[
             block: 256,
         },
     },
+    // Split-K variants (WP36). Same geometry; the launcher runs two ordered
+    // k-slices so a wave-starved short prompt gets twice the blocks. The
+    // second slice accumulates into the first slice's output.
+    KernelSpec {
+        name: "prefill_q4_k_w2h_sk",
+        entry: "prefill_q4_k_w2h_sk",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_q6_k_w2h_sk",
+        entry: "prefill_q6_k_w2h_sk",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_q8_0_w2h_sk",
+        entry: "prefill_q8_0_w2h_sk",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_halfw_w2h_sk",
+        entry: "prefill_halfw_w2h_sk",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
     KernelSpec {
         name: "prefill_xhalf",
         entry: "prefill_xhalf",
