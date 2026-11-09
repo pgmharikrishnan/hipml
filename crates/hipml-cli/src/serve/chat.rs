@@ -31,58 +31,14 @@ pub fn messages(v: &Value) -> Result<Vec<Message>, String> {
     }
     let mut out = Vec::with_capacity(arr.len());
     for (i, m) in arr.iter().enumerate() {
-        let role = m
-            .get("role")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("message {i}: role is required"))?;
-        let role = match role {
-            "developer" => "system",
-            r => r,
-        };
-        let content = m
-            .get("content")
-            .map(content_text)
-            .transpose()?
-            .unwrap_or_default();
-        let reasoning = m
-            .get("reasoning_content")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if role == "assistant" && !reasoning.is_empty() {
-            out.push(Message::assistant_with_reasoning(content, reasoning));
-        } else {
-            out.push(Message::new(role, content));
-        }
+        // The CLI's JSON path is the same builder: tool calls, content parts
+        // and reasoning all go through one implementation.
+        out.push(hipml_core::chat_request::message_from_arg(
+            &hipml_core::chat_request::value_to_arg(m),
+            i,
+        )?);
     }
     Ok(out)
-}
-
-/// OpenAI content may be a string or an array of typed parts. Text parts are
-/// concatenated; an image part is rejected rather than silently dropped.
-fn content_text(v: &Value) -> Result<String, String> {
-    match v {
-        Value::Str(s) => Ok(s.clone()),
-        Value::Null => Ok(String::new()),
-        Value::Arr(parts) => {
-            let mut out = String::new();
-            for p in parts {
-                match p.get("type").and_then(Value::as_str) {
-                    Some("text") => {
-                        if let Some(t) = p.get("text").and_then(Value::as_str) {
-                            out.push_str(t);
-                        }
-                    }
-                    Some("image_url") => {
-                        return Err("image parts are not supported by this model".to_string())
-                    }
-                    Some(other) => return Err(format!("unsupported content part {other:?}")),
-                    None => return Err("content part without a type".to_string()),
-                }
-            }
-            Ok(out)
-        }
-        _ => Err("content must be a string or an array of parts".to_string()),
-    }
 }
 
 fn opts(add_generation_prompt: bool) -> ChatOptions {

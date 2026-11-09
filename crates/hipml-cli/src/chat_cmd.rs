@@ -25,6 +25,9 @@ use hipml_core::tokenizer::Tokenizer;
 struct Args {
     gguf: String,
     messages: String,
+    /// Full request body JSON (messages + tools + template kwargs), the same
+    /// shape llama-server's `/apply-template` takes. Overrides `--messages`.
+    json_file: Option<String>,
     tools: Option<String>,
     enable_thinking: bool,
     reasoning_effort: String,
@@ -39,6 +42,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
     let mut a = Args {
         gguf: String::new(),
         messages: String::new(),
+        json_file: None,
         tools: None,
         enable_thinking: true,
         reasoning_effort: "xhigh".to_string(),
@@ -62,6 +66,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--messages" => {
                 a.messages = need(i)?.to_string();
+                i += 2;
+            }
+            "--json-file" => {
+                a.json_file = Some(need(i)?.to_string());
                 i += 2;
             }
             "--tools" => {
@@ -107,8 +115,8 @@ fn parse(args: &[String]) -> Result<Args, String> {
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    if a.gguf.is_empty() || a.messages.is_empty() {
-        return Err("--gguf and --messages are required".to_string());
+    if a.gguf.is_empty() || (a.messages.is_empty() && a.json_file.is_none()) {
+        return Err("--gguf and (--messages or --json-file) are required".to_string());
     }
     Ok(a)
 }
@@ -219,41 +227,59 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("chat: {} has no tokenizer.chat_template", a.gguf);
         return 1;
     };
-    let text = match std::fs::read_to_string(&a.messages) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("chat: read {}: {e}", a.messages);
-            return 1;
-        }
-    };
-    let messages = match parse_messages(&text) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("chat: {}: {e}", a.messages);
-            return 1;
-        }
-    };
-    let tools = match &a.tools {
-        None => Vec::new(),
-        Some(path) => match std::fs::read_to_string(path) {
-            Ok(s) => s
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(str::to_string)
-                .collect(),
+    let (messages, opts) = if let Some(path) = &a.json_file {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
             Err(e) => {
                 eprintln!("chat: read {path}: {e}");
                 return 1;
             }
-        },
-    };
-    let opts = ChatOptions {
-        enable_thinking: a.enable_thinking,
-        reasoning_effort: a.reasoning_effort.clone(),
-        preserve_thinking: a.preserve_thinking,
-        add_generation_prompt: a.generation_prompt,
-        tools,
+        };
+        match hipml_core::chat_request::load(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("chat: {path}: {e}");
+                return 1;
+            }
+        }
+    } else {
+        let text = match std::fs::read_to_string(&a.messages) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("chat: read {}: {e}", a.messages);
+                return 1;
+            }
+        };
+        let messages = match parse_messages(&text) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("chat: {}: {e}", a.messages);
+                return 1;
+            }
+        };
+        let tools = match &a.tools {
+            None => Vec::new(),
+            Some(path) => match std::fs::read_to_string(path) {
+                Ok(s) => s
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                Err(e) => {
+                    eprintln!("chat: read {path}: {e}");
+                    return 1;
+                }
+            },
+        };
+        let opts = ChatOptions {
+            enable_thinking: a.enable_thinking,
+            reasoning_effort: a.reasoning_effort.clone(),
+            preserve_thinking: a.preserve_thinking,
+            add_generation_prompt: a.generation_prompt,
+            tools,
+        };
+        (messages, opts)
     };
     let rendered = match render(template, &messages, &opts) {
         Ok(r) => r,

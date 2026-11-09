@@ -11,6 +11,7 @@ use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
 
 mod attn_cmd;
 mod chat_cmd;
+
 #[cfg(feature = "hip")]
 mod cache_cmd;
 #[cfg(feature = "hip")]
@@ -28,6 +29,7 @@ mod mtp_cmd;
 #[cfg(feature = "hip")]
 mod oracle_gate;
 mod prefill_cmd;
+mod tok_cmd;
 #[cfg(feature = "hip")]
 mod rows_cmd;
 #[cfg(feature = "hip")]
@@ -75,6 +77,7 @@ fn main() {
         "generate" => std::process::exit(gen_cmd::generate(&args[1..])),
         "chat" => std::process::exit(chat_cmd::run(&args[1..])),
         "tokenize" => std::process::exit(gen_cmd::tokenize(&args[1..])),
+        "tokenize-batch" => std::process::exit(tok_cmd::run(&args[1..])),
         "matbench" => std::process::exit(gen_cmd::matbench(&args[1..])),
         "prefill-bench" => std::process::exit(prefill_cmd::bench(&args[1..])),
         "prefill-model" => std::process::exit(prefill_cmd::model(&args[1..])),
