@@ -12,7 +12,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::chat;
-use super::http::{new_job, now_unix, write_body_h, write_json, write_json_h, Shared, Sse, Text};
+use super::http::{new_job, Shared};
+use super::wire::{now_unix, write_body_h, write_json, write_json_h, Sse, Text};
 use super::json::{self, Value};
 use super::sched::{Done, Event, CANCEL_GONE, CANCEL_STOP};
 

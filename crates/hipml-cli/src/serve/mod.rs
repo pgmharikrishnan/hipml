@@ -17,6 +17,7 @@ mod chat;
 mod http;
 mod metrics;
 mod sched;
+mod wire;
 
 /// The JSON reader/writer lives in the core crate so the CPU-only CLI paths
 /// (`hipml chat --messages-json`) can use the same parser as the server.
