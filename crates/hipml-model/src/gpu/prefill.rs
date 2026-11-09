@@ -109,6 +109,13 @@ pub(crate) struct Chunk {
     /// Second k-partial for split-K ffn projections. Only allocated for short
     /// prompts, where the ffn tile is wave-starved; `tokens * max(n_embd,n_ff)`.
     pub sk: Buffer,
+    /// Split-K attention partials: `[splits][qslots][n_head][head_dim]` and
+    /// `[splits][qslots][n_head][2]`, f32, `qslots` the chunk rounded up to a
+    /// 32-query tile. One allocation per engine, reused by every layer.
+    pub apart: Buffer,
+    pub apart_ml: Buffer,
+    /// Key splits the deep chunks use, from `HIPML_ATTN_SPLITS` (1 disables).
+    pub attn_splits: usize,
 }
 
 impl Chunk {
@@ -126,6 +133,19 @@ impl Chunk {
         // under three waves (see `prefill_should_split`); at the 2048-token
         // chunk used by long prompts the scratch would never be touched.
         let sk = if tokens <= 1024 { tokens * wide } else { 1 };
+        // Split-K attention scratch. `splits` is the env knob; the buffer is
+        // capped so a deep prompt cannot turn it into a residency problem
+        // (8 splits of a 2048-token chunk is 402 MiB, which is the ceiling).
+        let qslots = (tokens + 31) / 32 * 32;
+        let mut attn_splits = std::env::var("HIPML_ATTN_SPLITS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1)
+            .clamp(1, 8);
+        let part_len = |splits: usize| splits * qslots * cfg.n_head * cfg.head_dim;
+        while attn_splits > 1 && part_len(attn_splits) * 4 > 384 << 20 {
+            attn_splits /= 2;
+        }
         Ok(Chunk {
             x: zeros(tokens * n)?,
             x1: zeros(tokens * n)?,
@@ -144,6 +164,9 @@ impl Chunk {
             y: zeros(tokens * n)?,
             xh: zeros((tokens * wide + 1) / 2)?,
             sk: zeros(sk)?,
+            apart: zeros(part_len(attn_splits).max(1))?,
+            apart_ml: zeros((attn_splits * qslots * cfg.n_head * 2).max(2))?,
+            attn_splits,
         })
     }
 
@@ -163,7 +186,9 @@ impl Chunk {
             + self.aout.len()
             + self.y.len()
             + self.xh.len()
-            + self.sk.len()) * 4
+            + self.sk.len()
+            + self.apart.len()
+            + self.apart_ml.len()) * 4
             + self.ssm.bytes()
     }
 }

@@ -63,7 +63,7 @@ pub(super) fn attention_tile(
                     0,
                     n_tok,
                 )?;
-                attn.chunk_attention_q8(
+                attn.chunk_attention_q8_split(
                     l,
                     &c.q,
                     &dk.k,
@@ -73,6 +73,9 @@ pub(super) fn attention_tile(
                     n_tok,
                     dk.dtype.id() + 1,
                     dk.seq,
+                    &c.apart,
+                    &c.apart_ml,
+                    split_count(c.attn_splits, pos0),
                 )?;
             } else {
                 // Shapes the matrix-unit kernel does not cover: one row at a
@@ -110,6 +113,28 @@ pub(super) fn attention_tile(
 /// Device pointer of row `t` of a `[tokens][width]` f32 buffer.
 fn row_ptr(buf: &Buffer, t: usize, width: usize) -> *mut std::ffi::c_void {
     unsafe { (buf.as_ptr() as *mut u8).add(t * width * 4) as *mut std::ffi::c_void }
+}
+
+/// Key splits for a chunk starting at `pos0`.
+///
+/// Short chunks gain nothing (the combine pass costs more than the loop it
+/// shortens), so the mono kernel keeps everything below
+/// `HIPML_ATTN_SPLIT_MIN` positions (default 16K, the first depth where the
+/// per-block key loop reaches ~1,000 tiles). `HIPML_ATTN_SPLITS` sets the
+/// count; 1 keeps the mono kernel everywhere.
+fn split_count(splits: usize, pos0: usize) -> usize {
+    if splits <= 1 {
+        return 1;
+    }
+    let min_pos = std::env::var("HIPML_ATTN_SPLIT_MIN")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(16_384);
+    if pos0 < min_pos {
+        1
+    } else {
+        splits
+    }
 }
 
 /// Quantized-KV decode attention for one layer at `pos`, reading the query row

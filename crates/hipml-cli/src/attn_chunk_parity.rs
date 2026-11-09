@@ -100,6 +100,23 @@ pub fn run(l: &Launcher, cfg: &Config, w: &FullAttnW) -> Result<(bool, Stats), S
 /// bytes, so the comparison isolates accumulation order and the f16 operand
 /// conversion; the 8-bit quantization error is common to both sides.
 pub fn run_q8(l: &Launcher, cfg: &Config, w: &FullAttnW) -> Result<(bool, Stats), String> {
+    run_q8_splits(l, cfg, w, 1)
+}
+
+/// The same case with the key axis split across blocks: `attn_chunk_split_f16`
+/// writes per-slice partials and `attn_chunk_combine_f32` folds them, so this
+/// case pins the combine pass against the CPU reference at a non-zero position
+/// (where one slice can sit wholly above the diagonal).
+pub fn run_q8_split(l: &Launcher, cfg: &Config, w: &FullAttnW) -> Result<(bool, Stats), String> {
+    run_q8_splits(l, cfg, w, 4)
+}
+
+fn run_q8_splits(
+    l: &Launcher,
+    cfg: &Config,
+    w: &FullAttnW,
+    splits: usize,
+) -> Result<(bool, Stats), String> {
     // Default is the 37@29 case; the env knobs run the same comparison deep in
     // a cache whose per-head stride is larger than the live length, which is
     // how the engine lays the cache out (stride = n_ctx).
@@ -160,7 +177,16 @@ pub fn run_q8(l: &Launcher, cfg: &Config, w: &FullAttnW) -> Result<(bool, Stats)
     let ob = hipml_hip::Buffer::alloc(tok * nhd)?;
 
     let layer = AttnLayer::new(l, w, cfg, seq + 8)?;
-    layer.chunk_attention_q8(l, &qb, &kbb, &vbb, &ob, pos0, tok, 1, seq)?;
+    if splits > 1 {
+        let qslots = (tok + 31) / 32 * 32;
+        let apart = hipml_hip::Buffer::alloc(splits * qslots * cfg.n_head * hd)?;
+        let aml = hipml_hip::Buffer::alloc(splits * qslots * cfg.n_head * 2)?;
+        layer.chunk_attention_q8_split(
+            l, &qb, &kbb, &vbb, &ob, pos0, tok, 1, seq, &apart, &aml, splits,
+        )?;
+    } else {
+        layer.chunk_attention_q8(l, &qb, &kbb, &vbb, &ob, pos0, tok, 1, seq)?;
+    }
     let gpu = ob.to_host()?;
 
     let scale = 1.0f32 / (hd as f32).sqrt();

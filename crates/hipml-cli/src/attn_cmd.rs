@@ -299,6 +299,25 @@ fn parity_run(l: &Launcher, m: &Loaded) -> i32 {
         }
     }
 
+    // 2d. The same q8 case with the key axis split across four blocks and the
+    // combine pass folded back in.
+    match attn_chunk_parity::run_q8_split(l, cfg, &m.w) {
+        Ok((ok, st)) => {
+            failed |= !ok;
+            println!(
+                "{:<30} {:>10.2e} {:>10.2e}  {}",
+                "chunk attention q8 split4",
+                st.max_abs,
+                st.max_rel,
+                if ok { "PASS" } else { "FAIL" }
+            );
+        }
+        Err(e) => {
+            eprintln!("attn: chunk attention q8 split: {e}");
+            return 1;
+        }
+    }
+
     const DEPTH: usize = 1000;
     let mut rng = Rng::new(0xA77E_0002_0000_0002);
     let xs: Vec<Vec<f32>> = (0..DEPTH)
