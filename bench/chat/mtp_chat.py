@@ -48,6 +48,7 @@ def ids_for(name, message_file, tools_file):
 
 
 def main():
+    global OUT
     ap = argparse.ArgumentParser()
     ap.add_argument("--tokens", type=int, default=384)
     ap.add_argument("--drafts", type=int, default=3)
@@ -55,7 +56,6 @@ def main():
     ap.add_argument("--ctx", type=int, default=0)
     ap.add_argument("--out", default=OUT)
     args = ap.parse_args()
-    global OUT
     OUT = args.out
     os.makedirs(OUT, exist_ok=True)
     all_rows = {}
