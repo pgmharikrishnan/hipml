@@ -225,7 +225,7 @@ impl AttnLayer<'_> {
                 let mut nt = tokens as i32;
                 let mut qs = qslots as i32;
                 let mut nsp = splits as i32;
-                let mut params: [*mut c_void; 7] = [
+                let mut params: [*mut c_void; 8] = [
                     &mut p_pa as *mut _ as *mut c_void,
                     &mut p_pm as *mut _ as *mut c_void,
                     &mut p_out as *mut _ as *mut c_void,
@@ -233,6 +233,7 @@ impl AttnLayer<'_> {
                     &mut hd as *mut _ as *mut c_void,
                     &mut nt as *mut _ as *mut c_void,
                     &mut qs as *mut _ as *mut c_void,
+                    &mut nsp as *mut _ as *mut c_void,
                 ];
                 let cfg = LaunchConfig {
                     grid: (qslots as u32, d.n_head as u32, 1),
