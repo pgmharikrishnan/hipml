@@ -199,6 +199,96 @@ dynamic count agrees with the measured ~5 cycles per (KV head, row) per CU. A
 matrix-unit decode kernel (16 keys against the six GQA heads padded to 16 rows)
 is the way out, not more splits.
 
+## Decode kernel rewrite: one warp per KV head (WP31)
+
+The staged kernel above reads the cache through shared memory with six warps per
+row (one per query head) and measures 12.58 ms for the 3.242 GiB q8 cache at
+100K (276.7 GB/s at 256 splits). A phase-attribution kernel
+(`attn_decode_kv_lab`, entries `lab_*`) compiles phases out so one 100K pass
+says where the time goes (16 layers, 64 splits):
+
+| phases compiled in | us | GB/s |
+| --- | ---: | ---: |
+| stage K+V, score, PV (full) | 12429 | 280.1 |
+| stage K, score, no V | 9237 | 376.9 |
+| stage V, no score, PV | 4892 | 711.7 |
+| stage K+V, no compute | 1730 | 2013.0 |
+| score+PV, no staging | 11191 | 311.1 |
+
+Staging is 1.7 ms and overlaps with compute (full is 0.5 ms under the sum of
+the two floors). The score chain — two K dword loads, eight FMAs and a
+five-step `ds_bpermute` butterfly per row and head — is ~8.4 ms of the 12.4 ms
+and PV ~4.0 ms. The instruction count, not the cache read, is the limiter.
+
+The new kernel (`attn_decode_kv_w.hip`) gives one warp a whole (KV head, key
+range) task and keeps the six query heads of the GQA group in it: `qv[6][8]`
+and `acc[6][8]`, eight components per lane, one 8-deep dot chain per head
+reduced by the same five butterfly steps, the same online softmax and the same
+split/reduce ABI. Two shapes exist: `w2`/`w4` (whole group, 2/4 rows per tile)
+and `s1`/`s2`/`s4` (three heads per warp, two warps per task sharing the row
+through L1). 100K, 16 layers, 256 splits:
+
+| entry | warps/task | VGPRs | us | GB/s |
+| --- | ---: | ---: | ---: | ---: |
+| `attn_decode_kv_q8` (staged) | 6 | 192 | 12583 | 276.7 |
+| `attn_decode_kv_s1` | 6 | 101 | 10375 | 335.6 |
+| `attn_decode_kv_s2` | 3 | 110 | 9462 | 367.9 |
+| `attn_decode_kv_s4` | 2 | 134 | 8815 | 395.0 |
+| `attn_decode_kv_w4` | 1 | 192 | - | 324 |
+| `attn_decode_kv_w2` (shipped) | 1 | 192 | 8323 | 418.3 |
+
+Fewer warps per task wins: the whole group in one warp removes the duplicate
+K/V reads, and the L1 sharing between the two `s4` warps does not pay for the
+extra issue slots. 384 splits are level (397 GB/s for `s4`) and 128 is worse
+(310 for `w2`), so the engine keeps `(seq/256).clamp(1,256)`.
+
+**An earlier `s4` reading of 698 GB/s was a measurement bug, not a kernel.**
+The launcher sized the grid as `ceil(tasks/4)` blocks for a kernel that needs
+`ceil(group/3)` warps per task, so every `s*` run above group 3 launched only
+the first half of its warps and read half the cache. The fix launches
+`ceil(tasks * wpr / 4)` blocks; `s4` then measures 395 GB/s and `w2` (one warp
+per task, never affected) is the fastest entry. The same bug made
+`attn_decode_kv_q8_hd256_s1000` and `_s4096` fail parity at max abs 0.103 and
+0.052; after the fix they are 1.27e-7 and 1.68e-7 and the whole KV table plus
+both 100K deep cases is green.
+
+Engine decode at 50 tokens (eager, q8 cache, unfused loop):
+
+| depth | baseline e9705d2 | shipped (w2) | delta |
+| ---: | ---: | ---: | ---: |
+| 0 | 33.54 ms (29.82) | 33.70 ms (29.68) | level |
+| 32,768 | 37.89 ms (26.39) | 37.59 ms (26.60) | +0.8% |
+| 100,000 | 46.59 ms (21.47) | 42.15 ms (23.73) | +9.5% |
+
+Depth 0 is level (33.4-33.7 ms across runs of either tree) and 32K is slightly
+better. Attention at 100K fell from 12.3-12.6 ms to 8.3 ms, which is the whole
+4.4 ms of the step; the weight stream (27.2 ms at 632 GB/s) and the rest of the
+step are unchanged. **The 24.5 tok/s target was not reached**: 100K needs
+40.8 ms and the step is 42.15 ms, so the remaining gap is 1.35 ms of attention
+(16%). With f32 dot math the score phase is the floor; the way past it is a
+matrix-unit score (16 keys x 16 heads) with an f16 dot, which the 1e-4 parity
+tolerance does not currently allow, or a whole-group kernel at one row per tile
+to cut the 192 VGPRs and raise occupancy.
+
+Not measured here: the `s1`/`s2`/`s4` entries stay in the manifest for A/B but
+are not the shipped path, and the graph path (`--graph`) was not re-timed after
+the kernel change.
+
+The fused residual+rmsnorm and SwiGLU epilogue were built and measured before
+being reverted: 42.478 ms vs 42.542 unfused at 100K (+0.06 ms, noise) and
+34.078 vs 33.566 ms at depth 0 (-0.51 ms, a regression). The ~190 launches it
+removes are not on the critical path at 2-3 us each, and the fused kernels cost
+more per launch than the pairs they replace, so the decode loop keeps the
+unfused launches.
+
+`hipml attn-parity` failed `layer depth 1` (max abs 8.0) and `layer depth 1000`
+(0.94) on every tree, including the base commit: the harness drove
+`AttnLayer::forward` without publishing the step buffer, so the decode kernels
+read the sequence length left behind by the norm+rope case (38) and depth 1
+attended 38 rows of a one-row f32 cache. `forward` now publishes the step (the
+engine already did, which is why the token loop was unaffected); the two cases
+pass at 2.48e-5 and 4.17e-6.
+
 ## KV layout: f32 for the chunk, q8 for depth
 
 The chunk path appends f32 rows because the attention kernel stages the cache

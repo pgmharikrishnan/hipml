@@ -153,27 +153,51 @@ pub fn launch_ptrs(
     if head_dim % 32 != 0 || head_dim > 256 {
         return Err(format!("head_dim {head_dim}: must be 32..=256, multiple of 32"));
     }
+    // The shipped q8 path at head_dim 256 is the warp kernel: the parity cases
+    // and the engine both take it, so `parity --deep` exercises what runs.
+    // Id 6 keeps the staged kernel reachable for A/B.
+    let dtype = if dtype == 0 && head_dim == 256 && group <= 8 {
+        4
+    } else {
+        dtype
+    };
     let entry = match dtype {
-        0 => "attn_decode_kv_q8",
+        0 | 6 => "attn_decode_kv_q8",
         1 => "attn_decode_kv_q4",
         2 => "attn_decode_kv_q8s",
         3 => "attn_decode_kv_q8g",
+        4 => "attn_decode_kv_w2",
+        5 => "attn_decode_kv_w4",
+        7 => "attn_decode_kv_s2",
+        13 => "attn_decode_kv_s4",
+        14 => "attn_decode_kv_s1",
+        8 => "attn_decode_kv_lab_full",
+        9 => "attn_decode_kv_lab_nov",
+        10 => "attn_decode_kv_lab_nok",
+        11 => "attn_decode_kv_lab_stage",
+        12 => "attn_decode_kv_lab_nostage",
         other => return Err(format!("unknown KV dtype {other}")),
     };
-    if dtype >= 2 && head_dim % 128 != 0 {
+    if dtype >= 2 && dtype <= 3 && head_dim % 128 != 0 {
         return Err(format!("head_dim {head_dim}: this variant needs a multiple of 128"));
+    }
+    // The warp-per-KV-head kernel owns eight components per lane, so it is
+    // head_dim 256 only; other widths keep the staged kernel.
+    if dtype >= 4 && head_dim != 256 {
+        return Err(format!("head_dim {head_dim}: the warp kernel is head_dim 256 only"));
     }
     // Same constants as KV_TILE_Q8 / KV_TILE_Q4 in attn_decode_kv.hip and
     // Q8S_TILE in attn_decode_kv_q8s.hip.
     let tile = match dtype {
         1 => 8,
         2 => 16,
-        0 => 4,
+        0 | 6 | 8..=12 => 4,
         _ => 0,
     };
     let row_bytes = (head_dim >> 5) * 34;
     let shared = match dtype {
         2 => 2 * tile * row_bytes,
+        4 | 5 => 0,
         _ => 2 * tile * head_dim * 4,
     };
 
@@ -204,9 +228,26 @@ pub fn launch_ptrs(
         &mut v_scale as *mut _ as *mut std::ffi::c_void,
         &mut v_splits as *mut _ as *mut std::ffi::c_void,
     ];
+    // The warp kernel launches one warp per (KV head, split, head-subset)
+    // task, four warps to a block; the staged kernels launch one block per
+    // (KV head, split) task. A whole-group warp (`w2`/`w4`) covers every head
+    // of the group in one warp, the `s*` variants three heads per warp, so
+    // they need `ceil(group/3)` warps per task. Missing that factor launched
+    // only the first `grid*4` warps of `tasks*wpr` and silently dropped the
+    // rest of the key range.
+    let warps = if matches!(dtype, 4 | 5 | 7 | 13 | 14) { 4 } else { 0 };
+    let hpw = if matches!(dtype, 4 | 5) { group } else { group.min(3) };
+    let wpr = group.div_ceil(hpw);
+    let tasks = n_kv * splits;
+    let grid = if warps > 0 {
+        (tasks * wpr).div_ceil(warps) as u32
+    } else {
+        tasks as u32
+    };
+    let block = if warps > 0 { 32 * warps } else { 32 * group };
     let cfg = LaunchConfig {
-        grid: ((n_kv * splits) as u32, 1, 1),
-        block: ((32 * group) as u32, 1, 1),
+        grid: (grid, 1, 1),
+        block: (block as u32, 1, 1),
         // KV_TILE rows of K and of V. The f32-staging kernels stage
         // dequantized rows (q8: 4 rows = 8 KB; q4: 8 rows = 16 KB); q8s stages
         // the 272 B quantized rows (16 rows = 8.7 KB); q8g uses none. Must
