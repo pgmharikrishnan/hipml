@@ -1,0 +1,4 @@
+--- user
+Copy the following sentence verbatim, with exactly the same characters and no commentary:
+
+The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs.

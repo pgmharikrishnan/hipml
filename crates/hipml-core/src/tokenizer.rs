@@ -24,9 +24,21 @@ pub struct Tokenizer {
     /// GPT-2 byte encoder: byte -> printable codepoint.
     byte_to_char: [char; 256],
     char_to_byte: HashMap<char, u8>,
+    /// `tokenizer.ggml.token_type` per id (1 normal, 3 control, 4 user-defined,
+    /// 6 byte; the GGUF llama.cpp enum).
+    token_type: Vec<u32>,
+    /// Control and user-defined tokens, as (text, id), longest first. These are
+    /// the strings llama.cpp treats as special: they are emitted as one id and
+    /// never enter the BPE merge loop.
+    special: Vec<(String, u32)>,
+    special_by_id: Vec<bool>,
+    /// `tokenizer.chat_template`, verbatim from the file. `chat::render` refuses
+    /// a template it does not understand rather than guessing a chat format.
+    pub chat_template: Option<String>,
     pub eos_id: u32,
     pub bos_id: u32,
     pub add_bos: bool,
+    pub add_eos: bool,
 }
 
 impl Tokenizer {
@@ -72,6 +84,32 @@ impl Tokenizer {
 
         let (byte_to_char, char_to_byte) = byte_encoder();
 
+        // llama.cpp's special-token set: CONTROL (3) and USER_DEFINED (4).
+        let token_type = g
+            .meta("tokenizer.ggml.token_type")
+            .and_then(|v| v.as_u32s())
+            .unwrap_or_else(|| vec![1u32; tokens.len()]);
+        if token_type.len() != tokens.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "token_type has {} entries for {} tokens",
+                    token_type.len(),
+                    tokens.len()
+                ),
+            ));
+        }
+        let mut special_by_id = vec![false; tokens.len()];
+        let mut special: Vec<(String, u32)> = Vec::new();
+        for (i, (&ty, text)) in token_type.iter().zip(tokens.iter()).enumerate() {
+            if ty == 3 || ty == 4 {
+                special_by_id[i] = true;
+                special.push((text.clone(), i as u32));
+            }
+        }
+        // Leftmost-longest matching needs longer strings first.
+        special.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.1.cmp(&b.1)));
+
         let eos_id = g
             .meta("tokenizer.ggml.eos_token_id")
             .and_then(|v| v.as_u32())
@@ -84,6 +122,14 @@ impl Tokenizer {
             .meta("tokenizer.ggml.add_bos_token")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let add_eos = g
+            .meta("tokenizer.ggml.add_eos_token")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let chat_template = g
+            .meta("tokenizer.chat_template")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
 
         Ok(Tokenizer {
             tokens,
@@ -91,22 +137,90 @@ impl Tokenizer {
             merges,
             byte_to_char,
             char_to_byte,
+            token_type,
+            special,
+            special_by_id,
+            chat_template,
             eos_id,
             bos_id,
             add_bos,
+            add_eos,
         })
     }
 
     /// Encode text to token ids. No BOS unless the file says to add one.
     pub fn encode(&self, text: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        if self.add_bos {
+            out.push(self.bos_id);
+        }
+        out.extend(self.encode_normal(text));
+        out
+    }
+
+    /// As [`encode`], but text that spells a control/user-defined token is
+    /// emitted as that single id. This is llama.cpp's `parse_special = true`
+    /// path and is what a chat template needs: `<|im_end|>` must be 248046,
+    /// never a handful of BPE pieces.
+    pub fn encode_special(&self, text: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        if self.add_bos {
+            out.push(self.bos_id);
+        }
+        let bytes = text.as_bytes();
+        let mut pos = 0usize;
+        let mut plain = 0usize;
+        while pos < bytes.len() {
+            let hit = self
+                .special
+                .iter()
+                .find(|(s, _)| bytes[pos..].starts_with(s.as_bytes()));
+            match hit {
+                Some((s, id)) => {
+                    if plain < pos {
+                        out.extend(self.encode_normal(&text[plain..pos]));
+                    }
+                    out.push(*id);
+                    pos += s.len();
+                    plain = pos;
+                }
+                None => {
+                    // Advance by one UTF-8 character, never into a codepoint.
+                    pos += text[pos..].chars().next().map(char::len_utf8).unwrap_or(1);
+                }
+            }
+        }
+        if plain < bytes.len() {
+            out.extend(self.encode_normal(&text[plain..]));
+        }
+        out
+    }
+
+    /// One token id for a special token's literal text, if the file has it.
+    pub fn special_id(&self, text: &str) -> Option<u32> {
+        self.special
+            .iter()
+            .find(|(s, _)| s == text)
+            .map(|(_, id)| *id)
+    }
+
+    /// Whether id is a control/user-defined token.
+    pub fn is_special(&self, id: u32) -> bool {
+        self.special_by_id.get(id as usize).copied().unwrap_or(false)
+    }
+
+    /// The token's GGUF type (1 normal, 3 control, 4 user-defined, 6 byte).
+    pub fn token_type(&self, id: u32) -> u32 {
+        self.token_type.get(id as usize).copied().unwrap_or(1)
+    }
+
+    /// Encode a run of ordinary text: pretokenize, byte-encode, merge.
+    fn encode_normal(&self, text: &str) -> Vec<u32> {
         // The pretokenizer runs on the raw text; the GPT-2 byte encoder is
         // applied to each resulting word (unicode.cpp: split, then
         // unicode_byte_encoding_process on every word).
         let raw: Vec<char> = text.chars().collect();
         let mut out = Vec::new();
-        if self.add_bos {
-            out.push(self.bos_id);
-        }
         for (start, end) in split_qwen35(&raw) {
             let word: String = raw[start..end].iter().collect();
             let encoded: Vec<char> = word
@@ -184,6 +298,17 @@ impl Tokenizer {
             bytes.extend_from_slice(&self.token_bytes(id));
         }
         String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Decode as a chat completion: control/user-defined tokens are not text
+    /// and are omitted, matching llama.cpp's default `special = false` detokenize.
+    pub fn decode_text(&self, ids: &[u32]) -> String {
+        let filtered: Vec<u32> = ids
+            .iter()
+            .copied()
+            .filter(|&id| !self.is_special(id))
+            .collect();
+        self.decode(&filtered)
     }
 }
 

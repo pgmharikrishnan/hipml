@@ -233,6 +233,26 @@ impl<'a> GpuEngine<'a> {
         Ok((last, rep.unwrap_or_default()))
     }
 
+    /// Same prefill, but also return the full logit vector for the last prompt
+    /// token. The chunked path already computed it in `self.logits`; this is the
+    /// diagnostic a cross-engine divergence needs (top-k margin under hipml).
+    pub fn prefill_chunked_logits(
+        &mut self,
+        tokens: &[u32],
+        st: &mut GpuState,
+        chunk: usize,
+    ) -> Result<(u32, Vec<f32>), String> {
+        let chunk = chunk.min(tokens.len()).max(1);
+        let deep = Self::wants_deep(tokens.len());
+        self.ensure_chunk(chunk, deep)?;
+        let mut last = 0u32;
+        for tile in tokens.chunks(chunk) {
+            last = self.forward_chunk(tile, st, &mut None)?;
+        }
+        let logits = self.logits.to_host()?;
+        Ok((last, logits))
+    }
+
     /// Same prefill, but also write every token's post-`output_norm` hidden
     /// state into `capture` at its absolute row. The speculative driver seeds
     /// the MTP drafter from these rows.

@@ -62,6 +62,8 @@ impl SpecStats {
 pub struct SpecRun {
     pub ids: Vec<u32>,
     pub stats: SpecStats,
+    /// True when a stop id (EOS) was emitted.
+    pub stopped: bool,
     /// Prompt prefill (chunked), including the hidden-state capture.
     pub prefill_s: f64,
     /// Building the drafter's prompt KV.
@@ -87,6 +89,7 @@ impl<'a> GpuEngine<'a> {
         tokens: usize,
         drafts: usize,
         chunk: usize,
+        stop_ids: &[u32],
     ) -> Result<SpecRun, String> {
         if drafts == 0 || drafts > 3 {
             return Err(format!("drafts {drafts} outside 1..=3"));
@@ -125,12 +128,13 @@ impl<'a> GpuEngine<'a> {
 
         let mut gen = Vec::with_capacity(tokens + 1);
         gen.push(next);
+        let mut stopped = stop_ids.contains(&next);
         let mut snaps = self.alloc_snapshots(drafts)?;
         let mut draft_ids = Vec::with_capacity(drafts);
         let (mut draft_s, mut verify_s, mut rollback_s) = (0.0f64, 0.0f64, 0.0f64);
         let t_decode = Instant::now();
 
-        while gen.len() < tokens {
+        while gen.len() < tokens && !stopped {
             // 3. Draft `drafts` tokens from the current position's hidden
             //    state (`hnext` was seeded above).
             let q = st.pos - 1;
@@ -153,13 +157,22 @@ impl<'a> GpuEngine<'a> {
             verify_s += t.elapsed().as_secs_f64();
             let t = Instant::now();
 
-            // 5. Longest matching prefix.
+            // 5. Longest matching prefix. A stop token ends the completion even
+            //    if the draft would have continued past it: with EOS ignored the
+            //    model closes the turn, invents a user turn and repeats, and
+            //    every acceptance figure is measured on degenerate text.
             let mut a = 0usize;
+            let mut stopped_on_draft = false;
             for k in 0..drafts {
                 stats.drafted[k] += 1;
                 if ids[k] == draft_ids[k] {
                     a += 1;
                     stats.accepted[k] += 1;
+                    if stop_ids.contains(&ids[k]) {
+                        stopped = true;
+                        stopped_on_draft = true;
+                        break;
+                    }
                 } else {
                     break;
                 }
@@ -173,7 +186,8 @@ impl<'a> GpuEngine<'a> {
             }
             st.pos = pos0 + a + 1;
 
-            // 7. Emit the accepted drafts and the correction.
+            // 7. Emit the accepted drafts, then the correction unless the stop
+            //    token was itself the last accepted draft.
             for &d in &draft_ids[..a] {
                 if gen.len() < tokens {
                     gen.push(d);
@@ -181,12 +195,20 @@ impl<'a> GpuEngine<'a> {
                 }
             }
             next = ids[a];
-            if gen.len() < tokens {
-                gen.push(next);
-                stats.tokens += 1;
+            if !stopped_on_draft {
+                if stop_ids.contains(&next) {
+                    stopped = true;
+                }
+                if gen.len() < tokens || stopped {
+                    gen.push(next);
+                    stats.tokens += 1;
+                }
             }
 
             rollback_s += t.elapsed().as_secs_f64();
+            if stopped {
+                break;
+            }
             // 8. Rewrite the drafter's KV for the accepted positions from the
             //    target's hidden state (the recursive draft wrote its own), as
             //    the reference does. `gen[p + 1 - p0]` is the token after `p`.
@@ -208,6 +230,7 @@ impl<'a> GpuEngine<'a> {
         Ok(SpecRun {
             ids: gen,
             stats,
+            stopped,
             prefill_s,
             draft_prefill_s,
             decode_s,

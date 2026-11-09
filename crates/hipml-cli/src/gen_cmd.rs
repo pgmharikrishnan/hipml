@@ -265,6 +265,8 @@ pub fn tokenize(args: &[String]) -> i32 {
     let mut gguf = None;
     let mut text = None;
     let mut json = false;
+    let mut special = false;
+    let mut list_special = false;
     let mut out_path = None;
     let mut i = 0;
     while i < args.len() {
@@ -298,6 +300,14 @@ pub fn tokenize(args: &[String]) -> i32 {
                 json = true;
                 i += 1;
             }
+            "--special" => {
+                special = true;
+                i += 1;
+            }
+            "--list-special" => {
+                list_special = true;
+                i += 1;
+            }
             "--out" => {
                 out_path = args.get(i + 1).cloned();
                 i += 2;
@@ -326,6 +336,14 @@ pub fn tokenize(args: &[String]) -> i32 {
             return 1;
         }
     };
+    if list_special {
+        for (id, s) in tok.tokens.iter().enumerate() {
+            if tok.is_special(id as u32) {
+                println!("{}\t{}\t{:?}", id, tok.token_type(id as u32), s);
+            }
+        }
+        return 0;
+    }
     let text = match text {
         Some(t) => t,
         None => {
@@ -333,17 +351,27 @@ pub fn tokenize(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let ids = tok.encode(&text);
+    let ids = if special {
+        tok.encode_special(&text)
+    } else {
+        tok.encode(&text)
+    };
     let rendered = if json {
         format!(
-            "{{\"ids\":{:?},\"text\":\"{}\",\"add_bos\":{},\"bos_id\":{}}}",
+            "{{\"ids\":{:?},\"text\":\"{}\",\"text_skip_special\":\"{}\",\"add_bos\":{},\"bos_id\":{},\"eos_id\":{}}}",
             ids,
             json_escape(&tok.decode(&ids)),
+            json_escape(&tok.decode_text(&ids)),
             tok.add_bos,
-            tok.bos_id
+            tok.bos_id,
+            tok.eos_id
         )
     } else {
-        format!("ids:  {ids:?}\ntext: {}", tok.decode(&ids))
+        format!(
+            "ids:  {ids:?}\ntext: {}\ntext (no specials): {}",
+            tok.decode(&ids),
+            tok.decode_text(&ids)
+        )
     };
     if let Some(path) = out_path {
         if let Err(e) = std::fs::write(&path, &rendered) {

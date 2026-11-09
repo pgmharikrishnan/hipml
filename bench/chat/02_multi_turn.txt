@@ -1,0 +1,6 @@
+--- user
+What does the `--stop-eos` flag do in hipml generate?
+--- assistant
+It stops greedy decoding as soon as the model samples its end-of-sequence token, so the completion ends at the assistant turn instead of running into invented user turns.
+--- user
+Show the exact token id for Qwen3.8-27B's EOS and the command line that passes it explicitly.

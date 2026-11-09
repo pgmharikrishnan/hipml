@@ -10,6 +10,7 @@ use hipml_core::tensor::Tensor;
 use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
 
 mod attn_cmd;
+mod chat_cmd;
 #[cfg(feature = "hip")]
 mod cache_cmd;
 #[cfg(feature = "hip")]
@@ -66,6 +67,7 @@ fn main() {
         "logits" => std::process::exit(load_cmd::logits(&args[1..])),
         "decode-bench" => std::process::exit(quant_cmd::decode_bench(&args[1..])),
         "generate" => std::process::exit(gen_cmd::generate(&args[1..])),
+        "chat" => std::process::exit(chat_cmd::run(&args[1..])),
         "tokenize" => std::process::exit(gen_cmd::tokenize(&args[1..])),
         "matbench" => std::process::exit(gen_cmd::matbench(&args[1..])),
         "prefill-bench" => std::process::exit(prefill_cmd::bench(&args[1..])),

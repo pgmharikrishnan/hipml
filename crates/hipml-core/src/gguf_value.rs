@@ -98,6 +98,11 @@ impl Value {
         self.as_array()?.iter().map(Value::as_usize).collect()
     }
 
+    /// `[1, 1, 3, ...]` as a u32 list (`tokenizer.ggml.token_type`).
+    pub fn as_u32s(&self) -> Option<Vec<u32>> {
+        self.as_array()?.iter().map(Value::as_u32).collect()
+    }
+
     /// Token list, e.g. `tokenizer.ggml.tokens`.
     pub fn as_strings(&self) -> Option<Vec<&str>> {
         self.as_array()?.iter().map(Value::as_str).collect()

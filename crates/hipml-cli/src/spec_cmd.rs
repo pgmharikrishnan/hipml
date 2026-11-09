@@ -25,6 +25,8 @@ struct Args {
     ctx: Option<usize>,
     chunk: usize,
     json: bool,
+    stop_ids: Vec<u32>,
+    stop_eos: bool,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -38,6 +40,8 @@ fn parse(args: &[String]) -> Result<Args, String> {
         ctx: None,
         chunk: 2048,
         json: false,
+        stop_ids: Vec::new(),
+        stop_eos: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -83,6 +87,20 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 a.json = true;
                 i += 1;
             }
+            "--stop-eos" => {
+                a.stop_eos = true;
+                i += 1;
+            }
+            "--stop-ids" => {
+                let parsed: Result<Vec<u32>, _> = need(i)?
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(str::parse::<u32>)
+                    .collect();
+                a.stop_ids = parsed.map_err(|e| format!("bad --stop-ids: {e}"))?;
+                i += 2;
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -108,6 +126,7 @@ struct Row {
     draft_ms: f64,
     verify_ms: f64,
     rollback_ms: f64,
+    stopped: bool,
 }
 
 pub fn bench(args: &[String]) -> i32 {
@@ -125,6 +144,17 @@ pub fn bench(args: &[String]) -> i32 {
             return 1;
         }
     };
+    let mut stop_ids = a.stop_ids.clone();
+    if a.stop_eos {
+        // The file is the authority; read its EOS rather than hard-coding.
+        match hipml_core::gguf::Gguf::open(&a.gguf)
+            .ok()
+            .and_then(|g| g.meta("tokenizer.ggml.eos_token_id").and_then(|v| v.as_u32()))
+        {
+            Some(eos) => stop_ids.push(eos),
+            None => eprintln!("spec-bench: --stop-eos but the GGUF has no eos id"),
+        }
+    }
     let t0 = Instant::now();
     let (mut model, report) = match Model::load(&a.gguf) {
         Ok(m) => m,
@@ -178,8 +208,9 @@ pub fn bench(args: &[String]) -> i32 {
         let mut ids = Vec::with_capacity(a.tokens);
         ids.push(first);
         let mut next = first;
+        let mut stopped = stop_ids.contains(&first);
         let t = Instant::now();
-        while ids.len() < a.tokens {
+        while ids.len() < a.tokens && !stopped {
             next = match engine.forward_token_id(next, &mut st) {
                 Ok(id) => id,
                 Err(e) => {
@@ -188,6 +219,7 @@ pub fn bench(args: &[String]) -> i32 {
                 }
             };
             ids.push(next);
+            stopped = stop_ids.contains(&next);
         }
         let decode_s = t.elapsed().as_secs_f64();
         let steps = ids.len() - 1;
@@ -206,6 +238,7 @@ pub fn bench(args: &[String]) -> i32 {
             draft_ms: 0.0,
             verify_ms: decode_s * 1e3 / steps.max(1) as f64,
             rollback_ms: 0.0,
+            stopped,
         });
         if !a.json {
             println!(
@@ -228,7 +261,7 @@ pub fn bench(args: &[String]) -> i32 {
                 return 1;
             }
         };
-        let run: SpecRun = match engine.spec_generate(&mut mtp, &prompt, a.tokens, d, chunk) {
+        let run: SpecRun = match engine.spec_generate(&mut mtp, &prompt, a.tokens, d, chunk, &stop_ids) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("spec-bench: spec {d}: {e}");
@@ -251,6 +284,7 @@ pub fn bench(args: &[String]) -> i32 {
             draft_ms: run.draft_s * 1e3 / steps.max(1) as f64,
             verify_ms: run.verify_s * 1e3 / steps.max(1) as f64,
             rollback_ms: run.rollback_s * 1e3 / steps.max(1) as f64,
+            stopped: run.stopped,
         });
     }
 
@@ -277,7 +311,7 @@ pub fn bench(args: &[String]) -> i32 {
                     "{{\"drafts\":{},\"steps\":{},\"tokens\":{},\"ms_per_step\":{:.4},\
                      \"tokens_per_step\":{:.4},\"tok_s\":{:.4},\"prefill_s\":{:.4},\
                      \"draft_prefill_s\":{:.4},\"draft_ms\":{:.4},\"verify_ms\":{:.4},\
-                     \"rollback_ms\":{:.4},\"accept\":[{}],\"ids\":{:?}}}",
+                     \"rollback_ms\":{:.4},\"stopped\":{},\"accept\":[{}],\"ids\":{:?}}}",
                     r.drafts,
                     r.steps,
                     r.tokens,
@@ -289,6 +323,7 @@ pub fn bench(args: &[String]) -> i32 {
                     r.draft_ms,
                     r.verify_ms,
                     r.rollback_ms,
+                    r.stopped,
                     acc.join(","),
                     r.ids
                 )

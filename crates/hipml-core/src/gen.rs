@@ -7,6 +7,8 @@ pub struct Generated {
     pub prompt_ids: Vec<u32>,
     pub ids: Vec<u32>,
     pub text: String,
+    /// True when decoding stopped because a stop id was sampled.
+    pub stopped: bool,
 }
 
 /// Feed the prompt one token at a time, then emit `n` greedy tokens.
@@ -24,6 +26,23 @@ pub fn greedy_with<F: FnMut(usize, u32, &[f32])>(
     prompt_ids: &[u32],
     n: usize,
     n_ctx: usize,
+    on_token: F,
+) -> Generated {
+    greedy_with_stop(model, tok, prompt_ids, n, n_ctx, &[], on_token)
+}
+
+/// Greedy decode that stops as soon as a sampled id is in `stop_ids`
+/// (the model's EOS, 248046, for a chat completion). The stop token is kept in
+/// `ids` so the caller can report `stopped_eos`; it is not fed back through the
+/// model. Without this a chat model closes its turn and then invents a user
+/// turn, and every acceptance number is measured past the answer.
+pub fn greedy_with_stop<F: FnMut(usize, u32, &[f32])>(
+    model: &Model,
+    tok: &Tokenizer,
+    prompt_ids: &[u32],
+    n: usize,
+    n_ctx: usize,
+    stop_ids: &[u32],
     mut on_token: F,
 ) -> Generated {
     assert!(!prompt_ids.is_empty(), "need at least one prompt token");
@@ -40,10 +59,15 @@ pub fn greedy_with<F: FnMut(usize, u32, &[f32])>(
     }
 
     let mut ids = Vec::with_capacity(n);
+    let mut stopped = false;
     for i in 0..n {
         let next = argmax_f32(&logits) as u32;
         on_token(i, next, &logits);
         ids.push(next);
+        if stop_ids.contains(&next) {
+            stopped = true;
+            break;
+        }
         if i + 1 < n {
             logits = model.forward_token(next, &mut st);
         }
@@ -51,8 +75,9 @@ pub fn greedy_with<F: FnMut(usize, u32, &[f32])>(
 
     Generated {
         prompt_ids: prompt_ids.to_vec(),
-        text: tok.decode(&ids),
+        text: tok.decode_text(&ids),
         ids,
+        stopped,
     }
 }
 

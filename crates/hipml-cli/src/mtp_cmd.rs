@@ -26,6 +26,8 @@ struct Args {
     ids: Vec<u32>,
     tokens: usize,
     depth: usize,
+    stop_ids: Vec<u32>,
+    stop_eos: bool,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -36,6 +38,8 @@ fn parse(args: &[String]) -> Result<Args, String> {
         ids: Vec::new(),
         tokens: 64,
         depth: 3,
+        stop_ids: Vec::new(),
+        stop_eos: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -49,6 +53,19 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--blk" => a.blk = num(v)?,
             "--tokens" => a.tokens = num(v)?,
             "--depth" => a.depth = num(v)?.max(1),
+            "--stop-eos" => {
+                a.stop_eos = true;
+                i += 1;
+                continue;
+            }
+            "--stop-ids" => {
+                a.stop_ids = v
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.parse::<u32>().map_err(|e| format!("id {s}: {e}")))
+                    .collect::<Result<_, _>>()?;
+            }
             "--ids-file" => {
                 let text = std::fs::read_to_string(v).map_err(|e| format!("{v}: {e}"))?;
                 a.ids = text
@@ -90,6 +107,16 @@ pub fn run(args: &[String]) -> i32 {
             return 1;
         }
     };
+    let mut stop_ids = a.stop_ids.clone();
+    if a.stop_eos {
+        match hipml_core::gguf::Gguf::open(&a.gguf)
+            .ok()
+            .and_then(|g| g.meta("tokenizer.ggml.eos_token_id").and_then(|v| v.as_u32()))
+        {
+            Some(eos) => stop_ids.push(eos),
+            None => eprintln!("mtp-accept: --stop-eos but the GGUF has no eos id"),
+        }
+    }
     let width = model.cfg.n_head_kv * model.cfg.head_dim;
     let n_ctx = a.ids.len() + a.tokens + a.depth + 2;
     let mut lanes = Vec::new();
@@ -132,8 +159,13 @@ pub fn run(args: &[String]) -> i32 {
         argmax_f32(&model.w.output.gemv(&n)) as u32
     };
     let mut next = head(&h);
+    let mut stopped = false;
     for i in 0..a.tokens {
         gen.push(next);
+        if stop_ids.contains(&next) {
+            stopped = true;
+            break;
+        }
         let q = p0 + i - 1;
         for l in &mut lanes {
             let mut hs = l.mtp.main_hidden(&model, &h);
@@ -155,7 +187,7 @@ pub fn run(args: &[String]) -> i32 {
     let gen_s = t2.elapsed().as_secs_f64();
 
     println!(
-        "prompt {} tokens in {prompt_s:.1} s, {} generated in {gen_s:.1} s",
+        "prompt {} tokens in {prompt_s:.1} s, {} generated in {gen_s:.1} s (stopped={stopped})",
         p0, a.tokens
     );
     let shown: Vec<String> = gen.iter().take(24).map(|t| t.to_string()).collect();

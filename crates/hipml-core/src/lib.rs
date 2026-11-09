@@ -8,6 +8,7 @@
 pub mod attention;
 pub mod attn_parity;
 pub mod cache;
+pub mod chat;
 pub mod config;
 pub mod delta;
 pub mod gen;

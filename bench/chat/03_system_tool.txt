@@ -1,0 +1,4 @@
+--- system
+You are a terse tool-using assistant. Prefer the provided function over prose.
+--- user
+What is the weather in Paris right now? Use the weather tool.

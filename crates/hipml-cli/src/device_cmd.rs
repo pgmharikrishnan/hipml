@@ -38,6 +38,10 @@ struct Args {
     json: bool,
     stage_report: bool,
     graph: bool,
+    stop_ids: Vec<u32>,
+    stop_eos: bool,
+    dump_at: Option<usize>,
+    topk: usize,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -55,6 +59,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
         json: false,
         stage_report: false,
         graph: false,
+        stop_ids: Vec::new(),
+        stop_eos: false,
+        dump_at: None,
+        topk: 8,
     };
     let mut i = 0;
     while i < args.len() {
@@ -124,6 +132,28 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 a.graph = true;
                 i += 1;
             }
+            "--stop-eos" => {
+                a.stop_eos = true;
+                i += 1;
+            }
+            "--stop-ids" => {
+                let parsed: Result<Vec<u32>, _> = need(i)?
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(str::parse::<u32>)
+                    .collect();
+                a.stop_ids = parsed.map_err(|e| format!("bad --stop-ids: {e}"))?;
+                i += 2;
+            }
+            "--dump-at" => {
+                a.dump_at = Some(need(i)?.parse().map_err(|e| format!("bad --dump-at: {e}"))?);
+                i += 2;
+            }
+            "--topk" => {
+                a.topk = need(i)?.parse().map_err(|e| format!("bad --topk: {e}"))?;
+                i += 2;
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -174,6 +204,8 @@ struct Rep {
     first_id: u32,
     ids: Vec<u32>,
     engine_build_ms: f64,
+    stopped: bool,
+    topk: Option<Vec<(u32, f32)>>,
 }
 
 pub fn generate(args: &[String]) -> i32 {
@@ -208,12 +240,16 @@ pub fn generate(args: &[String]) -> i32 {
             }
         },
         (None, Some(ids), _) => ids.clone(),
-        (None, None, Some(text)) => tok.encode(text),
+        (None, None, Some(text)) => tok.encode_special(text),
         (None, None, None) => {
             eprintln!("generate: need --text, --ids or --ids-file");
             return 2;
         }
     };
+    let mut stop_ids = a.stop_ids.clone();
+    if a.stop_eos && !stop_ids.contains(&tok.eos_id) {
+        stop_ids.push(tok.eos_id);
+    }
     if prompt_ids.is_empty() {
         eprintln!("generate: empty prompt");
         return 2;
@@ -295,11 +331,24 @@ pub fn generate(args: &[String]) -> i32 {
         let mut first_id: Option<u32> = None;
         let mut logits = Vec::new();
         if let Some(chunk) = chunk {
-            match engine.prefill_chunked(&prompt_ids, &mut st, chunk) {
-                Ok(id) => first_id = Some(id),
-                Err(e) => {
-                    eprintln!("generate: chunked prefill: {e}");
-                    return 1;
+            if a.dump_at == Some(0) {
+                match engine.prefill_chunked_logits(&prompt_ids, &mut st, chunk) {
+                    Ok((id, v)) => {
+                        first_id = Some(id);
+                        logits = v;
+                    }
+                    Err(e) => {
+                        eprintln!("generate: chunked prefill: {e}");
+                        return 1;
+                    }
+                }
+            } else {
+                match engine.prefill_chunked(&prompt_ids, &mut st, chunk) {
+                    Ok(id) => first_id = Some(id),
+                    Err(e) => {
+                        eprintln!("generate: chunked prefill: {e}");
+                        return 1;
+                    }
                 }
             }
         } else {
@@ -312,6 +361,18 @@ pub fn generate(args: &[String]) -> i32 {
             };
         }
         let prefill_s = t_prefill.elapsed().as_secs_f64();
+        let mut topk: Option<Vec<(u32, f32)>> = None;
+        if a.dump_at == Some(0) && !logits.is_empty() {
+            let lp = hipml_core::gen::top_logprobs(&logits, a.topk);
+            topk = Some(lp.iter().map(|(i, p)| (*i as u32, *p)).collect());
+            if !a.json {
+                let s: Vec<String> = lp
+                    .iter()
+                    .map(|(i, p)| format!("{i}:{p:.4}"))
+                    .collect();
+                eprintln!("topk at 0: {}", s.join(" "));
+            }
+        }
 
         if a.compare_cpu {
             match cpu_first_logits(&a.gguf, &prompt_ids) {
@@ -354,26 +415,51 @@ pub fn generate(args: &[String]) -> i32 {
             Some(id) => id,
             None => argmax_f32(&logits) as u32,
         };
+        let mut stopped = false;
         for i in 0..a.tokens {
             ids.push(next);
+            if stop_ids.contains(&next) {
+                stopped = true;
+                break;
+            }
             if i + 1 < a.tokens {
                 let t = Instant::now();
-                let got = if a.graph {
-                    engine.graph_token(next, &mut st)
-                } else {
-                    engine.forward_token_id(next, &mut st)
-                };
-                next = match got {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("generate: decode: {e}");
-                        return 1;
+                if a.dump_at == Some(i + 1) {
+                    let v = match engine.forward_token(next, &mut st) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("generate: decode: {e}");
+                            return 1;
+                        }
+                    };
+                    let lp = hipml_core::gen::top_logprobs(&v, a.topk);
+                    if !a.json {
+                        let s: Vec<String> = lp
+                            .iter()
+                            .map(|(idx, p)| format!("{idx}:{p:.4}"))
+                            .collect();
+                        eprintln!("topk at {}: {}", i + 1, s.join(" "));
                     }
-                };
+                    topk = Some(lp.iter().map(|(idx, p)| (*idx as u32, *p)).collect());
+                    next = argmax_f32(&v) as u32;
+                } else {
+                    let got = if a.graph {
+                        engine.graph_token(next, &mut st)
+                    } else {
+                        engine.forward_token_id(next, &mut st)
+                    };
+                    next = match got {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("generate: decode: {e}");
+                            return 1;
+                        }
+                    };
+                }
                 decode_s += t.elapsed().as_secs_f64();
             }
         }
-        let steps = a.tokens.saturating_sub(1);
+        let steps = ids.len().saturating_sub(1);
         if !a.json {
             if a.reps == 1 {
                 for (i, id) in ids.iter().enumerate() {
@@ -381,7 +467,7 @@ pub fn generate(args: &[String]) -> i32 {
                 }
             }
             println!(
-                "rep {}: prefill {:.2} tok/s ({} tokens in {:.1} ms), decode {:.2} tok/s ({} steps in {:.1} ms)",
+                "rep {}: prefill {:.2} tok/s ({} tokens in {:.1} ms), decode {:.2} tok/s ({} steps in {:.1} ms, stopped={})",
                 rep,
                 prompt_ids.len() as f64 / prefill_s.max(1e-9),
                 prompt_ids.len(),
@@ -389,6 +475,7 @@ pub fn generate(args: &[String]) -> i32 {
                 steps as f64 / decode_s.max(1e-9),
                 steps,
                 decode_s * 1e3,
+                stopped,
             );
         }
         reps.push(Rep {
@@ -399,6 +486,8 @@ pub fn generate(args: &[String]) -> i32 {
             first_id: ids.first().copied().unwrap_or(0),
             ids,
             engine_build_ms,
+            stopped,
+            topk,
         });
         // Drop the engine before the next rep so every run starts from zeroed
         // KV and zeroed GDN state.
@@ -459,16 +548,26 @@ pub fn generate(args: &[String]) -> i32 {
             .map(|r| {
                 let prefill_tps = prompt_ids.len() as f64 / (r.prefill_ms / 1e3).max(1e-9);
                 let decode_tps = r.decode_tokens as f64 / (r.decode_ms / 1e3).max(1e-9);
+                let tk = match &r.topk {
+                    None => "null".to_string(),
+                    Some(v) => {
+                        let items: Vec<String> = v
+                            .iter()
+                            .map(|(id, p)| format!("{{\"id\":{id},\"logprob\":{p:.6}}}"))
+                            .collect();
+                        format!("[{}]", items.join(","))
+                    }
+                };
                 format!(
-                    "{{\"rep\":{},\"ttft_ms\":{:.4},\"prefill_ms\":{:.4},\"prefill_tok_s\":{:.4},\"decode_ms\":{:.4},\"decode_tok_s\":{:.4},\"decode_tokens\":{},\"first_id\":{},\"engine_build_ms\":{:.4},\"ids\":{:?}}}",
+                    "{{\"rep\":{},\"ttft_ms\":{:.4},\"prefill_ms\":{:.4},\"prefill_tok_s\":{:.4},\"decode_ms\":{:.4},\"decode_tok_s\":{:.4},\"decode_tokens\":{},\"first_id\":{},\"stopped\":{},\"engine_build_ms\":{:.4},\"ids\":{:?},\"topk\":{}}}",
                     r.index, r.prefill_ms, r.prefill_ms, prefill_tps,
                     r.decode_ms, decode_tps, r.decode_tokens, r.first_id,
-                    r.engine_build_ms, r.ids
+                    r.stopped, r.engine_build_ms, r.ids, tk
                 )
             })
             .collect();
         let out = format!(
-            "{{\"engine\":\"hipml\",\"prompt_tokens\":{},\"n_ctx\":{},\"gen_tokens\":{},\"model_load_s\":{:.4},\"resident_upload_s\":{:.4},\"weights_bytes\":{},\"kv_bytes\":{},\"kv_mode\":\"{}\",\"reps\":[{}],\"stage\":{}}}",
+            "{{\"engine\":\"hipml\",\"prompt_tokens\":{},\"n_ctx\":{},\"gen_tokens\":{},\"model_load_s\":{:.4},\"resident_upload_s\":{:.4},\"weights_bytes\":{},\"kv_bytes\":{},\"kv_mode\":\"{}\",\"stop_ids\":{:?},\"reps\":[{}],\"stage\":{}}}",
             prompt_ids.len(),
             n_ctx,
             a.tokens,
@@ -477,6 +576,7 @@ pub fn generate(args: &[String]) -> i32 {
             weight_bytes,
             kv_bytes,
             a.kv.name(),
+            stop_ids,
             rep_json.join(","),
             stage_json
         );
@@ -489,7 +589,7 @@ pub fn generate(args: &[String]) -> i32 {
         Some(r) => r,
         None => return 1,
     };
-    let steps = a.tokens.saturating_sub(1);
+    let steps = last.decode_tokens;
     println!("gen ids:    {:?}", last.ids);
     println!(
         "prefill:    {:.2} tok/s ({} prompt tokens in {:.1} ms)",
@@ -498,13 +598,14 @@ pub fn generate(args: &[String]) -> i32 {
         last.prefill_ms
     );
     println!(
-        "decode:     {:.2} tok/s ({} steps in {:.1} ms, {:.2} ms/token)",
+        "decode:     {:.2} tok/s ({} steps in {:.1} ms, {:.2} ms/token, stopped={})",
         steps as f64 / (last.decode_ms / 1e3).max(1e-9),
         steps,
         last.decode_ms,
-        last.decode_ms / steps.max(1) as f64
+        last.decode_ms / steps.max(1) as f64,
+        last.stopped
     );
-    println!("text:       {}", tok.decode(&last.ids));
+    println!("text:       {}", tok.decode_text(&last.ids));
     0
 }
 
