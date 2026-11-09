@@ -14,14 +14,23 @@ use std::ffi::c_void;
 
 impl<'a> SsmGpuLayer<'a> {
     /// `qkv, z, alpha, beta = W x` for every row of the chunk.
+    ///
+    /// `xh` is scratch for an fp16 copy of the activation tile (see
+    /// [`crate::prefill_xhalf`]); it is only touched when the active prefill
+    /// path stages converted activations.
     pub fn project_chunk(
         &self,
         l: &Launcher,
         x: &Buffer,
+        xh: &Buffer,
         c: &SsmChunk,
         tokens: usize,
     ) -> Result<(), String> {
         let d = &self.dims;
+        let half = crate::prefill_has_xhalf();
+        if half {
+            crate::prefill_xhalf(l.module(), l.stream(), x, xh, tokens * d.n_embd)?;
+        }
         let plan = [
             (&self.wqkv, &c.qkv, d.conv_ch),
             (&self.wgate, &c.z, d.inner()),
@@ -42,17 +51,34 @@ impl<'a> SsmGpuLayer<'a> {
                     m,
                     d.n_embd,
                 )?,
-                SsmWeight::Quant(b, e) => crate::prefill_resident(
-                    l.module(),
-                    l.stream(),
-                    prefill_entry(e)?,
-                    b,
-                    x,
-                    y,
-                    m,
-                    d.n_embd,
-                    tokens,
-                )?,
+                SsmWeight::Quant(b, e) => {
+                    let entry = prefill_entry(e)?;
+                    if half {
+                        crate::prefill_resident_half(
+                            l.module(),
+                            l.stream(),
+                            entry,
+                            b,
+                            xh,
+                            y,
+                            m,
+                            d.n_embd,
+                            tokens,
+                        )?
+                    } else {
+                        crate::prefill_resident(
+                            l.module(),
+                            l.stream(),
+                            entry,
+                            b,
+                            x,
+                            y,
+                            m,
+                            d.n_embd,
+                            tokens,
+                        )?
+                    }
+                }
                 SsmWeight::F32(_) => {
                     return Err("prefill chunk needs resident weights".to_string())
                 }
@@ -292,10 +318,20 @@ impl<'a> SsmGpuLayer<'a> {
     pub fn out_chunk(
         &self,
         l: &Launcher,
+        xh: &Buffer,
         c: &SsmChunk,
         tokens: usize,
     ) -> Result<(), String> {
         let d = &self.dims;
+        let entry = match &self.wout {
+            SsmWeight::Quant(_, "gemv_f32") => None,
+            SsmWeight::Quant(_, e) => Some(prefill_entry(e)?),
+            SsmWeight::F32(_) => None,
+        };
+        let half = entry.is_some() && crate::prefill_has_xhalf();
+        if half {
+            crate::prefill_xhalf(l.module(), l.stream(), &c.gated, xh, tokens * d.inner())?;
+        }
         match &self.wout {
             SsmWeight::Quant(b, "gemv_f32") => crate::gemm_rows_f32(
                 l.module(),
@@ -307,17 +343,34 @@ impl<'a> SsmGpuLayer<'a> {
                 d.n_embd,
                 d.inner(),
             ),
-            SsmWeight::Quant(b, e) => crate::prefill_resident(
-                l.module(),
-                l.stream(),
-                prefill_entry(e)?,
-                b,
-                &c.gated,
-                &c.out,
-                d.n_embd,
-                d.inner(),
-                tokens,
-            ),
+            SsmWeight::Quant(b, _) => {
+                let e = entry.expect("checked above");
+                if half {
+                    crate::prefill_resident_half(
+                        l.module(),
+                        l.stream(),
+                        e,
+                        b,
+                        xh,
+                        &c.out,
+                        d.n_embd,
+                        d.inner(),
+                        tokens,
+                    )
+                } else {
+                    crate::prefill_resident(
+                        l.module(),
+                        l.stream(),
+                        e,
+                        b,
+                        &c.gated,
+                        &c.out,
+                        d.n_embd,
+                        d.inner(),
+                        tokens,
+                    )
+                }
+            }
             SsmWeight::F32(_) => Err("prefill chunk needs resident weights".to_string()),
         }
     }

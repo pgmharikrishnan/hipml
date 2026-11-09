@@ -77,6 +77,13 @@ impl Launcher {
                 "{name}: k={k} must be a multiple of the 64-value k-tile"
             ));
         }
+        // The engine hands these GEMMs an fp16 activation tile. Bench the same
+        // path when the v2 shape has a converted-activation entry, so the number
+        // is the one the prefill graph actually pays; the one-off conversion is
+        // outside the timed loop because the graph amortizes it over the
+        // projections that share the tile.
+        let half = prefill_entry_for_half(name);
+        let name = half.unwrap_or(name);
         let spec = crate::spec(name).ok_or_else(|| format!("{name} is not in the manifest"))?;
         let (rpb, tpb, block) = match spec.kind {
             crate::KernelKind::Prefill {
@@ -88,11 +95,19 @@ impl Launcher {
         };
         let wb = ByteBuffer::from_host(w)?;
         let xb = Buffer::from_host(x)?;
+        let xhalf = match half {
+            Some(_) => {
+                let b = Buffer::alloc((tokens * k + 1) / 2)?;
+                prefill_xhalf(&self.module, &self.stream, &xb, &b, tokens * k)?;
+                Some(b)
+            }
+            None => None,
+        };
         let y = Buffer::alloc(tokens * m)?;
         let kernel = self.module.kernel(name)?;
 
         let mut p_w = wb.as_ptr();
-        let mut p_x = xb.as_ptr();
+        let mut p_x = xhalf.as_ref().map_or(xb.as_ptr(), |b| b.as_ptr());
         let mut p_y = y.as_ptr();
         let mut v_m = m as i32;
         let mut v_k = k as i32;
@@ -173,6 +188,45 @@ pub fn prefill_xhalf(
         &mut v_n as *mut _ as *mut c_void,
     ];
     kernel.launch(LaunchConfig::linear(n, 256), stream, &mut params)
+}
+
+/// The fp16-activation variant of the entry the active path would launch.
+///
+/// `None` means the path has no converted-activation kernel (f32 or fp16 dot2),
+/// so callers must keep passing the f32 tile.
+pub fn prefill_entry_for_half(name: &str) -> Option<&'static str> {
+    Some(match crate::prefill_entry_for(name)? {
+        "prefill_q4_k_w2" => "prefill_q4_k_w2h",
+        "prefill_q6_k_w2" => "prefill_q6_k_w2h",
+        "prefill_q8_0_w2" => "prefill_q8_0_w2h",
+        "prefill_halfw_w2" => "prefill_halfw_w2h",
+        _ => return None,
+    })
+}
+
+/// Whether the active path stages a converted fp16 activation tile. Lets a
+/// caller skip the `prefill_xhalf` pass when there is nothing to read it.
+pub fn prefill_has_xhalf() -> bool {
+    prefill_entry_for_half("prefill_q4_k").is_some()
+}
+
+/// Tiled prefill GEMM reading an fp16 copy of the activation tile that the
+/// caller made with [`prefill_xhalf`]. Falls through to the normal entry when
+/// the path has no converted-activation kernel.
+#[allow(clippy::too_many_arguments)]
+pub fn prefill_resident_half(
+    module: &Module,
+    stream: &Stream,
+    name: &str,
+    w: &ByteBuffer,
+    xh: &Buffer,
+    y: &Buffer,
+    m: usize,
+    k: usize,
+    tokens: usize,
+) -> Result<(), String> {
+    let name = prefill_entry_for_half(name).unwrap_or(name);
+    prefill_resident(module, stream, name, w, xh, y, m, k, tokens)
 }
 
 /// Tiled prefill GEMM over a resident weight payload.

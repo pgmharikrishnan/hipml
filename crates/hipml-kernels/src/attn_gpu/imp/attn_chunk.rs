@@ -16,10 +16,14 @@ use super::*;
 impl AttnLayer<'_> {
     /// Q/K/V projections for `tokens` rows of `x` into chunk buffers
     /// `[tokens][2*n_head*head_dim]`, `[tokens][width]`, `[tokens][width]`.
+    ///
+    /// `xh` is scratch for an fp16 copy of `x`; it is only written when the
+    /// active prefill path reads converted activations.
     pub fn project_chunk(
         &self,
         l: &Launcher,
         x: &Buffer,
+        xh: &Buffer,
         qg: &Buffer,
         k: &Buffer,
         v: &Buffer,
@@ -31,21 +35,39 @@ impl AttnLayer<'_> {
             (&self.wk, k, d.width),
             (&self.wv, v, d.width),
         ];
+        let half = crate::prefill_has_xhalf();
+        if half {
+            crate::prefill_xhalf(l.module(), l.stream(), x, xh, tokens * d.n_embd)?;
+        }
         for (w, y, m) in plan {
             if w.rows != m {
                 return Err(format!("prefill qkv: {} rows, launch says {m}", w.rows));
             }
-            crate::prefill_resident(
-                l.module(),
-                l.stream(),
-                w.prefill_entry()?,
-                &w.data_bytes(),
-                x,
-                y,
-                m,
-                w.cols,
-                tokens,
-            )?;
+            if half {
+                crate::prefill_resident_half(
+                    l.module(),
+                    l.stream(),
+                    w.prefill_entry()?,
+                    &w.data_bytes(),
+                    xh,
+                    y,
+                    m,
+                    w.cols,
+                    tokens,
+                )?;
+            } else {
+                crate::prefill_resident(
+                    l.module(),
+                    l.stream(),
+                    w.prefill_entry()?,
+                    &w.data_bytes(),
+                    x,
+                    y,
+                    m,
+                    w.cols,
+                    tokens,
+                )?;
+            }
         }
         Ok(())
     }

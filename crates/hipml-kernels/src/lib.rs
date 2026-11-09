@@ -29,7 +29,10 @@ pub use launch::{
     PrefillPath,
 };
 #[cfg(feature = "hip")]
-pub use launch::{gemm_rows_f32, prefill_resident, prefill_xhalf};
+pub use launch::{
+    gemm_rows_f32, prefill_entry_for_half, prefill_has_xhalf, prefill_resident,
+    prefill_resident_half, prefill_xhalf,
+};
 #[cfg(feature = "hip")]
 pub use launch::{gemv_job_tiles, GemvJob, ReadJob};
 #[cfg(feature = "hip")]

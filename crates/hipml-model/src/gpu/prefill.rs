@@ -103,7 +103,8 @@ pub(crate) struct Chunk {
     pub aout: Buffer,
     pub y: Buffer,
     /// fp16 copy of the activation tile, converted once per projection. Holds
-    /// `tokens * max(n_embd, n_ff)` halves, i.e. half that many 4-byte words.
+    /// `tokens * max(n_embd, n_ff, ssm inner)` halves, i.e. half that many
+    /// 4-byte words.
     pub xh: Buffer,
 }
 
@@ -114,6 +115,10 @@ impl Chunk {
         let qd = cfg.n_head * cfg.head_dim;
         let w = cfg.n_head_kv * cfg.head_dim;
         let zeros = |len: usize| Buffer::alloc(len);
+        let sd = hipml_kernels::ssm::SsmDims::from_config(cfg);
+        // The fp16 activation copy must hold the widest tile any projection
+        // reads: the ffn tiles, the ssm `out` input and the plain residual.
+        let wide = n.max(ff).max(sd.inner());
         Ok(Chunk {
             x: zeros(tokens * n)?,
             x1: zeros(tokens * n)?,
@@ -122,7 +127,7 @@ impl Chunk {
             up: zeros(tokens * ff)?,
             act: zeros(tokens * ff)?,
             down: zeros(tokens * n)?,
-            ssm: SsmChunk::new(&hipml_kernels::ssm::SsmDims::from_config(cfg), tokens)?,
+            ssm: SsmChunk::new(&sd, tokens)?,
             qg: zeros(tokens * 2 * qd)?,
             q: zeros(tokens * qd)?,
             aq_gate: zeros(tokens * qd)?,
@@ -130,7 +135,7 @@ impl Chunk {
             v: zeros(tokens * w)?,
             aout: zeros(tokens * qd)?,
             y: zeros(tokens * n)?,
-            xh: zeros((tokens * n.max(ff) + 1) / 2)?,
+            xh: zeros((tokens * wide + 1) / 2)?,
         })
     }
 
@@ -238,7 +243,7 @@ impl<'a> GpuEngine<'a> {
             }
             let block_out: &Buffer = match &block.kind {
                 BlockKind::Ssm(s) => {
-                    s.project_chunk(l, &c.t, &c.ssm, n_tok)?;
+                    s.project_chunk(l, &c.t, &c.xh, &c.ssm, n_tok)?;
                     if let Some(r) = rep.as_mut() {
                         r.lap(l, |r| &mut r.ssm_gemm_ms);
                     }
@@ -249,7 +254,7 @@ impl<'a> GpuEngine<'a> {
                     } else {
                         s.steps_chunk(&c.ssm, n_tok)?;
                     }
-                    s.out_chunk(l, &c.ssm, n_tok)?;
+                    s.out_chunk(l, &c.xh, &c.ssm, n_tok)?;
                     if let Some(r) = rep.as_mut() {
                         r.lap(l, |r| &mut r.ssm_seq_ms);
                     }
@@ -259,7 +264,7 @@ impl<'a> GpuEngine<'a> {
                     // One batched GEMM per chunk for q/k/v, then the cache-
                     // dependent attention tile (q8/q4 read in place, or the
                     // row-at-a-time fallback).
-                    attn.project_chunk(l, &c.t, &c.qg, &c.k, &c.v, n_tok)?;
+                    attn.project_chunk(l, &c.t, &c.xh, &c.qg, &c.k, &c.v, n_tok)?;
                     if let Some(r) = rep.as_mut() {
                         r.lap(l, |r| &mut r.attn_gemm_ms);
                     }

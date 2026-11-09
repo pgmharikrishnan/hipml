@@ -22,7 +22,10 @@ pub(crate) mod device {
     #[path = "prefill_launch.rs"]
     mod prefill_launch;
 
-    pub use prefill_launch::{gemm_rows_f32, prefill_resident, prefill_xhalf};
+    pub use prefill_launch::{
+        gemm_rows_f32, prefill_entry_for_half, prefill_has_xhalf, prefill_resident,
+        prefill_resident_half, prefill_xhalf,
+    };
     #[path = "quant_launch.rs"]
     mod quant_launch;
     #[path = "stream_launch.rs"]
@@ -532,6 +535,8 @@ pub(crate) mod device {
 
 #[cfg(feature = "hip")]
 pub use device::{gemm_rows_f32, prefill_resident, prefill_xhalf};
+#[cfg(feature = "hip")]
+pub use device::{prefill_entry_for_half, prefill_has_xhalf, prefill_resident_half};
 #[cfg(feature = "hip")]
 pub use device::{gemv_job_tiles, GemvJob, Launcher, ReadJob};
 #[cfg(feature = "hip")]
