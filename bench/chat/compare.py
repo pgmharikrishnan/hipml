@@ -25,7 +25,7 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CHAT = os.path.join(ROOT, "bench", "chat")
-OUT = os.path.join(CHAT, "out")
+OUT = r"C:\Users\Hari\wp43\chat"
 MODEL = r"C:\models\Qwen3.8-27B-Q4_K_M.gguf"
 HIPML = os.path.join(ROOT, "target", "release", "hipml.exe")
 LLAMA = r"C:\llama.cpp\rocm-gfx120x\llama-server.exe"
@@ -137,7 +137,7 @@ def build_longdoc(target=8192):
 
 
 # ---------------------------------------------------------------------- llama
-def start_llama(log_path, kv="q8_0"):
+def start_llama(log_path, kv="q8_0", fa="off"):
     env = dict(os.environ)
     env["HIP_PATH"] = r"C:\rocm-sdk\_rocm_sdk_core"
     env["HIPML_ARCH"] = "gfx1201"
@@ -145,7 +145,7 @@ def start_llama(log_path, kv="q8_0"):
     log = open(log_path, "w", encoding="utf-8")
     proc = subprocess.Popen(
         [LLAMA, "-m", MODEL, "-c", "16384", "-ngl", "999",
-         "-ctk", kv, "-ctv", kv, "--host", "127.0.0.1",
+         "-ctk", kv, "-ctv", kv, "-fa", fa, "--host", "127.0.0.1",
          "--port", "8092", "--jinja", "--reasoning-format", "none"],
         stdout=log, stderr=log, env=env)
     for _ in range(180):
@@ -317,16 +317,20 @@ def main():
     ap.add_argument("--tokens", type=int, default=256)
     ap.add_argument("--kv", default="q8")
     ap.add_argument("--llama-kv", default="q8_0")
+    ap.add_argument("--llama-fa", default="off")
     ap.add_argument("--hipml-chunk", type=int, default=None)
     ap.add_argument("--n-probs", type=int, default=32)
+    ap.add_argument("--out", default=r"C:\Users\Hari\wp43\chat")
     args = ap.parse_args()
+    global OUT
+    OUT = args.out
     os.makedirs(OUT, exist_ok=True)
     build_longdoc(8192)
     convs = CONVS
     proc = log = None
     try:
         print("starting llama-server on 8092")
-        proc, log = start_llama(os.path.join(OUT, "llama.log"), args.llama_kv)
+        proc, log = start_llama(os.path.join(OUT, "llama.log"), args.llama_kv, args.llama_fa)
         llama = llama_phase(convs, args.tokens, args.n_probs)
     finally:
         stop_llama(proc, log)
