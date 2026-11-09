@@ -13,7 +13,7 @@ impl<'a> AttnLayer<'a> {
     /// one launch covers every position and every column.
     pub(super) fn split_geom(&self) -> (usize, usize) {
         let d = self.dims;
-        let splits = (d.n_ctx / 128).clamp(1, MAX_SPLITS);
+        let splits = d.n_ctx.div_ceil(32).clamp(1, MAX_SPLITS);
         let per = d.n_ctx.div_ceil(splits);
         (splits, per)
     }
