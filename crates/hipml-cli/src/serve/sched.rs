@@ -242,8 +242,10 @@ fn prefill_step(
     }
     // A cut is a message boundary: capture it so the next request sharing that
     // prefix restores instead of recomputing. The tile's last row is exactly
-    // that boundary.
-    let at_cut = cut == Some(end) || end == len;
+    // that boundary. The full prompt is deliberately not captured: on a hybrid
+    // model that costs a ~230 MB SSM+KV copy per request and only pays off for
+    // an exact repeat, which is not the workload a shared prefix describes.
+    let at_cut = cut == Some(end);
     if at_cut {
         let logits = engine.logits_host()?;
         let _ = engine.prefix_capture(&pf.job.prompt, end, Some(&logits))?;
