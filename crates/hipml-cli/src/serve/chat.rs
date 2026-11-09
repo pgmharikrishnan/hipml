@@ -164,9 +164,15 @@ pub fn completion(tok: &Tokenizer, body: &Value) -> Result<Prompt, String> {
             if items.iter().any(|v| v.as_arr().is_some()) {
                 return Err("batched prompts are not supported; send one array of ids".to_string());
             }
+            // An id past the vocabulary would index past the embedding table
+            // on the device; reject it here, before the scheduler sees it.
+            let vocab = tok.tokens.len() as u64;
             let mut ids = Vec::with_capacity(items.len());
             for it in items {
                 let n = it.as_u64().ok_or("prompt ids must be non-negative integers")?;
+                if n >= vocab {
+                    return Err(format!("prompt id {n} is outside the {vocab}-token vocabulary"));
+                }
                 ids.push(n as u32);
             }
             ids
