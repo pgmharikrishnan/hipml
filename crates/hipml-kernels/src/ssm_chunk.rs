@@ -113,23 +113,6 @@ impl<'a> SsmGpuLayer<'a> {
     pub fn steps_chunk(&self, c: &SsmChunk, tokens: usize) -> Result<(), String> {
         let d = &self.dims;
         let s = self.stream;
-        let trace = std::env::var_os("HIPML_SSM_TRACE").is_some();
-        let mut t0 = std::time::Instant::now();
-        macro_rules! lap {
-            ($n:expr) => {
-                if trace {
-                    self.stream.synchronize()?;
-                    eprintln!("SSMTRACE {} {:.4}", $n, t0.elapsed().as_secs_f64() * 1e3);
-                    t0 = std::time::Instant::now();
-                }
-            };
-        }
-        if trace {
-            // Drain the projections queued before this call so the first lap
-            // measures the gates kernel, not the GEMMs ahead of it.
-            self.stream.synchronize()?;
-            t0 = std::time::Instant::now();
-        }
 
         // gates
         {
@@ -155,7 +138,6 @@ impl<'a> SsmGpuLayer<'a> {
                 .kernel("ssm_gates_chunk_f32")?
                 .launch(LaunchConfig::linear(tokens * d.n_v, 256), s, &mut params)?;
         }
-            lap!("gates");
 
         // conv + silu, carrying the window in a separate buffer
         {
@@ -181,7 +163,6 @@ impl<'a> SsmGpuLayer<'a> {
                 .kernel("ssm_conv1d_chunk_f32")?
                 .launch(LaunchConfig::linear(tokens * d.conv_ch, 256), s, &mut params)?;
         }
-            lap!("conv");
         {
             let n = (d.d_conv - 1) * d.conv_ch;
             let mut p_src = c.conv_next.as_ptr();
@@ -196,7 +177,6 @@ impl<'a> SsmGpuLayer<'a> {
                 .kernel("copy_f32")?
                 .launch(LaunchConfig::linear(n, 256), s, &mut params)?;
         }
-            lap!("copy");
 
         // per-head L2 of q and k, both halves in one launch
         {
@@ -227,7 +207,6 @@ impl<'a> SsmGpuLayer<'a> {
                 .kernel("l2norm_chunk_f32")?
                 .launch(cfg, s, &mut params)?;
         }
-            lap!("l2");
 
         // the recurrence, state in registers: 32-row blocks with the operands
         // staged in shared when the head is 128 wide, else one block per head
@@ -268,7 +247,6 @@ impl<'a> SsmGpuLayer<'a> {
                 .kernel("gdn_chunk_f32")?
                 .launch(cfg, s, &mut params)?;
         }
-            lap!("rec");
 
         // gated RMS norm
         {
@@ -297,7 +275,6 @@ impl<'a> SsmGpuLayer<'a> {
                 .kernel("gate_norm_chunk_f32")?
                 .launch(cfg, s, &mut params)?;
         }
-            lap!("gnorm");
         Ok(())
     }
 
