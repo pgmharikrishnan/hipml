@@ -487,6 +487,7 @@ impl<'a> BatchEngine<'a> {
             tails.len(),
         )?;
         mark!("final");
+        let _ = last;
         l.synchronize()?;
         if trace {
             let total: f64 = marks.iter().map(|(_, ms)| ms).sum();

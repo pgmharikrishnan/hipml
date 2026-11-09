@@ -179,14 +179,15 @@ pub fn completion(tok: &Tokenizer, body: &Value) -> Result<Prompt, String> {
     // Test knob: `cache_cut` makes a raw-id prompt capture a prefix state at
     // that boundary, so a second identical request exercises the prefix-hit
     // tail path (the default cut is the whole prompt, which never hits).
+    let n = ids.len();
     let cut = body
         .get("cache_cut")
         .and_then(Value::as_u64)
         .map(|c| c as usize)
-        .filter(|c| *c > 0 && *c < ids.len());
+        .filter(|c| *c > 0 && *c < n);
     Ok(Prompt {
         ids,
-        cuts: vec![cut.unwrap_or(ids.len())],
+        cuts: vec![cut.unwrap_or(n)],
     })
 }
 

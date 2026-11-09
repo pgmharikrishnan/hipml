@@ -115,7 +115,7 @@ pub fn run(
                     && gathered.is_empty();
                 let mode = if alone && cfg.mtp { Mode::Spec } else { Mode::Batch };
                 match begin(&mut engine, job, &cfg, mode, &metrics) {
-                    Ok(mut pf) => {
+                    Ok(pf) => {
                         let tail = pf.job.prompt.len().saturating_sub(pf.done);
                         let qualifies = pf.mode == Mode::Batch
                             && pf.done > 0
