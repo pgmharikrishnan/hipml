@@ -147,7 +147,6 @@ impl<'a> BatchEngine<'a> {
             .unwrap_or(ROW_BLOCK_MAX)
     }
 
-impl<'a> BatchEngine<'a> {
     /// Rows the current scratch can hold.
     pub fn row_capacity(&self) -> usize {
         self.rows.as_ref().map(|r| r.cap).unwrap_or(0)

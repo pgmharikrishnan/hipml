@@ -29,6 +29,7 @@ impl<'a> SsmGpuLayer<'a> {
     /// `g, beta = softplus(alpha + dt) * a, sigmoid(beta)` for every row.
     pub fn gates_rows(&self, l: &Launcher, c: &SsmChunk, rows: usize) -> Result<(), String> {
         let d = &self.dims;
+        let _ = l;
         let mut p_alpha = c.alpha.as_ptr();
         let mut p_beta = c.beta.as_ptr();
         let mut p_dt = self.dt_bias.as_ptr();
