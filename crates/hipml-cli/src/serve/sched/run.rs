@@ -96,6 +96,14 @@ pub fn run(
                         let tail: VecDeque<u32> =
                             pf.job.prompt[pf.done..].iter().copied().collect();
                         let slot = batch.adopt(&engine, pf.st.pos)?;
+                        if std::env::var_os("HIPML_SERVE_TRACE").is_some() {
+                            eprintln!(
+                                "serve: tail-feed slot {slot} at {} ({} tokens, {} active)",
+                                pf.done,
+                                tail.len(),
+                                batch.active().len()
+                            );
+                        }
                         metrics.update(|s| s.batch_requests += 1);
                         slots[slot] = Some(Active {
                             job: pf.job,
@@ -271,7 +279,15 @@ pub fn run(
                 })
                 .collect();
             let t_step = Instant::now();
+            if std::env::var_os("HIPML_SERVE_TRACE").is_some() {
+                let tails: Vec<usize> =
+                    order.iter().map(|&s| slots[s].as_ref().map_or(0, |a| a.tail.len())).collect();
+                eprintln!("serve: step b={} tails={tails:?}", order.len());
+            }
             let ids = batch.forward(&toks)?;
+            if std::env::var_os("HIPML_SERVE_TRACE").is_some() {
+                eprintln!("serve: step done in {:.1} ms", t_step.elapsed().as_secs_f64() * 1e3);
+            }
             let step_ms = t_step.elapsed().as_secs_f64() * 1e3;
             metrics.update(|s| {
                 s.decode_steps += 1;
