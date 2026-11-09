@@ -53,6 +53,12 @@
 #ifndef PWW2_PF
 #define PWW2_PF 0
 #endif
+// One resident block is all the 16-accumulator shape can have, so ask the
+// compiler for the whole register file: a pipelined build that is capped at the
+// two-block limit spills instead of hoisting its prefetch loads.
+#ifndef PWW2_MIN_BLOCKS
+#define PWW2_MIN_BLOCKS 1
+#endif
 #ifndef PWW2_TOKFAST
 #define PWW2_TOKFAST 0
 #endif
@@ -385,7 +391,24 @@ static __device__ __forceinline__ void pww2_body(
     __syncthreads();
     for (int base = 0, b = 0; base < k; base += PWW2_KW, b ^= 1) {
         const bool more = base + PWW2_KW < k;
-#if PWW2_PF >= 2
+#if PWW2_PF >= 3
+        // x-only pipeline: the fp16 activation run is the widest global stream
+        // in the tile, and it needs no conversion, so hold just that array in
+        // registers across the multiply. The weight bytes are fetched after it,
+        // which keeps the live set inside the register file (PF=2, which holds
+        // both, spills at this shape).
+#if !PWW2_PROBE_NO_STAGE
+        if (more) load_x(base + PWW2_KW);
+#endif
+        compute(shx + b * PWW2_TT * PWW2_XS, shw + b * PWW2_RT * PWW2_WS);
+#if !PWW2_PROBE_NO_STAGE
+        if (more) {
+            load_w(base + PWW2_KW);
+            commit_x(shx + (b ^ 1) * PWW2_TT * PWW2_XS, base + PWW2_KW);
+            commit_w(shw + (b ^ 1) * PWW2_RT * PWW2_WS, base + PWW2_KW);
+        }
+#endif
+#elif PWW2_PF >= 2
 #if !PWW2_PROBE_NO_STAGE
         if (more) {
             load_x(base + PWW2_KW);
@@ -434,56 +457,56 @@ static __device__ __forceinline__ void pww2_body(
         }
 }
 
-extern "C" __global__ void prefill_q4_k_w2(const unsigned char* __restrict__ w,
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q4_k_w2(const unsigned char* __restrict__ w,
                                            const float* __restrict__ x,
                                            float* __restrict__ y, int m, int k, int tokens)
 {
     pww2_body<0, false>(w, x, y, m, k, tokens);
 }
 
-extern "C" __global__ void prefill_q6_k_w2(const unsigned char* __restrict__ w,
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q6_k_w2(const unsigned char* __restrict__ w,
                                            const float* __restrict__ x,
                                            float* __restrict__ y, int m, int k, int tokens)
 {
     pww2_body<1, false>(w, x, y, m, k, tokens);
 }
 
-extern "C" __global__ void prefill_q8_0_w2(const unsigned char* __restrict__ w,
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q8_0_w2(const unsigned char* __restrict__ w,
                                            const float* __restrict__ x,
                                            float* __restrict__ y, int m, int k, int tokens)
 {
     pww2_body<2, false>(w, x, y, m, k, tokens);
 }
 
-extern "C" __global__ void prefill_halfw_w2(const unsigned char* __restrict__ w,
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_halfw_w2(const unsigned char* __restrict__ w,
                                             const float* __restrict__ x,
                                             float* __restrict__ y, int m, int k, int tokens)
 {
     pww2_body<3, false>(w, x, y, m, k, tokens);
 }
 
-extern "C" __global__ void prefill_q4_k_w2h(const unsigned char* __restrict__ w,
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q4_k_w2h(const unsigned char* __restrict__ w,
                                             const void* __restrict__ x,
                                             float* __restrict__ y, int m, int k, int tokens)
 {
     pww2_body<0, true>(w, x, y, m, k, tokens);
 }
 
-extern "C" __global__ void prefill_q6_k_w2h(const unsigned char* __restrict__ w,
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q6_k_w2h(const unsigned char* __restrict__ w,
                                             const void* __restrict__ x,
                                             float* __restrict__ y, int m, int k, int tokens)
 {
     pww2_body<1, true>(w, x, y, m, k, tokens);
 }
 
-extern "C" __global__ void prefill_q8_0_w2h(const unsigned char* __restrict__ w,
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q8_0_w2h(const unsigned char* __restrict__ w,
                                             const void* __restrict__ x,
                                             float* __restrict__ y, int m, int k, int tokens)
 {
     pww2_body<2, true>(w, x, y, m, k, tokens);
 }
 
-extern "C" __global__ void prefill_halfw_w2h(const unsigned char* __restrict__ w,
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_halfw_w2h(const unsigned char* __restrict__ w,
                                              const void* __restrict__ x,
                                              float* __restrict__ y, int m, int k, int tokens)
 {
