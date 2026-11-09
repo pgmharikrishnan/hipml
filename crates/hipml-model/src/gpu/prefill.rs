@@ -204,7 +204,7 @@ impl<'a> GpuEngine<'a> {
     ) -> Result<u32, String> {
         // Scratch is sized by the chunk, so a short prompt never asks for more.
         let chunk = chunk.min(tokens.len()).max(1);
-        let deep = attn_tile::split_count(attn_tile::env_splits(), tokens.len()) > 1;
+        let deep = Self::wants_deep(tokens.len());
         self.ensure_chunk(chunk, deep)?;
         let mut rep: Option<PrefillReport> = None;
         let mut last = 0u32;
@@ -223,7 +223,7 @@ impl<'a> GpuEngine<'a> {
         chunk: usize,
     ) -> Result<(u32, PrefillReport), String> {
         let chunk = chunk.min(tokens.len()).max(1);
-        let deep = attn_tile::split_count(attn_tile::env_splits(), tokens.len()) > 1;
+        let deep = Self::wants_deep(tokens.len());
         self.ensure_chunk(chunk, deep)?;
         let mut rep = Some(PrefillReport::default());
         let mut last = 0u32;
@@ -244,7 +244,7 @@ impl<'a> GpuEngine<'a> {
         capture: &Buffer,
     ) -> Result<u32, String> {
         let chunk = chunk.min(tokens.len()).max(1);
-        let deep = attn_tile::split_count(attn_tile::env_splits(), tokens.len()) > 1;
+        let deep = Self::wants_deep(tokens.len());
         self.ensure_chunk(chunk, deep)?;
         let mut last = 0u32;
         for tile in tokens.chunks(chunk) {
@@ -460,6 +460,15 @@ impl<'a> GpuEngine<'a> {
         let bytes = self.arg_out.download_bytes(0, 4)?;
         st.pos += n_tok;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    /// Whether any chunk of a `tokens`-long prompt reaches the split gate.
+    ///
+    /// The last chunk starts at `tokens - 1` when the prompt is one token past
+    /// a multiple of the chunk size, so an 8192-token prompt (whose last chunk
+    /// starts at 6144) must not allocate the split scratch.
+    fn wants_deep(tokens: usize) -> bool {
+        attn_tile::split_count(attn_tile::env_splits(), tokens.saturating_sub(1)) > 1
     }
 
     /// Allocate (or grow) the chunk scratch. Called by `prefill_chunked`.

@@ -7,13 +7,13 @@ Five prompt classes, each tokenised once by `hipml tokenize`. Both engines recei
 | model | `C:\models\Qwen3.8-27B-Q4_K_M.gguf` (17,203,416,064 bytes) |
 | GPU | AMD Radeon AI PRO R9700 32.0.32015.7029  |
 | host | rtx |
-| hipml commit | `6c4bc14c4d5ab666f7fe4586dc4eb80b22e39045` (dirty worktree) |
-| hipml binary sha256 | `4f744daf1604c83699121fb4df9cb8fe269b60da627d1bf8d82049225f241708` |
+| hipml commit | `98c96b942ea9e36bbfc506788676882f5406abf8` |
+| hipml binary sha256 | `ae63d5049fc9a9f805908ba613727feb9d4697c1365cc54a7ab9240f4abf797a` |
 | llama.cpp | version: 0.7.0-dev (build 11820, commit d7725699) |
 | llama.cpp build | `11820` commit `d7725699` |
 | llama KV type | q8_0 |
 | hipml KV type | q8 |
-| generated | 2026-11-09T05:15:33.843940+00:00 |
+| generated | 2026-11-09T06:45:17.474766+00:00 |
 
 ## Results
 
@@ -21,30 +21,30 @@ Five prompt classes, each tokenised once by `hipml tokenize`. Both engines recei
 
 | prompt | depth | tokens | engine | KV | reps | TTFT ms | prefill tok/s | decode tok/s | peak GiB | spilled |
 | --- | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| code_edit | 0 | 672 | hipml | q8 | 3 | 569 (567-577) | 1,181 (1,164-1,185) | 29.2 (29.2-29.2) | 17.60 | - |
-| code_edit | 0 | 672 | llama | q8_0 | 3 | 688 (686-817) | 1,015 (839-1,019) | 30.2 (29.9-30.2) | 16.22 | no |
-| code_edit | 8192 | 8192 | hipml | q8 | 3 | 6,636 (6,618-6,656) | 1,235 (1,231-1,238) | 28.7 (28.6-28.7) | 18.73 | - |
-| code_edit | 8192 | 8192 | llama | q8_0 | 3 | 6,915 (6,888-6,979) | 1,187 (1,177-1,192) | 29.4 (29.4-29.5) | 16.47 | no |
-| code_edit | 32768 | 32768 | hipml | q8 | 1 | 31,227 | 1,049 | 27.0 | 19.31 | - |
-| code_edit | 32768 | 32768 | llama | q8_0 | 1 | 30,718 | 1,067 | 27.4 | 17.38 | no |
-| code_edit | 100000 | 100000 | hipml | q8 | 1 | 135,529 | 738 | 23.4 | 21.55 | - |
-| code_edit | 100000 | 100000 | llama | q8_0 | 1 | 120,837 | 828 | 21.8 | 19.88 | no |
-| json_tool_call | 0 | 300 | hipml | q8 | 3 | 338 (333-339) | 888 (884-901) | 29.2 (29.2-29.2) | 17.34 | - |
-| json_tool_call | 0 | 300 | llama | q8_0 | 3 | 368 (358-507) | 841 (611-852) | 30.2 (30.1-30.2) | 16.21 | no |
-| json_tool_call | 8192 | 8192 | hipml | q8 | 3 | 6,633 (6,632-6,661) | 1,235 (1,230-1,235) | 28.6 (28.6-28.7) | 18.73 | - |
-| json_tool_call | 8192 | 8192 | llama | q8_0 | 3 | 6,943 (6,913-7,006) | 1,184 (1,172-1,188) | 29.4 (29.3-29.5) | 16.47 | no |
-| prose_explanation | 0 | 373 | hipml | q8 | 3 | 362 (357-363) | 1,029 (1,026-1,045) | 29.3 (29.2-29.3) | 17.43 | - |
-| prose_explanation | 0 | 373 | llama | q8_0 | 3 | 417 (395-541) | 944 (724-948) | 30.2 (30.1-30.3) | 16.21 | no |
-| prose_explanation | 8192 | 8192 | hipml | q8 | 3 | 6,638 (6,634-6,648) | 1,234 (1,232-1,235) | 28.7 (28.6-28.7) | 18.73 | - |
-| prose_explanation | 8192 | 8192 | llama | q8_0 | 3 | 6,933 (6,890-7,004) | 1,185 (1,173-1,190) | 29.5 (29.4-29.5) | 16.47 | no |
-| longdoc_qa | 0 | 7694 | hipml | q8 | 3 | 6,315 (6,293-6,329) | 1,218 (1,216-1,223) | 28.7 (28.7-28.8) | 18.71 | - |
-| longdoc_qa | 0 | 7694 | llama | q8_0 | 3 | 6,533 (6,482-6,578) | 1,181 (1,173-1,188) | 29.5 (29.4-29.5) | 16.46 | no |
-| longdoc_qa | 8192 | 8192 | hipml | q8 | 3 | 6,639 (6,635-6,650) | 1,234 (1,232-1,235) | 28.7 (28.6-28.7) | 18.80 | - |
-| longdoc_qa | 8192 | 8192 | llama | q8_0 | 3 | 6,939 (6,914-7,017) | 1,184 (1,172-1,188) | 29.4 (29.4-29.5) | 16.47 | no |
-| copy_200_words | 0 | 285 | hipml | q8 | 3 | 335 (330-340) | 850 (839-863) | 29.2 (29.2-29.2) | 17.32 | - |
-| copy_200_words | 0 | 285 | llama | q8_0 | 3 | 336 (332-474) | 860 (622-878) | 30.2 (30.1-30.2) | 16.21 | no |
-| copy_200_words | 8192 | 8192 | hipml | q8 | 3 | 6,644 (6,629-6,646) | 1,233 (1,233-1,236) | 28.6 (28.6-28.7) | 18.73 | - |
-| copy_200_words | 8192 | 8192 | llama | q8_0 | 3 | 6,921 (6,906-7,008) | 1,184 (1,172-1,188) | 29.4 (29.3-29.5) | 16.47 | no |
+| code_edit | 0 | 672 | hipml | q8 | 3 | 561 (561-572) | 1,198 (1,175-1,199) | 29.2 (29.2-29.3) | 17.62 | - |
+| code_edit | 0 | 672 | llama | q8_0 | 3 | 664 (663-811) | 1,014 (845-1,016) | 30.2 (30.0-30.2) | 16.22 | no |
+| code_edit | 8192 | 8192 | hipml | q8 | 3 | 6,629 (6,615-6,630) | 1,236 (1,236-1,238) | 28.6 (28.6-28.7) | 19.17 | - |
+| code_edit | 8192 | 8192 | llama | q8_0 | 3 | 6,930 (6,912-7,000) | 1,184 (1,173-1,188) | 29.4 (29.4-29.5) | 16.47 | no |
+| code_edit | 32768 | 32768 | hipml | q8 | 1 | 28,647 | 1,144 | 27.0 | 19.75 | - |
+| code_edit | 32768 | 32768 | llama | q8_0 | 1 | 30,736 | 1,067 | 27.4 | 17.38 | no |
+| code_edit | 100000 | 100000 | hipml | q8 | 1 | 107,777 | 928 | 23.4 | 21.93 | - |
+| code_edit | 100000 | 100000 | llama | q8_0 | 1 | 120,903 | 827 | 21.8 | 19.88 | no |
+| json_tool_call | 0 | 300 | hipml | q8 | 3 | 335 (331-340) | 897 (883-906) | 29.3 (29.2-29.3) | 17.35 | - |
+| json_tool_call | 0 | 300 | llama | q8_0 | 3 | 377 (359-504) | 837 (614-849) | 30.1 (30.1-30.2) | 16.21 | no |
+| json_tool_call | 8192 | 8192 | hipml | q8 | 3 | 6,645 (6,635-6,654) | 1,233 (1,231-1,235) | 28.6 (28.6-28.6) | 19.17 | - |
+| json_tool_call | 8192 | 8192 | llama | q8_0 | 3 | 6,932 (6,890-7,007) | 1,185 (1,172-1,189) | 29.5 (29.3-29.5) | 16.47 | no |
+| prose_explanation | 0 | 373 | hipml | q8 | 3 | 362 (356-366) | 1,032 (1,021-1,049) | 29.3 (29.3-29.3) | 17.46 | - |
+| prose_explanation | 0 | 373 | llama | q8_0 | 3 | 422 (410-539) | 939 (713-948) | 30.2 (30.0-30.2) | 16.21 | no |
+| prose_explanation | 8192 | 8192 | hipml | q8 | 3 | 6,644 (6,631-6,655) | 1,233 (1,231-1,235) | 28.7 (28.6-28.7) | 19.17 | - |
+| prose_explanation | 8192 | 8192 | llama | q8_0 | 3 | 6,918 (6,913-7,010) | 1,185 (1,173-1,189) | 29.5 (29.5-29.5) | 16.47 | no |
+| longdoc_qa | 0 | 7694 | hipml | q8 | 3 | 6,303 (6,274-6,317) | 1,221 (1,218-1,226) | 28.7 (28.6-28.7) | 18.82 | - |
+| longdoc_qa | 0 | 7694 | llama | q8_0 | 3 | 6,593 (6,565-6,646) | 1,172 (1,161-1,176) | 29.4 (29.4-29.5) | 16.46 | no |
+| longdoc_qa | 8192 | 8192 | hipml | q8 | 3 | 6,641 (6,626-6,657) | 1,234 (1,231-1,236) | 28.6 (28.6-28.7) | 19.17 | - |
+| longdoc_qa | 8192 | 8192 | llama | q8_0 | 3 | 6,941 (6,921-7,007) | 1,184 (1,172-1,188) | 29.4 (29.4-29.5) | 16.47 | no |
+| copy_200_words | 0 | 285 | hipml | q8 | 3 | 334 (329-336) | 854 (849-867) | 29.1 (29.1-29.1) | 17.34 | - |
+| copy_200_words | 0 | 285 | llama | q8_0 | 3 | 348 (333-476) | 859 (620-874) | 30.1 (30.0-30.2) | 16.21 | no |
+| copy_200_words | 8192 | 8192 | hipml | q8 | 3 | 6,642 (6,638-6,689) | 1,233 (1,225-1,234) | 28.6 (28.6-28.6) | 19.17 | - |
+| copy_200_words | 8192 | 8192 | llama | q8_0 | 3 | 6,947 (6,906-7,012) | 1,184 (1,172-1,188) | 29.5 (29.3-29.5) | 16.47 | no |
 
 ## Gap (hipml minus llama.cpp)
 
@@ -52,24 +52,24 @@ Positive means hipml is faster; negative means llama.cpp is faster. Each row is 
 
 | prompt | depth | prefill | decode | TTFT (llama/hipml) |
 | --- | ---: | ---: | ---: | ---: |
-| code_edit | 0 | +16.4% | -3.1% | 1.21x |
-| code_edit | 8192 | +4.0% | -2.5% | 1.04x |
-| code_edit | 32768 | -1.7% | -1.5% | 0.98x |
-| code_edit | 100000 | -10.9% | +7.3% | 0.89x |
-| json_tool_call | 0 | +5.5% | -3.4% | 1.09x |
-| json_tool_call | 8192 | +4.3% | -2.7% | 1.05x |
-| prose_explanation | 0 | +9.0% | -3.0% | 1.15x |
-| prose_explanation | 8192 | +4.1% | -2.6% | 1.04x |
-| longdoc_qa | 0 | +3.2% | -2.6% | 1.03x |
-| longdoc_qa | 8192 | +4.2% | -2.5% | 1.05x |
-| copy_200_words | 0 | -1.3% | -3.3% | 1.00x |
-| copy_200_words | 8192 | +4.1% | -2.6% | 1.04x |
+| code_edit | 0 | +18.1% | -3.1% | 1.18x |
+| code_edit | 8192 | +4.3% | -2.8% | 1.05x |
+| code_edit | 32768 | +7.2% | -1.2% | 1.07x |
+| code_edit | 100000 | +12.1% | +7.4% | 1.12x |
+| json_tool_call | 0 | +7.1% | -2.8% | 1.13x |
+| json_tool_call | 8192 | +4.0% | -3.0% | 1.04x |
+| prose_explanation | 0 | +9.8% | -3.0% | 1.17x |
+| prose_explanation | 8192 | +4.1% | -2.7% | 1.04x |
+| longdoc_qa | 0 | +4.2% | -2.3% | 1.05x |
+| longdoc_qa | 8192 | +4.2% | -2.6% | 1.05x |
+| copy_200_words | 0 | -0.6% | -3.5% | 1.04x |
+| copy_200_words | 8192 | +4.2% | -2.9% | 1.05x |
 
 ## Headline gaps
 
-- **prefill**: hipml fastest at `code_edit@0` (+16.4%, reps 3/3); llama.cpp fastest at `code_edit@100000` (-10.9%, reps 1/1).
-- **decode**: hipml fastest at `code_edit@100000` (+7.3%, reps 1/1); llama.cpp fastest at `json_tool_call@0` (-3.4%, reps 3/3).
-- **ttft**: hipml fastest at `code_edit@0` (+20.9%, reps 3/3); llama.cpp fastest at `code_edit@100000` (-10.8%, reps 1/1).
+- **prefill**: hipml fastest at `code_edit@0` (+18.1%, reps 3/3); llama.cpp fastest at `copy_200_words@0` (-0.6%, reps 3/3).
+- **decode**: hipml fastest at `code_edit@100000` (+7.4%, reps 1/1); llama.cpp fastest at `copy_200_words@0` (-3.5%, reps 3/3).
+- **ttft**: hipml fastest at `code_edit@0` (+18.4%, reps 3/3); llama.cpp did not win any cell for this metric.
 
 ## llama.cpp warm pass (cache_prompt=true)
 
@@ -77,18 +77,18 @@ Same ids immediately after the cold reps. A near-1 `prompt_n` and a large `cache
 
 | prompt | depth | TTFT ms | warm prefill tok/s | cache_n | prompt_n |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| code_edit | 0 | 118 | 41.5 | 668 | 4 |
-| code_edit | 8192 | 117 | 39.3 | 8188 | 4 |
-| code_edit | 32768 | 120 | 36.0 | 32764 | 4 |
-| code_edit | 100000 | 191 | 27.6 | 99996 | 4 |
-| json_tool_call | 0 | 115 | 39.2 | 296 | 4 |
-| json_tool_call | 8192 | 124 | 39.3 | 8188 | 4 |
-| prose_explanation | 0 | 119 | 40.3 | 369 | 4 |
-| prose_explanation | 8192 | 124 | 39.3 | 8188 | 4 |
-| longdoc_qa | 0 | 123 | 37.8 | 7690 | 4 |
-| longdoc_qa | 8192 | 120 | 39.3 | 8188 | 4 |
-| copy_200_words | 0 | 114 | 39.2 | 281 | 4 |
-| copy_200_words | 8192 | 109 | 37.6 | 8188 | 4 |
+| code_edit | 0 | 112 | 40.7 | 668 | 4 |
+| code_edit | 8192 | 103 | 40.1 | 8188 | 4 |
+| code_edit | 32768 | 118 | 36.3 | 32764 | 4 |
+| code_edit | 100000 | 197 | 26.9 | 99996 | 4 |
+| json_tool_call | 0 | 104 | 38.9 | 296 | 4 |
+| json_tool_call | 8192 | 124 | 38.8 | 8188 | 4 |
+| prose_explanation | 0 | 118 | 38.7 | 369 | 4 |
+| prose_explanation | 8192 | 129 | 38.9 | 8188 | 4 |
+| longdoc_qa | 0 | 130 | 38.8 | 7690 | 4 |
+| longdoc_qa | 8192 | 124 | 38.7 | 8188 | 4 |
+| copy_200_words | 0 | 121 | 39.9 | 281 | 4 |
+| copy_200_words | 8192 | 117 | 38.3 | 8188 | 4 |
 
 ## hipml prefill stage breakdown
 
@@ -96,11 +96,11 @@ One extra synchronised run per cell; the per-stage values include a stream sync 
 
 | prompt | depth | total_wall | embed | elementwise | gemm_attn | gemm_ssm | gemm_ffn | final | seq_ssm | seq_attn | stage_sum |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| code_edit | 0 | 586 | 1 | 19 | 23 | 76 | 297 | 2 | 125 | 43 | 586 |
-| json_tool_call | 0 | 347 | 1 | 12 | 16 | 48 | 187 | 2 | 63 | 20 | 347 |
-| prose_explanation | 0 | 375 | 1 | 13 | 17 | 50 | 195 | 2 | 75 | 23 | 374 |
-| longdoc_qa | 0 | 6,443 | 10 | 186 | 209 | 723 | 3,091 | 7 | 1,430 | 786 | 6,443 |
-| copy_200_words | 0 | 347 | 1 | 13 | 16 | 48 | 187 | 2 | 62 | 19 | 347 |
+| code_edit | 0 | 584 | 1 | 20 | 22 | 76 | 294 | 2 | 125 | 43 | 583 |
+| json_tool_call | 0 | 352 | 1 | 14 | 16 | 48 | 187 | 2 | 64 | 20 | 352 |
+| prose_explanation | 0 | 377 | 1 | 15 | 17 | 50 | 194 | 2 | 75 | 23 | 376 |
+| longdoc_qa | 0 | 6,437 | 10 | 189 | 209 | 723 | 3,086 | 7 | 1,425 | 785 | 6,434 |
+| copy_200_words | 0 | 349 | 1 | 14 | 16 | 49 | 187 | 2 | 62 | 19 | 349 |
 
 ## Completeness
 
