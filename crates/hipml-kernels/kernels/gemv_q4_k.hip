@@ -141,7 +141,7 @@ __device__ __forceinline__ void q4k_tile(
     int k,
     float* __restrict__ sx,
     int tile,
-    const float* __restrict__ gate)
+    const float* __restrict__ gate = nullptr)
 {
     const int tid = threadIdx.x;
     const int lane = tid & 31;
