@@ -141,9 +141,9 @@ impl Chunk {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(1)
-            .clamp(1, 8);
+            .clamp(1, 32);
         let part_len = |splits: usize| splits * qslots * cfg.n_head * cfg.head_dim;
-        while attn_splits > 1 && part_len(attn_splits) * 4 > 384 << 20 {
+        while attn_splits > 1 && part_len(attn_splits) * 4 > 1 << 30 {
             attn_splits /= 2;
         }
         Ok(Chunk {
