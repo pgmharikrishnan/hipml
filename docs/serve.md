@@ -276,3 +276,134 @@ hip` are clean.
 row count rather than `M` (or split the block at 256 rows) so the large-block
 path is state-bit-identical too, then retest cells b/c and sweep the tail-length
 crossover.
+
+## WP51: making the server safe to leave running
+
+Review 4 found the server fast but not safe: one bad request took the process
+down, a burst queued without limit, `temperature` was silently ignored, the
+batched path was not bit-exact at four or more slots, and the first request paid
+a ~5 s first-touch cost. This section is what changed and what it cost.
+
+### 1. A failure fails one job
+
+Before: every `?` in the scheduler loop returned to `sched::run`, which returned
+to `serve::run`, which exited 1 — so an allocation failure, a transient HIP
+error or one slot's bad state dropped every in-flight stream.
+
+Now every fallible step has a scope (`serve/sched/fail.rs`):
+
+| scope | sites | what happens |
+|---|---|---|
+| one job | admit, prefill tile, spec seed, spec step, adopt, activate, a corrupt id | that job gets an error event, its slot is freed, its prefix-cache entries are dropped (`prefix_invalidate`), the engine keeps serving |
+| one batch | the shared weight pass (`BatchEngine::forward`) | no slot can be blamed for a launch that covers every slot: every job in the batch fails, the batch engine is reset (zeroed SSM state, empty slot set), and the next admission starts clean |
+| the device | a reset that itself fails, or three resets with no successful step between them | every stream is drained with an error, the scheduler waits up to 2 s for the connections to close (`admit::await_close`), then the process exits 1 so a supervisor restarts it |
+
+The per-slot scope is real, not a wrapper: after the shared pass every id is
+checked against the vocabulary, and an out-of-vocabulary id fails **that slot's
+job** while the other slots' tokens — already computed in the same pass — are
+delivered unchanged. `HIPML_FAULT_SLOT=n` (with `HIPML_FAULT_STEP`, default 4)
+injects exactly that failure so the probe can prove it.
+
+`begin` now hands the job back with its error (`Result<Prefill, (Job, String)>`)
+instead of dropping it, so a rejected request can still be answered and its
+prefix entries invalidated.
+
+**Evidence** (`bench/serve/wp51_probe.py --plan isolation`): four concurrent
+streams, 24 tokens each, first a no-fault run and then the same four with slot
+1's step injected to fail. In the fault run exactly one stream received an error
+event and the other three matched the no-fault run token for token; the process
+stayed healthy, `/metrics` counted one slot fault and **zero** batch resets, and
+a request after the fault was served normally.
+
+### 2. Backpressure
+
+The real limit is VRAM slots, not threads: a slot costs its KV cache plus its
+SSM recurrent state (hundreds of MiB at 8K ctx), while a queued request costs
+only its token ids on the host (4 bytes a token). So the queue is bounded as a
+small multiple of the slots and the *connection* bound is separate and looser:
+
+* `inflight = slots + queue_max`, with `queue_max` = `--max-queue` (default
+  `2 x slots`, i.e. 32 for 16 slots). This is the admission bound.
+* `--max-conns` (default 64) bounds connection threads, so a flood of idle
+  sockets cannot exhaust memory either.
+* A generation request past `inflight` is answered `503 Service Unavailable`
+  with `Retry-After: 1` and a JSON error, **before** it is tokenized or queued.
+  `/health`, `/metrics`, `/props` and `/tokenize` are never refused.
+
+`/metrics` exposes the bound (`hipml_inflight_max`, `hipml_queue_max`,
+`hipml_connections_max`) and the live values, plus
+`hipml_requests_rejected_busy_total` and `hipml_connections_rejected_total`.
+
+**Measured** (`--plan backpressure`, 40 concurrent requests against 16 slots):
+
+| queue bound | streams | 503s | other | hangs | Retry-After |
+|---|---:|---:|---:|---:|---|
+| 4 (capacity 20) | | | | | |
+| default 32 (capacity 48) | | | | | |
+
+### 3. Sampling honesty
+
+Chosen: **refuse, do not fake.** A request with `temperature > 0` or `n > 1` is
+a `400` whose message says the server is greedy-only. The alternative —
+implementing a sampler — would put a second, non-argmax decode path beside the
+exactness claims this project is built on, and the batched kernels sample per
+slot with `argmax` only; a half-implemented sampler is worse than an honest
+refusal.
+
+`top_p` and `seed` are accepted and are no-ops *by arithmetic*: under greedy
+decode the argmax is inside every nucleus, and a seed has nothing to seed.
+`temperature: 0` and an absent temperature are both accepted and produce the
+same ids.
+
+### 4. Batched exactness
+
+The serving default is still the WMMA tile at B>=4 (`HIPML_BATCH_SKINNY=1`),
+because the exact `_b` path costs the throughput the fleet numbers depend on
+(measured below). The divergence is now impossible to miss:
+
+* every generation response carries `X-Hipml-Batch-Exact: 0` (with
+  `X-Hipml-Batch-Tile-Min: 4`) when the tile can be used, and `1` when the exact
+  path is the only one;
+* `/metrics` has `hipml_batch_exact_path` (0/1) and
+  `hipml_tile_steps_total`, the number of decode steps that actually ran
+  through the tile;
+* `HIPML_BATCH_LEGACY=1` makes the whole server exact.
+
+**Cost of exact** (`--plan exact`, 8 and 4 slots, 400-token prompts, 64 tokens,
+one warm wave):
+
+| slots | tile aggregate tok/s | exact aggregate tok/s | cost |
+|---:|---:|---:|---:|
+| 4 | | | |
+| 8 | | | |
+
+### 5. Warm-up and supervisor
+
+`serve` now warms three paths at load (`serve/sched/warm.rs`): one full
+`--chunk` prefill tile (every weight page and every prefill kernel), one batched
+step on two synthetic slots (the batch kernels), and one drafter step. Then it
+resets the state. `HIPML_NO_WARMUP=1` skips it, which is how the cost is
+measured.
+
+| first request | TTFT, 200-token prompt | TTFT, 2000-token prompt |
+|---|---:|---:|
+| no warm-up | | |
+| warm-up (default) | | |
+
+`scripts/hipml-serve.ps1` is the supervisor: start, log to a timestamped file,
+wait for exit, relaunch with a 2 s → 60 s backoff (reset after 60 s of uptime),
+stop the child on Ctrl+C. A context loss now costs one restart, not an outage.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\hipml-serve.ps1 -Slots 16 -Ctx 32768
+```
+
+### What is still not done
+
+* The batch-wide reset is the honest scope for a shared weight pass: a launch
+  that fails cannot be pinned to one slot, so those jobs fail together. Only
+  per-slot failures (the common case) are isolated.
+* A multi-hour soak was not run; the isolation probe runs minutes, not hours.
+* The supervisor is a restart loop, not a health monitor: it does not restart a
+  server that is up but wedged (a step that never returns). A watchdog on
+  `hipml_decode_steps_total` would be the next step.
