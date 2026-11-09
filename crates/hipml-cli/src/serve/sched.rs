@@ -40,6 +40,9 @@ pub struct Job {
     pub max_tokens: usize,
     pub stop_ids: Vec<u32>,
     pub drafts: usize,
+    /// `cache_prompt`: consult the prefix cache for this request. Capture is
+    /// unconditional, so a later request can still reuse this one's prefix.
+    pub cache: bool,
     pub tx: Sender<Event>,
 }
 
@@ -143,9 +146,12 @@ fn begin(
     let mut st = engine.new_state();
     let mut start = 0usize;
 
-    metrics.update(|s| s.prefix_lookups += 1);
     let mut restored_logits = None;
-    if let Some(hit) = engine.prefix_lookup(&job.prompt) {
+    if !job.cache {
+        // `cache_prompt: false`: prefill everything, but still capture so a
+        // later request can reuse the prefix.
+    } else if let Some(hit) = engine.prefix_lookup(&job.prompt) {
+        metrics.update(|s| s.prefix_lookups += 1);
         restored_logits = engine.prefix_restore(hit, &mut st)?;
         start = hit.pos;
         if start > 0 {

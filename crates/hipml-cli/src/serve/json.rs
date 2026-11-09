@@ -320,6 +320,13 @@ mod tests {
     }
 
     #[test]
+    fn reads_negative_n_predict() {
+        let v = parse(r#"{"n_predict":-1}"#).unwrap();
+        assert_eq!(v.get("n_predict").and_then(Value::as_i64), Some(-1));
+        assert_eq!(v.get("n_predict").and_then(Value::as_u64), None);
+    }
+
+    #[test]
     fn rejects_trailing_garbage() {
         assert!(parse("{}x").is_err());
         assert!(parse("{\"a\":1,}").is_err());

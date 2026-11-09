@@ -283,8 +283,9 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn new_job(shared: &Shared, prompt: chat::Prompt, max_tokens: usize, ignore_eos: bool,
-               stop_strings: &[String], stop_ids: Vec<u32>, drafts: usize)
+               stop_strings: &[String], stop_ids: Vec<u32>, drafts: usize, cache: bool)
     -> Result<(u64, std::sync::mpsc::Receiver<super::sched::Event>, Instant), String>
 {
     let (tx, rx) = channel();
@@ -307,6 +308,7 @@ pub fn new_job(shared: &Shared, prompt: chat::Prompt, max_tokens: usize, ignore_
         max_tokens,
         stop_ids: stops,
         drafts,
+        cache,
         tx,
     };
     let at = Instant::now();

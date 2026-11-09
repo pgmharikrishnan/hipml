@@ -144,6 +144,7 @@ pub fn chat_completion(
         &strings(v.get("stop")),
         token_ids(v.get("stop_token_ids")),
         shared.cfg.drafts,
+        bool_field(&v, "cache_prompt", true),
     ) {
         Ok(x) => x,
         Err(e) => return bad(stream, &e),
@@ -290,6 +291,7 @@ pub fn completion(
         &strings(v.get("stop")),
         token_ids(v.get("stop_token_ids")),
         shared.cfg.drafts,
+        bool_field(&v, "cache_prompt", true),
     ) {
         Ok(x) => x,
         Err(e) => return bad(stream, &e),
