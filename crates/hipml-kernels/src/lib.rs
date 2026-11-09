@@ -29,13 +29,14 @@ pub use attn_gpu::AttnLayer;
 #[cfg(feature = "hip")]
 pub mod launch_kv;
 pub use launch::{
-    prefill_entry_for, prefill_half, prefill_path, prefill_v2, set_prefill_half, set_prefill_path,
-    PrefillPath,
+    prefill_entry_for, prefill_half, prefill_path, prefill_slices, prefill_v2, set_prefill_half,
+    set_prefill_path, PrefillPath,
 };
 #[cfg(feature = "hip")]
 pub use launch::{
     gemm_rows_f32, prefill_entry_for_half, prefill_has_xhalf, prefill_resident,
-    prefill_resident_half, prefill_resident_split_half, prefill_should_split, prefill_xhalf,
+    prefill_resident_half, prefill_resident_slices, prefill_resident_split_half,
+    prefill_should_split, prefill_xhalf,
 };
 #[cfg(feature = "hip")]
 pub use launch::{gemv_job_tiles, GemvJob, ReadJob};
@@ -482,6 +483,18 @@ pub const KERNELS: &[KernelSpec] = &[
             block: 256,
         },
     },
+    // n-slice variant of the same geometry (see `prefill_slices`): the SSM
+    // alpha/beta projections are 64 rows wide, so one row tile is 8 blocks and
+    // the card idles. Slices stack along `blockIdx.z`.
+    KernelSpec {
+        name: "prefill_halfw_w2h_sn",
+        entry: "prefill_halfw_w2h_sn",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
     KernelSpec {
         name: "prefill_xhalf",
         entry: "prefill_xhalf",
@@ -601,6 +614,11 @@ pub const KERNELS: &[KernelSpec] = &[
     KernelSpec {
         name: "residual_add_f32",
         entry: "residual_add_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "reduce_slices_f32",
+        entry: "reduce_slices_f32",
         kind: KernelKind::Linear { block: 256 },
     },
     KernelSpec {

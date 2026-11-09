@@ -277,6 +277,15 @@ fn split_entry(name: &str) -> Option<&'static str> {
     })
 }
 
+/// n-slice entry for a converted-activation kernel. Only the raw-fp16 weights
+/// have one: the SSM alpha/beta projections are the shape that needs it.
+fn slice_entry(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "prefill_halfw_w2h" => "prefill_halfw_w2h_sn",
+        _ => return None,
+    })
+}
+
 /// Whether a shape should split its k range in two. The v2 tile is 128 rows x
 /// 256 tokens, so `blocks` tiles are `blocks / 64` waves on this card. Below
 /// three waves the matrix units idle at the end of every chunk; at 512 tokens
@@ -393,6 +402,89 @@ pub fn prefill_resident_split_half(
     let name = prefill_entry_for_half(name).unwrap_or(name);
     let sk = split_entry(name).ok_or_else(|| format!("{name}: no split-K entry"))?;
     prefill_split(module, stream, sk, w, xh, y, scratch, m, k, tokens)
+}
+
+/// n-slice k split of the fp16-activation prefill GEMM, for a shape whose row
+/// tile is only a few blocks (the 64-row SSM alpha/beta projections).
+///
+/// Slice 0 writes `y`, slices 1..n write `scratch` at `(z - 1) * tokens * m`,
+/// and one `reduce_slices_f32` launch sums them in slice order, so the result
+/// is deterministic. `n == 1` falls through to the single-pass kernel.
+#[allow(clippy::too_many_arguments)]
+pub fn prefill_resident_slices(
+    module: &Module,
+    stream: &Stream,
+    name: &str,
+    w: &ByteBuffer,
+    xh: &Buffer,
+    y: &Buffer,
+    scratch: &Buffer,
+    m: usize,
+    k: usize,
+    tokens: usize,
+) -> Result<(), String> {
+    let name = prefill_entry_for_half(name).unwrap_or(name);
+    let n = crate::prefill_slices(m, k, tokens);
+    let sn = match slice_entry(name) {
+        Some(sn) if n > 1 => sn,
+        _ => return prefill_resident(module, stream, name, w, xh, y, m, k, tokens),
+    };
+    let spec = crate::spec(sn).ok_or_else(|| format!("{sn} is not in the manifest"))?;
+    let (rpb, tpb, block) = match spec.kind {
+        crate::KernelKind::Prefill {
+            rows,
+            tokens,
+            block,
+        } => (rows, tokens, block),
+        _ => return Err(format!("{sn}: not a prefill kernel")),
+    };
+    let ks = k / n;
+    if ks % 64 != 0 || ks == 0 {
+        return prefill_resident(module, stream, name, w, xh, y, m, k, tokens);
+    }
+    if scratch.len() < (n - 1) * tokens * m {
+        return Err(format!(
+            "{sn}: slice scratch has {} values, needs {}",
+            scratch.len(),
+            (n - 1) * tokens * m
+        ));
+    }
+    let kernel = module.kernel(sn)?;
+    let mut cfg = LaunchConfig::prefill(m, tokens, rpb, tpb, block);
+    cfg.grid.2 = n as u32;
+    let mut p_w = w.as_ptr();
+    let mut p_x = xh.as_ptr();
+    let mut p_y = y.as_ptr();
+    let mut p_s = scratch.as_ptr();
+    let mut v_m = m as i32;
+    let mut v_k = k as i32;
+    let mut v_tokens = tokens as i32;
+    let mut v_ks = ks as i32;
+    let mut params: [*mut c_void; 8] = [
+        &mut p_w as *mut _ as *mut c_void,
+        &mut p_x as *mut _ as *mut c_void,
+        &mut p_y as *mut _ as *mut c_void,
+        &mut p_s as *mut _ as *mut c_void,
+        &mut v_m as *mut _ as *mut c_void,
+        &mut v_k as *mut _ as *mut c_void,
+        &mut v_tokens as *mut _ as *mut c_void,
+        &mut v_ks as *mut _ as *mut c_void,
+    ];
+    kernel.launch(cfg, stream, &mut params)?;
+
+    // y = y + s0 + s1 + ..., in slice order.
+    let reduce = module.kernel("reduce_slices_f32")?;
+    let mut r_y = y.as_ptr();
+    let mut r_s = scratch.as_ptr();
+    let mut r_n = (n - 1) as i32;
+    let mut r_len = (tokens * m) as i32;
+    let mut rparams: [*mut c_void; 4] = [
+        &mut r_y as *mut _ as *mut c_void,
+        &mut r_s as *mut _ as *mut c_void,
+        &mut r_n as *mut _ as *mut c_void,
+        &mut r_len as *mut _ as *mut c_void,
+    ];
+    reduce.launch(LaunchConfig::linear(tokens * m, 256), stream, &mut rparams)
 }
 
 /// Tiled prefill GEMM over a resident weight payload.

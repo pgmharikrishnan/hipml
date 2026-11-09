@@ -135,6 +135,9 @@ pub struct SsmChunk {
     /// copied into the layer's `conv_state` (the conv reads and writes the
     /// window, so it cannot alias).
     pub conv_next: Buffer,
+    /// k-slice partials for the wave-starved SSM alpha/beta projection, at most
+    /// seven of `tokens * n_v` (see [`crate::prefill_slices`]).
+    pub asplit: Buffer,
     pub tokens: usize,
 }
 
@@ -153,6 +156,7 @@ impl SsmChunk {
             g: zeros(tokens * d.n_v)?,
             beta_sig: zeros(tokens * d.n_v)?,
             conv_next: zeros((d.d_conv - 1) * d.conv_ch)?,
+            asplit: zeros(7 * tokens * d.n_v)?,
             tokens,
         })
     }
@@ -165,7 +169,8 @@ impl SsmChunk {
             + self.out.len()
             + self.g.len()
             + self.beta_sig.len()
-            + self.conv_next.len())
+            + self.conv_next.len()
+            + self.asplit.len())
             * 4
     }
 }

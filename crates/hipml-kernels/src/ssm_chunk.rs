@@ -41,16 +41,18 @@ impl<'a> SsmGpuLayer<'a> {
             // The loader keeps F32 tensors (ssm_alpha, ssm_beta in Qwen3.8-27B) as raw
             // little-endian f32, so those go through the f32 multi-row GEMM. The
             // resident loader also leaves an fp16 copy, which rides the
-            // tensor-core path with the converted activation tile.
+            // tensor-core path with the converted activation tile, k-sliced
+            // because 64 rows is only 8 blocks of a 64-block wave.
             match w {
                 SsmWeight::Quant(b, "gemv_f32") => match (half, half_w) {
-                    (true, Some(hw)) => crate::prefill_resident_half(
+                    (true, Some(hw)) => crate::prefill_resident_slices(
                         l.module(),
                         l.stream(),
                         "prefill_halfw_w2h",
                         hw,
                         xh,
                         y,
+                        &c.asplit,
                         m,
                         d.n_embd,
                         tokens,
