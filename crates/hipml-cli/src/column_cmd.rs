@@ -288,10 +288,12 @@ fn check(model: &Model, prompt: &[u32], a: &Args, n_ctx: usize, chunk: usize) ->
     let mut next = first;
     let (mut total, mut diff, mut rows, mut nv) = (0usize, 0usize, 0usize, 0usize);
     let mut worst = 0.0f32;
+    let (mut hdiff, mut hworst) = (0usize, 0.0f32);
     let steps = (a.tokens / a.cols.max(1)).max(1);
     for _ in 0..steps {
         let mut cols = vec![next];
         let mut reference: Vec<Vec<f32>> = Vec::with_capacity(a.cols);
+        let mut reference_h: Vec<Vec<f32>> = Vec::with_capacity(a.cols);
         for r in 0..a.cols {
             let id = match ref_eng.forward_token_id(cols[r], &mut ref_st) {
                 Ok(id) => id,
@@ -304,6 +306,13 @@ fn check(model: &Model, prompt: &[u32], a: &Args, n_ctx: usize, chunk: usize) ->
                 Ok(l) => reference.push(l),
                 Err(e) => {
                     eprintln!("column-check: reference logits: {e}");
+                    return 1;
+                }
+            }
+            match ref_eng.final_hidden().to_host() {
+                Ok(h) => reference_h.push(h),
+                Err(e) => {
+                    eprintln!("column-check: reference hidden: {e}");
                     return 1;
                 }
             }
@@ -324,6 +333,14 @@ fn check(model: &Model, prompt: &[u32], a: &Args, n_ctx: usize, chunk: usize) ->
             }
         };
         nv = col_eng.n_vocab();
+        let hidden = match col_eng.column_hidden().and_then(|b| b.to_host()) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("column-check: column hidden: {e}");
+                return 1;
+            }
+        };
+        let n = col_eng.n_embd();
         for (r, want) in reference.iter().enumerate() {
             let have = &got[r * nv..(r + 1) * nv];
             rows += 1;
@@ -334,12 +351,26 @@ fn check(model: &Model, prompt: &[u32], a: &Args, n_ctx: usize, chunk: usize) ->
                     worst = worst.max((have[i] - want[i]).abs());
                 }
             }
+            if let Some(want_h) = reference_h.get(r) {
+                let have_h = &hidden[r * n..(r + 1) * n];
+                let mut hd = 0usize;
+                let mut hw = 0.0f32;
+                for i in 0..n {
+                    if have_h[i].to_bits() != want_h[i].to_bits() {
+                        hd += 1;
+                        hw = hw.max((have_h[i] - want_h[i]).abs());
+                    }
+                }
+                hdiff += hd;
+                hworst = hworst.max(hw);
+            }
         }
     }
     println!(
         "column-check: {rows} columns x {nv} logits = {total} values, {diff} differ, max |d| {worst:.3e}"
     );
-    if diff == 0 {
+    println!("column-check: hidden {hdiff} differ, max |d| {hworst:.3e}");
+    if diff == 0 && hdiff == 0 {
         0
     } else {
         1

@@ -442,6 +442,11 @@ impl<'a> GpuEngine<'a> {
         self.cfg.n_vocab
     }
 
+    /// Hidden width (`n_embd`), the row width of `final_hidden`.
+    pub fn n_embd(&self) -> usize {
+        self.cfg.n_embd
+    }
+
     /// The post-`output_norm` hidden row of the last plain decode step.
     pub fn final_hidden(&self) -> &Buffer {
         &self.final_h
