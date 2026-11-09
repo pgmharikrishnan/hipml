@@ -228,12 +228,19 @@ pub fn launch_ptrs(
         &mut v_scale as *mut _ as *mut std::ffi::c_void,
         &mut v_splits as *mut _ as *mut std::ffi::c_void,
     ];
-    // The warp kernel launches one warp per (KV head, split) task, four to a
-    // block; the staged kernels launch one block per task.
+    // The warp kernel launches one warp per (KV head, split, head-subset)
+    // task, four warps to a block; the staged kernels launch one block per
+    // (KV head, split) task. A whole-group warp (`w2`/`w4`) covers every head
+    // of the group in one warp, the `s*` variants three heads per warp, so
+    // they need `ceil(group/3)` warps per task. Missing that factor launched
+    // only the first `grid*4` warps of `tasks*wpr` and silently dropped the
+    // rest of the key range.
     let warps = if matches!(dtype, 4 | 5 | 7 | 13 | 14) { 4 } else { 0 };
+    let hpw = if matches!(dtype, 4 | 5) { group } else { group.min(3) };
+    let wpr = group.div_ceil(hpw);
     let tasks = n_kv * splits;
     let grid = if warps > 0 {
-        tasks.div_ceil(warps) as u32
+        (tasks * wpr).div_ceil(warps) as u32
     } else {
         tasks as u32
     };
