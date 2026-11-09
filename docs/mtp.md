@@ -185,10 +185,20 @@ cannot be weight-batched.
 * Rollback restores the `[columns][layers]` snapshot and relies on the KV
   overwrite; the state snapshot itself is not compared against a replayed
   prefix. Exactness of the emitted ids over 128 tokens is the evidence.
-* The WP33 WMMA skinny quantized GEMM (`feat/skinny-wmma`) was **not adopted**
-  in this change: it is not bit-identical (max_abs ~1.6e-2) and the priority was
-  the exact path. Its measured cost curve (r=4 ≈ 0.93-1.05x of one column)
-  makes it the obvious next lever for the 65-80 tok/s class, behind a
-  `--skinny` switch with the 128-token divergence check. If it costs a token,
-  keep the exact batched GEMV as default.
+* The WP33 WMMA skinny quantized GEMM (`feat/skinny-wmma`) is copied in
+  behind `HIPML_SKINNY=1`; the exact batched GEMV stays the default. Measured
+  both ways on the four fixtures (128 tokens):
+
+  | prompt | exact best | skinny best | logit max |d| | skinny exact |
+  |---|---|---|---|---|
+  | prose | 42.58 (d2) | 38.71 (d2) | 9.4e-3 | 128/128 |
+  | json | 50.06 (d3) | 51.21 (d3) | 9.4e-3 | 128/128 |
+  | copy | 61.12 (d3) | 62.51 (d3) | 9.4e-3 | 128/128 |
+  | code | 49.53 (d2) | 52.46 (d3) | 9.4e-3 | 128/128 |
+
+  The skinny path is *not* a token divergence (128/128 on every prompt), but it
+  is not faster enough: its dequantise-into-shared staging runs at ~40-68 GB/s
+  of weight against the batched GEMV's 400-500 GB/s, so at r=2/3 it is slower
+  and only at r=4 does it reach parity (prose verify 55.3 vs 56.5 ms). It does
+  not reach the 65-80 tok/s class. Keep the exact path default.
 * No graph capture on the verify path; launch overhead is inside every number.
