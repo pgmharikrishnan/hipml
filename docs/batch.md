@@ -72,9 +72,17 @@ Same model file, q8_0 K/V, `-np B`, B concurrent greedy requests:
 
 | B | hipml batch | llama.cpp | hipml / llama |
 | ---: | ---: | ---: | ---: |
-| 2 | 44.5 | 56.3 | 0.79 |
-| 4 | 64.4 | 87.3 | 0.74 |
-| 8 | 68.6 | 101.3 | 0.68 |
+| 2 | 45.7 | 56.3 | 0.81 |
+| 4 | 64.8 | 87.3 | 0.74 |
+| 8 | **102.0** | 101.3 | **1.01** |
+
+The B=8 number is WP33: `Launcher::gemv_batched` routes batched projections to
+`gemm_skinny_*` at B >= 4, which holds ~400 GB/s where the `_b` kernels fall to
+154 GB/s (B=2 stays on `_b`, measured better there: 45.3 vs 37.2). B=4 is a wash
+because both paths sit at 273 GB/s; the remaining 1.3x there is the
+non-projection half of the step. See `docs/review.md` §9 for the cost curve,
+the exactness statement and the routing switches (`HIPML_BATCH_SKINNY`,
+`HIPML_BATCH_LEGACY`, `HIPML_BATCH_SKINNY_TRACE`).
 
 llama.cpp's np8 client-overlap figure was 88.96 tok/s; its server clock says
 101.26.

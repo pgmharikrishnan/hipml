@@ -6,7 +6,8 @@
 //!
 //! Contract: `y[r, :] = W @ x[r, :]`, `x` is `[r, k]` f32, `y` is `[r, n]` f32,
 //! `r <= 16`, `k` a multiple of 256 (Q4_K/Q6_K) or 32 (Q8_0). The 16-row
-//! activation tile is padded with zeros when `r < 16`, so the cost is the tile.
+//! activation tile repeats the last real row when `r < 16` and discards the
+//! extra rows in the epilogue, so the cost is the tile, not `r`.
 
 use super::*;
 

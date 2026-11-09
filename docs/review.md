@@ -175,6 +175,9 @@ Per decode step with B sequences (*model*): weights once (27.2 ms), ramp once
 | 8 | 8 / (2.95 × 27.2 + 5.6 + 3.8) = 89 | 8 / (28.3 + 9.4) = 212 |
 | 16 | memory: 16 × 157 MB state + KV, fits at 8K | 16 / (29.5 + 13.3) = 374 |
 
+**The "WMMA skinny" column is a projection from §4's arithmetic; it was built
+and measured in §9 and the B = 4/8 entries are 65 and 102 tok/s, not 114/212.**
+
 Where it breaks: at B ≥ 4 on today's kernel (cost per column grows), at about
 B = 30 on VRAM at 8K context (state 157 MB + KV 0.54 GB per sequence), and
 at about B = 87 on compute. llama `-np B` was **not measured** (running
@@ -261,7 +264,7 @@ arithmetic from measured parts.
 | 2 | Deep-prefill 64/128-query tile, KV-outer loop (feat/deep-prefill) | 100K TTFT 144.7 → about 105 s (llama 120.9); 32K -3 s | medium, in flight | low | attention about 64 s at 100K, memory-bound at 137 GB/s (model) |
 | 3 | Prefill GEMM pipeline, 65 → 100+ TFLOPS | 8K TTFT 7.40 → about 6.0 s (llama 6.93); 100K -20 s | high | medium: new reduction order, needs the parity suite | 5.0 s of GEMM at 8K, 35-43% of the measured WMMA ceiling |
 | 4 | q8 decode attention to bandwidth at depth | 100K decode 21.2 → about 25 tok/s (llama 22.1); 32K 26.2 → about 28 | low-medium | low | +13.7 ms per token at 100K measured against 5.5 ms of KV bytes |
-| 5 | WMMA skinny GEMM, R ≤ 16 columns | MTP with 3 drafts → about 80 tok/s (model); batch B = 8 → about 210 tok/s aggregate | medium-high | medium: not bit-identical to `gemv` unless decode also uses it at R = 1 | f32-from-LDS kernel measured at 1.90x / 2.95x for 4 / 8 columns |
+| 5 | WMMA skinny GEMM, R ≤ 16 columns | **done**: cost curve R=4/8 within 1.05x of R=1 on all five shapes; batch B=8 73.2 → **102.0 tok/s** (llama 101.3), B=4 unchanged | done (`gemm_skinny_*`) | none: same ids as the B=1 path over 16 tokens | measured §9 |
 | 6 | Chunkwise (WY) GDN recurrence on WMMA | 8K -1.1 s, 100K -13 s | high | medium: cannot be bit-identical | `seq ssm` 1.54 s at 8K after §5, shuffle-bound |
 | 7 | Norm / gate / SiLU fused into GEMV prologue and epilogue | decode +5-8% | medium | low | 5.6 ms of ramp measured; not in the refuted list |
 | 8 | Row-split GDN recurrence | **done**: 8K -0.40 s, 1.40x per layer | done (c5ed8c7) | none: bit-identical | measured §5 |
@@ -289,3 +292,81 @@ closing 64% of the 8K gap. What remains is GEMM efficiency at shallow depth
 feat/deep-prefill tile. With MTP decode, the deep-prefill tile and a 100-TFLOPS
 GEMM, hipml beats llama on every row of the table; without MTP it ties
 decode at best.
+
+## 9. WP33: the WMMA skinny GEMM, measured
+
+`gemm_skinny_{q4_k,q6_k,q8_0}` computes `y[r,:] = W @ x[r,:]` for `r <= 16` by
+padding R to one 16-wide WMMA tile, so the weight stream is the cost and the
+column count is nearly free. Parity: 8/8 cases against the CPU oracle
+(`hipml parity skinny`).
+
+### Cost curve (R9700, reps 20, best of 3, one resident weight)
+
+| shape | MB | skinny r=1 | r=2 | r=4 | r=8 | r=16 | r=4 / r=1 | r=8 / r=1 |
+|---|---|---|---|---|---|---|---|---|
+| q4_k 17408x5120 ffn_gate | 50.1 | 397 | 411 | 401 | 389 | 383 | 0.99 | 1.02 |
+| q6_k 17408x5120 ffn_up | 73.1 | 500 | 488 | 478 | 475 | 470 | 1.05 | 1.05 |
+| q6_k 5120x17408 ffn_down | 73.1 | 388 | 408 | 419 | 408 | 401 | 0.93 | 0.95 |
+| q4_k 5120x5120 o_proj | 14.7 | 329 | 330 | 323 | 320 | 315 | 1.02 | 1.03 |
+| q8_0 8192x5120 ssm | 44.6 | 715 | 727 | 728 | 724 | 740 | 0.98 | 0.99 |
+
+GB/s of weight, from the block format. Worst case **R=4 1.05x, R=8 1.05x**
+against R=1 — the gate was 1.1x / 1.25x. The single-column GEMV on the same
+bytes: 652 (ffn_gate), 596, 565, 605, 1000 GB/s, so the tile costs 53-73% of the
+GEMV's bandwidth and buys a flat column curve in exchange.
+
+### Batch integration (`hipml batch-bench --tokens 16`, q8 KV, depth 0)
+
+All batched projections route through the tile at B >= 4 (`SKINNY_MIN_BATCH`);
+B <= 3 keeps the f32-from-LDS `_b` kernels, because one 16-wide tile is mostly
+padding there and that is a measured regression (B=2: 45.3 with `_b`, 37.2 with
+the tile).
+
+| B | `_b` kernels (WP26) | WMMA tile | llama -np | vs llama |
+|---|---|---|---|---|
+| 2 | 45.25 | 45.74 (`_b`) | 56.33 | 0.81x |
+| 4 | 64.58 | 64.79 | 87.34 | 0.74x |
+| 8 | 73.24 | **102.04** | 101.26 | **1.01x** |
+
+B=8 is +39% over WP26 and level with llama, because the `_b` kernels fall to
+154 GB/s at B=8 while the tile stays at ~400. B=4 is a wash: both paths sit at
+273 GB/s, so 1.3x is still on the table there from the non-projection half of
+the step (SSM recurrence, attention, argmax), not from this kernel.
+
+Exactness: greedy streams identical to the B=1 path over 16 tokens for every
+slot at B=4 and B=8 (`--check`). No logit divergence was observed; the kernel
+level difference against the CPU oracle at production k is max_abs 1.59e-2
+(q4_k 5120x5120) to 2.57e-2 (q6_k), which is the fp16 operand budget, plus the
+k-split reduction order (4 accumulators folded at the end).
+
+### What it cost to get there, and what is left
+
+Three defects, each worth an order of magnitude:
+
+1. `pf_scale_min` branches on the sub-block index, which is per-lane here, so
+   every 8-value group became two exec-masked blocks with a `s_wait_loadcnt`
+   between them: 20 GB/s. Replaced by a branch-free dword unpack.
+2. The staging loads were serialised (one 8-byte load in flight per warp).
+   `pws_prep`/`pws_finish` split the load from the arithmetic so a small array
+   of raw words can be hoisted.
+3. The bench summed `reps` launches and reported the total as one launch, so
+   the whole cost curve read 10x low. Fixed in `run_skinny_resident_reps`.
+
+Remaining split at the shipped geometry (probes, ffn_gate): compute 47%,
+staging 46%, barriers 8%. The next lever is the compute half — RT=64 with a
+128-value k tile would put all four warps on n-tiles instead of two, which is
+the one geometry not measured (every 16-wide tile at RT <= 48 was 10-40% worse
+for shared-footprint reasons). Note `KernelKind::RowTile::rows` must equal
+`PWS_RT`: a mismatch silently halves the grid and looks like a 2x speedup.
+
+### Call signature for WP30
+
+```rust
+// resident weight, x is [r, k] f32, y is [r, n] f32, r <= 16, k a multiple of 256
+launcher.run_skinny_resident("gemm_skinny_q4_k", &w, &x, &y, n, k, r)?;
+// or, for the graph: hipml_kernels::launch::skinny_resident(
+//     &module, &stream, "gemm_skinny_q4_k", &w, &x, &y, n, k, r)
+```
+`hipml_kernels::skinny_entry("gemv_q4_k")` maps a resident GEMV entry to the
+tile entry. Grid is `ceil(n / 32)` at 128 threads. For MTP verify pass r = 1 +
+drafts: at r = 4 the verify costs 0.99-1.05x of one token.
