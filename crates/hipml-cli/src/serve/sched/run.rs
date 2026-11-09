@@ -96,6 +96,11 @@ pub fn run(
                         let tail: VecDeque<u32> =
                             pf.job.prompt[pf.done..].iter().copied().collect();
                         let slot = batch.adopt(&engine, pf.st.pos)?;
+                        metrics.update(|s| {
+                            s.batch_requests += 1;
+                            s.tail_feeds += 1;
+                            s.tail_rows += tail.len() as u64;
+                        });
                         if std::env::var_os("HIPML_SERVE_TRACE").is_some() {
                             eprintln!(
                                 "serve: tail-feed slot {slot} at {} ({} tokens, {} active)",
@@ -104,7 +109,6 @@ pub fn run(
                                 batch.active().len()
                             );
                         }
-                        metrics.update(|s| s.batch_requests += 1);
                         slots[slot] = Some(Active {
                             job: pf.job,
                             feed: 0,
@@ -114,6 +118,13 @@ pub fn run(
                             tail,
                         });
                     } else {
+                        if std::env::var_os("HIPML_SERVE_TRACE").is_some() {
+                            eprintln!(
+                                "serve: prefill len={plen} start={} tail={tail_len} active={}",
+                                pf.done,
+                                slots.iter().filter(|s| s.is_some()).count()
+                            );
+                        }
                         prefill = Some(pf);
                     }
                 }
