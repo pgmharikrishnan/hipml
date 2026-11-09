@@ -179,16 +179,16 @@ def post(path, body, timeout=600):
         c.close()
 
 
-def completion(ids, n, **kw):
-    body = {"prompt": ids, "n_predict": n, "ignore_eos": True, "cache_prompt": False}
+def completion(ids, npred, **kw):
+    body = {"prompt": ids, "n_predict": npred, "ignore_eos": True, "cache_prompt": False}
     body.update(kw)
     return post("/completion", body)
 
 
-def stream(ids, n, timeout=600, **kw):
+def stream(ids, npred, timeout=600, **kw):
     """One streaming completion, read to EOF. Returns a dict with the ids that
     arrived, the TTFT and the decode rate."""
-    body = {"prompt": ids, "n_predict": n, "ignore_eos": True, "cache_prompt": False,
+    body = {"prompt": ids, "n_predict": npred, "ignore_eos": True, "cache_prompt": False,
             "stream": True}
     body.update(kw)
     c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=timeout)
@@ -449,8 +449,81 @@ def plan_exact(a, rec):
             ttft_p50_ms=round(sorted(ttfts)[len(ttfts) // 2], 0) if ttfts else None)
 
 
+def plan_scopes(a, rec):
+    """The two failure scopes the isolation plan does not reach: a failed
+    shared weight pass (batch reset, engine keeps serving) and a device that
+    cannot finish a step at all (drain every stream, then exit 1)."""
+    prompt = ids_of_len(80, 4)
+    # One batch-wide failure with every slot active, then service resumes.
+    # Step 30 is late enough that all four prompts are prefilled and decoding.
+    with Server(a.hipml, ctx=2048, slots=4, drafts=0,
+                env={"HIPML_FAULT_BATCH": "30"}, log=f"{a.out}.batch.log") as s:
+        res, _ = concurrent(lambda p: stream(p, 48), [(prompt,)] * 4)
+        m = metrics()
+        rec("batch_fault", statuses=[r["status"] for r in res],
+            errors=[bool(r["error"]) for r in res],
+            resets=m.get("hipml_batch_resets_total"),
+            job_errors=m.get("hipml_job_errors_total"),
+            healthy=health())
+        r = stream(prompt, 8)
+        rec("after_batch_reset", status=r["status"], tokens=len(r["ids"]),
+            healthy=health(), server_up=(s.proc.poll() is None))
+
+    # Three failures with no successful step between them: drain, then exit 1.
+    with Server(a.hipml, ctx=2048, slots=4, drafts=0,
+                env={"HIPML_FAULT_BATCH_ALL": "1"}, log=f"{a.out}.device.log") as s:
+        waves = []
+        for _ in range(4):
+            if s.proc.poll() is not None:
+                waves.append({"statuses": "server already exited"})
+                break
+            res, _ = concurrent(lambda p: stream(p, 8, timeout=60), [(prompt,)] * 4)
+            waves.append({
+                "statuses": [r["status"] for r in res],
+                "errors": [bool(r["error"]) for r in res],
+                "tokens": [len(r["ids"]) for r in res],
+            })
+            time.sleep(0.5)
+        try:
+            code = s.proc.wait(timeout=60)
+        except Exception:
+            code = "still running"
+        rec("device_drain", waves=waves, exit_code=code,
+            resets=metrics().get("hipml_batch_resets_total"))
+
+
+def plan_headers(a, rec):
+    """The exactness signal a client can see: the header on a reply, and the
+    gauges on /metrics, in both the default and the forced-exact modes."""
+    p = ids_of_len(120, 3)
+    with Server(a.hipml, ctx=2048, slots=4, drafts=0, log=f"{a.out}.hdr.log") as s:
+        r = stream(p, 4)
+        rec("stream_header", status=r["status"],
+            exact=r["headers"].get("X-Hipml-Batch-Exact"),
+            tile_min=r["headers"].get("X-Hipml-Batch-Tile-Min"))
+        st, js, hdrs, _ = completion(p, 4)
+        m = metrics()
+        rec("json_header", status=st, exact=hdrs.get("X-Hipml-Batch-Exact"),
+            metric_exact=m.get("hipml_batch_exact_path"),
+            tile_steps=m.get("hipml_tile_steps_total"))
+        # Four concurrent streams push the batch to B=4, where the tile is used.
+        res, _ = concurrent(lambda q: stream(q, 8), [(ids_of_len(120, i + 3),) for i in range(4)])
+        m = metrics()
+        rec("tile_used_at_4", statuses=[r["status"] for r in res],
+            tile_steps=m.get("hipml_tile_steps_total"),
+            exact_header=[r["headers"].get("X-Hipml-Batch-Exact") for r in res])
+    with Server(a.hipml, ctx=2048, slots=4, drafts=0,
+                env={"HIPML_BATCH_LEGACY": "1"}, log=f"{a.out}.hdr_legacy.log") as s:
+        st, js, hdrs, _ = completion(p, 4)
+        m = metrics()
+        rec("legacy_header", status=st, exact=hdrs.get("X-Hipml-Batch-Exact"),
+            metric_exact=m.get("hipml_batch_exact_path"),
+            tile_steps=m.get("hipml_tile_steps_total"))
+
+
 PLANS = {"isolation": plan_isolation, "backpressure": plan_backpressure,
-         "sampling": plan_sampling, "warmup": plan_warmup, "exact": plan_exact}
+         "sampling": plan_sampling, "warmup": plan_warmup, "exact": plan_exact,
+         "headers": plan_headers, "scopes": plan_scopes}
 
 
 def main():

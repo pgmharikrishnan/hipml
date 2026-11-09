@@ -300,9 +300,17 @@ pub fn run(args: &[String]) -> i32 {
     );
 
     let inflight = Arc::clone(&shared.inflight);
+    // The listener is spawned first so the port is bound while the engines
+    // warm up, but it does not accept until the scheduler signals that the
+    // warm-up is done. A client that connects early waits in the backlog and
+    // its first request is served by a warm engine.
+    let (ready_tx, ready_rx) = channel::<()>();
     let l = Arc::clone(&shared);
-    std::thread::spawn(move || http::listen(listener, l));
-    match sched::run(&model, rx, cfg, metrics, inflight) {
+    std::thread::spawn(move || {
+        let _ = ready_rx.recv();
+        http::listen(listener, l);
+    });
+    match sched::run(&model, rx, cfg, metrics, inflight, ready_tx) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("serve: scheduler: {e}");

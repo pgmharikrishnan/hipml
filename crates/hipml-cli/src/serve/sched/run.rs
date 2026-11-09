@@ -24,6 +24,7 @@ pub fn run(
     cfg: SchedCfg,
     metrics: Arc<Metrics>,
     inflight: Arc<crate::serve::admit::Bound>,
+    ready: std::sync::mpsc::Sender<()>,
 ) -> Result<(), String> {
     let mut engine = GpuEngine::new(model, cfg.ctx, KvMode::Q8)?;
     engine.enable_prefix_cache(cfg.prefix_entries, cfg.prefix_bytes);
@@ -36,12 +37,25 @@ pub fn run(
     // Resolve every kernel and touch every weight page before the first
     // request, so TTFT is not charged for graph construction and first touch.
     warm::warm_up(&mut engine, &mut batch, mtp.as_mut(), &cfg, &metrics)?;
+    // Only now may the listener accept: until this signal the port is bound
+    // but nothing is answered, so `/health` means "warm and serving" and the
+    // first real request does not queue behind the warm-up.
+    let _ = ready.send(());
 
     let mut queue: VecDeque<Job> = VecDeque::new();
     let mut slots: Vec<Option<Active>> = (0..batch.slots).map(|_| None).collect();
     let mut prefill: Option<Prefill> = None;
     let mut spec: Option<Spec> = None;
     let mut faults = step::Faults::new();
+    // Test hooks for the batch and device scopes, off unless set.
+    // `HIPML_FAULT_BATCH=n` fails shared pass n once (one batch reset, then the
+    // engine serves again); `HIPML_FAULT_BATCH_ALL=1` fails every pass, which
+    // is what drives three resets and the drain-and-exit path.
+    let batch_fault_at: Option<u64> = std::env::var("HIPML_FAULT_BATCH")
+        .ok()
+        .and_then(|v| v.parse().ok());
+    let batch_fault_all = std::env::var_os("HIPML_FAULT_BATCH_ALL").is_some();
+    let mut batch_steps: u64 = 0;
     // Batch resets with no successful step between them: a device that cannot
     // finish one weight pass is not coming back on its own.
     let mut reset_streak = 0u32;
@@ -338,7 +352,13 @@ pub fn run(
                 .iter()
                 .map(|&s| slots[s].as_ref().expect("active slot has a job").feed)
                 .collect();
-            let ids = match batch.forward(&toks) {
+            batch_steps += 1;
+            let stepped = if batch_fault_all || batch_fault_at == Some(batch_steps) {
+                Err("injected batch-step failure (HIPML_FAULT_BATCH)".to_string())
+            } else {
+                batch.forward(&toks)
+            };
+            let ids = match stepped {
                 Ok(ids) => {
                     reset_streak = 0;
                     ids
@@ -360,7 +380,7 @@ pub fn run(
                 }
             });
             if let Err(e) =
-                step::deliver(&mut batch, &mut engine, &mut slots, &order, &ids, &metrics, &faults)
+                step::deliver(&mut batch, &mut engine, &mut slots, &order, &ids, &metrics, &mut faults)
             {
                 reset_batch!(e);
             }

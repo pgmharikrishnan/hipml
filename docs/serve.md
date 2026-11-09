@@ -310,10 +310,24 @@ prefix entries invalidated.
 
 **Evidence** (`bench/serve/wp51_probe.py --plan isolation`): four concurrent
 streams, 24 tokens each, first a no-fault run and then the same four with slot
-1's step injected to fail. In the fault run exactly one stream received an error
-event and the other three matched the no-fault run token for token; the process
-stayed healthy, `/metrics` counted one slot fault and **zero** batch resets, and
-a request after the fault was served normally.
+1's step injected to fail.
+
+| run | streams | tokens per stream | errors | resets |
+|---|---|---:|---|---:|
+| no fault | 4 | 24, 24, 24, 24 | 0 | 0 |
+| slot 1 faulted | 4 | 24, 24, 24, **3** | 1 (the 3-token stream) | **0** |
+
+The three intact streams' ids are **identical to the no-fault run, token for
+token**. `/metrics` shows `hipml_slot_faults_total 1`, `hipml_job_errors_total
+1`, `hipml_batch_resets_total 0`; the process stays healthy and a request after
+the fault returns 8/8 tokens. The 4x24 wave took 1.97 s.
+
+**The other two scopes** (`--plan scopes`, which injects into the shared pass):
+
+| injection | result |
+|---|---|
+| one pass fails with four slots active (`HIPML_FAULT_BATCH=30`) | all four jobs in that pass get an error event, `hipml_batch_resets_total 1`, `hipml_job_errors_total 4`; the next request in the same process returns 8/8 tokens |
+| every pass fails (`HIPML_FAULT_BATCH_ALL=1`) | three resets with no step between them, all four streams get an error event, then the process exits **1** |
 
 ### 2. Backpressure
 
@@ -336,10 +350,15 @@ small multiple of the slots and the *connection* bound is separate and looser:
 
 **Measured** (`--plan backpressure`, 40 concurrent requests against 16 slots):
 
-| queue bound | streams | 503s | other | hangs | Retry-After |
-|---|---:|---:|---:|---:|---|
-| 4 (capacity 20) | | | | | |
-| default 32 (capacity 48) | | | | | |
+| queue bound | streams | 503s | other | hangs | wall |
+|---|---:|---:|---:|---:|---:|
+| `--max-queue 4` (capacity 20) | 20 | 20 | 0 | 0 | 5.1 s |
+| default 32 (capacity 48) | 40 | 0 | 0 | 0 | 9.7 s |
+
+Every one of the 40 requests was answered, each 503 carried `Retry-After: 1`
+and a JSON body, `hipml_requests_rejected_busy_total` counted exactly the 20
+refusals, and `hipml_inflight` was back to 0 afterwards. No request hung past
+the 180 s read timeout (the slowest finished in 9.7 s).
 
 ### 3. Sampling honesty
 
@@ -372,10 +391,23 @@ because the exact `_b` path costs the throughput the fleet numbers depend on
 **Cost of exact** (`--plan exact`, 8 and 4 slots, 400-token prompts, 64 tokens,
 one warm wave):
 
-| slots | tile aggregate tok/s | exact aggregate tok/s | cost |
+| slots | tile aggregate tok/s | exact aggregate tok/s | cost of exact |
 |---:|---:|---:|---:|
-| 4 | | | |
-| 8 | | | |
+| 4 | 67.7 | 66.3 | 2% |
+| 8 | 107.1 | 75.3 | **30%** |
+
+(400-token distinct prompts, cache off, 64 tokens, one warm wave; the same
+binary with only `HIPML_BATCH_LEGACY` changed.) At B=4 the tile barely wins, so
+exactness is nearly free there; the 8-slot fleet case is where it costs. That is
+why the tile stays the default and the divergence is advertised instead: on the
+published protocol the same build still gives **129.8 tok/s at 8 slots** (cell
+b, 0 errors) and **214.9 tok/s at 16** (cell c), so forcing exact would drop the
+8-slot number from 130 to about 90 and break the fleet claim.
+
+Header and gauges, measured (`--plan headers`): a default reply carries
+`X-Hipml-Batch-Exact: 0` and `X-Hipml-Batch-Tile-Min: 4`; four concurrent
+streams push `hipml_tile_steps_total` to 4; with `HIPML_BATCH_LEGACY=1` the
+header is `1` and the gauge `hipml_batch_exact_path` is 1.
 
 ### 5. Warm-up and supervisor
 
@@ -385,10 +417,22 @@ step on two synthetic slots (the batch kernels), and one drafter step. Then it
 resets the state. `HIPML_NO_WARMUP=1` skips it, which is how the cost is
 measured.
 
-| first request | TTFT, 200-token prompt | TTFT, 2000-token prompt |
-|---|---:|---:|
-| no warm-up | | |
-| warm-up (default) | | |
+| first request | load | TTFT, 200-token prompt | TTFT, 2000-token prompt |
+|---|---:|---:|---:|
+| before WP51 | 8.6 s | 4797 ms | 1869 ms |
+| no warm-up (`HIPML_NO_WARMUP=1`) | 12.8 s | 238 ms | 1861 ms |
+| warm-up (default) | 13.0 s (269 ms of it warm-up) | **210 ms** | 1870 ms |
+
+**The ~5 s was not first touch.** The listener used to start accepting before
+the scheduler had built its engines, so `/health` answered ~4.4 s early and the
+first request queued behind `GpuEngine`/`BatchEngine` construction (26 GB of
+device buffers). The fix that mattered is a readiness gate: the port is bound
+while the engines warm up, but nothing is accepted until the scheduler signals
+ready, so `/health` means "warm and serving". That is why load time grew by the
+same 4.4 s the first request used to pay. The warm-up itself (one 256-token
+prefill tile, one two-slot batch step, one drafter step) costs 269 ms of load
+and removes the remaining first-launch cost; the 28 ms difference between warm
+and cold is inside run-to-run noise at this prompt size.
 
 `scripts/hipml-serve.ps1` is the supervisor: start, log to a timestamped file,
 wait for exit, relaunch with a 2 s → 60 s backoff (reset after 60 s of uptime),
@@ -398,12 +442,38 @@ stop the child on Ctrl+C. A context loss now costs one restart, not an outage.
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\hipml-serve.ps1 -Slots 16 -Ctx 32768
 ```
 
+Tested end to end (`bench/serve/wp51_supervisor_test.ps1`): the child was killed
+(pid 14800, the same thing a context loss looks like from outside), the loop
+relaunched it as pid 21312 within the 2 s backoff, `/health` answered, and a
+`/completion` after the restart returned HTTP 200 — one restart, no outage.
+
+### Regression gates
+
+| gate | result |
+|---|---|
+| `oracle-gate --ids-file p2_math_169.ids --chunk 2048` | PASS, 20/20 ids identical |
+| `parity --deep` | 56 passed, 0 failed, 1 skipped |
+| `cargo test -p hipml-core --test tokenizer_fixture` | 2 passed |
+| `cargo test --workspace` | all suites pass |
+| serve_bench cell b (8 slots) | 129.8 tok/s aggregate, TTFT p50 492 ms, 0 errors, 26.3 GiB |
+| serve_bench cell c (16 slots) | 214.9 tok/s aggregate, TTFT p50 753 ms, 0 errors, 28.3 GiB |
+| single-stream MTP | 39.0 tok/s p50, TTFT 251 ms |
+| review 4 crash plan | every malformed input still a 400 (one 100 KB request line is a connection reset), server healthy throughout |
+
 ### What is still not done
 
 * The batch-wide reset is the honest scope for a shared weight pass: a launch
   that fails cannot be pinned to one slot, so those jobs fail together. Only
   per-slot failures (the common case) are isolated.
-* A multi-hour soak was not run; the isolation probe runs minutes, not hours.
+* The fault hooks (`HIPML_FAULT_SLOT`, `HIPML_FAULT_BATCH`,
+  `HIPML_FAULT_BATCH_ALL`) inject the failure at the scheduler's decision
+  points, not inside a kernel: the recovery path is the real one, the failing
+  HIP call is not.
+* A multi-hour soak was not run; the probes run minutes, not hours.
 * The supervisor is a restart loop, not a health monitor: it does not restart a
   server that is up but wedged (a step that never returns). A watchdog on
   `hipml_decode_steps_total` would be the next step.
+* A prompt longer than the context still answers 500 rather than 400 (review 4
+  item 24); it is unchanged because the 500 comes from the generic job-error
+  path, and separating client errors from device errors there is not a
+  one-liner.

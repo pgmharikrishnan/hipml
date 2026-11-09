@@ -21,6 +21,10 @@ pub struct Faults {
     slot: Option<usize>,
     after: u64,
     steps: u64,
+    /// Fire once. A released slot is filled by the last active slot's state,
+    /// so a fault keyed on the index alone would cascade into every job that
+    /// later occupied it; the point is one job's step, not the index.
+    fired: bool,
 }
 
 impl Faults {
@@ -34,6 +38,7 @@ impl Faults {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(4),
             steps: 0,
+            fired: false,
         }
     }
 
@@ -42,9 +47,12 @@ impl Faults {
         self.steps += 1;
     }
 
-    fn hit(&self, slot: usize) -> Option<String> {
-        (self.slot == Some(slot) && self.steps >= self.after)
-            .then(|| "injected fault (HIPML_FAULT_SLOT)".to_string())
+    fn hit(&mut self, slot: usize) -> Option<String> {
+        if self.fired || self.slot != Some(slot) || self.steps < self.after {
+            return None;
+        }
+        self.fired = true;
+        Some("injected fault (HIPML_FAULT_SLOT)".to_string())
     }
 }
 
@@ -60,7 +68,7 @@ pub fn deliver(
     order: &[usize],
     ids: &[u32],
     metrics: &Metrics,
-    faults: &Faults,
+    faults: &mut Faults,
 ) -> Result<(), String> {
     let n_vocab = batch.cfg.n_vocab;
     // (slot, fault, finish reason)
