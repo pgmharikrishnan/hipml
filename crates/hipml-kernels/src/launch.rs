@@ -8,6 +8,20 @@
 use hipml_core::parity::OpCase;
 use hipml_core::tensor::Tensor;
 
+/// Grid for the warp-per-output `gemm_rows_f32` kernel: one warp per
+/// `(token, output row)` pair, eight warps (256 threads) per block.
+///
+/// Kept outside the `hip` gate so the launch shape has a host-side regression
+/// test. The first version passed the *block count* to `LaunchConfig::linear`,
+/// which divides by the block size again: a 1-token chunk launched one block
+/// instead of six and 40 of the 48 SSM alpha/beta rows were never written.
+pub fn gemm_rows_grid(tokens: usize, m: usize) -> (usize, usize) {
+    const WARPS: usize = 8;
+    const THREADS: usize = WARPS * 32;
+    let warps = tokens * m;
+    ((warps + WARPS - 1) / WARPS, THREADS)
+}
+
 #[cfg(feature = "hip")]
 pub(crate) mod device {
     use super::*;
@@ -798,4 +812,33 @@ pub fn prefill_entry_for(name: &str) -> Option<&'static str> {
         (PrefillPath::Wmma, "prefill_halfw") => "prefill_halfw_w",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gemm_rows_grid;
+
+    /// Every `(token, row)` output must get its own warp: the grid has to cover
+    /// `tokens * m` warps. A launcher that treats the block count as a thread
+    /// count (the WP42 bug) covers 256x fewer and leaves the tail of the SSM
+    /// alpha/beta vectors unwritten.
+    #[test]
+    fn gemm_rows_grid_covers_every_output() {
+        for (tokens, m) in [(1, 48), (1, 1), (4, 48), (169, 48), (2048, 48), (512, 5120)] {
+            let (blocks, threads) = gemm_rows_grid(tokens, m);
+            let warps = blocks * (threads / 32);
+            assert!(
+                warps >= tokens * m,
+                "grid covers {warps} warps, needs {}",
+                tokens * m
+            );
+            assert!(
+                warps - tokens * m < 8,
+                "grid over-launches {} warps for {} outputs",
+                warps - tokens * m,
+                tokens * m
+            );
+            assert_eq!(threads, 256);
+        }
+    }
 }

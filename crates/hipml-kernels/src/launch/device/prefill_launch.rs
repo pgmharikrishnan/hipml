@@ -104,6 +104,31 @@ impl Launcher {
             None => None,
         };
         let y = Buffer::alloc(tokens * m)?;
+        // Follow the graph's own split-K decision. Parity used to exercise the
+        // single-pass launch only, so a split-K defect had no gate at all: the
+        // 17408x5120 case here is exactly a shape the engine splits.
+        if let Some(half_name) = half {
+            if prefill_should_split(m, k, tokens) {
+                let scratch = Buffer::alloc(tokens * m)?;
+                let start = std::time::Instant::now();
+                prefill_split(
+                    &self.module,
+                    &self.stream,
+                    split_entry(half_name)
+                        .ok_or_else(|| format!("{half_name}: no split-K entry"))?,
+                    &wb,
+                    xhalf.as_ref().expect("half entry implies a converted tile"),
+                    &y,
+                    &scratch,
+                    m,
+                    k,
+                    tokens,
+                )?;
+                self.stream.synchronize()?;
+                let secs = start.elapsed().as_secs_f64();
+                return Ok((if download { y.to_host()? } else { Vec::new() }, secs));
+            }
+        }
         let kernel = self.module.kernel(name)?;
 
         let mut p_w = wb.as_ptr();
@@ -160,8 +185,18 @@ pub fn gemm_rows_f32(
         &mut v_m as *mut _ as *mut std::ffi::c_void,
         &mut v_k as *mut _ as *mut std::ffi::c_void,
     ];
-    let warps = 8usize;
-    let cfg = LaunchConfig::linear((tokens * m + warps - 1) / warps, (warps * 32) as u32);
+    // `linear(n, block)` derives the grid from a *thread count*: it launches
+    // `ceil(n / block)` blocks. The kernel wants one warp per output element,
+    // so `ceil(tokens * m / warps)` blocks of `warps * 32` threads. Passing the
+    // block count itself under-launched by `warps * 32` and left every alpha and
+    // beta row past the first tile unwritten (the WP42 defect: 40 of 48 rows
+    // zero on a 1-token chunk, so the GDN gates ran on zeros).
+    let (blocks, threads) = crate::launch::gemm_rows_grid(tokens, m);
+    let cfg = LaunchConfig {
+        grid: (blocks as u32, 1, 1),
+        block: (threads as u32, 1, 1),
+        shared_mem_bytes: 0,
+    };
     kernel.launch(cfg, stream, &mut params)
 }
 
