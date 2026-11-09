@@ -86,7 +86,9 @@ extern "C" __global__ void gdn_ar_f32(
         for (int t = 0; t < GDN_MAXV; ++t) {
             const int i = lane + t * GDN_LANES;
             r[t] = i < sd ? row[i] : 0.0f;
-            dot += r[t] * decay * kk[t];
+            // Explicit fma so the batched kernel compiles to the same
+            // rounding; contraction is otherwise per-file.
+            dot = __fmaf_rn(__fmul_rn(r[t], decay), kk[t], dot);
         }
         dot = wave_sum(dot);
 
@@ -97,9 +99,9 @@ extern "C" __global__ void gdn_ar_f32(
         for (int t = 0; t < GDN_MAXV; ++t) {
             const int i = lane + t * GDN_LANES;
             if (i < sd) {
-                const float nv = r[t] * decay + kk[t] * delta;
+                const float nv = __fmaf_rn(r[t], decay, __fmul_rn(kk[t], delta));
                 row[i] = nv;
-                acc += nv * qq[t];
+                acc = __fmaf_rn(nv, qq[t], acc);
             }
         }
         acc = wave_sum(acc);

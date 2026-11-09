@@ -27,7 +27,7 @@ extern "C" __global__ void ssm_gate_norm_f32(
 
     float acc = 0.0f;
     for (int i = t; i < dim; i += GN_BLOCK) {
-        acc += src[i] * src[i];
+        acc = __fmaf_rn(src[i], src[i], acc);
     }
 
     __shared__ float s[GN_BLOCK];

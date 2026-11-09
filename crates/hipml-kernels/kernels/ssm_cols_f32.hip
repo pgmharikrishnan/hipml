@@ -78,9 +78,9 @@ extern "C" __global__ void ssm_conv1d_cols_f32(
 
         float acc = 0.0f;
         for (int k = 0; k < hist; ++k) {
-            acc += state[(size_t)k * channels + c] * wc[k];
+            acc = __fmaf_rn(state[(size_t)k * channels + c], wc[k], acc);
         }
-        acc += xr[c] * wc[hist];
+        acc = __fmaf_rn(xr[c], wc[hist], acc);
         const float v = acc;
 
         // Slide left, then append the current token (read-before-write is per
@@ -119,7 +119,7 @@ extern "C" __global__ void l2norm_cols_f32(
 
     float acc = 0.0f;
     for (int i = t; i < dim; i += SC_L2_BLOCK) {
-        acc += src[i] * src[i];
+        acc = __fmaf_rn(src[i], src[i], acc);
     }
 
     __shared__ float s[SC_L2_BLOCK];
@@ -190,7 +190,9 @@ extern "C" __global__ void gdn_cols_f32(
             #pragma unroll
             for (int t = 0; t < SC_MAXV; ++t) {
                 const int i = lane + t * SC_LANES;
-                if (i < sd) dot += r[t] * decay * kh[i];
+                if (i < sd) {
+                    dot = __fmaf_rn(__fmul_rn(r[t], decay), kh[i], dot);
+                }
             }
             dot = sc_wave_sum(dot);
 
@@ -201,9 +203,10 @@ extern "C" __global__ void gdn_cols_f32(
             for (int t = 0; t < SC_MAXV; ++t) {
                 const int i = lane + t * SC_LANES;
                 if (i < sd) {
-                    const float nv = r[t] * decay + kh[i] * delta;
+                    const float nv =
+                        __fmaf_rn(r[t], decay, __fmul_rn(kh[i], delta));
                     r[t] = nv;
-                    acc += nv * qh[i];
+                    acc = __fmaf_rn(nv, qh[i], acc);
                 }
             }
             acc = sc_wave_sum(acc);
@@ -251,7 +254,7 @@ extern "C" __global__ void ssm_gate_norm_cols_f32(
 
     float acc = 0.0f;
     for (int i = t; i < dim; i += SC_L2_BLOCK) {
-        acc += src[i] * src[i];
+        acc = __fmaf_rn(src[i], src[i], acc);
     }
 
     __shared__ float s[SC_L2_BLOCK];

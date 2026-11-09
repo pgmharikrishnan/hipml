@@ -50,7 +50,7 @@ extern "C" __global__ void head_rmsnorm_cols_f32(
 
     float acc = 0.0f;
     for (int d = threadIdx.x; d < head_dim; d += HF_BLOCK) {
-        acc += xr[d] * xr[d];
+        acc = __fmaf_rn(xr[d], xr[d], acc);
     }
 
     __shared__ float red[HF_BLOCK];
