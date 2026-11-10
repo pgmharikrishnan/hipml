@@ -55,6 +55,12 @@ PRO R9700 (`gfx1201`, RDNA4) under Windows 11 and ROCm 7.2.1.
 - A prompt whose length was one token more than a multiple of 2,048 could abort
   the process in split-K scratch sizing. The scratch is sized for the tail, and
   `splitk-gate` covers the boundary.
+- The prefix cache could store a snapshot larger than the whole cache as a
+  0-byte entry and then serve a shorter hit as if it were the full prefix. It
+  now refuses an entry that cannot fit (counted in `refused`, never truncated),
+  verifies the hit length on lookup, evicts LRU entries before refusing, and
+  publishes the KV and SSM halves together or not at all. `cache-gate` replays
+  the old consumer, requires it to diverge, and checks the fallback is exact.
 
 ### Known issues
 
@@ -75,9 +81,6 @@ PRO R9700 (`gfx1201`, RDNA4) under Windows 11 and ROCm 7.2.1.
   11 build 26200, driver 32.0.32015.7029. No other GPU, OS or driver has been
   measured.
 - The 32,768- and 100,000-token cells are one cold rep each.
-- With the default 1 GiB cache, an 8,192-token prefix snapshot (1,174.6 MiB) is
-  admitted as a 0-byte entry and an exact repeat diverges. Use
-  `--bytes-mib 4096`; the admission bug is unpatched.
 - MTP at q8 KV, batch decode at depth > 0, the full `mtp-batch-bench` matrix and
   servers above 16 slots have no release measurements.
 
