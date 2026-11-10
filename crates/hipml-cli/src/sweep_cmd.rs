@@ -9,7 +9,7 @@
 //! nothing else. No dequant math runs, so the measurement is memory-side only.
 //!
 //! ```
-//! hipml gpu-sweep --gguf C:\models\Qwen3.8-27B-Q4_K_M.gguf
+//! hipml gpu-sweep --gguf path\to\Qwen3.8-27B-Q4_K_M.gguf
 //! hipml gpu-sweep --gguf ... --reps 3      # repeat each variant, report best
 //! ```
 

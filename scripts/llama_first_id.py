@@ -6,25 +6,36 @@ ids `100 + (i % 1000)` for i in 0..N. Uses 8092 only.
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
 import urllib.request
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "bench"))
+import _paths  # noqa: E402
+
 PORT = 8092
-MODEL = r"C:\models\Qwen3.8-27B-Q4_K_M.gguf"
-SERVER = r"C:\llama.cpp\rocm-gfx120x\llama-server.exe"
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="One llama-server request on the synthetic 100K prompt. "
+                    "Paths come from HIPML_GGUF / LLAMA_SERVER.")
     ap.add_argument("--n", type=int, default=100000)
     ap.add_argument("--ctx", type=int, default=0)
+    ap.add_argument("--model", default=None,
+                    help="target GGUF (default: $HIPML_GGUF)")
+    ap.add_argument("--llama-server", default=None,
+                    help="llama.cpp server binary (default: $LLAMA_SERVER)")
     args = ap.parse_args()
+    model = _paths.model(args.model)
+    server = _paths.llama_server(args.llama_server)
     ctx = args.ctx or (args.n + 64)
     ids = [100 + (i % 1000) for i in range(args.n)]
     proc = subprocess.Popen(
-        [SERVER, "-m", MODEL, "--host", "127.0.0.1", "--port", str(PORT),
+        [server, "-m", model, "--host", "127.0.0.1", "--port", str(PORT),
          "-ngl", "99", "-c", str(ctx), "-np", "1",
          "-ctk", "q8_0", "-ctv", "q8_0", "-fa", "on",
          "--no-webui", "--no-cache-idle-slots"],
