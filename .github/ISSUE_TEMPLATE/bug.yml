@@ -1,0 +1,102 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Bug report
+description: Something failed, produced wrong tokens, or crashed.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A useful report has the command, the full output tail and the model's
+        SHA-256. Security issues do **not** go here: see
+        [SECURITY.md](https://github.com/pgmharikrishnan/hipml/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The symptom, and whether it is wrong tokens, a crash, a hang, or a build failure.
+      placeholder: |
+        decode stalls after ~3K tokens; the process exits 0xC0000005.
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The exact command line, with the model path replaced by $env:HIPML_GGUF.
+      render: powershell
+      placeholder: |
+        .\target\release\hipml.exe generate --gguf $env:HIPML_GGUF --device --text "..." --tokens 128
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+      description: What you expected instead. For a wrong-output bug, the ids or the first few tokens you expected.
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and architecture
+      description: Card model and gfx arch from `hipml probe`.
+      placeholder: Radeon AI PRO R9700, gfx1201
+    validations:
+      required: false
+
+  - type: input
+    id: driver
+    attributes:
+      label: Driver version
+      description: Windows display driver, from Device Manager or `hipml probe`.
+      placeholder: 31.0.x
+    validations:
+      required: false
+
+  - type: input
+    id: rocm
+    attributes:
+      label: ROCm version
+      description: The wheel version behind HIP_PATH.
+      placeholder: 7.2.1
+    validations:
+      required: false
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and build
+      description: Windows edition and build, or the Linux distribution.
+      placeholder: Windows 11 26100
+    validations:
+      required: false
+
+  - type: input
+    id: model
+    attributes:
+      label: Model file and SHA-256
+      description: File name plus the hash, so the report can be reproduced without the file.
+      placeholder: Qwen3.8-27B-Q4_K_M.gguf, sha256 3f9a…
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log tail
+      description: The last ~40 lines of output. Paste text, not a screenshot.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: hipml version or commit
+      description: Output of `hipml --version`, or the commit you built.
+    validations:
+      required: false

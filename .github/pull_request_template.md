@@ -1,0 +1,3 @@
+- [ ] `cargo fmt --all -- --check`, `cargo check --workspace` and `cargo test --workspace` are green locally; CI will confirm, and the tokenizer skip is a skip, not a pass.
+- [ ] Correctness: a new kernel or quant type has a CPU reference and a parity case, and any change to prefill, decode, MTP, batching or the server has been through `oracle-gate` (see `docs/reproduce.md`).
+- [ ] GPU claims: `results.json` is committed with GPU, driver, ROCm and model SHA-256 — or this is a CPU-only change and no GPU log is needed.

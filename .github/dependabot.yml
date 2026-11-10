@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The workspace has no external crates, so there is nothing for a cargo
+# ecosystem entry to update. GitHub Actions is the only dependency that moves.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    open-pull-requests-limit: 3

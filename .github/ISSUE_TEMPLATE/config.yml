@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Links shown above the "New issue" buttons. Discussions must be enabled in
+# the repository settings (Settings -> Features -> Discussions) or the first
+# link 404s; that is a repo setting, not a file in this tree.
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/pgmharikrishnan/hipml/discussions
+    about: New models, other GPUs and Linux support start as a discussion, not an issue.
+  - name: Security policy
+    url: https://github.com/pgmharikrishnan/hipml/blob/main/SECURITY.md
+    about: Report a vulnerability privately; do not open a public issue.
