@@ -30,6 +30,8 @@ pub struct Stats {
     pub prefix_misses: u64,
     pub prefix_restore_ms: f64,
     pub prefix_captures: u64,
+    /// Captures refused because one snapshot exceeded the cache byte bound.
+    pub prefix_refused: u64,
     pub prefix_capture_ms: f64,
     pub prefill_chunks: u64,
     pub prefill_ms: f64,
@@ -118,6 +120,7 @@ impl Metrics {
         c("hipml_prefix_hit_rate", "Fixture hit rate over lookups", "gauge", format!("{hit_rate:.6}"));
         c("hipml_prefix_restore_seconds_total", "Device time restoring a prefix", "counter", format!("{:.6}", s.prefix_restore_ms / 1e3));
         c("hipml_prefix_captures_total", "Prefix snapshots taken", "counter", s.prefix_captures.to_string());
+        c("hipml_prefix_refused_total", "Prefix snapshots refused because one entry exceeded the cache bound", "counter", s.prefix_refused.to_string());
         c("hipml_prefix_capture_seconds_total", "Device time capturing a prefix", "counter", format!("{:.6}", s.prefix_capture_ms / 1e3));
         c("hipml_prefill_chunks_total", "Prefill tiles run by the scheduler", "counter", s.prefill_chunks.to_string());
         c("hipml_prefill_seconds_total", "Wall time in prefill tiles", "counter", format!("{:.6}", s.prefill_ms / 1e3));
