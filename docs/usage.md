@@ -34,6 +34,8 @@ silent fallback to somebody else's disk.
 | `LLAMA_SERVER` | the llama.cpp server binary | none: llama.cpp cells are skipped with a message |
 | `HIP_PATH` | ROCm SDK root | build skips the kernels; runtime scripts fail fast |
 | `HIPML_ARCH` | offload architecture | `gfx1201` |
+| `HIPML_SKINNY` | `1` opts the batched decode into the WMMA tile (approximate, not bit-identical) | unset = the exact `_b` path |
+| `HIPML_BATCH_LEGACY` | `1` forces the server's batched path to the exact `_b` kernels | unset = the tile at four or more slots |
 | `HIPML_BENCH_OUT` | raw bench output root | `<repo>/bench/out/<tool>` |
 | `HIPML_GPU_LOCK` | optional lock script taking `acquire <label>`, `release <label>`, `status` | unset = no locking |
 | `HIPML_BENCH_HOST` | ssh host for the remote bench | unset = run locally |

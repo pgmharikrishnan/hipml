@@ -195,15 +195,14 @@ that from its TTFT, not that column.
   --len 8192 --shared 4096 --chunk 2048 --bytes-mib 4096
 ```
 
-Expected: cold 8,192-token prefill 6,786.4 ms; exact repeat 4.7 ms (1,448.7×);
-50% shared prefix 3,528.3 ms (1.94×); hit latency 4.60 ms at 8,192 tokens.
+On the patched build (`bench/release/cache/cache_8192_4gib_fixed.txt`): cold
+8,192-token prefill 6,724.4 ms; exact repeat 4.6 ms (1,460×); 50% shared prefix
+3,498.8 ms (1.94×); hit latency 4.59 ms at 8,192 tokens.
 
-Use `--bytes-mib 4096` for the exact 8,192-token hit: 4.6 ms against 6,724.4 ms
-cold, 1,460×, at 4.59 ms hit latency. At the default 1 GiB cap the same snapshot
-needs 1,174.6 MiB, so it is **refused at capture** (counted in `refused`, never
-truncated) and the exact repeat falls back to a full prefill: 6,766.2 ms against
-6,691.7 ms cold, with token-identical ids. That is the fixed behaviour, not a
-measurement error.
+At the default 1 GiB cap the same snapshot needs 1,174.6 MiB, so it is
+**refused at capture** (counted in `refused`, never truncated) and the exact
+repeat falls back to a full prefill: 6,766.2 ms against 6,691.7 ms cold, with
+token-identical ids. That is the fixed behaviour, not a measurement error.
 
 Then run the gate. It replays the old consumer (a partial hit used as exact) and
 requires it to diverge, and checks that the fixed fallback matches the uncached
