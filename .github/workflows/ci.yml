@@ -1,0 +1,163 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Five gates that need no GPU, so they run on every push and every PR.
+#
+#   fmt         rustfmt --check over the whole workspace
+#   check       cargo check --workspace, plus the proof that no HIP_PATH means
+#               "kernels skipped with a warning", never a build error
+#   test        cargo test --workspace, plus the proof that the tokenizer
+#               fixture skips out loud instead of passing quietly
+#   guard       the public-tree guard: no machine paths, private hosts, secrets
+#   docs-links  every relative Markdown link in README.md and docs/** resolves
+#
+# The GPU gates are manual on purpose (docs/reproduce.md): no hosted runner has
+# an R9700, and a "GPU job" that cannot touch a GPU is a green checkmark that
+# means nothing.
+#
+# Actions: first-party (actions/*) and dtolnay/rust-toolchain, all pinned to a
+# major tag. Cargo caching is actions/cache rather than Swatinem/rust-cache to
+# keep the workflow free of third-party actions; the workspace has no external
+# crates, so caching `target` and the cargo home by Cargo.lock is enough.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only by default; nothing here needs to write to the repository.
+permissions:
+  contents: read
+
+# A new push to the same branch cancels the previous run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
+
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: Make sure the kernel build script actually runs
+        run: |
+          # cargo caches build-script output, and this job restores `target/`.
+          # Touch the script so the HIP_PATH branch is exercised on every run;
+          # otherwise a cache hit could hide the warning the next step asserts.
+          touch crates/hipml-kernels/build.rs
+      - name: cargo check --workspace
+        run: |
+          set -o pipefail
+          cargo check --workspace 2>&1 | tee check.log
+      - name: HIP kernels skip cleanly without HIP_PATH
+        run: |
+          # Both build.rs files skip hipcc when HIP_PATH is unset. That skip
+          # must stay a warning: an error here would break every CPU-only
+          # contributor, and a silent success would hide a broken kernel build.
+          #
+          # CARGO_TERM_COLOR=always puts escape codes between "warning" and the
+          # crate name, so the pattern must allow anything in between.
+          grep -q 'warning.*HIP_PATH not set' check.log
+          {
+            echo "### HIP kernels skipped"
+            echo ""
+            echo '`HIP_PATH` is unset on this runner: the HIP kernels were not'
+            echo 'compiled, and the build said so as a warning. The CPU path is'
+            echo 'what this job tests.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: cargo test --workspace
+        run: |
+          set -o pipefail
+          cargo test --workspace 2>&1 | tee test.log
+      - name: The tokenizer fixture skips loudly, not silently
+        run: |
+          # cargo captures stdout/stderr of passing tests, so the full run
+          # above cannot show the skip. Re-run that one target with
+          # --nocapture and require one of the two markers to appear.
+          set -o pipefail
+          cargo test -p hipml-core --test tokenizer_fixture -- --nocapture 2>&1 | tee tokenizer.log
+          if grep -q 'SKIP tokenizer fixture' tokenizer.log; then
+            echo "::warning title=tokenizer fixture skipped::HIPML_GGUF is not set, so the tokenizer id-equality gate did not run."
+            {
+              echo "### Tokenizer fixture: SKIPPED"
+              echo ""
+              echo '`HIPML_GGUF` is not set on CI, so the id-equality and'
+              echo 'chat-template gates did not run. This is a visible skip,'
+              echo 'not a pass. `docs/reproduce.md` runs them on a GPU host.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif grep -q 'strings match llama' tokenizer.log; then
+            {
+              echo "### Tokenizer fixture: ran"
+              echo ""
+              echo '`HIPML_GGUF` was set and the fixtures matched llama.cpp.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "the tokenizer fixture neither ran nor printed a skip" >&2
+            exit 1
+          fi
+
+  guard:
+    name: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: No machine paths, private hosts or secrets
+        run: bash scripts/check-public-tree.sh
+
+  docs-links:
+    name: docs-links
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every relative Markdown link resolves
+        run: python3 scripts/check-doc-links.py
