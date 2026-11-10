@@ -13,6 +13,7 @@ A and C must emit the same 20 greedy ids. Exit non-zero otherwise, and print
 the row-block counters from /metrics.
 """
 
+import argparse
 import json
 import os
 import socket
@@ -22,9 +23,10 @@ import time
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "bench"))
+import _paths  # noqa: E402
+
 PORT = 8093
-MODEL = r"C:\models\Qwen3.8-27B-Q4_K_M.gguf"
-HIPML = os.path.join(ROOT, "target", "release", "hipml.exe")
 IDS = os.path.join(ROOT, "bench", "fixtures", "p2_math_169.ids")
 
 
@@ -75,18 +77,28 @@ def metrics():
 
 
 def main():
+    ap = argparse.ArgumentParser(
+        description="Check the row-block tail path end to end. Paths come from "
+                    "HIPML_GGUF / HIPML_EXE or the flags below.")
+    ap.add_argument("--model", default=None,
+                    help="target GGUF (default: $HIPML_GGUF)")
+    ap.add_argument("--hipml", default=None,
+                    help="hipml binary (default: $HIPML_EXE or target/release/hipml)")
+    args = ap.parse_args()
+    model = _paths.model(args.model)
+    hipml = _paths.hipml_exe(args.hipml)
+
     if port_open(PORT):
         raise SystemExit(f"port {PORT} is already in use")
     ids = json.load(open(IDS, encoding="utf-8"))["ids"]
     cut = len(ids) - 26
-    env = dict(os.environ)
-    env["HIP_PATH"] = r"C:\rocm-sdk\_rocm_sdk_core"
-    env["HIPML_ARCH"] = "gfx1201"
-    env["PATH"] = r"C:\rocm-sdk\_rocm_sdk_core\bin;" + env.get("PATH", "")
-    cmd = [HIPML, "serve", "--gguf", MODEL, "--port", str(PORT),
+    env = _paths.rocm_env()
+    env["HIPML_ARCH"] = env.get("HIPML_ARCH", "gfx1201")
+    cmd = [hipml, "serve", "--gguf", model, "--port", str(PORT),
            "--ctx", "4096", "--slots", "4", "--chunk", "256",
            "--prefix-entries", "4", "--prefix-mb", "512"]
-    log = open(os.path.join(ROOT, "bench", "serve", "out", "tail_check.log"), "w", encoding="utf-8")
+    out_dir = _paths.out_dir("serve")
+    log = open(os.path.join(out_dir, "tail_check.log"), "w", encoding="utf-8")
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
     try:
         wait_health(proc, 420)

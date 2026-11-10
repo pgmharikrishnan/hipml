@@ -6,13 +6,18 @@
 # child (which is what a context loss or an OOM kill looks like from outside),
 # and checks that a *new* pid answers /health within the backoff window. Then it
 # stops the supervisor. The caller holds the GPU lock.
+#
+# Environment: HIPML_GGUF, HIPML_EXE, HIP_PATH (required by the supervisor).
 param(
     [int]$Port = 8093,
-    [string]$LogDir = "C:\hipml-release\logs\supervisor-test",
+    [string]$LogDir = "",
     [int]$TimeoutS = 300
 )
 
 $ErrorActionPreference = "Continue"
+$RepoRoot = Resolve-Path "$PSScriptRoot\..\.."
+if (-not $LogDir) { $LogDir = Join-Path $RepoRoot 'logs\supervisor-test' }
+$supervisor = Join-Path $RepoRoot 'scripts\hipml-serve.ps1'
 $sup = $null
 $fail = 0
 
@@ -28,8 +33,9 @@ function Wait-Health([int]$seconds) {
 }
 
 function Child-Pid {
+    $root = "$RepoRoot"
     (Get-Process hipml -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -like "*hipml-release*" } |
+        Where-Object { $_.Path -and $_.Path.StartsWith($root) } |
         Select-Object -First 1).Id
 }
 
@@ -37,7 +43,7 @@ try {
     if (Wait-Health 1) { Write-Host "port $Port already serving; refusing to run"; exit 2 }
     $sup = Start-Process powershell -PassThru -ArgumentList @(
         "-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", "C:\hipml-release\scripts\hipml-serve.ps1",
+        "-File", $supervisor,
         "-LogDir", $LogDir, "-Port", "$Port", "-Slots", "4", "-Ctx", "4096", "-Drafts", "0"
     )
     if (-not (Wait-Health $TimeoutS)) { Write-Host "FAIL: never became healthy"; exit 1 }

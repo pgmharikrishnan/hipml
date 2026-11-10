@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Cross-engine chat comparison: hipml (device, greedy) vs llama.cpp.
 
-Runs on rtx. Starts llama-server on 8092, renders every conversation through
-llama's own template (/apply-template + /tokenize), generates with the shared
-prompt ids, stops the server, then runs hipml on the same ids and diffs the
-output token streams and decoded text.
+Starts llama-server on 8092, renders every conversation through llama's own
+template (/apply-template + /tokenize), generates with the shared prompt ids,
+stops the server, then runs hipml on the same ids and diffs the output token
+streams and decoded text.
 
 Usage (inside a GPU-lock hold):
 
-    python C:\\hipml-chat\\bench\\chat\\compare.py --tokens 256
+    python bench/chat/compare.py --tokens 256
 
-Outputs JSON per conversation under bench/chat/out and a summary table.
+Needs HIPML_GGUF and LLAMA_SERVER (or --model / --llama-server). Outputs JSON
+per conversation under bench/out/chat and a summary table.
 """
 
 import argparse
@@ -24,11 +25,14 @@ import urllib.error
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "bench"))
+import _paths  # noqa: E402
+
 CHAT = os.path.join(ROOT, "bench", "chat")
-OUT = r"C:\Users\Hari\wp43\chat"
-MODEL = r"C:\models\Qwen3.8-27B-Q4_K_M.gguf"
-HIPML = os.path.join(ROOT, "target", "release", "hipml.exe")
-LLAMA = r"C:\llama.cpp\rocm-gfx120x\llama-server.exe"
+OUT = os.path.join(ROOT, "bench", "out", "chat")
+MODEL = None
+HIPML = None
+LLAMA = None
 BASE = "http://127.0.0.1:8092"
 CONVS = [
     ("01_single_turn_code", "01_single_turn_code.txt", None),
@@ -138,10 +142,8 @@ def build_longdoc(target=8192):
 
 # ---------------------------------------------------------------------- llama
 def start_llama(log_path, kv="q8_0", fa="off"):
-    env = dict(os.environ)
-    env["HIP_PATH"] = r"C:\rocm-sdk\_rocm_sdk_core"
-    env["HIPML_ARCH"] = "gfx1201"
-    env["PATH"] = r"C:\rocm-sdk\_rocm_sdk_core\bin;" + env.get("PATH", "")
+    env = _paths.rocm_env()
+    env["HIPML_ARCH"] = env.get("HIPML_ARCH", "gfx1201")
     log = open(log_path, "w", encoding="utf-8")
     proc = subprocess.Popen(
         [LLAMA, "-m", MODEL, "-c", "16384", "-ngl", "999",
@@ -313,18 +315,30 @@ def compare(convs, llama, hipml):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="Compare hipml and llama.cpp chat output token for token. "
+                    "Paths come from HIPML_GGUF / LLAMA_SERVER.")
     ap.add_argument("--tokens", type=int, default=256)
     ap.add_argument("--kv", default="q8")
     ap.add_argument("--llama-kv", default="q8_0")
     ap.add_argument("--llama-fa", default="off")
     ap.add_argument("--hipml-chunk", type=int, default=None)
     ap.add_argument("--n-probs", type=int, default=32)
-    ap.add_argument("--out", default=r"C:\Users\Hari\wp43\chat")
+    ap.add_argument("--model", default=None,
+                    help="target GGUF (default: $HIPML_GGUF)")
+    ap.add_argument("--llama-server", default=None,
+                    help="llama.cpp server binary (default: $LLAMA_SERVER)")
+    ap.add_argument("--hipml", default=None,
+                    help="hipml binary (default: $HIPML_EXE or target/release/hipml)")
+    ap.add_argument("--out", default=None,
+                    help="output directory (default: $HIPML_BENCH_OUT or "
+                         "bench/out/chat)")
     args = ap.parse_args()
-    global OUT
-    OUT = args.out
-    os.makedirs(OUT, exist_ok=True)
+    global OUT, MODEL, HIPML, LLAMA
+    OUT = _paths.out_dir("chat", args.out)
+    MODEL = _paths.model(args.model)
+    HIPML = _paths.hipml_exe(args.hipml)
+    LLAMA = _paths.llama_server(args.llama_server)
     build_longdoc(8192)
     convs = CONVS
     proc = log = None

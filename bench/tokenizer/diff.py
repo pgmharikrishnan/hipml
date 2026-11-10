@@ -14,11 +14,13 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
 
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BASE = "http://127.0.0.1:8092"
 
 
@@ -66,7 +68,11 @@ def cls(label):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    global BASE
+    ap = argparse.ArgumentParser(
+        description="Diff hipml tokenizer output against llama-server's.")
+    ap.add_argument("--base", default=os.environ.get("HIPML_BASE_URL", BASE),
+                    help="llama-server base URL (default: %(default)s)")
     ap.add_argument("--corpus", required=True)
     ap.add_argument("--hipml-ids", help="precomputed tokenize-batch output")
     ap.add_argument("--save", help="write the fixture file")
@@ -76,6 +82,7 @@ def main():
                     help="when saving, skip records longer than N characters")
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
+    BASE = args.base.rstrip("/")
 
     corpus = read_corpus(args.corpus)
     if args.limit:

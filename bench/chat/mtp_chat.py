@@ -8,7 +8,9 @@ closes the turn and invents a user turn; that degenerate repetition is trivially
 draftable and inflates acceptance.
 
 Usage:
-    python C:\\hipml-chat\\bench\\chat\\mtp_chat.py --tokens 384 --drafts 3
+    python bench/chat/mtp_chat.py --tokens 384 --drafts 3
+
+Needs HIPML_GGUF and HIPML_MTP_GGUF (or --model / --mtp).
 """
 
 import argparse
@@ -18,11 +20,14 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "bench"))
+import _paths  # noqa: E402
+
 CHAT = os.path.join(ROOT, "bench", "chat")
-OUT = r"C:\Users\Hari\wp43\chat"
-MODEL = r"C:\models\Qwen3.8-27B-Q4_K_M.gguf"
-MTP = r"C:\models\mtp-Qwen3.8-27B-Q4_0.gguf"
-HIPML = os.path.join(ROOT, "target", "release", "hipml.exe")
+OUT = os.path.join(ROOT, "bench", "out", "chat")
+MODEL = None
+MTP = None
+HIPML = None
 CONVS = [
     ("01_single_turn_code", "01_single_turn_code.txt", None),
     ("02_multi_turn", "02_multi_turn.txt", None),
@@ -48,16 +53,30 @@ def ids_for(name, message_file, tools_file):
 
 
 def main():
-    global OUT
-    ap = argparse.ArgumentParser()
+    global OUT, MODEL, MTP, HIPML
+    ap = argparse.ArgumentParser(
+        description="MTP acceptance on chat prompts with EOS stop. "
+                    "Paths come from HIPML_GGUF / HIPML_MTP_GGUF.")
     ap.add_argument("--tokens", type=int, default=384)
     ap.add_argument("--drafts", type=int, default=3)
     ap.add_argument("--kv", default="f32")
     ap.add_argument("--ctx", type=int, default=0)
-    ap.add_argument("--out", default=OUT)
+    ap.add_argument("--model", default=None,
+                    help="target GGUF (default: $HIPML_GGUF)")
+    ap.add_argument("--mtp", default=None,
+                    help="MTP drafter GGUF (default: $HIPML_MTP_GGUF)")
+    ap.add_argument("--hipml", default=None,
+                    help="hipml binary (default: $HIPML_EXE or target/release/hipml)")
+    ap.add_argument("--out", default=None,
+                    help="output directory (default: $HIPML_BENCH_OUT or "
+                         "bench/out/chat)")
     args = ap.parse_args()
-    OUT = args.out
-    os.makedirs(OUT, exist_ok=True)
+    OUT = _paths.out_dir("chat", args.out)
+    MODEL = _paths.model(args.model)
+    MTP = _paths.mtp_model(args.mtp)
+    if not MTP:
+        sys.exit("error: no MTP drafter; pass --mtp or set HIPML_MTP_GGUF")
+    HIPML = _paths.hipml_exe(args.hipml)
     all_rows = {}
     for name, message_file, tools_file in CONVS:
         ids = ids_for(name, message_file, tools_file)

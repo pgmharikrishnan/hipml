@@ -10,6 +10,7 @@ ever touched, and the server is terminated before returning.
 
 import argparse
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -17,9 +18,9 @@ import threading
 import time
 import urllib.request
 
+import _paths
+
 PORT = 8092
-MODEL = r"C:\models\Qwen3.8-27B-Q4_K_M.gguf"
-SERVER = r"C:\llama.cpp\rocm-gfx120x\llama-server.exe"
 PROMPT = [1] + list(range(100, 116))
 
 
@@ -100,16 +101,24 @@ def port_open():
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="Measure llama.cpp aggregate decode throughput at equal B. "
+                    "The model and server paths come from the environment.")
     ap.add_argument("--np", type=int, default=4)
     ap.add_argument("--predict", type=int, default=32)
     ap.add_argument("--ctx", type=int, default=8192)
     ap.add_argument("--reps", type=int, default=1)
+    ap.add_argument("--model", default=os.environ.get("HIPML_GGUF"),
+                    help="target GGUF (default: $HIPML_GGUF)")
+    ap.add_argument("--llama-server", default=os.environ.get("LLAMA_SERVER"),
+                    help="llama.cpp server binary (default: $LLAMA_SERVER)")
     args = ap.parse_args()
+    model = _paths.model(args.model)
+    server = _paths.llama_server(args.llama_server)
     if port_open():
         print(f"port {PORT} already in use; refusing to touch it", file=sys.stderr)
         return 2
-    cmd = [SERVER, "-m", MODEL, "--host", "127.0.0.1", "--port", str(PORT),
+    cmd = [server, "-m", model, "--host", "127.0.0.1", "--port", str(PORT),
            "-ngl", "99", "-c", str(args.ctx), "--parallel", str(args.np),
            "-ctk", "q8_0", "-ctv", "q8_0",
            "--no-webui", "--no-cache-idle-slots"]

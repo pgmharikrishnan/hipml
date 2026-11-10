@@ -10,8 +10,8 @@ output divergence and the margin llama assigns to it.
 Requires llama-server (GPU, -fa off, f32 KV) on 8092 and a hip build of hipml.
 
 Usage:
-    python3 bench/tokenizer/coding_task.py --gguf C:\\models\\Qwen3.8-27B-Q4_K_M.gguf \
-        --hipml target/release/hipml.exe --tokens 96 --out coding_task.json
+    python3 bench/tokenizer/coding_task.py --gguf %HIPML_GGUF% \
+        --hipml target/release/hipml.exe --tokens 96 --out bench/out/coding_task.json
 """
 
 import argparse
@@ -21,6 +21,10 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "bench"))
+import _paths  # noqa: E402
 
 BASE = "http://127.0.0.1:8092"
 
@@ -69,12 +73,24 @@ def first_diff(a, b):
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--gguf", required=True)
-    ap.add_argument("--hipml", required=True)
+    global BASE
+    ap = argparse.ArgumentParser(
+        description="One realistic coding-agent request through both engines. "
+                    "Needs HIPML_GGUF or --gguf.")
+    ap.add_argument("--base", default=os.environ.get("HIPML_BASE_URL", BASE),
+                    help="llama-server base URL (default: %(default)s)")
+    ap.add_argument("--gguf", default=os.environ.get("HIPML_GGUF"),
+                    help="target GGUF (default: $HIPML_GGUF)")
+    ap.add_argument("--hipml", default=None,
+                    help="hipml binary (default: $HIPML_EXE or target/release/hipml)")
     ap.add_argument("--tokens", type=int, default=96)
-    ap.add_argument("--out", default="coding_task.json")
+    ap.add_argument("--out", default=os.path.join(ROOT, "bench", "out",
+                                                  "coding_task.json"))
     args = ap.parse_args()
+    if not args.gguf:
+        raise SystemExit("error: set HIPML_GGUF or pass --gguf")
+    args.hipml = _paths.hipml_exe(args.hipml)
+    BASE = args.base.rstrip("/")
 
     ok, at = post("/apply-template", REQUEST)
     if not ok:

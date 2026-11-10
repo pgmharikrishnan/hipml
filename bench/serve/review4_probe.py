@@ -13,14 +13,18 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
 
-PORT = 8093
-MODEL = r"C:\models\Qwen3.8-27B-Q4_K_M.gguf"
-MTP = r"C:\models\mtp-Qwen3.8-27B-Q4_0.gguf"
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+import _paths  # noqa: E402
+
+PORT = 8093
+MODEL = None
+MTP = None
 FIXTURE = os.path.join(os.path.dirname(HERE), "fixtures", "p2_math_169.ids")
 
 
@@ -55,10 +59,8 @@ def port_open():
 def start(hipml, ctx, slots, drafts, log_path, extra_env=None):
     if port_open():
         raise RuntimeError(f"port {PORT} is already in use")
-    env = dict(os.environ)
-    env["HIP_PATH"] = r"C:\rocm-sdk\_rocm_sdk_core"
-    env["HIPML_ARCH"] = "gfx1201"
-    env["PATH"] = r"C:\rocm-sdk\_rocm_sdk_core\bin;" + env.get("PATH", "")
+    env = _paths.rocm_env()
+    env["HIPML_ARCH"] = env.get("HIPML_ARCH", "gfx1201")
     env.update(extra_env or {})
     cmd = [hipml, "serve", "--gguf", MODEL, "--port", str(PORT),
            "--ctx", str(ctx), "--slots", str(slots), "--chunk", "256",
@@ -425,8 +427,16 @@ PLANS = {"exact": plan_exact, "crash": plan_crash, "stress": plan_stress,
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--hipml", required=True)
+    global MODEL, MTP
+    ap = argparse.ArgumentParser(
+        description="Server audit probes. Paths come from HIPML_GGUF / "
+                    "HIPML_MTP_GGUF or the flags below.")
+    ap.add_argument("--hipml", default=None,
+                    help="hipml binary (default: $HIPML_EXE or target/release/hipml)")
+    ap.add_argument("--model", default=None,
+                    help="target GGUF (default: $HIPML_GGUF)")
+    ap.add_argument("--mtp", default=None,
+                    help="MTP drafter GGUF (default: $HIPML_MTP_GGUF)")
     ap.add_argument("--plan", required=True, choices=sorted(PLANS))
     ap.add_argument("--ctx", type=int, default=4096)
     ap.add_argument("--slots", type=int, default=2)
@@ -435,6 +445,11 @@ def main():
     ap.add_argument("--tag", required=True)
     ap.add_argument("--env", action="append", default=[], help="KEY=VALUE for the server")
     a = ap.parse_args()
+    a.hipml = _paths.hipml_exe(a.hipml)
+    MODEL = _paths.model(a.model)
+    MTP = _paths.mtp_model(a.mtp)
+    if a.drafts > 0 and not MTP:
+        sys.exit("error: --drafts needs the MTP drafter; pass --mtp or set HIPML_MTP_GGUF")
 
     extra = dict(kv.split("=", 1) for kv in a.env)
     log_path = a.out + f".{a.tag}.server.log"
