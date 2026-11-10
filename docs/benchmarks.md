@@ -5,12 +5,17 @@ Every number here is measured, committed and re-derivable. The raw report is
 [`bench/results.json`](../bench/results.json). The method is in
 [`bench/README.md`](../bench/README.md).
 
-**Status of the numbers below.** They come from the last committed full matrix:
-hipml binary `5713f143…`, commit `cef7657`, on a Radeon AI PRO R9700 (gfx1201),
-Windows 11, ROCm 7.2.1, against llama.cpp build 11820 (commit `d7725699`). That
-run predates the correctness fix in the projection path, which moved timings by
-0.2–0.9%; the release run replaces this table and the README quotes only the
-release run.
+**Status: superseded.** The current numbers are the **release run** on the stock
+`Qwen3.8-27B-Q4_K_M.gguf`, in
+[`release-run.md`](release-run.md) and [`../bench/release/`](../bench/release/).
+Quote only that file.
+
+The table and per-feature rows below are the **historical** Qwen3.8-27B fine-tune
+matrix: hipml binary `5713f143…`, commit `cef7657`, on a Radeon AI PRO R9700
+(gfx1201), Windows 11, ROCm 7.2.1, against llama.cpp build 11820 (commit
+`d7725699`). They predate the WP42 projection-path correctness fix and name a
+model that is not the release model, so they are kept only as engineering
+history.
 
 ## Method
 
@@ -59,7 +64,10 @@ not from moving weights faster. The measurement history, including the 633.6
 GB/s fp32 GEMV result that established the memory path, is in
 [`notes/roofline-log.md`](notes/roofline-log.md).
 
-## Per-feature tables
+## Per-feature tables (historical)
+
+The rows in this section are the pre-release Qwen3.8-27B measurements. The release
+cells are in [`release-run.md`](release-run.md).
 
 | feature | result | source |
 |---|---|---|
