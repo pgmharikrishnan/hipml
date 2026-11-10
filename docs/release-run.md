@@ -208,23 +208,33 @@ TOKENS DIFFER`) and must be quoted as approximate, not exact.
 
 | case | cache | tokens matched | TTFT ms | vs cold | prefill% | ids |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
-| cold P (2,048) | miss | 0 | 1,619.9 | 1.00× | 0% | ok |
-| warm exact P | hit | 2,048 | **2.0** | **810.8×** | 100% | equal |
-| cold Q (2,048) | miss | 0 | 1,621.4 | 1.00× | 0% | ok |
-| warm shared Q (50% prefix) | hit | 1,024 | **838.1** | **1.93×** | 50% | equal |
-| cold P (8,192, cache 4 GiB) | miss | 0 | 6,786.4 | 1.00× | 0% | ok |
-| warm exact P | hit | 8,192 | **4.7** | **1,448.7×** | 100% | equal |
-| warm shared Q (50%) | hit | 4,096 | **3,528.3** | **1.94×** | 50% | equal |
+| cold P (2,048) | miss | 0 | 1,614.2 | 1.00× | 0% | ok |
+| warm exact P | hit | 2,048 | **1.8** | **895.2×** | 100% | equal |
+| cold Q (2,048) | miss | 0 | 1,616.1 | 1.00× | 0% | ok |
+| warm shared Q (50% prefix) | hit | 1,024 | **836.0** | **1.93×** | 50% | equal |
+| cold P (8,192, default 1 GiB) | miss | 0 | 6,722.7 | 1.00× | 0% | ok |
+| warm exact P (default cap) | refused | 0 | 6,794.5 | 0.99× | 0% | equal |
+| warm shared Q (default cap) | hit | 4,096 | **3,499.7** | **1.95×** | 50% | equal |
+| cold P (8,192, cache 4 GiB) | miss | 0 | 6,724.4 | 1.00× | 0% | ok |
+| warm exact P (4 GiB) | hit | 8,192 | **4.6** | **1,460.2×** | 100% | equal |
+| warm shared Q (4 GiB) | hit | 4,096 | **3,498.8** | **1.94×** | 50% | equal |
 
-Hit latency (lookup + restore + argmax, no compute): 1.92 ms at 2,048 tokens,
-4.60 ms at 8,192.
+Hit latency (lookup + restore + argmax, no compute): 1.89 ms at 2,048 tokens,
+4.59 ms at 8,192.
 
-**Defect found at the default cache cap.** With the default 1 GiB cache, the
-8,192-token snapshot is 1,174.6 MiB — larger than the whole cache. `cache-bench`
-admitted it as a 0-byte entry and the "exact repeat" diverged
-(`cache-bench: exact-repeat ids differ from the cold path`). With
-`--bytes-mib 4096` the same cell is exact. An entry that cannot fit should be
-refused, not captured empty; this is unpatched.
+**The default-cap defect is fixed.** At 1 GiB the 8,192-token snapshot needs
+1,174.6 MiB, so it is **refused at capture time** (counted in `refused`, never
+truncated) and the exact repeat falls back to a full prefill: the ids are
+token-identical, and the row is reported as `refused`, not `hit`. With
+`--bytes-mib 4096` the same cell is a 4.6 ms exact hit. Admission evicts LRU
+entries to make room first and refuses only when one entry cannot fit at all;
+KV and SSM halves are published together or not at all, and a snapshot whose
+recorded position disagrees with its entry is a miss. `cache-gate` replays the
+old consumer (a partial hit used as exact) and requires it to diverge — it
+diverges at id 0 — while the fixed fallback matches the uncached ids. Peak
+process VRAM at the default cap fell from 21,270.9 to 20,340.9 MiB (the refused
+KV+SSM buffers are no longer allocated); at 4 GiB it fell from 22,553.5 to
+21,462.9 MiB (reserve evicts before allocating the next snapshot).
 
 ## Tokenizer and chat template
 
@@ -267,8 +277,9 @@ tree keeps WP52's split-K scratch sizing and WP53's `splitk-gate`.
 
 | gate | result |
 | --- | --- |
-| `cargo test --workspace` | **82 passed, 0 failed** (local and on the GPU host) |
+| `cargo test --workspace` | **84 passed, 0 failed** (local and on the GPU host) |
 | `cargo check --workspace --features hip` | clean |
+| `cache-gate --len 8192 --shared 4096 --chunk 2048` | **PASS**: capture refused (1,174.6 > 1,024 MiB), fallback ids equal the uncached run, legacy partial-hit path diverges at id 0 |
 | `oracle-gate --ids-file p2_math_169.ids --steps 20 --chunk 2048 --kv q8` | **20/20**, step 19 = **41020** |
 | 20-id acceptance (stock model) | `11751 13 198 760 6511 314 9564 369 19241 13 198 760 6511 314 14898 369 21047 13 198 760`; chunked = token loop; CPU text identical |
 | `parity --deep` | **56 passed, 0 failed, 1 skipped** (`sample_top_p_f32`, host-only) |
