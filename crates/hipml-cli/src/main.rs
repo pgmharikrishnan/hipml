@@ -16,6 +16,8 @@ mod chat_cmd;
 #[cfg(feature = "hip")]
 mod cache_cmd;
 #[cfg(feature = "hip")]
+mod cache_gate;
+#[cfg(feature = "hip")]
 mod batch_cmd;
 #[cfg(feature = "hip")]
 mod mtp_batch_cmd;
@@ -101,6 +103,15 @@ fn main() {
             #[cfg(not(feature = "hip"))]
             {
                 eprintln!("cache-bench needs a build with `--features hip`");
+                std::process::exit(2);
+            }
+        }
+        "cache-gate" => {
+            #[cfg(feature = "hip")]
+            std::process::exit(cache_gate::run_gate(&args[1..]));
+            #[cfg(not(feature = "hip"))]
+            {
+                eprintln!("cache-gate needs a build with `--features hip`");
                 std::process::exit(2);
             }
         }
@@ -223,6 +234,7 @@ fn help() {
          \x20 prefill-bench time the tiled prefill GEMM at Qwen3.8-27B shapes, M=512/2048\n\
          \x20 prefill-model prefill the whole model cold, then warm from a KV prefix\n\
          \x20 cache-bench cold / warm-exact / warm-shared TTFT on SSM+KV snapshots\n\
+         \x20 cache-gate  undersized-cap admission: refuse, miss, ids stay exact\n\
          \x20 ssm       gated-delta-net parity (small + real layer) and layer timing\n\
          \x20 attn-parity --gguf PATH   GPU full-attention block vs CPU reference\n\
          \x20 attn-bench  --gguf PATH   per-layer time at depths 0/8192/100000\n\
