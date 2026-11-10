@@ -82,7 +82,7 @@ cargo test -p hipml-core --test tokenizer_fixture
 # 2 passed, 0 failed (with HIPML_GGUF set; otherwise the id gate is a visible skip)
 
 cargo test --workspace
-# 82 passed, 0 failed
+# 84 passed, 0 failed
 
 .\target\release\hipml.exe splitk-gate --gguf $env:HIPML_GGUF `
   --ids-file bench\fixtures\p2_math_169.ids
