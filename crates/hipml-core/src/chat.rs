@@ -180,8 +180,8 @@ with your current knowledge and do not tell the user about function calls\n</IMP
 /// Render `messages` with the template stored in the GGUF.
 ///
 /// `template` must be the file's `tokenizer.chat_template` string. The text-only
-/// Qwen3.5/Qwen3.8-27B template is recognised by the markers below; anything else is
-/// an error rather than a best-effort guess.
+/// Qwen3.5/Qwen3.8 template is recognised by the markers below; anything
+/// else is an error rather than a best-effort guess.
 pub fn render(
     template: &str,
     messages: &[Message],
@@ -348,8 +348,8 @@ pub fn tojson(raw: &str) -> String {
 }
 
 /// Reject a template this renderer was not written against. The markers are
-/// the branch points used above; they are all present in the Qwen3.8-27B template and
-/// absent from a plain ChatML template.
+/// the branch points used above; they are all present in the Qwen3.8 template
+/// and absent from a plain ChatML template.
 fn validate_template(template: &str) -> Result<(), ChatError> {
     let required = [
         "render_content",
