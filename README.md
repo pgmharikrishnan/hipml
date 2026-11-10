@@ -221,10 +221,11 @@ harness is [`bench/README.md`](bench/README.md). The bench feeds both engines th
 same token ids and records the GPU, driver, binary SHA-256 and llama.cpp version
 next to every number.
 
-These numbers are one GPU, one OS and one driver. On the same card and file the
-harness should land within a few percent; the 32K and 100K cells are single cold
-reps, so a small difference there is noise. Other hardware is welcome as new
-data, never as a replacement for the R9700 rows.
+These numbers are one GPU, one OS and one driver. On the same card and the same
+file the harness should reproduce these cells; the three-rep cells show their
+min–max spread in [`docs/release-run.md`](docs/release-run.md), and the 32K and
+100K cells are single cold reps, so a small difference there is noise. Other
+hardware is welcome as new data, never as a replacement for the R9700 rows.
 
 ## License
 
