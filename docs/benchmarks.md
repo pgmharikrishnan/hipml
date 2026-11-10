@@ -50,8 +50,8 @@ history.
 
 Gaps, hipml minus llama.cpp: prefill +18.1% / +5.7% / +7.2% / +12.1%, decode
 −3.1% / −2.2% / −1.2% / +7.4%, TTFT ratio 1.18× / 1.06× / 1.07× / 1.12×.
-The full 5-prompt × 4-depth table, the warm-pass table and the prefill stage
-breakdown are in [`bench/release/`](../bench/release/).
+This historical matrix was retired with `bench/RESULTS.md`; the release run's
+full 5-prompt × 4-depth table is in [`bench/release/`](../bench/release/).
 
 ## Roofline
 
