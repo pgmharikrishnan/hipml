@@ -338,11 +338,14 @@ fn prefill_step(
     if at_cut {
         let logits = engine.logits_host()?;
         let t = Instant::now();
-        let _ = engine.prefix_capture(&pf.job.prompt, end, Some(&logits))?;
+        let capture = engine.prefix_capture(&pf.job.prompt, end, Some(&logits))?;
         let ms = t.elapsed().as_secs_f64() * 1e3;
         metrics.update(|s| {
             s.prefix_captures += 1;
             s.prefix_capture_ms += ms;
+            if capture.refused {
+                s.prefix_refused += 1;
+            }
         });
     }
     Ok(ms)

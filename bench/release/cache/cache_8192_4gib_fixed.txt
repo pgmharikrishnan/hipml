@@ -1,0 +1,26 @@
+resident: 15.65 GiB in 866 tensors on AMD Radeon AI PRO R9700 (upload 5.1s)
+build: 8.3s
+prompts: P and Q 8192 tokens, shared prefix 4096 (50%), unrelated R 8192
+cache: 2 entries / 4096 MiB, chunk 2048; decode 20 ids per case
+seed: captured P@4096 (662.6 MiB) and captured P@8192 (1174.6 MiB); cache 2 entries / 1837.1 MiB
+
+case            cache  matched computed    TTFT ms   vs cold   prefill%     ids
+cold P           miss        0     8192     6724.4     1.00x         0%      ok
+warm exact P      hit     8192        0        4.6  1460.24x       100%      ok
+cold Q           miss        0     8192     6794.2     1.00x         0%      ok
+warm shared Q     hit     4096     4096     3498.8     1.94x        50%      ok
+cold R           miss        0     8192     6796.7     1.00x         0%      ok
+
+hit latency (lookup + restore + argmax, no compute): 4.59 ms for 8192 tokens
+first 20 ids: cold P [1503, 271, 248068, 198, 760, 1156, 369, 9859, 264, 3050, 10597, 3296, 883, 81726, 35464, 8978, 45850, 321, 3069, 424]
+              warm exact [1503, 271, 248068, 198, 760, 1156, 369, 9859, 264, 3050, 10597, 3296, 883, 81726, 35464, 8978, 45850, 321, 3069, 424] (equal: true)
+              warm shared Q [14162, 1330, 271, 248068, 198, 760, 1156, 369, 9859, 328, 14162, 1330, 1, 864, 369, 11173, 1599, 2942, 318, 275] (equal to cold: true)
+unrelated ids: [7734, 264, 2716, 31708, 883, 279, 17415, 506] (its own cold path; not compared)
+
+entries after the seed:
+  P@4096   662.6 MiB  hash 0c7084101c9fa3cc
+  P@8192   1174.6 MiB  hash 269509a9f7c3d7df
+memory per entry at 8192 tokens: 149.6 MiB SSM (48 layers) + 1024.0 MiB KV (16 layers, K+V) + 0.9 MiB logits = 1174.6 MiB
+3-request sequence: exact repeat -> hit @8192; shared prefix -> hit @4096; unrelated -> miss (inserted at 1837.1 MiB, 1 evicted)
+cache bound: 2 entries / 4096 MiB -> 2 entries / 1837.1 MiB, 2 hits, 1 misses, 1 evictions, 0 refused
+post-eviction exact repeat: partial hit at 4096 of 8192 tokens (the full entry was the LRU victim)
