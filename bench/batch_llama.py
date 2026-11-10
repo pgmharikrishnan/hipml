@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Measure llama.cpp aggregate decode throughput at equal B.
 
 Starts llama-server on 8092 with `-np B` and q8_0 K/V, then issues B identical

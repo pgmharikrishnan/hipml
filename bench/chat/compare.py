@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Cross-engine chat comparison: hipml (device, greedy) vs llama.cpp.
 
 Starts llama-server on 8092, renders every conversation through llama's own

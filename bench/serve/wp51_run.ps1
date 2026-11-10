@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Run one WP51 probe plan under the optional GPU lock, releasing it even on
 # failure.
 #

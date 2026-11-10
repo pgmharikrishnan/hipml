@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """REVIEW-4 server probes: exactness A/B, malformed input, and user stress.
 
 Stdlib only. Starts `hipml serve` on 127.0.0.1:8093 (never 8080/8090/8091/

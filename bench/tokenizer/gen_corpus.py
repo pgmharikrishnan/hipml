@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate the WP48 tokenizer differential corpus.
 
 Deterministic: same Python 3 + same seed -> same file. Output lines are

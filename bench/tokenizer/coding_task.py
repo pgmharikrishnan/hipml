@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """One realistic coding-agent request through both engines.
 
 The conversation is multi-turn, carries an assistant tool call with JSON

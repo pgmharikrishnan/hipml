@@ -1,3 +1,5 @@
+rem SPDX-License-Identifier: Apache-2.0
+
 @echo off
 rem Environment for every hipml invocation on the bench host.
 rem

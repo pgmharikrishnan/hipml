@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Build the shared token fixture for the like-for-like bench.
 
 Every prompt is tokenised once, by `hipml tokenize`, on the same GGUF the two

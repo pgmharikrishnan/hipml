@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Tokenizer differential harness: hipml vs llama.cpp on a hex corpus.
 
 Reads the corpus written by gen_corpus.py (``hex(text) TAB label``), gets

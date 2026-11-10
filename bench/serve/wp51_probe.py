@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """WP51 probes: error isolation, backpressure, sampling honesty, exactness cost
 and warm-up.
 
