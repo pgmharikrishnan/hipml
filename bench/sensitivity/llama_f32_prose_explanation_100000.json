@@ -50,9 +50,9 @@
   "server_version": "version: 0.7.0-dev (build 11820, commit d7725699)",
   "peak_vram_mib": 29553.08203125,
   "command": [
-    "C:\\llama.cpp\\rocm-gfx120x\\llama-server.exe",
+    "<LLAMA_SERVER>",
     "-m",
-    "C:\\models\\Qwen3.8-27B-Q4_K_M.gguf",
+    "<HIPML_GGUF>",
     "--host",
     "127.0.0.1",
     "--port",

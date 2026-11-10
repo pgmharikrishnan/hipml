@@ -26,9 +26,9 @@
  "metrics": null,
  "peak_vram_mib": 23668.23046875,
  "command": [
-  "C:\\llama.cpp\\rocm-gfx120x\\llama-server.exe",
+  "<LLAMA_SERVER>",
   "-m",
-  "C:\\models\\Qwen3.8-27B-Q4_K_M.gguf",
+  "<HIPML_GGUF>",
   "--host",
   "127.0.0.1",
   "--port",
