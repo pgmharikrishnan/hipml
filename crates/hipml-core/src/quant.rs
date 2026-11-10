@@ -145,14 +145,21 @@ impl TensorType {
 }
 
 /// `(values, bytes)` per block for GGML types that are sized but never
-/// dequantised here, so a file that carries one (an MTP sidecar's Q3_K head)
-/// still parses: F16, Q4_0, Q2_K, Q3_K. `(0, 0)` for anything else.
+/// dequantised here, so a file that carries one still loads and the load
+/// report can name it: F16, Q4_0, Q2_K, Q3_K, IQ4_NL, IQ3_S, IQ4_XS.
+///
+/// The IQ entries matter because Unsloth's "UD" dynamic quants mix tensor
+/// types per layer; sizing them is metadata only, not a dequant path.
+/// `(0, 0)` for anything else.
 fn size_only(id: u32) -> (usize, usize) {
     match id {
         1 => (1, 2),
         2 => (32, 18),
         10 => (QK_K, 84),
         11 => (QK_K, 110),
+        20 => (32, 18),    // IQ4_NL
+        21 => (QK_K, 110), // IQ3_S
+        23 => (QK_K, 136), // IQ4_XS
         _ => (0, 0),
     }
 }
