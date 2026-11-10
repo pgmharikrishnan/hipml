@@ -58,7 +58,7 @@ tokens and 0.51 tok/s at 8,192; q4 rises by 6.57 and 0.79 tok/s respectively.
 Formula: `631e9 / (17.19e9 + depth * bytes_per_token)`. These figures
 are distinct from the measurements below, which use 633.6 GB/s.
 
-`bartowski/NousResearch_Qwen3.8-27B-GGUF`, Q4_K_M: 16.01 GiB, 26.90 B parameters,
+Qwen3.8-27B Q4_K_M: 16.01 GiB, 26.90 B parameters,
 `qwen3_5`. Decode ceiling **36.9 tok/s**, prefill ceiling **1779 tok/s**.
 
 Two reference points measured on the same box in the same conditions:
@@ -100,7 +100,7 @@ long prompts, and roughly halves at depth (64.3% vs 49.8% at 8K).
 cache stays in VRAM.
 
 **The engine opportunity is measurable and small on a mature architecture.** Ripple
-sits at 70.6% of its own decode ceiling (16.0 of 22.7 tok/s) while Qwen3.8-27B and Swift
+sits at 70.6% of its own decode ceiling (16.0 of 22.7 tok/s) while Qwen3.8 and Swift
 sit at 87–88%. That 17-point gap is the entire case for a custom engine on this
 card: 16 → ~19.5 tok/s, not a doubling. It exists because `ricursive` has no
 Flash Attention path, and it disappears as soon as llama.cpp gains one.
@@ -667,13 +667,13 @@ The formats, the reference and the kernels are in `hipml-core/src/kv.rs`,
 `ops::attn_decode_kv` and `kernels/attn_decode_kv.hip`. The block layouts are
 ggml's, so a cache packed here is the same bytes `llama.cpp -ctk/-ctv` holds:
 
-| dtype | block | bytes/value | Qwen3.8-27B bytes/token | 100K cache | 128K cache |
+| dtype | block | bytes/value | Qwen3.8 bytes/token | 100K cache | 128K cache |
 | --- | --- | ---: | ---: | ---: | ---: |
 | f16 | — | 2.0 | 65,536 | 6.5536 GB | 8.3886 GB |
 | q8_0 | 2 B f16 scale + 32 i8 = 34 B | 1.0625 | 34,816 | 3.4816 GB | 4.5639 GB |
 | q4_0 | 2 B f16 scale + 16 B packed = 18 B | 0.5625 | 18,432 | 1.8432 GB | 2.4159 GB |
 
-Qwen3.8-27B bytes/token = `2 (K,V) * 4 kv heads * 16 full-attention layers * 256`.
+Qwen3.8 bytes/token = `2 (K,V) * 4 kv heads * 16 full-attention layers * 256`.
 Parity is `Tol::DEFAULT` (abs 1e-4, rel 1e-3); the worst absolute difference
 across the 14 quantized-attention cases, including the 100,000-token one, was
 **1.6e-7**. Both sides read the same encoded bytes, so the comparison measures
