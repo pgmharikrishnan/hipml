@@ -2,7 +2,7 @@
   "format": "hipml-bench-results/1",
   "generated": "2026-11-09T07:12:10.572341+00:00",
   "meta": {
-    "host": "rtx",
+    "host": "gpu-host",
     "os": "Microsoft Windows 11 Pro",
     "gpu": "AMD Radeon AI PRO R9700 32.0.32015.7029 ",
     "hipml_commit": "cef765724eb4f7add7d52fa14c85185878f5560b",
@@ -13,17 +13,17 @@
     "llama_commit": "d7725699",
     "llama_kv": "q8_0",
     "hipml_kv": "q8",
-    "model_path": "C:\\models\\Qwen3.8-27B-Q4_K_M.gguf",
-    "llama_server_path": "C:\\llama.cpp\\rocm-gfx120x\\llama-server.exe",
+    "model_path": "<HIPML_GGUF>",
+    "llama_server_path": "<LLAMA_SERVER>",
     "depths": "8192",
     "reps": "3",
     "reps_deep": "1",
     "reps_100k": "1"
   },
   "fixture": {
-    "path": "/Users/harikrishnan/Documents/GitHub/hipml-final/bench/fixtures/prompts.json",
+    "path": "bench/fixtures/prompts.json",
     "model": {
-      "path": "C:\\models\\Qwen3.8-27B-Q4_K_M.gguf",
+      "path": "<HIPML_GGUF>",
       "bytes": 17203416064
     },
     "tokenizer": {
