@@ -288,6 +288,11 @@ tree keeps WP52's split-K scratch sizing and WP53's `splitk-gate`.
 39.2M-word SSM state; the decoded ids are identical, which is what the gate
 asserts. Raw gate logs: `bench/release/gates/`.
 
+The gate rows above (oracle, parity, gemv, spec, batch check, rows, splitk,
+chunk-boundary prefill) were run on `Qwen3.8-27B-Q4_K_M.gguf`, the model the gate
+corpus and the MTP drafter were built for. The 20-id acceptance and every
+release cell in this document use the stock `Qwen3.8-27B-Q4_K_M.gguf`.
+
 ## What is still unmeasured
 
 - MTP at **q8 KV** on the stock model: the release MTP cells use f32 KV, like
