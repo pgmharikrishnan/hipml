@@ -35,7 +35,6 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DEFAULT_FILES = [
-    "bench/results.json",
     "bench/fixtures/prompts.json",
     "bench/sensitivity/*.json",
     "bench/serve/results/**/*.json",
