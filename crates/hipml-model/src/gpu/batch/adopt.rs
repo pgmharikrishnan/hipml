@@ -160,7 +160,9 @@ impl<'a> BatchEngine<'a> {
             return Err(format!("release: slot {slot} is not active"));
         };
         if i != slot {
-            return Err(format!("release: active[{i}] is slot {slot}, want a dense set"));
+            return Err(format!(
+                "release: active[{i}] is slot {slot}, want a dense set"
+            ));
         }
         let last = self.active.len() - 1;
         if slot == last {
@@ -198,8 +200,10 @@ impl<'a> BatchEngine<'a> {
                     let dst = to * slot_words;
                     for h in 0..f.kv.n_kv {
                         let o = h * head_stride;
-                        f.kv.k.copy_range_on(&f.kv.k, src + o, dst + o, per, stream)?;
-                        f.kv.v.copy_range_on(&f.kv.v, src + o, dst + o, per, stream)?;
+                        f.kv.k
+                            .copy_range_on(&f.kv.k, src + o, dst + o, per, stream)?;
+                        f.kv.v
+                            .copy_range_on(&f.kv.v, src + o, dst + o, per, stream)?;
                     }
                 }
                 BatchKind::Ssm(d) => {
@@ -213,7 +217,8 @@ impl<'a> BatchEngine<'a> {
                         conv_len,
                         stream,
                     )?;
-                    d.s_state.copy_range_on(&d.s_state, from * sw, to * sw, state_len, stream)?;
+                    d.s_state
+                        .copy_range_on(&d.s_state, from * sw, to * sw, state_len, stream)?;
                 }
             }
         }

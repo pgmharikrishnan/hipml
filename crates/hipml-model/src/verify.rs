@@ -145,18 +145,15 @@ pub fn cpu_embedding_row(path: &Path, token: u32) -> Result<Vec<f32>, String> {
         return Err(format!("{TOKEN_EMBD}: ne0 {k} is not a multiple of {QK_K}"));
     }
     if token as u64 >= rows {
-        return Err(format!("{TOKEN_EMBD}: token {token} out of range (rows {rows})"));
+        return Err(format!(
+            "{TOKEN_EMBD}: token {token} out of range (rows {rows})"
+        ));
     }
     let blocks = k / QK_K;
     let row_bytes = info.nbytes / rows;
     let mut raw = vec![0u8; row_bytes as usize];
-    g.read_tensor_range(
-        TOKEN_EMBD,
-        token as u64 * row_bytes,
-        raw.len(),
-        &mut raw,
-    )
-    .map_err(|e| format!("{TOKEN_EMBD}: {e}"))?;
+    g.read_tensor_range(TOKEN_EMBD, token as u64 * row_bytes, raw.len(), &mut raw)
+        .map_err(|e| format!("{TOKEN_EMBD}: {e}"))?;
 
     let mut out = vec![0.0f32; k];
     let mut tmp = [0.0f32; QK_K];
@@ -181,10 +178,7 @@ pub fn top_k(logits: &[f32], n: usize) -> Vec<(usize, f32)> {
         if top.len() == n && v <= top[n - 1].1 {
             continue;
         }
-        let at = top
-            .iter()
-            .position(|&(_, t)| v > t)
-            .unwrap_or(top.len());
+        let at = top.iter().position(|&(_, t)| v > t).unwrap_or(top.len());
         top.insert(at, (i, v));
         if top.len() > n {
             top.pop();

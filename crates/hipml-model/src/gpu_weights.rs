@@ -450,7 +450,10 @@ fn dequant_q5_k(t: &DeviceTensor, rows: usize, cols: usize) -> Result<Vec<f32>, 
     for r in 0..rows {
         for b in 0..blocks {
             let src = &raw[r * row_bytes + b * Q5_K_BYTES..r * row_bytes + (b + 1) * Q5_K_BYTES];
-            dequant_q5_k(src, &mut out[r * cols + b * QK_K..r * cols + (b + 1) * QK_K]);
+            dequant_q5_k(
+                src,
+                &mut out[r * cols + b * QK_K..r * cols + (b + 1) * QK_K],
+            );
         }
     }
     Ok(out)

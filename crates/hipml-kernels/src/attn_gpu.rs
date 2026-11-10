@@ -383,12 +383,7 @@ mod imp {
             self.rope_launch(l, k, d.n_kv)
         }
 
-        fn rope_launch(
-            &self,
-            l: &Launcher,
-            x: *mut c_void,
-            n_heads: usize,
-        ) -> Result<(), String> {
+        fn rope_launch(&self, l: &Launcher, x: *mut c_void, n_heads: usize) -> Result<(), String> {
             let d = self.dims;
             let rope = self.module_kernel(l, "mrope_f32")?;
             let mut p_in = x;
@@ -836,15 +831,7 @@ mod imp {
         ) -> Result<(), String> {
             if crate::skinny_on() {
                 if let Some(name) = crate::skinny_entry(w.entry()?) {
-                    return l.run_skinny_resident(
-                        name,
-                        w.data_bytes(),
-                        x,
-                        y,
-                        w.rows,
-                        w.cols,
-                        rows,
-                    );
+                    return l.run_skinny_resident(name, w.data_bytes(), x, y, w.rows, w.cols, rows);
                 }
             }
             if let Some(kind) = crate::batch_kind_for(w.kind) {
@@ -943,7 +930,6 @@ mod imp {
             kernel.launch(cfg, &l.stream, &mut params)
         }
     }
-
 }
 
 #[cfg(not(feature = "hip"))]
@@ -988,11 +974,7 @@ impl AttnLayer {
         Err("hipml was built without the `hip` feature".to_string())
     }
 
-    pub fn prepare_qkv(
-        &self,
-        _l: &crate::Launcher,
-        _x: &hipml_hip::Buffer,
-    ) -> Result<(), String> {
+    pub fn prepare_qkv(&self, _l: &crate::Launcher, _x: &hipml_hip::Buffer) -> Result<(), String> {
         Err("hipml was built without the `hip` feature".to_string())
     }
 

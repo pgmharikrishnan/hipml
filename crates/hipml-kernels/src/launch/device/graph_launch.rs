@@ -102,12 +102,8 @@ impl Launcher {
                     if std::env::var_os("HIPML_BATCH_SKINNY_TRACE").is_some() {
                         eprintln!("[skinny] {entry} m={m} k={k} r={r} row0={base}");
                     }
-                    let px = unsafe {
-                        (x.as_ptr() as *mut u8).add(base * k * 4) as *const _
-                    };
-                    let py = unsafe {
-                        (y.as_ptr() as *mut u8).add(base * m * 4) as *const _
-                    };
+                    let px = unsafe { (x.as_ptr() as *mut u8).add(base * k * 4) as *const _ };
+                    let py = unsafe { (y.as_ptr() as *mut u8).add(base * m * 4) as *const _ };
                     super::skinny_launch::skinny_resident_rows(
                         &self.module,
                         &self.stream,
@@ -149,12 +145,8 @@ impl Launcher {
             };
             let shared = r * tile * 4;
             let mut p_w = w.as_ptr();
-            let mut p_x = unsafe {
-                (x.as_ptr() as *mut u8).add(base * k * 4) as *mut c_void
-            };
-            let mut p_y = unsafe {
-                (y.as_ptr() as *mut u8).add(base * m * 4) as *mut c_void
-            };
+            let mut p_x = unsafe { (x.as_ptr() as *mut u8).add(base * k * 4) as *mut c_void };
+            let mut p_y = unsafe { (y.as_ptr() as *mut u8).add(base * m * 4) as *mut c_void };
             let mut v_m = m as i32;
             let mut v_k = k as i32;
             let mut v_b = r as i32;
@@ -655,8 +647,18 @@ impl Launcher {
         head_dim: usize,
         stride: usize,
     ) -> Result<(), String> {
-        self.kv_encode_ptr_on(&self.stream, &self.step, dtype, k_ptr, v_ptr, k_cache, v_cache,
-                              n_kv, head_dim, stride)
+        self.kv_encode_ptr_on(
+            &self.stream,
+            &self.step,
+            dtype,
+            k_ptr,
+            v_ptr,
+            k_cache,
+            v_cache,
+            n_kv,
+            head_dim,
+            stride,
+        )
     }
 
     /// Same append on a chosen stream with a chosen step buffer: the two-stream

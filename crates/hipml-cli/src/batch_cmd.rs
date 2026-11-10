@@ -211,8 +211,15 @@ pub fn run(args: &[String]) -> i32 {
     );
     if a.split {
         const NAMES: [&str; 9] = [
-            "embed", "attn proj", "attn kv+core", "attn out", "ssm proj", "ssm rec",
-            "ssm out", "ffn", "final",
+            "embed",
+            "attn proj",
+            "attn kv+core",
+            "attn out",
+            "ssm proj",
+            "ssm rec",
+            "ssm out",
+            "ffn",
+            "final",
         ];
         for (i, name) in NAMES.iter().enumerate() {
             println!(
@@ -266,7 +273,9 @@ pub fn run(args: &[String]) -> i32 {
 
     if a.check {
         if a.depths.iter().any(|d| *d != 0) {
-            println!("check: token parity is only defined at depth 0 here (synthetic KV seeds differ)");
+            println!(
+                "check: token parity is only defined at depth 0 here (synthetic KV seeds differ)"
+            );
         } else {
             // Replay a token stream that differs per slot and per step, then
             // run each slot's stream through a single-sequence engine. This
@@ -275,7 +284,10 @@ pub fn run(args: &[String]) -> i32 {
             let vocab = eng.cfg.n_vocab as u32;
             let stream = |b: usize, step: usize| (7 + b as u32 * 97 + step as u32 * 13) % vocab;
             let mut batch_ids = vec![Vec::with_capacity(n); active];
-            if let Err(e) = eng.reset_state().and_then(|_| eng.set_positions(&a.depths[..active])) {
+            if let Err(e) = eng
+                .reset_state()
+                .and_then(|_| eng.set_positions(&a.depths[..active]))
+            {
                 eprintln!("batch-bench: check reset: {e}");
                 return 1;
             }

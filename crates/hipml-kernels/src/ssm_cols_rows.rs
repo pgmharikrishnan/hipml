@@ -70,7 +70,11 @@ impl<'a> SsmGpuLayer<'a> {
                 &mut v_n as *mut _ as *mut c_void,
                 &mut v_rows as *mut _ as *mut c_void,
             ];
-            k.launch(LaunchConfig::linear(rows * nv, 64), self.stream, &mut params)?;
+            k.launch(
+                LaunchConfig::linear(rows * nv, 64),
+                self.stream,
+                &mut params,
+            )?;
         }
         // conv + silu
         {

@@ -81,9 +81,9 @@ pub fn deliver(
             out.push((slot, None, reason));
             continue;
         }
-        let fault = faults
-            .hit(slot)
-            .or_else(|| (id as usize >= n_vocab).then(|| format!("id {id} outside the vocabulary")));
+        let fault = faults.hit(slot).or_else(|| {
+            (id as usize >= n_vocab).then(|| format!("id {id} outside the vocabulary"))
+        });
         if let Some(why) = fault {
             out.push((slot, Some(why), ""));
             continue;

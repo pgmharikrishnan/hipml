@@ -82,7 +82,9 @@ impl<'a> GpuEngine<'a> {
     }
 
     pub fn prefix_limits(&self) -> Option<(usize, usize)> {
-        self.prefix.as_ref().map(|c| (c.max_entries(), c.max_bytes()))
+        self.prefix
+            .as_ref()
+            .map(|c| (c.max_entries(), c.max_bytes()))
     }
 
     /// `(prefix length, bytes, hash)` for every entry, in insertion slot order.
@@ -244,11 +246,11 @@ impl<'a> GpuEngine<'a> {
             ssm,
             kv,
         };
-        let mut out = self
-            .prefix
-            .as_mut()
-            .expect("checked above")
-            .insert(prompt[..pos].to_vec(), bytes, snap);
+        let mut out = self.prefix.as_mut().expect("checked above").insert(
+            prompt[..pos].to_vec(),
+            bytes,
+            snap,
+        );
         out.evicted += evicted;
         Ok(out)
     }
@@ -328,10 +330,7 @@ impl<'a> GpuEngine<'a> {
             .prefix
             .as_ref()
             .ok_or_else(|| "prefix cache is not enabled".to_string())?;
-        let e = cache
-            .entry(hit.index)
-            .tokens
-            .len();
+        let e = cache.entry(hit.index).tokens.len();
         if e != hit.pos {
             return Err(format!(
                 "prefix restore: entry covers {e} tokens, hit says {}",
@@ -345,19 +344,17 @@ impl<'a> GpuEngine<'a> {
 
         let l = self.model.launcher();
         l.synchronize()?;
-        for ((b, ss), kk) in self
-            .layers
-            .iter()
-            .zip(snap.ssm.iter())
-            .zip(snap.kv.iter())
-        {
+        for ((b, ss), kk) in self.layers.iter().zip(snap.ssm.iter()).zip(snap.kv.iter()) {
             match &b.kind {
                 BlockKind::Ssm(s) => {
                     let bufs = ss
                         .as_ref()
                         .ok_or_else(|| "prefix restore: missing SSM snapshot".to_string())?;
-                    s.conv_state_buf()
-                        .copy_from_device_on(&bufs.conv, bufs.conv_len, l.stream())?;
+                    s.conv_state_buf().copy_from_device_on(
+                        &bufs.conv,
+                        bufs.conv_len,
+                        l.stream(),
+                    )?;
                     s.s_state_buf()
                         .copy_from_device_on(&bufs.s, bufs.s_len, l.stream())?;
                 }
@@ -369,8 +366,10 @@ impl<'a> GpuEngine<'a> {
                         return Err("prefix restore: KV cache kind changed".to_string());
                     }
                     let n = bufs.rows * bufs.width;
-                    attn.kv_k_buf().copy_from_device_on(&bufs.k, n, l.stream())?;
-                    attn.kv_v_buf().copy_from_device_on(&bufs.v, n, l.stream())?;
+                    attn.kv_k_buf()
+                        .copy_from_device_on(&bufs.k, n, l.stream())?;
+                    attn.kv_v_buf()
+                        .copy_from_device_on(&bufs.v, n, l.stream())?;
                 }
                 BlockKind::Full { deep: Some(dk), .. } => {
                     let bufs = kk
@@ -383,11 +382,15 @@ impl<'a> GpuEngine<'a> {
                         || bufs.words != dk.heads() * per
                         || per * dk.heads() > bufs.words
                     {
-                        return Err("prefix restore: quantized KV snapshot does not fit".to_string());
+                        return Err(
+                            "prefix restore: quantized KV snapshot does not fit".to_string()
+                        );
                     }
                     for h in 0..dk.heads() {
-                        bufs.k.copy_range_on(&dk.k, h * per, h * dk.seq * row, per, l.stream())?;
-                        bufs.v.copy_range_on(&dk.v, h * per, h * dk.seq * row, per, l.stream())?;
+                        bufs.k
+                            .copy_range_on(&dk.k, h * per, h * dk.seq * row, per, l.stream())?;
+                        bufs.v
+                            .copy_range_on(&dk.v, h * per, h * dk.seq * row, per, l.stream())?;
                     }
                 }
             }

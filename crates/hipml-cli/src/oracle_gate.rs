@@ -65,8 +65,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 i += 2;
             }
             "--ids" => {
-                let parsed: Result<Vec<u32>, _> =
-                    need(i)?.split(',').map(|s| s.trim().parse::<u32>()).collect();
+                let parsed: Result<Vec<u32>, _> = need(i)?
+                    .split(',')
+                    .map(|s| s.trim().parse::<u32>())
+                    .collect();
                 a.ids = Some(parsed.map_err(|e| format!("bad --ids: {e}"))?);
                 i += 2;
             }
@@ -87,7 +89,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 i += 2;
             }
             "--tol-nats" => {
-                a.tol_nats = need(i)?.parse().map_err(|e| format!("bad --tol-nats: {e}"))?;
+                a.tol_nats = need(i)?
+                    .parse()
+                    .map_err(|e| format!("bad --tol-nats: {e}"))?;
                 i += 2;
             }
             other => return Err(format!("unknown argument {other}")),
@@ -245,8 +249,7 @@ pub fn run(args: &[String]) -> i32 {
     println!(
         "prefill logits: max |gpu - cpu| = {worst:.4} at {at} \
          (gpu argmax {} / cpu argmax {})",
-        first,
-        cpu_steps[0].id
+        first, cpu_steps[0].id
     );
 
     let mut gpu_steps = Vec::with_capacity(a.steps);

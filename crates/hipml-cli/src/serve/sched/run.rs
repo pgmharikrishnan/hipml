@@ -91,7 +91,9 @@ pub fn run(
             }
             reset_streak += 1;
             if reset_streak >= 3 {
-                fatal!(format!("{reset_streak} batch resets with no step in between"));
+                fatal!(format!(
+                    "{reset_streak} batch resets with no step in between"
+                ));
             }
         }};
     }
@@ -113,9 +115,7 @@ pub fn run(
             s.active_slots = live as u64;
             s.queue_depth = queue.len() as u64;
         });
-        let busy = prefill.is_some()
-            || spec.is_some()
-            || slots.iter().any(|s| s.is_some());
+        let busy = prefill.is_some() || spec.is_some() || slots.iter().any(|s| s.is_some());
         if !busy && queue.is_empty() {
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(j) => {
@@ -149,7 +149,11 @@ pub fn run(
         if prefill.is_none() && spec.is_none() && !queue.is_empty() && can_admit {
             let job = queue.pop_front().expect("checked");
             let alone = slots.iter().all(|s| s.is_none()) && queue.is_empty();
-            let mode = if alone && cfg.mtp { Mode::Spec } else { Mode::Batch };
+            let mode = if alone && cfg.mtp {
+                Mode::Spec
+            } else {
+                Mode::Batch
+            };
             let plen = job.prompt.len();
             match begin(&mut engine, job, &cfg, mode, &metrics) {
                 Ok(pf) => {
@@ -274,7 +278,14 @@ pub fn run(
                 }
             } else if let Some(reason) = spec.as_ref().and_then(|sp| sp.job.cancelled()) {
                 let sp = spec.take().expect("checked");
-                send_done(&sp.job.tx, &sp.job, reason, sp.emitted, sp.prefill_ms, sp.hit_tokens);
+                send_done(
+                    &sp.job.tx,
+                    &sp.job,
+                    reason,
+                    sp.emitted,
+                    sp.prefill_ms,
+                    sp.hit_tokens,
+                );
                 finished(&metrics, reason);
             } else {
                 let step = match mtp.as_mut() {
@@ -380,9 +391,15 @@ pub fn run(
                     s.tile_steps += 1;
                 }
             });
-            if let Err(e) =
-                step::deliver(&mut batch, &mut engine, &mut slots, &order, &ids, &metrics, &mut faults)
-            {
+            if let Err(e) = step::deliver(
+                &mut batch,
+                &mut engine,
+                &mut slots,
+                &order,
+                &ids,
+                &metrics,
+                &mut faults,
+            ) {
                 reset_batch!(e);
             }
         }

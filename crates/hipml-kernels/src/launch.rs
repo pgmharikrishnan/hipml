@@ -55,8 +55,8 @@ pub(crate) mod device {
     #[path = "graph_launch.rs"]
     mod graph_launch;
     pub use graph_launch::{
-        gemv_job_tiles, GemvJob, GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80,
-        GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80,
+        gemv_job_tiles, GemvJob, GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80, GEMV_JOB_Q4K,
+        GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80,
     };
     #[path = "prefill_launch.rs"]
     mod prefill_launch;
@@ -66,12 +66,12 @@ pub(crate) mod device {
         prefill_resident_half, prefill_resident_slices, prefill_resident_split_half,
         prefill_should_split, prefill_split_scratch_cap, prefill_xhalf,
     };
+    #[path = "batch_launch.rs"]
+    mod batch_launch;
     #[path = "quant_launch.rs"]
     mod quant_launch;
     #[path = "skinny_launch.rs"]
     mod skinny_launch;
-    #[path = "batch_launch.rs"]
-    mod batch_launch;
     #[path = "stream_launch.rs"]
     mod stream_launch;
     pub use stream_launch::ReadJob;
@@ -128,7 +128,10 @@ pub(crate) mod device {
         pub fn set_step(&self, pos: usize, seq: usize, token: usize) -> Result<(), String> {
             let p = pos as i32;
             let mut bytes = [0u8; 32];
-            for (i, v) in [p, seq as i32, token as i32, 0, p, p, p, p].iter().enumerate() {
+            for (i, v) in [p, seq as i32, token as i32, 0, p, p, p, p]
+                .iter()
+                .enumerate()
+            {
                 bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
             }
             self.step.upload_bytes_async(0, &bytes, &self.stream)
@@ -143,7 +146,10 @@ pub(crate) mod device {
         pub fn set_step_side(&self, pos: usize, seq: usize, token: usize) -> Result<(), String> {
             let p = pos as i32;
             let mut bytes = [0u8; 32];
-            for (i, v) in [p, seq as i32, token as i32, 0, p, p, p, p].iter().enumerate() {
+            for (i, v) in [p, seq as i32, token as i32, 0, p, p, p, p]
+                .iter()
+                .enumerate()
+            {
                 bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
             }
             self.step_side.upload_bytes_async(0, &bytes, &self.side)
@@ -213,10 +219,12 @@ pub(crate) mod device {
                 "softmax_f32" => self.softmax(case, inputs, reps),
                 "attn_decode_f32" | "attn_decode_pm_f32" => self.attention(case, inputs, reps),
                 n if n.starts_with("attn_decode_kv") => self.attention_kv(case, inputs, reps),
-                "qg_split_f32" | "head_rmsnorm_f32" | "mrope_f32" | "q_gate_f32"
-                | "kv_append_f32" | "attn_decode_split_f32" => {
-                    self.run_attn_case(case, inputs, reps)
-                }
+                "qg_split_f32"
+                | "head_rmsnorm_f32"
+                | "mrope_f32"
+                | "q_gate_f32"
+                | "kv_append_f32"
+                | "attn_decode_split_f32" => self.run_attn_case(case, inputs, reps),
                 "kv_encode_q8" | "kv_encode_q4" => self.kv_encode_case(case, inputs, reps),
                 "argmax_f32" => self.argmax_case(case, inputs, reps),
                 "ssm_conv1d_f32" => {
@@ -599,18 +607,16 @@ pub(crate) mod device {
 #[cfg(feature = "hip")]
 pub use device::{gemm_rows_f32, prefill_resident, prefill_resident_slices, prefill_xhalf};
 #[cfg(feature = "hip")]
-pub use device::{
-    prefill_entry_for_half, prefill_has_xhalf, prefill_resident_half,
-    prefill_resident_split_half, prefill_should_split, prefill_split_scratch_cap,
-};
-#[cfg(feature = "hip")]
 pub use device::{gemv_job_tiles, GemvJob, Launcher, ReadJob};
+#[cfg(feature = "hip")]
+pub use device::{
+    prefill_entry_for_half, prefill_has_xhalf, prefill_resident_half, prefill_resident_split_half,
+    prefill_should_split, prefill_split_scratch_cap,
+};
 #[cfg(feature = "hip")]
 pub use device::{GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
 #[cfg(feature = "hip")]
 pub use device::{GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80};
-
-
 
 /// Without the `hip` feature the launcher exists but refuses to run, so callers
 /// need no conditional compilation of their own.
@@ -783,10 +789,7 @@ pub fn prefill_path() -> PrefillPath {
         return PrefillPath::Dot2;
     }
     #[cfg(feature = "hip")]
-    match std::sync::atomic::AtomicU8::load(
-        &PREFILL_PATH,
-        std::sync::atomic::Ordering::Relaxed,
-    ) {
+    match std::sync::atomic::AtomicU8::load(&PREFILL_PATH, std::sync::atomic::Ordering::Relaxed) {
         0 => PrefillPath::F32,
         1 => PrefillPath::Dot2,
         _ => PrefillPath::Wmma,
@@ -798,7 +801,11 @@ pub fn prefill_path() -> PrefillPath {
 /// Kept for callers that only ask "is this an fp16 path" (the looser parity
 /// budget): true unless the f32 kernel is selected.
 pub fn set_prefill_half(on: bool) {
-    set_prefill_path(if on { PrefillPath::Wmma } else { PrefillPath::F32 });
+    set_prefill_path(if on {
+        PrefillPath::Wmma
+    } else {
+        PrefillPath::F32
+    });
 }
 
 pub fn prefill_half() -> bool {
@@ -811,9 +818,7 @@ pub fn prefill_half() -> bool {
 /// a performance decision and not a numeric one.
 pub fn prefill_v2() -> bool {
     static V2: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V2.get_or_init(|| {
-        std::env::var_os("HIPML_PREFILL_V2").map_or(true, |v| v != "0")
-    })
+    *V2.get_or_init(|| std::env::var_os("HIPML_PREFILL_V2").map_or(true, |v| v != "0"))
 }
 
 /// The entry point a base (f32) prefill kernel name maps to on the active path.

@@ -77,10 +77,7 @@ impl Model {
         Self::load_impl(g, None)
     }
 
-    fn load_impl<R: Read + Seek>(
-        g: &mut Gguf<R>,
-        map: Option<&Arc<Map>>,
-    ) -> io::Result<Model> {
+    fn load_impl<R: Read + Seek>(g: &mut Gguf<R>, map: Option<&Arc<Map>>) -> io::Result<Model> {
         // One entry point for weight tensors so the mapped and copied paths
         // share all shape checks.
         let mat = |g: &mut Gguf<R>, name: &str| -> io::Result<Mat> {
@@ -125,7 +122,11 @@ impl Model {
                 expect(&w.alpha, cfg.ssm_dt_rank, cfg.n_embd, "ssm_alpha")?;
                 expect(&w.beta, cfg.ssm_dt_rank, cfg.n_embd, "ssm_beta")?;
                 expect(&w.wout, cfg.n_embd, cfg.ssm_d_inner, "ssm_out")?;
-                check_len(&w.conv1d, cfg.ssm_d_conv * cfg.ssm_conv_channels(), "ssm_conv1d")?;
+                check_len(
+                    &w.conv1d,
+                    cfg.ssm_d_conv * cfg.ssm_conv_channels(),
+                    "ssm_conv1d",
+                )?;
                 check_len(&w.dt_bias, cfg.ssm_dt_rank, "ssm_dt.bias")?;
                 check_len(&w.a, cfg.ssm_dt_rank, "ssm_a")?;
                 check_len(&w.norm, hd_v, "ssm_norm")?;

@@ -200,7 +200,8 @@ fn run_ar_cols(l: &Launcher) -> Result<(usize, usize), String> {
     Ok((diff(&out[0].0, &out[1].0), diff(&out[0].1, &out[1].1)))
 }
 
-fn run_both(l: &Launcher, tokens: usize) -> Result<(usize, usize), String> {    let c = case(tokens, 0x6D17_0000 + tokens as u64)?;
+fn run_both(l: &Launcher, tokens: usize) -> Result<(usize, usize), String> {
+    let c = case(tokens, 0x6D17_0000 + tokens as u64)?;
     let mut out = Vec::new();
     for rows in [false, true] {
         let s = Buffer::from_host(&c.s0)?;

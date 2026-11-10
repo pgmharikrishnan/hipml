@@ -16,7 +16,7 @@ const Q4: KvDtype = KvDtype::Q4;
 fn block_byte_counts_are_the_documented_layout() {
     assert_eq!(Q8.block_bytes(), 34); // f16 d + 32 i8
     assert_eq!(Q4.block_bytes(), 18); // f16 d + 16 packed nibbles
-    // Qwen3.8: 2 (K,V) * 4 kv heads * 16 layers * 256 values/token.
+                                      // Qwen3.8: 2 (K,V) * 4 kv heads * 16 layers * 256 values/token.
     assert_eq!(Q8.token_bytes(4, 256, 16), 34_816);
     assert_eq!(Q4.token_bytes(4, 256, 16), 18_432);
 }
@@ -24,7 +24,9 @@ fn block_byte_counts_are_the_documented_layout() {
 #[test]
 fn f16_round_trips_exactly_and_rounds_to_nearest() {
     // Every f16-representable value must come back bit-exact.
-    for h in [0x0000u16, 0x3800, 0x3c00, 0xbc00, 0x7bff, 0x0001, 0x03ff, 0x7c00] {
+    for h in [
+        0x0000u16, 0x3800, 0x3c00, 0xbc00, 0x7bff, 0x0001, 0x03ff, 0x7c00,
+    ] {
         let f = kv::f16_to_f32(h);
         if h & 0x7fff == 0x7c00 {
             continue; // inf has no finite round trip worth asserting
@@ -126,7 +128,11 @@ fn q4_extreme_maps_exactly_and_error_is_bounded() {
             .iter()
             .zip(&back)
             .fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
-        assert!(err <= amax / 8.0 + 1e-6, "err {err} > amax/8 {}", amax / 8.0);
+        assert!(
+            err <= amax / 8.0 + 1e-6,
+            "err {err} > amax/8 {}",
+            amax / 8.0
+        );
     }
 }
 
@@ -137,7 +143,9 @@ fn row_layout_matches_block_order() {
     let dtype = Q4;
     let (n_kv, seq, dim) = (2usize, 7usize, 64usize);
     let mut rng = Rng::new(77);
-    let values: Vec<f32> = (0..n_kv * seq * dim).map(|_| rng.normal_scaled(0.7)).collect();
+    let values: Vec<f32> = (0..n_kv * seq * dim)
+        .map(|_| rng.normal_scaled(0.7))
+        .collect();
     let bytes = kv::quantize(dtype, &values);
     let nb = dim / BLOCK;
     let bb = dtype.block_bytes();
@@ -161,7 +169,9 @@ fn quantized_attention_equals_attention_over_decoded_values() {
         let (heads, n_kv, dim, seq) = (6usize, 1usize, 64usize, 257usize);
         let mut rng = Rng::new(0xABCD + dtype as u64);
         let q: Vec<f32> = (0..heads * dim).map(|_| rng.normal()).collect();
-        let k: Vec<f32> = (0..n_kv * seq * dim).map(|_| rng.normal_scaled(0.3)).collect();
+        let k: Vec<f32> = (0..n_kv * seq * dim)
+            .map(|_| rng.normal_scaled(0.3))
+            .collect();
         let v: Vec<f32> = (0..n_kv * seq * dim).map(|_| rng.normal()).collect();
         let kb = kv::quantize(dtype, &k);
         let vb = kv::quantize(dtype, &v);
@@ -191,7 +201,9 @@ fn quantized_attention_error_against_the_f32_cache_is_small() {
     let (heads, n_kv, dim, seq) = (6usize, 1usize, 64usize, 512usize);
     let mut rng = Rng::new(0xFEED);
     let q: Vec<f32> = (0..heads * dim).map(|_| rng.normal()).collect();
-    let k: Vec<f32> = (0..n_kv * seq * dim).map(|_| rng.normal_scaled(0.3)).collect();
+    let k: Vec<f32> = (0..n_kv * seq * dim)
+        .map(|_| rng.normal_scaled(0.3))
+        .collect();
     let v: Vec<f32> = (0..n_kv * seq * dim).map(|_| rng.normal()).collect();
     let exact = ops::attn_decode_f32(&q, &k, &v, heads, n_kv, dim, seq, 0.125);
     for (dtype, bound) in [(Q8, 2e-3f32), (Q4, 3e-2)] {
@@ -219,8 +231,14 @@ fn synthetic_bench_cache_is_well_formed() {
     let bytes = kv::synthetic_blocks(Q8, 1000, 7);
     assert_eq!(bytes.len(), 1000 * 34);
     let back = kv::dequantize(Q8, &bytes);
-    assert!(back.iter().all(|v| v.is_finite()), "bench bytes must be finite");
-    assert!(back.iter().any(|v| v.abs() > 0.0), "bench bytes must be non-zero");
+    assert!(
+        back.iter().all(|v| v.is_finite()),
+        "bench bytes must be finite"
+    );
+    assert!(
+        back.iter().any(|v| v.abs() > 0.0),
+        "bench bytes must be non-zero"
+    );
     for b in 0..1000 {
         let d = kv::block_scale(Q8, &bytes, b);
         assert!((0.01..0.05).contains(&d), "scale {d} out of range");

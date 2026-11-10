@@ -45,7 +45,10 @@ pub fn bench(args: &[String]) -> i32 {
         .unwrap_or(5)
         .max(1);
     // The matrix unit is the default; `--dot2` and `--f32` are the A/B paths.
-    let path = match (args.iter().any(|a| a == "--f32"), args.iter().any(|a| a == "--dot2")) {
+    let path = match (
+        args.iter().any(|a| a == "--f32"),
+        args.iter().any(|a| a == "--dot2"),
+    ) {
         (true, _) => ::hipml_kernels::PrefillPath::F32,
         (_, true) => ::hipml_kernels::PrefillPath::Dot2,
         _ => ::hipml_kernels::PrefillPath::Wmma,
@@ -78,21 +81,18 @@ pub fn bench(args: &[String]) -> i32 {
         for &tokens in &[512usize, MAX_TOKENS] {
             let xs = &x[..tokens * case.k];
             let entry = ::hipml_kernels::prefill_entry_for(case.name).unwrap_or(case.name);
-            if let Err(e) =
-                launcher.run_prefill_reps(entry, &w, xs, case.m, case.k, tokens, 1)
-            {
+            if let Err(e) = launcher.run_prefill_reps(entry, &w, xs, case.m, case.k, tokens, 1) {
                 println!("{:<26} failed: {e}", case.label);
                 continue;
             }
-            let (_, secs) = match launcher.run_prefill_reps(
-                entry, &w, xs, case.m, case.k, tokens, reps,
-            ) {
-                Ok(v) => v,
-                Err(e) => {
-                    println!("{:<26} failed: {e}", case.label);
-                    continue;
-                }
-            };
+            let (_, secs) =
+                match launcher.run_prefill_reps(entry, &w, xs, case.m, case.k, tokens, reps) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        println!("{:<26} failed: {e}", case.label);
+                        continue;
+                    }
+                };
             let per = secs / reps as f64;
             let flops = 2.0 * tokens as f64 * case.m as f64 * case.k as f64;
             let tflops = flops / per / 1e12;
@@ -138,7 +138,10 @@ pub fn model(args: &[String]) -> i32 {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(512)
         .max(1);
-    let compute = match (args.iter().any(|a| a == "--f32"), args.iter().any(|a| a == "--dot2")) {
+    let compute = match (
+        args.iter().any(|a| a == "--f32"),
+        args.iter().any(|a| a == "--dot2"),
+    ) {
         (true, _) => ::hipml_kernels::PrefillPath::F32,
         (_, true) => ::hipml_kernels::PrefillPath::Dot2,
         _ => ::hipml_kernels::PrefillPath::Wmma,

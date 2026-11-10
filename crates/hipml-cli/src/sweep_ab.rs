@@ -37,10 +37,7 @@ pub(crate) fn pair_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result<()
     let x = Buffer::alloc(k)?;
     let yg = Buffer::alloc(m)?;
     let yu = Buffer::alloc(m)?;
-    let bytes: usize = pairs
-        .iter()
-        .map(|(g, u, _, _)| g.len() + u.len())
-        .sum();
+    let bytes: usize = pairs.iter().map(|(g, u, _, _)| g.len() + u.len()).sum();
 
     // Warm.
     for (g, u, m, k) in &pairs {
@@ -75,7 +72,11 @@ pub(crate) fn pair_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result<()
 /// The real GEMV kernel over the same set, one launch per tensor, timed with
 /// events. This is the number the graph actually pays: a pure read is not the
 /// kernel the decode step runs.
-pub(crate) fn gemv_pass(l: &hipml_kernels::Launcher, model: &Model, _total: usize) -> Result<(), String> {
+pub(crate) fn gemv_pass(
+    l: &hipml_kernels::Launcher,
+    model: &Model,
+    _total: usize,
+) -> Result<(), String> {
     let mut xs: std::collections::HashMap<usize, Buffer> = std::collections::HashMap::new();
     let mut outs: std::collections::HashMap<usize, Buffer> = std::collections::HashMap::new();
     let mut marks = Vec::new();
@@ -203,7 +204,11 @@ pub(crate) fn event_pass(
         (wall * 1e3 - sum).max(0.0),
         (wall * 1e3 - sum).max(0.0) / w.len() as f64
     );
-    println!("events: bytes {:.2} GB, span bandwidth {:.1} GB/s", total as f64 / 1e9, total as f64 / (sum / 1e3) / 1e9);
+    println!(
+        "events: bytes {:.2} GB, span bandwidth {:.1} GB/s",
+        total as f64 / 1e9,
+        total as f64 / (sum / 1e3) / 1e9
+    );
     for (bytes, ms, floor) in rows.iter().take(5) {
         println!(
             "  {:6.1} MB  span {:8.3} ms  floor {:8.3} ms  overhead {:6.3} ms",
@@ -226,14 +231,20 @@ pub(crate) fn event_pass(
     Ok(())
 }
 
-
 /// Two-row (default) versus one-row-per-warp kernels over the same tensors.
 /// The 1-row entry doubles the grid for shapes whose row count leaves the
 /// machine half empty (5120 rows = 320 blocks at 16 rows/block).
 pub(crate) fn variant_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result<(), String> {
     let mut sets: Vec<(
         &str,
-        Vec<(&ByteBuffer, usize, usize, &'static str, &'static str, &'static str)>,
+        Vec<(
+            &ByteBuffer,
+            usize,
+            usize,
+            &'static str,
+            &'static str,
+            &'static str,
+        )>,
     )> = Vec::new();
     for suffix in [
         "ffn_gate",
@@ -319,7 +330,9 @@ pub(crate) fn variant_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result
             );
         }
         if worst > 0 {
-            return Err(format!("{label}: {worst} of 8 outputs differ between entries"));
+            return Err(format!(
+                "{label}: {worst} of 8 outputs differ between entries"
+            ));
         }
         println!("{label:<12} entries write identical bytes (4 sampled tensors)");
     }

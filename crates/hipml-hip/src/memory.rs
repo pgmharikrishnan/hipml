@@ -142,8 +142,7 @@ impl Buffer {
         if elems > self.len || elems > src.len {
             return Err(format!(
                 "device copy of {elems} values needs dst {} and src {}",
-                self.len,
-                src.len
+                self.len, src.len
             ));
         }
         if elems == 0 {

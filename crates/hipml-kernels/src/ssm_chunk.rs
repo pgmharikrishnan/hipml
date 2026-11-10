@@ -99,9 +99,7 @@ impl<'a> SsmGpuLayer<'a> {
                         )?
                     }
                 }
-                SsmWeight::F32(_) => {
-                    return Err("prefill chunk needs resident weights".to_string())
-                }
+                SsmWeight::F32(_) => return Err("prefill chunk needs resident weights".to_string()),
             }
         }
         Ok(())
@@ -154,9 +152,11 @@ impl<'a> SsmGpuLayer<'a> {
                 &mut v_nv as *mut _ as *mut c_void,
                 &mut v_t as *mut _ as *mut c_void,
             ];
-            self.module
-                .kernel("ssm_gates_chunk_f32")?
-                .launch(LaunchConfig::linear(tokens * d.n_v, 256), s, &mut params)?;
+            self.module.kernel("ssm_gates_chunk_f32")?.launch(
+                LaunchConfig::linear(tokens * d.n_v, 256),
+                s,
+                &mut params,
+            )?;
         }
 
         // conv + silu, carrying the window in a separate buffer
@@ -179,9 +179,11 @@ impl<'a> SsmGpuLayer<'a> {
                 &mut v_k as *mut _ as *mut c_void,
                 &mut v_t as *mut _ as *mut c_void,
             ];
-            self.module
-                .kernel("ssm_conv1d_chunk_f32")?
-                .launch(LaunchConfig::linear(tokens * d.conv_ch, 256), s, &mut params)?;
+            self.module.kernel("ssm_conv1d_chunk_f32")?.launch(
+                LaunchConfig::linear(tokens * d.conv_ch, 256),
+                s,
+                &mut params,
+            )?;
         }
         {
             let n = (d.d_conv - 1) * d.conv_ch;

@@ -96,7 +96,10 @@ impl Map {
     /// The whole file. Panics if `range` is out of bounds.
     pub fn slice(&self, start: usize, len: usize) -> &[u8] {
         assert!(
-            start.checked_add(len).map(|e| e <= self.len()).unwrap_or(false),
+            start
+                .checked_add(len)
+                .map(|e| e <= self.len())
+                .unwrap_or(false),
             "map slice {start}+{len} outside {} bytes",
             self.len()
         );

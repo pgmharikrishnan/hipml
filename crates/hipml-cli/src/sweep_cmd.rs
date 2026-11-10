@@ -67,7 +67,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 i += 2;
             }
             "--max-blocks" => {
-                a.max_blocks = need(i)?.parse().map_err(|e| format!("bad --max-blocks: {e}"))?;
+                a.max_blocks = need(i)?
+                    .parse()
+                    .map_err(|e| format!("bad --max-blocks: {e}"))?;
                 i += 2;
             }
             "--gemv" => {

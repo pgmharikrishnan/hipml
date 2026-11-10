@@ -146,5 +146,4 @@ impl GpuEngine<'_> {
             launches: launches_per_token(self.cfg.n_layer, &self.cfg.is_recr),
         })
     }
-
 }

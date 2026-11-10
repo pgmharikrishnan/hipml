@@ -16,9 +16,9 @@
 use std::ffi::c_void;
 use std::time::Instant;
 
+use hipml_core::config::Config;
 use hipml_core::gen::argmax_f32;
 use hipml_core::gguf::Gguf;
-use hipml_core::config::Config;
 use hipml_hip::{Buffer, LaunchConfig};
 use hipml_model::gpu::{GpuEngine, KvMode};
 use hipml_model::Model;
@@ -62,10 +62,7 @@ pub fn profile(args: &[String]) -> i32 {
                 i += 2;
             }
             "--reps" => {
-                reps = args
-                    .get(i + 1)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(2000);
+                reps = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(2000);
                 i += 2;
             }
             other => {
@@ -164,7 +161,10 @@ pub fn profile(args: &[String]) -> i32 {
     println!("step upload:       {step_us:.3} us (async, 512 queued)");
 
     println!("embedding row:     {embed_ms:.3} ms");
-    println!("logits readback:   {readback_ms:.3} ms ({} values)", cfg.n_vocab);
+    println!(
+        "logits readback:   {readback_ms:.3} ms ({} values)",
+        cfg.n_vocab
+    );
 
     match stream_weights(&model) {
         Ok((secs, bytes, count)) => println!(

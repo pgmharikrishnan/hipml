@@ -169,7 +169,9 @@ impl Launcher {
         slots: usize,
     ) -> Result<(), String> {
         if n_kv == 0 || n_heads % n_kv != 0 {
-            return Err(format!("n_heads {n_heads} is not a multiple of n_kv {n_kv}"));
+            return Err(format!(
+                "n_heads {n_heads} is not a multiple of n_kv {n_kv}"
+            ));
         }
         let group = n_heads / n_kv;
         let (entry, tile) = match dtype {

@@ -24,11 +24,7 @@ pub fn cases() -> Vec<OpCase> {
             name: "head_rmsnorm_f32",
             tol: Tol::DEFAULT,
             seed: 0x3333_4444_5555_6666,
-            scalars: &[
-                ("n_heads", 6.0),
-                ("head_dim", 64.0),
-                ("eps", 1e-6),
-            ],
+            scalars: &[("n_heads", 6.0), ("head_dim", 64.0), ("eps", 1e-6)],
             build: |rng| {
                 let (n_heads, head_dim) = (6usize, 64usize);
                 let x = Tensor::from_fn(vec![n_heads, head_dim], |_| rng.normal());

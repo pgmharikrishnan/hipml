@@ -34,10 +34,7 @@ impl AttnLayer<'_> {
     /// heads.
     pub fn q8_chunk_supported(&self) -> bool {
         let d = self.dims;
-        d.head_dim == 256
-            && d.n_kv > 0
-            && d.n_head % d.n_kv == 0
-            && d.n_head / d.n_kv <= 8
+        d.head_dim == 256 && d.n_kv > 0 && d.n_head % d.n_kv == 0 && d.n_head / d.n_kv <= 8
     }
 
     /// Causal chunk attention over the quantized decode cache, dequantizing
@@ -151,7 +148,11 @@ impl AttnLayer<'_> {
         }
         let att = self.module_kernel(
             l,
-            if tiled { "attn_chunk_tile_f32" } else { "attn_chunk_f32" },
+            if tiled {
+                "attn_chunk_tile_f32"
+            } else {
+                "attn_chunk_f32"
+            },
         )?;
         let mut p_q = q.as_ptr();
         let mut p_kc = kc.as_ptr();
@@ -225,7 +226,11 @@ impl AttnLayer<'_> {
                     &mut nsp as *mut _ as *mut c_void,
                     &mut qs as *mut _ as *mut c_void,
                 ];
-                let zgrid = if full { splits as u32 } else { 2 * splits as u32 };
+                let zgrid = if full {
+                    splits as u32
+                } else {
+                    2 * splits as u32
+                };
                 let cfg = LaunchConfig {
                     // Whole-width: blockIdx.z is the key split. Shipped shape:
                     // split * 2 + d half.

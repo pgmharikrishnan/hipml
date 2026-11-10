@@ -541,7 +541,9 @@ pub fn prefill_resident(
         _ => return Err(format!("{name}: not a prefill kernel")),
     };
     if k % 64 != 0 {
-        return Err(format!("{name}: k={k} must be a multiple of the 64-value k-tile"));
+        return Err(format!(
+            "{name}: k={k} must be a multiple of the 64-value k-tile"
+        ));
     }
     let kernel = module.kernel(name)?;
     let mut p_w = w.as_ptr();

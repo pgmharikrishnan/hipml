@@ -79,11 +79,15 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 i += 2;
             }
             "--entries" => {
-                a.entries = need(i)?.parse().map_err(|e| format!("bad --entries: {e}"))?;
+                a.entries = need(i)?
+                    .parse()
+                    .map_err(|e| format!("bad --entries: {e}"))?;
                 i += 2;
             }
             "--bytes-mib" => {
-                let mib: usize = need(i)?.parse().map_err(|e| format!("bad --bytes-mib: {e}"))?;
+                let mib: usize = need(i)?
+                    .parse()
+                    .map_err(|e| format!("bad --bytes-mib: {e}"))?;
                 a.bytes = mib.max(1) * 1024 * 1024;
                 i += 2;
             }
@@ -259,7 +263,13 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
                 .ok_or("end snapshot has no cached logits")?;
             let first = argmax_f32(&cached) as u32;
             let ms = t.elapsed().as_secs_f64() * 1e3;
-            (ms, decode(engine, &mut st, first, a.tokens)?, "hit", p.len(), 0)
+            (
+                ms,
+                decode(engine, &mut st, first, a.tokens)?,
+                "hit",
+                p.len(),
+                0,
+            )
         }
         None => {
             let (ms, ids) = run(engine, &p, a.chunk, a.tokens)?;
@@ -312,19 +322,20 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
         "\n{:<14} {:>6} {:>8} {:>8} {:>10} {:>9} {:>10} {:>7}",
         "case", "cache", "matched", "computed", "TTFT ms", "vs cold", "prefill%", "ids"
     );
-    let row = |label: &str, kind: &str, matched: usize, computed: usize, ms: f64, cold: f64, ok: bool| {
-        println!(
-            "{:<14} {:>6} {:>8} {:>8} {:>10.1} {:>8.2}x {:>9.0}% {:>7}",
-            label,
-            kind,
-            matched,
-            computed,
-            ms,
-            cold / ms.max(1e-9),
-            100.0 * (1.0 - computed as f64 / a.len as f64),
-            if ok { "ok" } else { "DIFF" }
-        );
-    };
+    let row =
+        |label: &str, kind: &str, matched: usize, computed: usize, ms: f64, cold: f64, ok: bool| {
+            println!(
+                "{:<14} {:>6} {:>8} {:>8} {:>10.1} {:>8.2}x {:>9.0}% {:>7}",
+                label,
+                kind,
+                matched,
+                computed,
+                ms,
+                cold / ms.max(1e-9),
+                100.0 * (1.0 - computed as f64 / a.len as f64),
+                if ok { "ok" } else { "DIFF" }
+            );
+        };
     row("cold P", "miss", 0, a.len, cold_p, cold_p, true);
     row(
         "warm exact P",
@@ -357,7 +368,11 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
         println!(
             "\nhit latency: n/a (exact P@{} snapshot {}, so the repeat prefills)",
             p.len(),
-            if at_end.refused { "was refused" } else { "was evicted" }
+            if at_end.refused {
+                "was refused"
+            } else {
+                "was evicted"
+            }
         );
     }
     println!(
@@ -375,7 +390,11 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
 
     println!("\nentries after the seed:");
     for (pos, bytes, hash) in engine.prefix_entries().unwrap_or_default() {
-        println!("  P@{pos:<6} {:.1} MiB  hash {:016x}", bytes as f64 / 1048576.0, hash);
+        println!(
+            "  P@{pos:<6} {:.1} MiB  hash {:016x}",
+            bytes as f64 / 1048576.0,
+            hash
+        );
     }
     let ssm_mib = 149.64_f64;
     let kv_mib = a.len as f64 * 131_072.0 / 1_048_576.0;

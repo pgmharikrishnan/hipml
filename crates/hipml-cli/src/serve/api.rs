@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 
 use super::chat;
 use super::http::{new_job, Shared};
-use super::wire::{now_unix, write_body_h, write_json, write_json_h, Sse, Text};
 use super::json::{self, Value};
 use super::sched::{Done, Event, CANCEL_GONE, CANCEL_STOP};
+use super::wire::{now_unix, write_body_h, write_json, write_json_h, Sse, Text};
 
 fn parse(body: &[u8]) -> Result<Value, String> {
     let s = std::str::from_utf8(body).map_err(|e| format!("body is not utf-8: {e}"))?;
@@ -47,7 +47,10 @@ fn max_tokens(v: &Value, prompt: usize, ctx: usize) -> usize {
 fn strings(v: Option<&Value>) -> Vec<String> {
     match v {
         Some(Value::Str(s)) => vec![s.clone()],
-        Some(Value::Arr(a)) => a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
+        Some(Value::Arr(a)) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -78,7 +81,12 @@ impl Stops {
             return String::new();
         }
         self.held.push_str(s);
-        if let Some(at) = self.pats.iter().filter_map(|p| self.held.find(p.as_str())).min() {
+        if let Some(at) = self
+            .pats
+            .iter()
+            .filter_map(|p| self.held.find(p.as_str()))
+            .min()
+        {
             self.hit = true;
             let out = self.held[..at].to_string();
             self.held.clear();
@@ -133,9 +141,12 @@ fn peer_closed(stream: &TcpStream) -> bool {
 /// channel is quiet: a decoding slot sends a token every few tens of ms, so a
 /// non-streaming client that hangs up would otherwise go unnoticed until the
 /// whole reply was generated. `peek` carries the last check across calls.
-fn next_event(rx: &Receiver<Event>, stream: &TcpStream, cancel: &AtomicU8, peek: &mut Instant)
-    -> Result<Event, String>
-{
+fn next_event(
+    rx: &Receiver<Event>,
+    stream: &TcpStream,
+    cancel: &AtomicU8,
+    peek: &mut Instant,
+) -> Result<Event, String> {
     let every = Duration::from_millis(250);
     let deadline = Instant::now() + Duration::from_secs(3600);
     loop {
@@ -154,16 +165,20 @@ fn next_event(rx: &Receiver<Event>, stream: &TcpStream, cancel: &AtomicU8, peek:
                     return Err("scheduler timed out".to_string());
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => {
-                return Err("scheduler stopped".to_string())
-            }
+            Err(RecvTimeoutError::Disconnected) => return Err("scheduler stopped".to_string()),
         }
     }
 }
 
 /// Decoded text for a run of ids, after stop strings. Sets the cancel flag
 /// the first time a stop string matches.
-fn deliver(shared: &Shared, text: &mut Text, stops: &mut Stops, cancel: &AtomicU8, t: &[u32]) -> String {
+fn deliver(
+    shared: &Shared,
+    text: &mut Text,
+    stops: &mut Stops,
+    cancel: &AtomicU8,
+    t: &[u32],
+) -> String {
     if stops.hit {
         return String::new();
     }
@@ -186,7 +201,11 @@ fn tail(text: &mut Text, stops: &mut Stops, done: &mut Done) -> String {
 
 fn token_ids(v: Option<&Value>) -> Vec<u32> {
     v.and_then(Value::as_arr)
-        .map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as u32)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_u64().map(|n| n as u32))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -354,13 +373,14 @@ pub fn chat_completion(
     if bool_field(&v, "stream", false) {
         stream_chat(shared, stream, rx, at, id, &model, &cancel, stops)
     } else {
-        let (text, _ids, done, ttft, decode_ms) = match drain(shared, stream, &rx, &cancel, stops, at) {
-            Ok(x) => x,
-            Err(e) => {
-                let b = format!("{{\"error\":{{\"message\":\"{}\"}}}}", json::escape(&e));
-                return write_json(stream, "500 Internal Server Error", &b);
-            }
-        };
+        let (text, _ids, done, ttft, decode_ms) =
+            match drain(shared, stream, &rx, &cancel, stops, at) {
+                Ok(x) => x,
+                Err(e) => {
+                    let b = format!("{{\"error\":{{\"message\":\"{}\"}}}}", json::escape(&e));
+                    return write_json(stream, "500 Internal Server Error", &b);
+                }
+            };
         let body = format!(
             "{{\"id\":\"chatcmpl-{id}\",\"object\":\"chat.completion\",\"created\":{},\
              \"model\":\"{model}\",\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\
@@ -471,11 +491,7 @@ fn stream_chat(
     }
 }
 
-pub fn completion(
-    shared: &Arc<Shared>,
-    stream: &mut TcpStream,
-    body: &[u8],
-) -> Result<(), String> {
+pub fn completion(shared: &Arc<Shared>, stream: &mut TcpStream, body: &[u8]) -> Result<(), String> {
     let v = match parse(body) {
         Ok(v) => v,
         Err(e) => return bad(stream, &e),
@@ -506,13 +522,14 @@ pub fn completion(
     let streaming = bool_field(&v, "stream", false);
     let stops = Stops::new(stop);
     if !streaming {
-        let (text, ids, done, ttft, decode_ms) = match drain(shared, stream, &rx, &cancel, stops, at) {
-            Ok(x) => x,
-            Err(e) => {
-                let b = format!("{{\"error\":{{\"message\":\"{}\"}}}}", json::escape(&e));
-                return write_json(stream, "500 Internal Server Error", &b);
-            }
-        };
+        let (text, ids, done, ttft, decode_ms) =
+            match drain(shared, stream, &rx, &cancel, stops, at) {
+                Ok(x) => x,
+                Err(e) => {
+                    let b = format!("{{\"error\":{{\"message\":\"{}\"}}}}", json::escape(&e));
+                    return write_json(stream, "500 Internal Server Error", &b);
+                }
+            };
         let body = format!(
             "{{\"content\":\"{}\",\"stop\":{},\"tokens\":{:?},\"timings\":{{{}}}}}",
             json::escape(&text),
@@ -520,7 +537,13 @@ pub fn completion(
             ids,
             timings(&done, ttft, decode_ms)
         );
-        write_body_h(stream, "200 OK", "application/json", exact_header(shared), body.as_bytes())
+        write_body_h(
+            stream,
+            "200 OK",
+            "application/json",
+            exact_header(shared),
+            body.as_bytes(),
+        )
     } else {
         stream_completion(shared, stream, rx, at, id, &cancel, stops)
     }
@@ -624,12 +647,18 @@ mod tests {
 
     #[test]
     fn cuts_before_a_stop_split_across_deltas() {
-        assert_eq!(run(&["\nUser:"], &["Hi", " there\nU", "ser: next"]), ("Hi there".to_string(), true));
+        assert_eq!(
+            run(&["\nUser:"], &["Hi", " there\nU", "ser: next"]),
+            ("Hi there".to_string(), true)
+        );
     }
 
     #[test]
     fn releases_held_text_that_never_becomes_a_stop() {
-        assert_eq!(run(&["</a>"], &["x</", "b> y"]), ("x</b> y".to_string(), false));
+        assert_eq!(
+            run(&["</a>"], &["x</", "b> y"]),
+            ("x</b> y".to_string(), false)
+        );
     }
 
     #[test]

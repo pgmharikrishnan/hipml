@@ -76,12 +76,7 @@ pub struct Snap {
 }
 
 impl Cols {
-    pub(crate) fn new(
-        cfg: &Config,
-        cap: usize,
-        p_acc: usize,
-        p_ml: usize,
-    ) -> Result<Cols, String> {
+    pub(crate) fn new(cfg: &Config, cap: usize, p_acc: usize, p_ml: usize) -> Result<Cols, String> {
         let n = cfg.n_embd;
         let ff = cfg.n_ff;
         let qd = cfg.n_head * cfg.head_dim;
@@ -205,7 +200,10 @@ impl<'a> GpuEngine<'a> {
         let _exact = (!hipml_kernels::skinny_on()).then(hipml_kernels::exact_scope);
         self.ensure_cols(rows)?;
         if rows > 1 && snaps.cols < rows - 1 {
-            return Err(format!("{} snapshot columns for {rows} columns", snaps.cols));
+            return Err(format!(
+                "{} snapshot columns for {rows} columns",
+                snaps.cols
+            ));
         }
         let cfg = self.cfg.clone();
         let n = cfg.n_embd;
@@ -267,17 +265,7 @@ impl<'a> GpuEngine<'a> {
                 }
                 BlockKind::Full { attn, deep } => {
                     super::trace::mark(&mut self.trace, l, "attn_in")?;
-                    attn.prepare_rows(
-                        l,
-                        &c.t,
-                        rows,
-                        &c.qg,
-                        &c.q,
-                        &c.agate,
-                        &c.k,
-                        &c.v,
-                        pos0,
-                    )?;
+                    attn.prepare_rows(l, &c.t, rows, &c.qg, &c.q, &c.agate, &c.k, &c.v, pos0)?;
                     // Append every column's K/V first, then attend: column `r`
                     // reads positions `0..=pos0 + r`, so a later column's append
                     // is invisible to it.
@@ -352,7 +340,8 @@ impl<'a> GpuEngine<'a> {
             .tensor(OUTPUT)
             .ok_or_else(|| "model has no output.weight".to_string())?;
         let entry = gemv_entry(out.ty())?;
-        if let Some(name) = hipml_kernels::skinny_entry(entry).filter(|_| hipml_kernels::skinny_on())
+        if let Some(name) =
+            hipml_kernels::skinny_entry(entry).filter(|_| hipml_kernels::skinny_on())
         {
             l.run_skinny_resident(
                 name,

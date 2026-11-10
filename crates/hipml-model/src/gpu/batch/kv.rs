@@ -6,8 +6,8 @@
 //! and attention kernels address a slot from `blockIdx.y` instead of needing a
 //! per-slot pointer table.
 
-use super::*;
 use super::deep_kv::MAX_SPLITS;
+use super::*;
 
 pub(super) struct BatchKv {
     pub dtype: KvDtype,
@@ -74,7 +74,8 @@ impl BatchKv {
         let row = self.row();
         let slot_bytes = self.slot_bytes();
         for (b, &depth) in depths.iter().enumerate() {
-            let pattern = hipml_core::kv::synthetic_blocks(self.dtype, depth * blocks_per_row, seed);
+            let pattern =
+                hipml_core::kv::synthetic_blocks(self.dtype, depth * blocks_per_row, seed);
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
             for h in 0..self.n_kv {
                 let off = b * slot_bytes + h * self.seq * row;

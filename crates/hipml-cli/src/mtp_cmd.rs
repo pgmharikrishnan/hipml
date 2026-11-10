@@ -110,10 +110,10 @@ pub fn run(args: &[String]) -> i32 {
     };
     let mut stop_ids = a.stop_ids.clone();
     if a.stop_eos {
-        match hipml_core::gguf::Gguf::open(&a.gguf)
-            .ok()
-            .and_then(|g| g.meta("tokenizer.ggml.eos_token_id").and_then(|v| v.as_u32()))
-        {
+        match hipml_core::gguf::Gguf::open(&a.gguf).ok().and_then(|g| {
+            g.meta("tokenizer.ggml.eos_token_id")
+                .and_then(|v| v.as_u32())
+        }) {
             Some(eos) => stop_ids.push(eos),
             None => eprintln!("mtp-accept: --stop-eos but the GGUF has no eos id"),
         }

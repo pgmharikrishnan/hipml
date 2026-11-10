@@ -193,7 +193,8 @@ impl Chunk {
             + self.xh.len()
             + self.sk.len()
             + self.apart.len()
-            + self.apart_ml.len()) * 4
+            + self.apart_ml.len())
+            * 4
             + self.ssm.bytes()
     }
 }
@@ -406,15 +407,7 @@ impl<'a> GpuEngine<'a> {
                     if let Some(r) = rep.as_mut() {
                         r.lap(l, |r| &mut r.attn_gemm_ms);
                     }
-                    attn_tile::attention_tile(
-                        l,
-                        &cfg,
-                        attn,
-                        deep.as_ref(),
-                        c,
-                        pos0,
-                        n_tok,
-                    )?;
+                    attn_tile::attention_tile(l, &cfg, attn, deep.as_ref(), c, pos0, n_tok)?;
                     attn.apply_output_chunk(l, &c.aout, &c.aq_gate, &c.y, n_tok)?;
                     if let Some(r) = rep.as_mut() {
                         r.lap(l, |r| &mut r.attn_seq_ms);
@@ -490,17 +483,22 @@ impl<'a> GpuEngine<'a> {
 
         // Every row's post-norm hidden state, for the speculative drafter.
         if let Some(cap) = capture {
-            let dst = unsafe {
-                (cap.as_ptr() as *mut u8).add(pos0 * n * 4) as *mut std::ffi::c_void
-            };
+            let dst =
+                unsafe { (cap.as_ptr() as *mut u8).add(pos0 * n * 4) as *mut std::ffi::c_void };
             l.rmsnorm_ptr(c.x.as_ptr(), &self.output_norm, dst, n, cfg.eps, n_tok)?;
         }
 
         // The chunk's last row is the only one that needs logits.
-        let last_row = unsafe {
-            (c.x.as_ptr() as *mut u8).add((n_tok - 1) * n * 4) as *mut std::ffi::c_void
-        };
-        l.rmsnorm_ptr(last_row, &self.output_norm, self.final_h.as_ptr(), n, cfg.eps, 1)?;
+        let last_row =
+            unsafe { (c.x.as_ptr() as *mut u8).add((n_tok - 1) * n * 4) as *mut std::ffi::c_void };
+        l.rmsnorm_ptr(
+            last_row,
+            &self.output_norm,
+            self.final_h.as_ptr(),
+            n,
+            cfg.eps,
+            1,
+        )?;
         let out = self
             .model
             .tensor(OUTPUT)

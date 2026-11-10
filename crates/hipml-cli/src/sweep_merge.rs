@@ -65,10 +65,7 @@ pub(crate) fn merge_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result<(
     }
     let k = pairs[0].gate.2;
     let m = pairs[0].gate.1;
-    let bytes: usize = pairs
-        .iter()
-        .map(|p| p.gate.0.len() + p.up.0.len())
-        .sum();
+    let bytes: usize = pairs.iter().map(|p| p.gate.0.len() + p.up.0.len()).sum();
     let x = Buffer::alloc(k)?;
     let yg = Buffer::alloc(m)?;
     let yu = Buffer::alloc(m)?;
@@ -109,38 +106,41 @@ pub(crate) fn merge_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result<(
     // Exactness: the merged kernel must write the same bits as the two entries.
     let mut mismatched = 0usize;
     for p in pairs.iter().take(4) {
-        l.run_quant_resident(entries[p.gate.3 as usize], p.gate.0, &x, &yg, p.gate.1, p.gate.2)?;
+        l.run_quant_resident(
+            entries[p.gate.3 as usize],
+            p.gate.0,
+            &x,
+            &yg,
+            p.gate.1,
+            p.gate.2,
+        )?;
         l.run_quant_resident(entries[p.up.3 as usize], p.up.0, &x, &yu, p.up.1, p.up.2)?;
         l.synchronize()?;
         let a_gate = yg.download_bytes(0, p.gate.1 * 4)?;
         let a_up = yu.download_bytes(0, p.up.1 * 4)?;
-        let jobs = job_buffer(&[
-            GemvJob {
-                w: p.gate.0.device_ptr(),
-                x: x.as_ptr() as usize,
-                y: yb.as_ptr() as usize,
-                m: p.gate.1 as i32,
-                k: p.gate.2 as i32,
-                kind: p.gate.3,
-                pad: 0,
-            },
-        ])?;
+        let jobs = job_buffer(&[GemvJob {
+            w: p.gate.0.device_ptr(),
+            x: x.as_ptr() as usize,
+            y: yb.as_ptr() as usize,
+            m: p.gate.1 as i32,
+            k: p.gate.2 as i32,
+            kind: p.gate.3,
+            pad: 0,
+        }])?;
         l.gemv_jobs(&jobs, 1, gemv_job_tiles(p.gate.3, p.gate.1))?;
         l.synchronize()?;
         if yb.download_bytes(0, p.gate.1 * 4)? != a_gate {
             mismatched += 1;
         }
-        let jobs = job_buffer(&[
-            GemvJob {
-                w: p.up.0.device_ptr(),
-                x: x.as_ptr() as usize,
-                y: yb.as_ptr() as usize,
-                m: p.up.1 as i32,
-                k: p.up.2 as i32,
-                kind: p.up.3,
-                pad: 0,
-            },
-        ])?;
+        let jobs = job_buffer(&[GemvJob {
+            w: p.up.0.device_ptr(),
+            x: x.as_ptr() as usize,
+            y: yb.as_ptr() as usize,
+            m: p.up.1 as i32,
+            k: p.up.2 as i32,
+            kind: p.up.3,
+            pad: 0,
+        }])?;
         l.gemv_jobs(&jobs, 1, gemv_job_tiles(p.up.3, p.up.1))?;
         l.synchronize()?;
         if yb.download_bytes(0, p.up.1 * 4)? != a_up {
@@ -148,23 +148,33 @@ pub(crate) fn merge_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result<(
         }
     }
     if mismatched > 0 {
-        return Err(format!("{mismatched} of 8 merged rows differ from the entries"));
+        return Err(format!(
+            "{mismatched} of 8 merged rows differ from the entries"
+        ));
     }
     println!("merge: merged rows identical to the standalone entries (8 sampled)");
 
-    let pass = |label: &str, launches: usize, f: &dyn Fn() -> Result<(), String>| -> Result<(), String> {
-        f()?;
-        l.synchronize()?;
-        let t = Instant::now();
-        f()?;
-        l.synchronize()?;
-        report(label, bytes, launches, t.elapsed().as_secs_f64());
-        Ok(())
-    };
+    let pass =
+        |label: &str, launches: usize, f: &dyn Fn() -> Result<(), String>| -> Result<(), String> {
+            f()?;
+            l.synchronize()?;
+            let t = Instant::now();
+            f()?;
+            l.synchronize()?;
+            report(label, bytes, launches, t.elapsed().as_secs_f64());
+            Ok(())
+        };
 
     pass("ffn pair sequential", pairs.len() * 2, &|| {
         for p in &pairs {
-            l.run_quant_resident(entries[p.gate.3 as usize], p.gate.0, &x, &yg, p.gate.1, p.gate.2)?;
+            l.run_quant_resident(
+                entries[p.gate.3 as usize],
+                p.gate.0,
+                &x,
+                &yg,
+                p.gate.1,
+                p.gate.2,
+            )?;
             l.run_quant_resident(entries[p.up.3 as usize], p.up.0, &x, &yu, p.up.1, p.up.2)?;
         }
         Ok(())
@@ -200,7 +210,9 @@ pub(crate) fn merge_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result<(
         });
     }
     let all_buf = job_buffer(&all)?;
-    pass("ffn pair one launch", 1, &|| l.gemv_jobs(&all_buf, all.len(), tiles))
+    pass("ffn pair one launch", 1, &|| {
+        l.gemv_jobs(&all_buf, all.len(), tiles)
+    })
 }
 
 /// `GemvJob` is `repr(C)` plain data; this is the byte view the buffer needs.
@@ -221,7 +233,13 @@ fn job_buffer(jobs: &[hipml_kernels::GemvJob]) -> Result<Buffer, String> {
 /// the unsplit kernel bit-for-bit (they are not expected to: the accumulation
 /// order over k changes, which is why this is a probe and not a swap).
 pub(crate) fn split_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result<(), String> {
-    for suffix in ["ssm_out", "attn_output", "attn_qkv", "attn_gate", "ffn_down"] {
+    for suffix in [
+        "ssm_out",
+        "attn_output",
+        "attn_qkv",
+        "attn_gate",
+        "ffn_down",
+    ] {
         let mut v: Vec<(&ByteBuffer, usize, usize)> = Vec::new();
         for i in 0..64 {
             let t = match model.tensor(&format!("blk.{i}.{suffix}.weight")) {
@@ -241,7 +259,9 @@ pub(crate) fn split_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result<(
         let x = Buffer::alloc(k)?;
         // A real pattern: with an uninitialised (zero) x every output is zero
         // and any exactness comparison below would pass vacuously.
-        let xf: Vec<f32> = (0..k).map(|i| ((i * 37) % 101) as f32 * 0.01 - 0.5).collect();
+        let xf: Vec<f32> = (0..k)
+            .map(|i| ((i * 37) % 101) as f32 * 0.01 - 0.5)
+            .collect();
         x.upload_bytes(0, unsafe {
             std::slice::from_raw_parts(xf.as_ptr() as *const u8, k * 4)
         })?;
@@ -310,4 +330,3 @@ pub(crate) fn split_pass(l: &hipml_kernels::Launcher, model: &Model) -> Result<(
     }
     Ok(())
 }
-

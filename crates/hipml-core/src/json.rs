@@ -81,7 +81,11 @@ impl Value {
 const MAX_DEPTH: usize = 64;
 
 pub fn parse(text: &str) -> Result<Value, String> {
-    let mut p = Parser { b: text.as_bytes(), i: 0, depth: 0 };
+    let mut p = Parser {
+        b: text.as_bytes(),
+        i: 0,
+        depth: 0,
+    };
     let v = p.value()?;
     p.ws();
     if p.i != p.b.len() {
@@ -209,12 +213,9 @@ impl Parser<'_> {
                                 if !(0xDC00..0xE000).contains(&lo) {
                                     return Err("bad surrogate pair".to_string());
                                 }
-                                let cp = 0x10000
-                                    + (((hi - 0xD800) as u32) << 10)
-                                    + (lo - 0xDC00) as u32;
-                                out.push(
-                                    char::from_u32(cp).ok_or("bad surrogate pair")?,
-                                );
+                                let cp =
+                                    0x10000 + (((hi - 0xD800) as u32) << 10) + (lo - 0xDC00) as u32;
+                                out.push(char::from_u32(cp).ok_or("bad surrogate pair")?);
                             } else {
                                 out.push(char::from_u32(hi as u32).ok_or("bad \\u")?);
                             }
@@ -228,8 +229,7 @@ impl Parser<'_> {
                     let start = self.i - 1;
                     let width = utf8_width(c);
                     let end = (start + width).min(self.b.len());
-                    let s = std::str::from_utf8(&self.b[start..end])
-                        .map_err(|e| e.to_string())?;
+                    let s = std::str::from_utf8(&self.b[start..end]).map_err(|e| e.to_string())?;
                     out.push_str(s);
                     self.i = end;
                 }
@@ -337,7 +337,10 @@ mod tests {
         assert_eq!(v.get("n").and_then(Value::as_u64), Some(3));
         let msgs = v.get("messages").and_then(Value::as_arr).unwrap();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].get("content").and_then(Value::as_str), Some("hi \"there\"\n"));
+        assert_eq!(
+            msgs[0].get("content").and_then(Value::as_str),
+            Some("hi \"there\"\n")
+        );
     }
 
     #[test]

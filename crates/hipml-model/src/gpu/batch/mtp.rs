@@ -64,7 +64,12 @@ pub struct MtpBatch<'a> {
 impl<'a> MtpBatch<'a> {
     /// Build the drafter from the sidecar's `blk.64` tensors already merged
     /// into `model` (`Model::load_sidecar`), with one q8 KV cache per slot.
-    pub fn new(model: &'a Model, n_ctx: usize, slots: usize, cfg: Config) -> Result<MtpBatch<'a>, String> {
+    pub fn new(
+        model: &'a Model,
+        n_ctx: usize,
+        slots: usize,
+        cfg: Config,
+    ) -> Result<MtpBatch<'a>, String> {
         let n = cfg.n_embd;
         let ff = cfg.n_ff;
         let qw = cfg.n_head * cfg.head_dim;
@@ -79,7 +84,12 @@ impl<'a> MtpBatch<'a> {
             if shape.len() != 2 {
                 return Err(format!("{name}: expected a matrix, got {shape:?}"));
             }
-            Ok((t.buffer(), shape[0] as usize, shape[1] as usize, mat_kind(t.ty())?))
+            Ok((
+                t.buffer(),
+                shape[0] as usize,
+                shape[1] as usize,
+                mat_kind(t.ty())?,
+            ))
         };
         let v = |name: &str| model.f32_vec(&format!("blk.{blk}.{name}"));
         let l = model.launcher();
@@ -97,7 +107,10 @@ impl<'a> MtpBatch<'a> {
         let embed_t = model
             .tensor(crate::TOKEN_EMBD)
             .ok_or_else(|| "model has no token_embd.weight".to_string())?;
-        let embed = (embed_t.buffer(), (embed_t.nbytes() / embed_t.rows()) as usize);
+        let embed = (
+            embed_t.buffer(),
+            (embed_t.nbytes() / embed_t.rows()) as usize,
+        );
         let head_t = model
             .tensor(crate::OUTPUT)
             .ok_or_else(|| "model has no output.weight".to_string())?;
@@ -213,13 +226,21 @@ impl<'a> MtpBatch<'a> {
         self.pos.upload_bytes_async(0, &pos_bytes, l.stream())?;
 
         for (i, &tok) in tokens.iter().enumerate() {
-            l.embed_row_q4_k_at(self.embed.0, tok as usize, self.embed.1, &self.emb, i * n, n)?;
+            l.embed_row_q4_k_at(
+                self.embed.0,
+                tok as usize,
+                self.embed.1,
+                &self.emb,
+                i * n,
+                n,
+            )?;
         }
         l.rmsnorm_rows(&self.emb, &self.enorm, &self.en, n, cfg.eps, b)?;
         l.rmsnorm_rows(&self.hnext, &self.hnorm, &self.hn, n, cfg.eps, b)?;
         let stream = l.stream();
         for i in 0..b {
-            self.en.copy_range_on(&self.cat, i * n, i * 2 * n, n, stream)?;
+            self.en
+                .copy_range_on(&self.cat, i * n, i * 2 * n, n, stream)?;
             self.hn
                 .copy_range_on(&self.cat, i * n, i * 2 * n + n, n, stream)?;
         }
@@ -227,8 +248,15 @@ impl<'a> MtpBatch<'a> {
         l.rmsnorm_rows(&self.x, &self.attn_norm, &self.t, n, cfg.eps, b)?;
         self.attn
             .qkv_rows(l, &self.t, &self.qg, &self.k, &self.v, b)?;
-        self.attn
-            .split_rope_rows(l, &self.qg, &self.k, &self.q, &self.gate_b, positions, &self.pos)?;
+        self.attn.split_rope_rows(
+            l,
+            &self.qg,
+            &self.k,
+            &self.q,
+            &self.gate_b,
+            positions,
+            &self.pos,
+        )?;
         let split = (maxpos / 64).clamp(1, crate::gpu::deep_kv::MAX_SPLITS);
         l.kv_encode_batch(
             self.kv.dtype.id(),
@@ -265,7 +293,8 @@ impl<'a> MtpBatch<'a> {
             qw,
             b,
         )?;
-        self.attn.out_rows(l, &self.aout, &self.gate_b, &self.y, b)?;
+        self.attn
+            .out_rows(l, &self.aout, &self.gate_b, &self.y, b)?;
         l.residual_buf(&self.x, &self.y, &self.x1, b * n)?;
         l.rmsnorm_rows(&self.x1, &self.post_norm, &self.t, n, cfg.eps, b)?;
         self.gate.gemm_batched(l, &self.t, &self.g, b)?;
@@ -276,7 +305,15 @@ impl<'a> MtpBatch<'a> {
         l.rmsnorm_rows(&self.out, &self.head_norm, &self.hnext, n, cfg.eps, b)?;
         let kind = crate::gpu_weights::batch_kind(gemv_entry(self.head.1)?)
             .ok_or_else(|| "drafter head has no batched GEMV".to_string())?;
-        l.gemv_batched(kind, self.head.0, &self.hnext, &self.logits, cfg.n_vocab, n, b)?;
+        l.gemv_batched(
+            kind,
+            self.head.0,
+            &self.hnext,
+            &self.logits,
+            cfg.n_vocab,
+            n,
+            b,
+        )?;
         l.argmax_batched(
             &self.logits,
             &self.arg_v,
@@ -327,7 +364,14 @@ impl<'a> MtpBatch<'a> {
         let n = cfg.n_embd;
         let l = self.attn_launcher();
         for (i, &tok) in tokens.iter().enumerate() {
-            l.embed_row_q4_k_at(self.embed.0, tok as usize, self.embed.1, &self.emb, i * n, n)?;
+            l.embed_row_q4_k_at(
+                self.embed.0,
+                tok as usize,
+                self.embed.1,
+                &self.emb,
+                i * n,
+                n,
+            )?;
         }
         l.rmsnorm_rows(&self.emb, &self.enorm, &self.en, n, cfg.eps, total)?;
         // Gather the selected hidden rows into a contiguous tile, then norm.
@@ -336,7 +380,8 @@ impl<'a> MtpBatch<'a> {
         }
         l.rmsnorm_rows(&self.hn, &self.hnorm, &self.t, n, cfg.eps, total)?;
         for i in 0..total {
-            self.en.copy_range_on(&self.cat, i * n, i * 2 * n, n, l.stream())?;
+            self.en
+                .copy_range_on(&self.cat, i * n, i * 2 * n, n, l.stream())?;
             self.t
                 .copy_range_on(&self.cat, i * n, i * 2 * n + n, n, l.stream())?;
         }

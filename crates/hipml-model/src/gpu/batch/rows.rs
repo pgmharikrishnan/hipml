@@ -242,14 +242,12 @@ impl<'a> BatchEngine<'a> {
                 let (conv, state) = s.inst.state_lens();
                 let cw = s.conv_state.len() / self.slots;
                 let sw = s.s_state.len() / self.slots;
-                out.extend(bytes_to_f32(&s.conv_state.download_bytes(
-                    slot * cw * 4,
-                    conv * 4,
-                )?));
-                out.extend(bytes_to_f32(&s.s_state.download_bytes(
-                    slot * sw * 4,
-                    state * 4,
-                )?));
+                out.extend(bytes_to_f32(
+                    &s.conv_state.download_bytes(slot * cw * 4, conv * 4)?,
+                ));
+                out.extend(bytes_to_f32(
+                    &s.s_state.download_bytes(slot * sw * 4, state * 4)?,
+                ));
             }
         }
         Ok(out)
@@ -449,7 +447,14 @@ impl<'a> BatchEngine<'a> {
             let src = tail_base[i] + tail_len[i] - 1;
             r.x.copy_range_on(&self.final_h, src * n, i * n, n, stream)?;
         }
-        l.rmsnorm_rows(&self.final_h, &self.output_norm, &r.t, n, cfg.eps, tails.len())?;
+        l.rmsnorm_rows(
+            &self.final_h,
+            &self.output_norm,
+            &r.t,
+            n,
+            cfg.eps,
+            tails.len(),
+        )?;
         let out = self
             .model
             .tensor(crate::OUTPUT)

@@ -96,57 +96,299 @@ impl Metrics {
         };
         let mut out = String::new();
         let mut c = |name: &str, help: &str, kind: &str, value: String| {
-            out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {value}\n"));
+            out.push_str(&format!(
+                "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {value}\n"
+            ));
         };
-        c("hipml_requests_total", "Requests admitted", "counter", s.requests_total.to_string());
-        c("hipml_requests_done_total", "Requests completed", "counter", s.requests_done.to_string());
-        c("hipml_requests_cancelled_total", "Requests ended early (client gone or stop string)", "counter", s.requests_cancelled.to_string());
-        c("hipml_requests_failed_total", "Requests ended with an error", "counter", s.requests_failed.to_string());
-        c("hipml_active_slots", "Requests prefilling or decoding (batch slots, a lone MTP request, the prefill)", "gauge", s.active_slots.to_string());
-        c("hipml_queue_depth", "Requests waiting for admission", "gauge", s.queue_depth.to_string());
-        c("hipml_prompt_tokens_total", "Prompt tokens processed", "counter", s.prompt_tokens.to_string());
-        c("hipml_generated_tokens_total", "Tokens generated", "counter", s.generated_tokens.to_string());
-        c("hipml_decode_steps_total", "Scheduler decode steps", "counter", s.decode_steps.to_string());
-        c("hipml_batch_steps_total", "Batched forward passes", "counter", s.batch_steps.to_string());
-        c("hipml_batch_requests_total", "Requests decoded through the batch engine", "counter", s.batch_requests.to_string());
-        c("hipml_mtp_requests_total", "Requests decoded with MTP speculation", "counter", s.mtp_requests.to_string());
-        c("hipml_spec_steps_total", "MTP draft+verify steps", "counter", s.spec_steps.to_string());
-        c("hipml_spec_drafted_total", "Draft tokens proposed", "counter", s.spec_drafted.to_string());
-        c("hipml_spec_accepted_total", "Draft tokens accepted", "counter", s.spec_accepted.to_string());
-        c("hipml_prefix_lookups_total", "Prefix-cache lookups", "counter", s.prefix_lookups.to_string());
-        c("hipml_prefix_hits_total", "Prefix-cache hits (any length)", "counter", s.prefix_hits.to_string());
-        c("hipml_prefix_misses_total", "Prefix-cache misses", "counter", s.prefix_misses.to_string());
-        c("hipml_prefix_hit_tokens_total", "Prompt tokens restored from cache", "counter", s.prefix_hit_tokens.to_string());
-        c("hipml_prefix_hit_rate", "Fixture hit rate over lookups", "gauge", format!("{hit_rate:.6}"));
-        c("hipml_prefix_restore_seconds_total", "Device time restoring a prefix", "counter", format!("{:.6}", s.prefix_restore_ms / 1e3));
-        c("hipml_prefix_captures_total", "Prefix snapshots taken", "counter", s.prefix_captures.to_string());
-        c("hipml_prefix_refused_total", "Prefix snapshots refused because one entry exceeded the cache bound", "counter", s.prefix_refused.to_string());
-        c("hipml_prefix_capture_seconds_total", "Device time capturing a prefix", "counter", format!("{:.6}", s.prefix_capture_ms / 1e3));
-        c("hipml_prefill_chunks_total", "Prefill tiles run by the scheduler", "counter", s.prefill_chunks.to_string());
-        c("hipml_prefill_seconds_total", "Wall time in prefill tiles", "counter", format!("{:.6}", s.prefill_ms / 1e3));
-        c("hipml_prefill_interleaved_total", "Prefill tiles run while a batch was decoding", "counter", s.prefill_interleaved.to_string());
-        c("hipml_interleave_stall_seconds_total", "Decode stall charged to interleaved prefill", "counter", format!("{:.6}", s.interleave_stall_ms / 1e3));
-        c("hipml_interleave_stall_seconds_max", "Longest single interleaved prefill tile", "gauge", format!("{:.6}", s.max_interleave_stall_ms / 1e3));
-        c("hipml_tail_row_blocks_total", "Row-block tail prefills run", "counter", s.tail_row_blocks.to_string());
-        c("hipml_tail_rows_total", "Prompt tail rows served by row blocks", "counter", s.tail_rows.to_string());
-        c("hipml_tail_rows_seconds_total", "Wall time in row-block tail prefill", "counter", format!("{:.6}", s.tail_rows_ms / 1e3));
-        c("hipml_requests_rejected_busy_total", "Requests answered 503 because slots and queue were full", "counter", s.requests_rejected_busy.to_string());
-        c("hipml_connections_rejected_total", "Connections refused past the connection bound", "counter", s.connections_rejected.to_string());
-        c("hipml_inflight", "Generation requests admitted but not yet finished", "gauge", s.inflight.to_string());
-        c("hipml_inflight_max", "Admission bound (slots + queue bound)", "gauge", s.inflight_max.to_string());
-        c("hipml_connections", "Open connection threads", "gauge", s.connections.to_string());
-        c("hipml_connections_max", "Connection thread bound", "gauge", s.connections_max.to_string());
-        c("hipml_queue_max", "Admission bound minus slots (the queue bound)", "gauge", s.queue_max.to_string());
-        c("hipml_job_errors_total", "Jobs that failed alone; the engine kept serving", "counter", s.job_errors.to_string());
-        c("hipml_slot_faults_total", "Decode steps failed for one slot only", "counter", s.slot_faults.to_string());
-        c("hipml_batch_resets_total", "Whole-batch resets after an unpinnable step failure", "counter", s.batch_resets.to_string());
-        c("hipml_prefix_invalidated_total", "Prefix-cache entries dropped because a job failed", "counter", s.prefix_invalidated.to_string());
-        c("hipml_batch_exact_path", "1 when batched decode is bit-exact at every B, 0 when B>=4 uses the WMMA tile", "gauge", s.batch_exact.to_string());
-        c("hipml_tile_steps_total", "Batched decode steps that used the non-exact WMMA tile (B>=4)", "counter", s.tile_steps.to_string());
-        c("hipml_warmup_seconds", "Load-time warm-up wall time", "gauge", format!("{:.6}", s.warmup_ms / 1e3));
+        c(
+            "hipml_requests_total",
+            "Requests admitted",
+            "counter",
+            s.requests_total.to_string(),
+        );
+        c(
+            "hipml_requests_done_total",
+            "Requests completed",
+            "counter",
+            s.requests_done.to_string(),
+        );
+        c(
+            "hipml_requests_cancelled_total",
+            "Requests ended early (client gone or stop string)",
+            "counter",
+            s.requests_cancelled.to_string(),
+        );
+        c(
+            "hipml_requests_failed_total",
+            "Requests ended with an error",
+            "counter",
+            s.requests_failed.to_string(),
+        );
+        c(
+            "hipml_active_slots",
+            "Requests prefilling or decoding (batch slots, a lone MTP request, the prefill)",
+            "gauge",
+            s.active_slots.to_string(),
+        );
+        c(
+            "hipml_queue_depth",
+            "Requests waiting for admission",
+            "gauge",
+            s.queue_depth.to_string(),
+        );
+        c(
+            "hipml_prompt_tokens_total",
+            "Prompt tokens processed",
+            "counter",
+            s.prompt_tokens.to_string(),
+        );
+        c(
+            "hipml_generated_tokens_total",
+            "Tokens generated",
+            "counter",
+            s.generated_tokens.to_string(),
+        );
+        c(
+            "hipml_decode_steps_total",
+            "Scheduler decode steps",
+            "counter",
+            s.decode_steps.to_string(),
+        );
+        c(
+            "hipml_batch_steps_total",
+            "Batched forward passes",
+            "counter",
+            s.batch_steps.to_string(),
+        );
+        c(
+            "hipml_batch_requests_total",
+            "Requests decoded through the batch engine",
+            "counter",
+            s.batch_requests.to_string(),
+        );
+        c(
+            "hipml_mtp_requests_total",
+            "Requests decoded with MTP speculation",
+            "counter",
+            s.mtp_requests.to_string(),
+        );
+        c(
+            "hipml_spec_steps_total",
+            "MTP draft+verify steps",
+            "counter",
+            s.spec_steps.to_string(),
+        );
+        c(
+            "hipml_spec_drafted_total",
+            "Draft tokens proposed",
+            "counter",
+            s.spec_drafted.to_string(),
+        );
+        c(
+            "hipml_spec_accepted_total",
+            "Draft tokens accepted",
+            "counter",
+            s.spec_accepted.to_string(),
+        );
+        c(
+            "hipml_prefix_lookups_total",
+            "Prefix-cache lookups",
+            "counter",
+            s.prefix_lookups.to_string(),
+        );
+        c(
+            "hipml_prefix_hits_total",
+            "Prefix-cache hits (any length)",
+            "counter",
+            s.prefix_hits.to_string(),
+        );
+        c(
+            "hipml_prefix_misses_total",
+            "Prefix-cache misses",
+            "counter",
+            s.prefix_misses.to_string(),
+        );
+        c(
+            "hipml_prefix_hit_tokens_total",
+            "Prompt tokens restored from cache",
+            "counter",
+            s.prefix_hit_tokens.to_string(),
+        );
+        c(
+            "hipml_prefix_hit_rate",
+            "Fixture hit rate over lookups",
+            "gauge",
+            format!("{hit_rate:.6}"),
+        );
+        c(
+            "hipml_prefix_restore_seconds_total",
+            "Device time restoring a prefix",
+            "counter",
+            format!("{:.6}", s.prefix_restore_ms / 1e3),
+        );
+        c(
+            "hipml_prefix_captures_total",
+            "Prefix snapshots taken",
+            "counter",
+            s.prefix_captures.to_string(),
+        );
+        c(
+            "hipml_prefix_refused_total",
+            "Prefix snapshots refused because one entry exceeded the cache bound",
+            "counter",
+            s.prefix_refused.to_string(),
+        );
+        c(
+            "hipml_prefix_capture_seconds_total",
+            "Device time capturing a prefix",
+            "counter",
+            format!("{:.6}", s.prefix_capture_ms / 1e3),
+        );
+        c(
+            "hipml_prefill_chunks_total",
+            "Prefill tiles run by the scheduler",
+            "counter",
+            s.prefill_chunks.to_string(),
+        );
+        c(
+            "hipml_prefill_seconds_total",
+            "Wall time in prefill tiles",
+            "counter",
+            format!("{:.6}", s.prefill_ms / 1e3),
+        );
+        c(
+            "hipml_prefill_interleaved_total",
+            "Prefill tiles run while a batch was decoding",
+            "counter",
+            s.prefill_interleaved.to_string(),
+        );
+        c(
+            "hipml_interleave_stall_seconds_total",
+            "Decode stall charged to interleaved prefill",
+            "counter",
+            format!("{:.6}", s.interleave_stall_ms / 1e3),
+        );
+        c(
+            "hipml_interleave_stall_seconds_max",
+            "Longest single interleaved prefill tile",
+            "gauge",
+            format!("{:.6}", s.max_interleave_stall_ms / 1e3),
+        );
+        c(
+            "hipml_tail_row_blocks_total",
+            "Row-block tail prefills run",
+            "counter",
+            s.tail_row_blocks.to_string(),
+        );
+        c(
+            "hipml_tail_rows_total",
+            "Prompt tail rows served by row blocks",
+            "counter",
+            s.tail_rows.to_string(),
+        );
+        c(
+            "hipml_tail_rows_seconds_total",
+            "Wall time in row-block tail prefill",
+            "counter",
+            format!("{:.6}", s.tail_rows_ms / 1e3),
+        );
+        c(
+            "hipml_requests_rejected_busy_total",
+            "Requests answered 503 because slots and queue were full",
+            "counter",
+            s.requests_rejected_busy.to_string(),
+        );
+        c(
+            "hipml_connections_rejected_total",
+            "Connections refused past the connection bound",
+            "counter",
+            s.connections_rejected.to_string(),
+        );
+        c(
+            "hipml_inflight",
+            "Generation requests admitted but not yet finished",
+            "gauge",
+            s.inflight.to_string(),
+        );
+        c(
+            "hipml_inflight_max",
+            "Admission bound (slots + queue bound)",
+            "gauge",
+            s.inflight_max.to_string(),
+        );
+        c(
+            "hipml_connections",
+            "Open connection threads",
+            "gauge",
+            s.connections.to_string(),
+        );
+        c(
+            "hipml_connections_max",
+            "Connection thread bound",
+            "gauge",
+            s.connections_max.to_string(),
+        );
+        c(
+            "hipml_queue_max",
+            "Admission bound minus slots (the queue bound)",
+            "gauge",
+            s.queue_max.to_string(),
+        );
+        c(
+            "hipml_job_errors_total",
+            "Jobs that failed alone; the engine kept serving",
+            "counter",
+            s.job_errors.to_string(),
+        );
+        c(
+            "hipml_slot_faults_total",
+            "Decode steps failed for one slot only",
+            "counter",
+            s.slot_faults.to_string(),
+        );
+        c(
+            "hipml_batch_resets_total",
+            "Whole-batch resets after an unpinnable step failure",
+            "counter",
+            s.batch_resets.to_string(),
+        );
+        c(
+            "hipml_prefix_invalidated_total",
+            "Prefix-cache entries dropped because a job failed",
+            "counter",
+            s.prefix_invalidated.to_string(),
+        );
+        c(
+            "hipml_batch_exact_path",
+            "1 when batched decode is bit-exact at every B, 0 when B>=4 uses the WMMA tile",
+            "gauge",
+            s.batch_exact.to_string(),
+        );
+        c(
+            "hipml_tile_steps_total",
+            "Batched decode steps that used the non-exact WMMA tile (B>=4)",
+            "counter",
+            s.tile_steps.to_string(),
+        );
+        c(
+            "hipml_warmup_seconds",
+            "Load-time warm-up wall time",
+            "gauge",
+            format!("{:.6}", s.warmup_ms / 1e3),
+        );
         if let Some((free, total)) = vram {
-            c("hipml_vram_free_bytes", "Device free memory", "gauge", free.to_string());
-            c("hipml_vram_total_bytes", "Device total memory", "gauge", total.to_string());
+            c(
+                "hipml_vram_free_bytes",
+                "Device free memory",
+                "gauge",
+                free.to_string(),
+            );
+            c(
+                "hipml_vram_total_bytes",
+                "Device total memory",
+                "gauge",
+                total.to_string(),
+            );
         }
         out
     }

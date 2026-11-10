@@ -205,7 +205,13 @@ impl Stream {
             )?;
             let mut exec: ffi::HipGraphExec = std::ptr::null_mut();
             check(
-                ffi::hipGraphInstantiate(&mut exec, graph, std::ptr::null_mut(), std::ptr::null_mut(), 0),
+                ffi::hipGraphInstantiate(
+                    &mut exec,
+                    graph,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                ),
                 "hipGraphInstantiate",
             )?;
             Ok(Graph {
@@ -244,14 +250,24 @@ impl Graph {
     /// with, so anything that changes per step has to live in device memory.
     #[cfg(feature = "hip")]
     pub fn launch(&self, stream: &Stream) -> Result<(), String> {
-        unsafe { check(ffi::hipGraphLaunch(self.exec, stream.handle), "hipGraphLaunch") }
+        unsafe {
+            check(
+                ffi::hipGraphLaunch(self.exec, stream.handle),
+                "hipGraphLaunch",
+            )
+        }
     }
 
     /// Build the device-side launch state ahead of time; the first `launch`
     /// then does not stall on upload.
     #[cfg(feature = "hip")]
     pub fn upload(&self, stream: &Stream) -> Result<(), String> {
-        unsafe { check(ffi::hipGraphUpload(self.exec, stream.handle), "hipGraphUpload") }
+        unsafe {
+            check(
+                ffi::hipGraphUpload(self.exec, stream.handle),
+                "hipGraphUpload",
+            )
+        }
     }
 
     #[cfg(not(feature = "hip"))]
@@ -308,7 +324,12 @@ impl Event {
 
     #[cfg(feature = "hip")]
     pub fn record(&self, stream: &Stream) -> Result<(), String> {
-        unsafe { check(ffi::hipEventRecord(self.handle, stream.handle), "hipEventRecord") }
+        unsafe {
+            check(
+                ffi::hipEventRecord(self.handle, stream.handle),
+                "hipEventRecord",
+            )
+        }
     }
 
     #[cfg(not(feature = "hip"))]

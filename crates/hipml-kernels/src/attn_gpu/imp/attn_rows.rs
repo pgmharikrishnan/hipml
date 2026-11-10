@@ -160,9 +160,7 @@ impl AttnLayer<'_> {
         stride: usize,
     ) -> Result<(), String> {
         if !self.q8_chunk_supported() || !(1..=2).contains(&dtype) {
-            return Err(
-                "row attention: only head_dim 256 with a q8/q4 cache".to_string(),
-            );
+            return Err("row attention: only head_dim 256 with a q8/q4 cache".to_string());
         }
         let d = self.dims;
         let t = tokens as u32;

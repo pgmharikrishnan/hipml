@@ -109,9 +109,7 @@ fn main_run(a: &Args) -> Result<(), String> {
     let mut expect: Vec<Expect> = Vec::with_capacity(a.slots);
     for b in 0..a.slots {
         let prefix: Vec<u32> = (0..a.prefix).map(|i| tok(b, i)).collect();
-        let tail: Vec<u32> = (0..tail_len(b))
-            .map(|i| tok(b, a.prefix + i))
-            .collect();
+        let tail: Vec<u32> = (0..tail_len(b)).map(|i| tok(b, a.prefix + i)).collect();
         single.reset_state()?;
         let mut st = single.new_state();
         if !prefix.is_empty() {
@@ -155,7 +153,8 @@ fn main_run(a: &Args) -> Result<(), String> {
         .map(|(b, e)| (b, e.tail.as_slice()))
         .collect();
     let firsts = batch.prefill_rows(&tails)?;
-    let (rows, ms) = batch.last_row_block();    println!(
+    let (rows, ms) = batch.last_row_block();
+    println!(
         "row block: {} tails, {} rows, {:.2} ms ({:.3} ms/tail, {:.2} row/ms)",
         firsts.len(),
         rows,

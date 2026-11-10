@@ -15,7 +15,13 @@ pub struct Generated {
 /// Feed the prompt one token at a time, then emit `n` greedy tokens.
 ///
 /// `n_ctx` sizes the KV cache; pass prompt length + `n` + slack.
-pub fn greedy(model: &Model, tok: &Tokenizer, prompt_ids: &[u32], n: usize, n_ctx: usize) -> Generated {
+pub fn greedy(
+    model: &Model,
+    tok: &Tokenizer,
+    prompt_ids: &[u32],
+    n: usize,
+    n_ctx: usize,
+) -> Generated {
     greedy_with(model, tok, prompt_ids, n, n_ctx, |_, _, _| {})
 }
 

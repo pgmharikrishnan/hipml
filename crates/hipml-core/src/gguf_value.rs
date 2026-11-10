@@ -198,7 +198,10 @@ pub fn skip_value<R: Read + Seek>(r: &mut R, ty: u32) -> io::Result<()> {
         VT_STRING => {
             let len = read_u64(r)?;
             if len > 1 << 40 {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "implausible string"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "implausible string",
+                ));
             }
             r.seek(SeekFrom::Current(len as i64))?;
         }

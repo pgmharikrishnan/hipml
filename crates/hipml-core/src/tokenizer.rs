@@ -211,7 +211,10 @@ impl Tokenizer {
 
     /// Whether id is a control/user-defined token.
     pub fn is_special(&self, id: u32) -> bool {
-        self.special_by_id.get(id as usize).copied().unwrap_or(false)
+        self.special_by_id
+            .get(id as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// The token's GGUF type (1 normal, 3 control, 4 user-defined, 6 byte).
@@ -330,7 +333,9 @@ fn byte_encoder() -> ([char; 256], HashMap<char, u8>) {
     let mut table = ['\0'; 256];
     let mut rev = HashMap::new();
     let mut next = 256u32;
-    let printable = |b: u32| (0x21..=0x7E).contains(&b) || (0xA1..=0xAC).contains(&b) || (0xAE..=0xFF).contains(&b);
+    let printable = |b: u32| {
+        (0x21..=0x7E).contains(&b) || (0xA1..=0xAC).contains(&b) || (0xAE..=0xFF).contains(&b)
+    };
     for b in 0..256u32 {
         let c = if printable(b) {
             char::from_u32(b).unwrap()

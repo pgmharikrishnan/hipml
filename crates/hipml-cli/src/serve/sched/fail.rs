@@ -69,7 +69,14 @@ pub fn release(
 
 pub fn take_active(slots: &mut [Option<Active>], slot: usize, finish: &str, metrics: &Metrics) {
     if let Some(a) = slots[slot].take() {
-        send_done(&a.job.tx, &a.job, finish, a.emitted, a.prefill_ms, a.hit_tokens);
+        send_done(
+            &a.job.tx,
+            &a.job,
+            finish,
+            a.emitted,
+            a.prefill_ms,
+            a.hit_tokens,
+        );
         finished(metrics, finish);
     }
 }

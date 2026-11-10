@@ -100,7 +100,7 @@ fn q5_k_dequant_follows_the_scale_and_high_bit_layout() {
     let mut b = vec![0u8; Q5_K_BYTES];
     b[0..2].copy_from_slice(&0x3C00u16.to_le_bytes()); // d = 1.0
     b[2..4].copy_from_slice(&0u16.to_le_bytes()); // dmin = 0
-    // scales: sc = 1 for all eight sub-blocks, min = 0.
+                                                  // scales: sc = 1 for all eight sub-blocks, min = 0.
     b[4..16].copy_from_slice(&[1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1]);
     // qh bit 2 -> fifth bit for the first 32-value group of sub-block 2.
     b[16] = 0x04;
