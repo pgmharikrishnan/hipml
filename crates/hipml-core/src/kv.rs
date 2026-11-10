@@ -39,7 +39,7 @@
 //! interleaving would only add a stride to both. `head_dim` must be a multiple
 //! of 32 (256 and 64 are the shapes this engine runs).
 //!
-//! Per-token traffic for the Qwen3.8-27B hybrid (24 q heads, 4 kv heads, width 256,
+//! Per-token traffic for the Qwen3.8 hybrid (24 q heads, 4 kv heads, width 256,
 //! 16 full-attention layers) is 65,536 B at f16, 34,816 B at q8 and 18,432 B at
 //! q4: `2 * 4 * 16 * 256 * bytes_per_value`.
 

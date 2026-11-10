@@ -2,8 +2,8 @@
 //! `hipml prefill-bench` and `hipml prefill-model`: the two measurements that
 //! make prefill a number rather than a claim.
 //!
-//! `prefill-bench` times the tiled GEMM at the three Qwen3.8-27B ffn shapes and both
-//! prompt lengths. `prefill-model` streams every quantized tensor once at a
+//! `prefill-bench` times the tiled GEMM at the three Qwen3.8 ffn shapes and
+//! both prompt lengths. `prefill-model` streams every quantized tensor once at
 //! fixed prompt length, sums the kernel time, and repeats the pass with the 16
 //! full-attention blocks skipped because the KV cache already holds those
 //! tokens. The difference is the measured cold-vs-warm TTFT.
@@ -174,7 +174,7 @@ pub fn model(args: &[String]) -> i32 {
         .and_then(|t| t.dims.first().copied())
         .map(|d| d as usize)
     else {
-        println!("cannot find attn_q_norm: not an Qwen3.8-27B-shaped model");
+        println!("cannot find attn_q_norm: not a Qwen3.8-27B-shaped model");
         return 1;
     };
     let kv_rows = g

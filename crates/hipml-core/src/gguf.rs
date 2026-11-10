@@ -2,7 +2,7 @@
 //! A read-only GGUF v2/v3 reader: header, metadata KV table, tensor-info table,
 //! and 32-byte-aligned tensor data.
 //!
-//! Deliberately streaming: an Qwen3.8-27B Q4_K_M file is 17.2 GB, so nothing here
+//! Deliberately streaming: a Qwen3.8-27B Q4_K_M file is 17.2 GB, so nothing
 //! reads the tensor data until `read_tensor` (or `read_tensor_range`) is called,
 //! and even then only the requested bytes are pulled. The metadata and tensor
 //! tables are tiny and live in memory.

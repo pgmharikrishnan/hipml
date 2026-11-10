@@ -14,7 +14,7 @@ use hipml_model::verify::{
 use hipml_model::{LoadReport, Model};
 
 /// Fixed token ids for the embedding check, plus the vocabulary's last row.
-/// The last row used to be the literal 248319 ("Qwen3.8-27B's 248320-row
+/// The last row used to be the literal 248319 ("the 248320-row
 /// vocabulary"); it now comes from the loaded embedding shape, so a model with
 /// a different vocabulary probes a valid id.
 fn probe_tokens(rows: u64) -> Vec<u32> {

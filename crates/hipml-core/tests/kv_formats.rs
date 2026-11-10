@@ -16,7 +16,7 @@ const Q4: KvDtype = KvDtype::Q4;
 fn block_byte_counts_are_the_documented_layout() {
     assert_eq!(Q8.block_bytes(), 34); // f16 d + 32 i8
     assert_eq!(Q4.block_bytes(), 18); // f16 d + 16 packed nibbles
-    // Qwen3.8-27B: 2 (K,V) * 4 kv heads * 16 layers * 256 values/token.
+    // Qwen3.8: 2 (K,V) * 4 kv heads * 16 layers * 256 values/token.
     assert_eq!(Q8.token_bytes(4, 256, 16), 34_816);
     assert_eq!(Q4.token_bytes(4, 256, 16), 18_432);
 }

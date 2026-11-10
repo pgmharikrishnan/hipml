@@ -34,8 +34,8 @@ impl Kind {
         Ok(match ty {
             TensorType::F32 => Kind::F32,
             TensorType::Q4K => Kind::Q4K,
-            // Q5_K was out of scope, but Qwen3.8-27B stores blk.51/55.ffn_down as
-            // Q5_K, so the reference has to read it.
+            // Q5_K was out of scope, but Qwen3.8-27B stores blk.51/55.ffn_down
+            // as Q5_K, so the reference has to read it.
             TensorType::Q5K => Kind::Q5K,
             TensorType::Q6K => Kind::Q6K,
             TensorType::Q8_0 => Kind::Q8_0,
