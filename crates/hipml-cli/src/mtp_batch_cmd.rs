@@ -7,7 +7,7 @@
 //! batched run.
 //!
 //! ```text
-//! hipml mtp-batch-bench --gguf Qwen3.8-27B.gguf --mtp mtp.gguf \
+//! hipml mtp-batch-bench --gguf model.gguf --mtp mtp.gguf \
 //!     --ids-file copy_200_words.ids --slots 8 --drafts 3 --tokens 256
 //! ```
 

@@ -11,7 +11,7 @@ __pycache__/
 *.gguf
 *.safetensors
 
-# bench raw output (results.json and RESULTS.md are committed)
+# bench scratch output; the committed run is bench/release/
 /bench/out/
 bench/out/
 

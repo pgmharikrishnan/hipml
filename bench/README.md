@@ -87,8 +87,7 @@ bench/
   run.sh               the one command
   ps/peak-vram.ps1     per-process peak dedicated VRAM
   out/                 raw job output (gitignored)
-  results.json         committed machine-readable result
-  RESULTS.md           committed table
+  release/             committed release-run output (see release/README.md)
 ```
 
 ## Caveats the harness cannot fix
@@ -98,8 +97,8 @@ bench/
 - hipml and llama.cpp both run q8-class KV (`q8` vs `q8_0`). The formats are
   the same 8-bit class but not byte-identical, so this is a same-precision
   comparison. The f32/f16 sensitivity runs are kept under `bench/sensitivity/`.
-- At 100K, q8 KV is ~3.2 GiB (hipml) and ~3.5 GiB (llama.cpp). `RESULTS.md`
-  reports peak VRAM and a spill flag; `spilled=no` means the server logged no
+- At 100K, q8 KV is ~3.2 GiB (hipml) and ~3.5 GiB (llama.cpp). The release
+  run reports peak VRAM and a spill flag; `spilled=no` means the server logged no
   allocation failure or CPU offload and peak stayed below 24 GiB.
 - llama-server adds HTTP handling to TTFT (small on localhost, not zero).
 - hipml's TTFT includes the first-token argmax; llama's prompt timing does not.

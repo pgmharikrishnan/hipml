@@ -6,8 +6,8 @@
 //   attn_decode_kv_reduce     grid = n_heads, merges the splits
 //
 // Block shape is 32 * (n_heads / n_kv) threads: one warp per query head of the
-// KV group, so the six Qwen3.8-27B query heads that share a KV head sit in the same
-// block and work from the same cache row.
+// KV group, so the six query heads of Qwen3.8-27B that share a KV head sit in
+// the same block and work from the same cache row.
 //
 // A block stages a tile of rows into shared memory once, *dequantized to f32*.
 // Reading from global per warp instead shares nothing: the six reads of every

@@ -5,10 +5,11 @@
 // See NOTICE and docs/reference/LICENSE.
 // y[row] = dequant_q5_k(W[row,:]) . x
 //
-// Q5_K is the one format Qwen3.8-27B uses that had no GEMV: `blk.51/55.ffn_down` were
-// dequantised to f32 once at graph build and served by `gemv_f32`, so the decode
-// step read 4 bytes per weight value instead of 0.6875 — 712 MB a token at the
-// f32 kernel's rate, the slowest bytes in the stream.
+// Q5_K is the one format Qwen3.8-27B uses that had no GEMV: the two
+// `blk.51/55.ffn_down` tensors were dequantised to f32 once at graph build and
+// served by `gemv_f32`, so the decode step read 4 bytes per weight value
+// instead of 0.6875 — 712 MB a token at the f32 kernel's rate, the slowest
+// bytes in the stream.
 //
 // Row tile, one row per warp: `gemv_q4_k_r1`'s geometry (8 rows per block,
 // 2048-value shared x tile, 16 values per lane) with Q5_K's fifth bit. The

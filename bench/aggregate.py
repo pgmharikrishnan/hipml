@@ -460,9 +460,6 @@ def write_markdown(report, path):
             "a cold rep: " + ", ".join(f"`{c['prompt']}@{c['depth']}`" for c in bad_cold) + "."
         )
     lines.append(
-        "- The earlier incomplete table, every `ERROR: missing` cell, and all "
-        "reruns are documented in `bench/RUNLOG.md`.")
-    lines.append(
         "- `hipml commit` is the Rust commit used; the `(dirty worktree)` flag on "
         "that run refers to bench-script edits made after the Rust commit, not to "
         "a different binary. The binary SHA-256 is recorded above.")

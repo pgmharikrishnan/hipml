@@ -3,7 +3,8 @@
 //!
 //! `gdn_rows_f32` claims to do the arithmetic of `gdn_chunk_f32` element for
 //! element, so the check is bit equality of both the per-token output and the
-//! carried state, on Qwen3.8-27B's GDN shape (48 value heads, 16 key heads, 128 wide)
+//! carried state, on the Qwen3.8 GDN shape (48 value heads, 16 key heads, 128
+//! wide)
 //! at a token count that is not a multiple of the 16-token tile. It then times
 //! both kernels on a 512-token tile.
 

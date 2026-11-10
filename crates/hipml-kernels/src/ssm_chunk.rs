@@ -39,7 +39,8 @@ impl<'a> SsmGpuLayer<'a> {
             (&self.beta_w, &c.beta, d.n_v, self.beta_half.as_ref()),
         ];
         for (w, y, m, half_w) in plan {
-            // The loader keeps F32 tensors (ssm_alpha, ssm_beta in Qwen3.8-27B) as raw
+            // The loader keeps F32 tensors (ssm_alpha, ssm_beta in Qwen3.8-27B)
+            // as raw
             // little-endian f32, so those go through the f32 multi-row GEMM. The
             // resident loader also leaves an fp16 copy, which rides the
             // tensor-core path with the converted activation tile, k-sliced

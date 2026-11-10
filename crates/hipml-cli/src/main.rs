@@ -220,7 +220,7 @@ fn help() {
          \x20           --topk K prints the top-K log-probs at every sampled position\n\
          \x20 load      load every tensor into VRAM and verify residency\n\
          \x20 logits    run lm_head on a 5120-value f32 vector file\n\
-         \x20 prefill-bench time the tiled prefill GEMM at Qwen3.8-27B shapes, M=512/2048\n\
+         \x20 prefill-bench  tiled prefill GEMM, Qwen3.8, M=512/2048\n\
          \x20 prefill-model prefill the whole model cold, then warm from a KV prefix\n\
          \x20 cache-bench cold / warm-exact / warm-shared TTFT on SSM+KV snapshots\n\
          \x20 ssm       gated-delta-net parity (small + real layer) and layer timing\n\
@@ -579,7 +579,7 @@ fn bench() -> i32 {
         );
     }
 
-    // Quantized production shapes: ffn_up/ffn_down/ffn_gate at Qwen3.8-27B sizes.
+    // Quantized production shapes: ffn_up/ffn_down/ffn_gate at Qwen3.8 sizes.
     quant_cmd::bench_quant(&launcher, REPS);
     0
 }

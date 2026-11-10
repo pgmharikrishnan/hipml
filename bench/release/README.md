@@ -7,12 +7,11 @@ of the files here.
 
 ## What this supersedes
 
-- **`bench/RESULTS.md` and `bench/results.json` are historical.** They were
-  measured on the private fine-tune `Qwen3.8-27B-Q4_K_M.gguf` with binary
-  `5713f143…` at commit `cef7657`, *before* the WP42 projection-path
-  correctness fix. The fix moved timings by 0.2–0.9% and, more importantly,
-  changed the model every number was measured on. They are kept for the record
-  and must not be quoted as release numbers.
+- **The pre-fix tables are gone.** `bench/results.json` and `bench/RESULTS.md`
+  described pre-fix measurements with binary `5713f143…` at commit `cef7657`,
+  *before* the WP42 projection-path correctness fix. The fix moved timings by
+  0.2–0.9% and, more importantly, changed the model every number was measured
+  on. Both files have been removed; nothing here is derived from them.
 - **`docs/benchmarks.md`** now points at `docs/release-run.md` for the
   headline matrix and per-feature cells. Its old narrative table is marked as
   superseded; the file itself is not rewritten because the method section and

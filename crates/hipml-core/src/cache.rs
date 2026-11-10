@@ -2,12 +2,13 @@
 //! Prefix reuse: a KV cache for the full-attention layers and the matcher that
 //! decides how much of a prompt is already computed.
 //!
-//! Qwen3.8-27B is a hybrid: 16 of its 64 blocks are full attention (every fourth block
-//! from `blk.3`), the other 48 are SSM blocks. Only the attention blocks have a
-//! KV cache that can be addressed by token position, so this cache covers those
-//! 16 and nothing else. The SSM blocks carry a fixed-size recurrent state that
-//! cannot be sliced by prefix; the model bench re-runs them for the whole
-//! prompt, which is the honest cost of caching the attention half.
+//! Qwen3.8-27B is a hybrid: 16 of its 64 blocks are full attention (every
+//! fourth block from `blk.3`), the other 48 are SSM blocks. Only the attention
+//! blocks have a KV cache that can be addressed by token position, so this
+//! cache covers those 16 and nothing else. The SSM blocks carry a fixed-size
+//! recurrent state that cannot be sliced by prefix; the model bench re-runs
+//! them for the whole prompt, which is the honest cost of caching the
+//! attention half.
 
 /// One full-attention layer: `k` and `v` are `[n_kv, capacity, head_dim]`.
 pub struct KvLayer {
