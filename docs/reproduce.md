@@ -31,6 +31,12 @@ the one in the release run. Its settings in the head-to-head are `-ngl 99 -c
 draft model and no speculative decoding. No `-fa`, `-b` or `-ub` flag was
 passed, so the build defaults applied: `-fa auto`, `-b 2048`, `-ub 512`.
 
+One distinction: the correctness gates in §§1–3 were measured on the gate model
+named in [`release-run.md`](release-run.md) — the fine-tune the gate corpus and
+the MTP drafter were built for — while the performance matrix and the chat and
+server cells in §§4–6 use the stock `Qwen3.8-27B-Q4_K_M.gguf` above. Set
+`HIPML_GGUF` to the gate model for §§1–3, then back to the stock file.
+
 ```powershell
 cargo build --release -p hipml-cli --features hip
 .\target\release\hipml.exe probe        # must list gfx1201
