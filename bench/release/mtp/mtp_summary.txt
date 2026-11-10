@@ -1,0 +1,22 @@
+ACQUIRED wp55 at 2026-11-10T21:23:56.5007803Z
+=== mtp chat 384 tok drafts 3
+running 01_single_turn_code ...
+{"kv": "f32", "prompt_tokens": 91}
+running 02_multi_turn ...
+{"kv": "f32", "prompt_tokens": 134}
+running 03_system_tool ...
+{"kv": "f32", "prompt_tokens": 364}
+running 04_longdoc_qa ...
+{"kv": "f32", "prompt_tokens": 8192}
+running 05_copy ...
+{"kv": "f32", "prompt_tokens": 89}
+
+=== MTP acceptance on chat prompts, EOS stop ===
+prompt                  toks   plain drafts   tok/s     x accept                      exact  eos
+01_single_turn_code       91   29.34      2   49.49  1.69 0.874,0.758               384/384 False
+02_multi_turn            134   29.29      2   44.79  1.53 0.754,0.714               384/384 False
+03_system_tool           364   29.35      3   58.60  2.00 0.944,0.941,0.875           65/65 True
+04_longdoc_qa           8192   25.14      3   46.01  1.83 0.885,0.870,0.900         174/174 True
+05_copy                   89   29.43      3   56.33  1.91 0.897,0.923,0.875         100/100 True
+exit=0
+RELEASED wp55

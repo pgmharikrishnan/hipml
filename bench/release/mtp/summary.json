@@ -1,0 +1,42 @@
+{
+ "01_single_turn_code": {
+  "identical": false,
+  "first_diff": 2,
+  "llama_id": 310,
+  "hipml_id": 4087,
+  "margin": 0.20635217428207397,
+  "llama_len": 238,
+  "hipml_len": 256,
+  "text_equal": false
+ },
+ "02_multi_turn": {
+  "identical": false,
+  "first_diff": 130,
+  "llama_id": 30,
+  "hipml_id": 6970,
+  "margin": 0.005914807319641113,
+  "llama_len": 256,
+  "hipml_len": 256,
+  "text_equal": false
+ },
+ "03_system_tool": {
+  "identical": true,
+  "tokens": 65,
+  "text_equal": false
+ },
+ "04_longdoc_qa": {
+  "identical": true,
+  "tokens": 174,
+  "text_equal": false
+ },
+ "05_copy": {
+  "identical": false,
+  "first_diff": 63,
+  "llama_id": 5469,
+  "hipml_id": 1330,
+  "margin": 0.026020050048828125,
+  "llama_len": 126,
+  "hipml_len": 100,
+  "text_equal": false
+ }
+}

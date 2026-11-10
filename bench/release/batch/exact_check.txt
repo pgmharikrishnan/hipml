@@ -1,0 +1,28 @@
+ACQUIRED wp55 at 2026-11-10T21:39:35.1736273Z
+=== batch-bench B=8 exact check
+check slot 3: 16/16 ids match the B=1 path
+check slot 4: 16/16 ids match the B=1 path
+check slot 5: 16/16 ids match the B=1 path
+check slot 6: 16/16 ids match the B=1 path
+check slot 7: 16/16 ids match the B=1 path
+check: all slots reproduce the B=1 path over the full stream
+vram per slot at 8192: 421.6 MiB (KV 272.0 + SSM 149.6)
+free now 13.33 GiB of 31.86: ~32 more slots at 8192, 40 total
+exit=0
+=== batch-bench B=16 exact check
+check slot 11: 16/16 ids match the B=1 path
+check slot 12: 16/16 ids match the B=1 path
+check slot 13: 16/16 ids match the B=1 path
+check slot 14: 16/16 ids match the B=1 path
+check slot 15: 16/16 ids match the B=1 path
+check: all slots reproduce the B=1 path over the full stream
+vram per slot at 8192: 421.6 MiB (KV 272.0 + SSM 149.6)
+free now 11.26 GiB of 31.86: ~27 more slots at 8192, 43 total
+exit=0
+=== batch llama np8
+llama.cpp -np 8 q8 KV: aggregate 97.54 tok/s (server clocks), 92.12 tok/s (client overlap), 248 tokens, 12.19 tok/s per stream
+exit=0
+=== batch llama np16
+llama.cpp -np 16 q8 KV: aggregate 227.89 tok/s (server clocks), 173.36 tok/s (client overlap), 496 tokens, 14.24 tok/s per stream
+exit=0
+RELEASED wp55

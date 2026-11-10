@@ -1,0 +1,65 @@
+ACQUIRED wp55 at 2026-11-10T20:15:35.0642085Z
+=== parity prefill --deep
+
+case                 result  detail
+prefill_q4_k 64x512 t=4      PASS    max_abs 4.45e-3  max_rel 1.02e-1
+prefill_q6_k 64x512 t=4      PASS    max_abs 3.15e-2  max_rel 4.44e-2
+prefill_q8_0 64x512 t=4      PASS    max_abs 1.24e-3  max_rel 7.23e-2
+prefill_q4_k 64x512 t=40     PASS    max_abs 5.73e-3  max_rel 4.51e-1
+prefill_q6_k 64x512 t=40     PASS    max_abs 3.09e-2  max_rel 1.28e-1
+prefill_q6_k 17408x5120 t=2  PASS    max_abs 1.12e-1  max_rel 2.38e1
+
+6 passed, 0 failed, 0 skipped
+exit=0
+=== gemv-check 4 tensors x R=1,2,4
+blk.0.ffn_gate.weight: 1 columns, 17408 values, 0 differ, max |d| 0.000e0
+  exit=0
+blk.0.ffn_gate.weight: 2 columns, 34816 values, 0 differ, max |d| 0.000e0
+  exit=0
+blk.0.ffn_gate.weight: 4 columns, 69632 values, 0 differ, max |d| 0.000e0
+  exit=0
+blk.0.attn_qkv.weight: 1 columns, 10240 values, 0 differ, max |d| 0.000e0
+  exit=0
+blk.0.attn_qkv.weight: 2 columns, 20480 values, 0 differ, max |d| 0.000e0
+  exit=0
+blk.0.attn_qkv.weight: 4 columns, 40960 values, 0 differ, max |d| 0.000e0
+  exit=0
+blk.0.ffn_down.weight: 1 columns, 5120 values, 0 differ, max |d| 0.000e0
+  exit=0
+blk.0.ffn_down.weight: 2 columns, 10240 values, 0 differ, max |d| 0.000e0
+  exit=0
+blk.0.ffn_down.weight: 4 columns, 20480 values, 0 differ, max |d| 0.000e0
+  exit=0
+output.weight: 1 columns, 248320 values, 0 differ, max |d| 0.000e0
+  exit=0
+output.weight: 2 columns, 496640 values, 0 differ, max |d| 0.000e0
+  exit=0
+output.weight: 4 columns, 993280 values, 0 differ, max |d| 0.000e0
+  exit=0
+=== splitk-gate synthetic
+    4133  ok    id 248046 = 248046, max|dlogit| 0.011199, split 3.42s
+    4134  ok    id 248046 = 248046, max|dlogit| 0.005341, split 3.42s
+    4135  ok    id 71 = 71, max|dlogit| 0.004450, split 3.42s
+    4136  ok    id 248046 = 248046, max|dlogit| 0.001960, split 3.42s
+    8193  ok    id 248046 = 248046, max|dlogit| 0.003580, split 6.87s
+PASS: 44 lengths, ids identical, worst |dlogit| 0.011199 <= 0.05
+exit=0
+=== splitk-gate ids
+    4133  ok    id 13 = 13, max|dlogit| 0.275789, split 3.43s
+    4134  ok    id 21 = 21, max|dlogit| 0.192573, split 3.43s
+    4135  ok    id 11 = 11, max|dlogit| 0.054766, split 3.43s
+    4136  ok    id 471 = 471, max|dlogit| 0.145683, split 3.43s
+    8193  ok    id 15 = 15, max|dlogit| 0.289367, split 6.87s
+PASS: 44 lengths, ids identical, worst |dlogit| 9.309817 <= 16
+exit=0
+=== tokenizer_fixture
+
+running 2 tests
+test tool_call_and_preserve_thinking_templates_match_llama_ids ... ok
+test multilingual_corpus_matches_llama_ids ... ok
+
+     Running tests\tokenizer_fixture.rs (target\debug\deps\tokenizer_fixture-85895dc10cb59f1d.exe)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.75s
+
+exit=0
+RELEASED wp55

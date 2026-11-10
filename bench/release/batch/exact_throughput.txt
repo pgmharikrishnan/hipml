@@ -1,0 +1,18 @@
+ACQUIRED wp55 at 2026-11-10T21:40:54.7338308Z
+=== batch-bench B=8 throughput
+resident: 15.65 GiB in 866 tensors on AMD Radeon AI PRO R9700 (upload 5.3s)
+batch: slots=8 kv=q8 n_ctx=24 | 14.73 GiB streamed/step | per-slot state 150.4 MiB (KV 0.8 + SSM 149.6)
+decode depth 0: 107.46 tok/s aggregate | 13.43 tok/s per stream | 74.45 ms/step | 212 GB/s weight | ids [198, 198, 198, 198]
+single stream at depth 0: 30.02 tok/s (33.31 ms/step) | batch efficiency 0.45x of 8x
+vram per slot at 8192: 421.6 MiB (KV 272.0 + SSM 149.6)
+free now 13.33 GiB of 31.86: ~32 more slots at 8192, 40 total
+exit=0
+=== batch-bench B=16 throughput
+resident: 15.65 GiB in 866 tensors on AMD Radeon AI PRO R9700 (upload 5.3s)
+batch: slots=16 kv=q8 n_ctx=24 | 14.73 GiB streamed/step | per-slot state 150.4 MiB (KV 0.8 + SSM 149.6)
+decode depth 0: 107.33 tok/s aggregate | 6.71 tok/s per stream | 149.08 ms/step | 106 GB/s weight | ids [198, 198, 198, 198]
+single stream at depth 0: 30.08 tok/s (33.25 ms/step) | batch efficiency 0.22x of 16x
+vram per slot at 8192: 421.6 MiB (KV 272.0 + SSM 149.6)
+free now 11.26 GiB of 31.86: ~27 more slots at 8192, 43 total
+exit=0
+RELEASED wp55

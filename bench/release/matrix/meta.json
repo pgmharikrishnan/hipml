@@ -1,0 +1,19 @@
+{
+  "host": "gpu-host",
+  "os": "Microsoft Windows 11 Pro",
+  "gpu": "AMD Radeon(TM) Graphics 32.0.21045.16010",
+  "hipml_commit": "6aeb5d962acb0b5973fa5c8130cb0913b3db503b",
+  "hipml_dirty": true,
+  "hipml_binary_sha256": "ab3074b02f6c281f815a06c223b09b08549c44a5208baf1f0d07d05020c4b220",
+  "llama_version": "version: 0.7.0-dev (build 11820, commit d7725699)",
+  "llama_build": "11820",
+  "llama_commit": "d7725699",
+  "llama_kv": "q8_0",
+  "hipml_kv": "q8",
+  "model_path": "<HIPML_GGUF>",
+  "llama_server_path": "<LLAMA_SERVER>",
+  "depths": "0,8192,32768,100000",
+  "reps": "3",
+  "reps_deep": "1",
+  "reps_100k": "1"
+}

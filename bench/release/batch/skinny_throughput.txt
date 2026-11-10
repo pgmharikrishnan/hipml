@@ -1,0 +1,22 @@
+ACQUIRED wp55 at 2026-11-10T21:41:59.1009831Z
+=== batch-bench B=8 skinny
+
+batch: slots=8 kv=q8 n_ctx=24 | 14.73 GiB streamed/step | per-slot state 150.4 MiB (KV 0.8 + SSM 149.6)
+decode depth 0: 149.43 tok/s aggregate | 18.68 tok/s per stream | 53.54 ms/step | 295 GB/s weight | ids [198, 198, 
+198, 198]
+single stream at depth 0: 30.16 tok/s (33.16 ms/step) | batch efficiency 0.62x of 8x
+exit=0
+=== batch-bench B=16 skinny
+batch: slots=16 kv=q8 n_ctx=24 | 14.73 GiB streamed/step | per-slot state 150.4 MiB (KV 0.8 + SSM 149.6)
+decode depth 0: 272.97 tok/s aggregate | 17.06 tok/s per stream | 58.61 ms/step | 270 GB/s weight | ids [198, 198, 
+198, 198]
+single stream at depth 0: 30.15 tok/s (33.17 ms/step) | batch efficiency 0.57x of 16x
+exit=0
+=== batch-bench B=8 skinny exact check
+decode depth 0: 149.22 tok/s aggregate | 18.65 tok/s per stream | 53.61 ms/step | 295 GB/s weight | ids [198, 198, 
+198, 198]
+check: TOKENS DIFFER
+exit=1
+RELEASED wp55
+
+

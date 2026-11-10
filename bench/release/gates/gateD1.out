@@ -1,0 +1,98 @@
+ACQUIRED wp55 at 2026-11-10T20:27:45.6385692Z
+=== spec-bench code_edit drafts=0
+
+drafts     ms/step    tokens/step       tok/s   vs plain      accept     exact  prefill/draft
+     0       34.33          1.000       29.13       1.00x           -         -  577.7/0.0 ms
+drafter: 253.59 MiB weights + 6.4 MiB KV at ctx 816; load+run wall 15.7 s
+exit=0
+=== spec-bench code_edit drafts=1
+     0       34.39          1.000       29.08       1.00x           -         -  580.8/0.0 ms
+     1       43.53          1.868       42.90       1.48x       0.868   128/128  573.5/100.0 ms
+drafts 1: no-accept 1.27x a plain step (23.0 tok/s); step 43.53 ms = draft 2.64 + verify 40.72 + rollback 0.17
+drafter: 253.59 MiB weights + 6.4 MiB KV at ctx 816; load+run wall 21.4 s
+exit=0
+=== spec-bench code_edit drafts=2
+     2       53.59          2.540       47.40       1.63x  0.840,0.833   128/128  578.3/99.6 ms
+drafts 1: no-accept 1.27x a plain step (22.9 tok/s); step 43.68 ms = draft 2.65 + verify 40.85 + rollback 0.17
+drafts 2: no-accept 1.56x a plain step (18.7 tok/s); step 53.59 ms = draft 5.19 + verify 48.03 + rollback 0.37
+drafter: 253.59 MiB weights + 6.4 MiB KV at ctx 816; load+run wall 26.8 s
+exit=0
+=== spec-bench code_edit drafts=3
+drafts 1: no-accept 1.27x a plain step (22.9 tok/s); step 43.67 ms = draft 2.64 + verify 40.86 + rollback 0.17
+drafts 2: no-accept 1.56x a plain step (18.6 tok/s); step 53.62 ms = draft 5.20 + verify 48.06 + rollback 0.37
+drafts 3: no-accept 1.89x a plain step (15.4 tok/s); step 65.00 ms = draft 7.72 + verify 56.70 + rollback 0.58
+drafter: 253.59 MiB weights + 6.4 MiB KV at ctx 816; load+run wall 32.4 s
+exit=0
+=== spec-bench json_tool_call drafts=0
+
+drafts     ms/step    tokens/step       tok/s   vs plain      accept     exact  prefill/draft
+     0       34.36          1.000       29.10       1.00x           -         -  345.7/0.0 ms
+drafter: 253.59 MiB weights + 3.5 MiB KV at ctx 444; load+run wall 15.3 s
+exit=0
+=== spec-bench json_tool_call drafts=1
+     0       34.35          1.000       29.11       1.00x           -         -  346.4/0.0 ms
+     1       43.45          1.954       44.97       1.54x       0.969   128/128  341.4/44.2 ms
+drafts 1: no-accept 1.26x a plain step (23.0 tok/s); step 43.45 ms = draft 2.55 + verify 40.74 + rollback 0.16
+drafter: 253.59 MiB weights + 3.5 MiB KV at ctx 444; load+run wall 20.7 s
+exit=0
+=== spec-bench json_tool_call drafts=2
+     2       53.51          2.822       52.74       1.81x  0.956,0.907   128/128  341.1/44.8 ms
+drafts 1: no-accept 1.27x a plain step (23.0 tok/s); step 43.51 ms = draft 2.56 + verify 40.78 + rollback 0.17
+drafts 2: no-accept 1.56x a plain step (18.7 tok/s); step 53.51 ms = draft 5.11 + verify 48.02 + rollback 0.39
+drafter: 253.59 MiB weights + 3.5 MiB KV at ctx 444; load+run wall 25.6 s
+exit=0
+=== spec-bench json_tool_call drafts=3
+drafts 1: no-accept 1.26x a plain step (23.0 tok/s); step 43.45 ms = draft 2.55 + verify 40.74 + rollback 0.16
+drafts 2: no-accept 1.55x a plain step (18.7 tok/s); step 53.44 ms = draft 5.13 + verify 47.94 + rollback 0.37
+drafts 3: no-accept 1.89x a plain step (15.4 tok/s); step 65.05 ms = draft 7.60 + verify 56.79 + rollback 0.65
+drafter: 253.59 MiB weights + 3.5 MiB KV at ctx 444; load+run wall 30.4 s
+exit=0
+=== spec-bench prose_explanation drafts=0
+
+drafts     ms/step    tokens/step       tok/s   vs plain      accept     exact  prefill/draft
+     0       34.36          1.000       29.10       1.00x           -         -  370.5/0.0 ms
+drafter: 253.59 MiB weights + 4.0 MiB KV at ctx 517; load+run wall 15.4 s
+exit=0
+=== spec-bench prose_explanation drafts=1
+     0       34.37          1.000       29.10       1.00x           -         -  370.9/0.0 ms
+     1       43.63          1.789       41.00       1.41x       0.803   128/128  366.7/55.5 ms
+drafts 1: no-accept 1.27x a plain step (22.9 tok/s); step 43.63 ms = draft 2.69 + verify 40.79 + rollback 0.16
+drafter: 253.59 MiB weights + 4.0 MiB KV at ctx 517; load+run wall 21.0 s
+exit=0
+=== spec-bench prose_explanation drafts=2
+     2       53.65          2.309       43.04       1.48x  0.745,0.756   128/128  366.9/55.4 ms
+drafts 1: no-accept 1.27x a plain step (22.9 tok/s); step 43.65 ms = draft 2.68 + verify 40.80 + rollback 0.16
+drafts 2: no-accept 1.56x a plain step (18.6 tok/s); step 53.65 ms = draft 5.27 + verify 48.01 + rollback 0.37
+drafter: 253.59 MiB weights + 4.0 MiB KV at ctx 517; load+run wall 26.5 s
+exit=0
+=== spec-bench prose_explanation drafts=3
+drafts 1: no-accept 1.27x a plain step (22.9 tok/s); step 43.64 ms = draft 2.69 + verify 40.79 + rollback 0.16
+drafts 2: no-accept 1.56x a plain step (18.7 tok/s); step 53.61 ms = draft 5.27 + verify 47.97 + rollback 0.38
+drafts 3: no-accept 1.89x a plain step (15.4 tok/s); step 64.97 ms = draft 7.75 + verify 56.63 + rollback 0.59
+drafter: 253.59 MiB weights + 4.0 MiB KV at ctx 517; load+run wall 32.1 s
+exit=0
+=== spec-bench longdoc_qa drafts=0
+
+drafts     ms/step    tokens/step       tok/s   vs plain      accept     exact  prefill/draft
+     0       39.58          1.000       25.27       1.00x           -         -  6375.8/0.0 ms
+drafter: 253.59 MiB weights + 61.2 MiB KV at ctx 7838; load+run wall 22.1 s
+exit=0
+=== spec-bench longdoc_qa drafts=1
+     0       39.59          1.000       25.26       1.00x           -         -  6372.4/0.0 ms
+     1       50.70          1.608       31.71       1.26x       0.620   128/128  6381.9/1210.0 ms
+drafts 1: no-accept 1.28x a plain step (19.7 tok/s); step 50.70 ms = draft 3.17 + verify 47.40 + rollback 0.13
+drafter: 253.59 MiB weights + 61.2 MiB KV at ctx 7838; load+run wall 35.7 s
+exit=0
+=== spec-bench longdoc_qa drafts=2
+     2       62.37          1.924       30.85       1.22x  0.667,0.386   128/128  6359.9/1202.8 ms
+drafts 1: no-accept 1.28x a plain step (19.7 tok/s); step 50.63 ms = draft 3.15 + verify 47.36 + rollback 0.12
+drafts 2: no-accept 1.58x a plain step (16.0 tok/s); step 62.37 ms = draft 5.97 + verify 55.94 + rollback 0.47
+drafter: 253.59 MiB weights + 61.2 MiB KV at ctx 7838; load+run wall 49.5 s
+exit=0
+=== spec-bench longdoc_qa drafts=3
+drafts 1: no-accept 1.28x a plain step (19.7 tok/s); step 50.63 ms = draft 3.15 + verify 47.36 + rollback 0.13
+drafts 2: no-accept 1.58x a plain step (16.0 tok/s); step 62.37 ms = draft 5.99 + verify 55.91 + rollback 0.47
+drafts 3: no-accept 1.92x a plain step (13.2 tok/s); step 75.88 ms = draft 8.87 + verify 66.40 + rollback 0.61
+drafter: 253.59 MiB weights + 61.2 MiB KV at ctx 7838; load+run wall 63.9 s
+exit=0
+RELEASED wp55
