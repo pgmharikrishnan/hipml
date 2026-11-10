@@ -50,5 +50,3 @@ bench/serve/results/** -text
 # repository is reported as mostly C++.
 docs/reference/** linguist-vendored
 bench/serve/results/** linguist-generated
-bench/results.json linguist-generated
-bench/RESULTS.md linguist-generated
