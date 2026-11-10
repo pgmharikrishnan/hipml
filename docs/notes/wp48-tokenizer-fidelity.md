@@ -1,5 +1,7 @@
 # WP48: tokenizer and template fidelity for real inputs
 
+> *Engineering log from development; internal work-package IDs and paths have been sanitized or removed where they were machine-specific. Current numbers: [docs/benchmarks.md](../benchmarks.md).*
+
 `feat/tok2`, base `a9523ef` (`feat/tail-prefill`). Every earlier number was
 measured on ASCII prompts and text-only chat. This package closes the two holes
 the independent review named: the pretokenizer's Unicode tables and the
@@ -94,8 +96,8 @@ HIPML_GGUF=~/models/Qwen3.8-27B-Q4_K_M.gguf \
 # template fixture: 16 conversations match llama
 ```
 
-Without a GGUF the test prints a skip; on the GPU host it finds the model at
-`C:\models\Qwen3.8-27B-Q4_K_M.gguf`.
+Without a GGUF the test prints a skip; set `HIPML_GGUF` to the model file to
+run the gate.
 
 ## A real coding task
 

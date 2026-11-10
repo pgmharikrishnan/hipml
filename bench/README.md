@@ -24,25 +24,30 @@ bench/run.sh --engine hipml --prompt code_edit --reps 5
 bench/run.sh --force               # rerun cells that already have results
 ```
 
-The script syncs `HEAD` to `rtx`, builds, and runs one
-(engine, prompt, depth) job per GPU-lock acquisition. That keeps every lock
-hold short and makes the 100K cells resumable.
+The script runs one (engine, prompt, depth) job per optional GPU-lock
+acquisition, which keeps every hold short and makes the 100K cells resumable.
+With no host set it builds and runs in this checkout; with
+`HIPML_BENCH_HOST` (or `--host`) it syncs `HEAD` there over ssh, builds on that
+host and pulls the raw results back.
 
-Prerequisites on the host:
+Everything machine-specific is an environment variable, and nothing here falls
+back to one machine's layout:
 
-```
-C:\models\Qwen3.8-27B-Q4_K_M.gguf
-C:\llama.cpp\rocm-gfx120x\llama-server.exe   (build 11820, commit d7725699)
-C:\models\gpu-lock.ps1
-```
+| variable | what it is | default if unset |
+|---|---|---|
+| `HIPML_GGUF` | the target GGUF | required: `run.sh` exits and says so |
+| `LLAMA_SERVER` | the llama.cpp server binary | required only for `--engine llama` |
+| `HIPML_EXE` | the hipml binary | `<repo>/target/release/hipml[.exe]` |
+| `HIP_PATH` | ROCm SDK root | the build skips the kernels |
+| `HIPML_ARCH` | offload arch | `gfx1201` |
+| `HIPML_GPU_LOCK` | optional lock script | unset = no locking |
+| `HIPML_BENCH_HOST` | ssh host | unset = local mode |
+| `HIPML_BENCH_REMOTE_DIR` | checkout on that host | required in remote mode |
+| `HIPML_BENCH_OUT` | raw output root | `<repo>/bench/out/<tool>` |
 
-Environment is set by `remote/with-env.cmd`:
-
-```
-HIP_PATH=C:\rocm-sdk\_rocm_sdk_core
-HIPML_ARCH=gfx1201
-PATH=C:\rocm-sdk\_rocm_sdk_core\bin;%PATH%
-```
+The comparison baseline is llama.cpp **build 11820, commit `d7725699`**, HIP
+backend for gfx120x. `bench/remote/with-env.cmd` reads `HIP_PATH` and
+`HIPML_BENCH_REMOTE_DIR` and fails when either is unset.
 
 ## What is measured
 
@@ -73,6 +78,7 @@ the total is exactly D tokens.
 bench/
   prompts/             five prompt texts + the real document
   fixtures/prompts.json  committed token ids and per-cell hashes
+  _paths.py            the one place an environment path is resolved
   prepare_fixture.py   regenerate the fixture (hipml tokenize)
   job.py               one cell, inside the GPU lock
   aggregate.py         raw jobs -> results.json + RESULTS.md

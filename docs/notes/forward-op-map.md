@@ -1,5 +1,7 @@
 # The forward pass, as a CPU reference
 
+> *Engineering log from development; internal work-package IDs and paths have been sanitized or removed where they were machine-specific. Current numbers: [docs/benchmarks.md](../benchmarks.md).*
+
 `hipml generate` runs Qwen3.8-27B Q4_K_M end to end on the CPU in f32 and prints
 greedy token ids. It exists to be the oracle the GPU graph is checked against,
 so it ports llama.cpp's code paths literally rather than deriving them.
@@ -104,4 +106,4 @@ Unicode tables.
 Reference: `llama-server` on the model at `-c 4096`, `temperature 0`,
 `ignore_eos true`, 24 predicted tokens, token ids from `completion_probabilities`.
 The comparison table and first-divergence indices live in
-`docs/forward-parity.md`.
+`docs/notes/wp42-forward-parity.md`.

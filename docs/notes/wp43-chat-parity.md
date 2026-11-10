@@ -1,5 +1,7 @@
 # WP43: real chat answers, EOS stop, and llama.cpp output comparison
 
+> *Engineering log from development; internal work-package IDs and paths have been sanitized or removed where they were machine-specific. Current numbers: [docs/benchmarks.md](../benchmarks.md).*
+
 `feat/chat`, base `110457f` (`feat/final`). Every earlier number was measured on
 raw text: no chat template, no special-token path, no EOS stop. On `code_edit`
 the model's first output was `<|im_end|>\n<|im_start|>assistant\n<think>` —
@@ -201,7 +203,7 @@ speculative path in this comparison.
   GEMV / attention accumulation order against llama's ROCm kernels), not to a
   single addend. No bit-level logit capture from llama was taken, so the exact
   flip is not reconstructed.
-- Non-ASCII tokenization: **closed in WP48** (`docs/wp48.md`): the pretokenizer
+- Non-ASCII tokenization: **closed in WP48** (`docs/notes/wp48-tokenizer-fidelity.md`): the pretokenizer
   now uses llama.cpp's generated category table, 0/6,789 corpus mismatches.
 - Template branches not exercised by text-only chat: **closed in WP48**:
   `tool_calls` arguments, `preserve_thinking=false`, and a clear rejection of

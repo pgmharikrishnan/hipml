@@ -1,8 +1,11 @@
 # Multi-sequence batching (WP26)
 
-Every earlier number in this project is single-stream latency. The product is
-an agent fleet, so the number that pays for the machine is aggregate
-throughput: many concurrent requests sharing one weight stream.
+> *Engineering log from development; internal work-package IDs and paths have been sanitized or removed where they were machine-specific. Current numbers: [docs/benchmarks.md](../benchmarks.md).*
+
+Every earlier number in this project is single-stream latency. The target
+workload is many concurrent agent sessions, so the number that pays for the
+machine is aggregate throughput: many concurrent requests sharing one weight
+stream.
 
 Decode is bandwidth-bound: one step reads 17.19 GB of weights. With B
 sequences decoded together, one read serves B tokens, so the roofline for a

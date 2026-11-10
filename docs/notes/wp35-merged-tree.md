@@ -1,5 +1,7 @@
 # WP35: the merged tree
 
+> *Engineering log from development; internal work-package IDs and paths have been sanitized or removed where they were machine-specific. Current numbers: [docs/benchmarks.md](../benchmarks.md).*
+
 `feat/merged2`, base `feat/pf-short` (`d7b53f6`). Merge order and what each one
 cost:
 
@@ -20,7 +22,7 @@ case below are green.
 | check | result |
 | --- | --- |
 | 20-id acceptance | `11751 13 198 760 6511 314 14898 369 21047 13 198 760 6511 314 17163 369 23327 13 198 760`, first id 11751, 29.80 tok/s over 20 tokens |
-| `cargo test --workspace` | 59 tests, 0 failed (local and rtx) |
+| `cargo test --workspace` | 59 tests, 0 failed (local and GPU host) |
 | `cargo check --workspace --features hip` | clean |
 | `parity prefill --deep` | 6 passed, 0 failed |
 | `parity --deep` | 56 passed, 0 failed, 1 skipped |

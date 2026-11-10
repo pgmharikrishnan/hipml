@@ -1,5 +1,7 @@
 # The GPU graph: one token end to end
 
+> *Engineering log from development; internal work-package IDs and paths have been sanitized or removed where they were machine-specific. Current numbers: [docs/benchmarks.md](../benchmarks.md).*
+
 WP13 wired the pieces from WP3–WP14 into one decode graph and measured it; WP14
 closed the host-side overhead and wired the tiled prefill GEMM. The CPU
 reference from `feat/graph` stays the oracle: `--cpu` runs it, `--device` runs
@@ -72,7 +74,7 @@ prefix-sliceable the way a KV cache is, so prefill and decode cost the same per
 token unless the state is snapshotted. WP22 does that: `cache-bench` captures the
 conv window and delta-net matrix at a prefix boundary and restores them on a
 repeat, which is what takes an exact repeat from 1.38× to 237× (see
-`docs/benchmarks.md`, "Cached prefill with SSM state").
+`docs/notes/roofline-log.md`, "Cached prefill with SSM state").
 
 ## Chunked prefill
 
@@ -107,13 +109,13 @@ QK^T and PV. `HIPML_ATTN_F32=1` selects the old f32 tiled kernel for A/B, and
 Numerics: fp16 operands and a 32-value k-tile accumulation mean a tile is not
 bit-identical to the token loop. Measured: the 20 acceptance ids are identical;
 the first-step logits and the kernel-level fp16 budgets are in
-`docs/benchmarks.md`.
+`docs/notes/roofline-log.md`.
 
 ## Commands
 
 ```powershell
 # correctness: same ids as the CPU oracle, plus first-step logit distance
-hipml generate --gguf C:\models\Qwen3.8-27B-Q4_K_M.gguf `
+hipml generate --gguf %HIPML_GGUF% `
   --ids 760,6511,314,9338,369 --tokens 20 --device
 hipml generate ... --device --compare-cpu        # loads the CPU oracle too
 hipml generate ... --device                     # chunked prefill (chunk 2048)
@@ -156,7 +158,7 @@ Prompt `760,6511,314,9338,369`, 20 greedy tokens:
 | device (GPU graph) | `11751 13 198 760 6511 314 14898 369 21047 13 198 760 6511 314 17163 369 23327 13 198 760` |
 | device, chunked prefill | identical |
 | CPU reference | identical |
-| llama.cpp | identical (`docs/forward-parity.md`) |
+| llama.cpp | identical (`docs/notes/wp42-forward-parity.md`) |
 
 First-step logits against the CPU oracle: **max |d| = 4.77e-5** at index 233546;
 device and CPU argmax both 11751.
@@ -173,7 +175,7 @@ device and CPU argmax both 11751.
 | decode at depth 32,768, q8 / q4 KV | — | — | — | — | 25.4 / 25.0 tok/s | — |
 
 \* WP20 prefill used the WP17 prefill kernel, which skipped half of every GEMM
-(see `docs/benchmarks.md`); WP19 is the same kernel with the accumulator index
+(see `docs/notes/roofline-log.md`); WP19 is the same kernel with the accumulator index
 fixed. The merged tree uses the WP19 prefill GEMM with the WP20 matrix-unit
 attention kernel, so its prefill is measured fresh in `bench/RESULTS.md`.
 
@@ -333,7 +335,7 @@ not run, because it appends to every layer's cache at the current position.
 | 8,192 | 512 | **11.41 s** | **717.7** | 1.39 |
 
 The 512 and 8,192 rows are WP19: the same kernel as WP17 with the accumulator
-index fixed (WP17 skipped half the MACs, see `docs/benchmarks.md`). WP17 reported
+index fixed (WP17 skipped half the MACs, see `docs/notes/roofline-log.md`). WP17 reported
 0.44 s / 1153.8 and 9.93 s / 825.1 for a kernel that produced zeros for the
 second 16 tokens of every 32-token warp span. WP20 replaced the attention stage
 in the 8K row (3.58 s → 0.78 s) and reported 6.82 s / 1201 tok/s; the merged

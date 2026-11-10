@@ -1,5 +1,7 @@
 # MTP speculative decode on the GPU engine
 
+> *Engineering log from development; internal work-package IDs and paths have been sanitized or removed where they were machine-specific. Current numbers: [docs/benchmarks.md](../benchmarks.md).*
+
 Speculative decode with the model's own multi-token-prediction (MTP) head: a
 small drafter proposes tokens, the target verifies them in **one weight pass**,
 and greedy decode emits the accepted prefix plus a correction. The point is
