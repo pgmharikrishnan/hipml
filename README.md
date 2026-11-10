@@ -227,6 +227,14 @@ min–max spread in [`docs/release-run.md`](docs/release-run.md), and the 32K an
 100K cells are single cold reps, so a small difference there is noise. Other
 hardware is welcome as new data, never as a replacement for the R9700 rows.
 
+## Articles
+
+1. [Beating llama.cpp at prefill: 11 cells of 12, and a 6% decode bill](docs/articles/01-beating-llama-cpp-prefill.md) — what the 2,048-token tile buys, and what the decode path pays for it.
+2. [The bug that survived every parity gate: 40 of 48 heads running on zeros](docs/articles/02-the-bug-that-survived-the-parity-gates.md) — a launch bug that passed kernel parity, and the oracle gate that caught it.
+3. [Speculative decoding that is exact: 1.53× to 2.00× from the model's own draft head](docs/articles/03-mtp-speculative-decoding-exact.md) — the MTP drafter, the verify pass, and why the output never changes.
+4. [Roofline first: why neither engine can decode faster on a 640 GB/s card](docs/articles/04-roofline-first.md) — the bandwidth budget behind the ~30 tok/s decode cell.
+5. [Serving eight sessions on one 32 GB card](docs/articles/05-serving-8-agents-on-one-card.md) — continuous batching, its 16-slot tie, and the prefix-cache defect the release run found and fixed.
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). The engine, the HIP
