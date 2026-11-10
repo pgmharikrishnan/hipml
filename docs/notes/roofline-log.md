@@ -100,8 +100,8 @@ long prompts, and roughly halves at depth (64.3% vs 49.8% at 8K).
 cache stays in VRAM.
 
 **The engine opportunity is measurable and small on a mature architecture.** Ripple
-sits at 70.6% of its own decode ceiling (16.0 of 22.7 tok/s) while Qwen3.8 and Swift
-sit at 87–88%. That 17-point gap is the entire case for a custom engine on this
+sits at 70.6% of its own decode ceiling (16.0 of 22.7 tok/s) while
+Qwen3.8-27B and Swift sit at 87–88%. That 17-point gap is the entire case for a custom engine on this
 card: 16 → ~19.5 tok/s, not a doubling. It exists because `ricursive` has no
 Flash Attention path, and it disappears as soon as llama.cpp gains one.
 
