@@ -18,11 +18,12 @@ use std::time::Instant;
 
 use hipml_core::gen::argmax_f32;
 use hipml_core::gguf::Gguf;
+use hipml_core::prefix_cache::InsertOutcome;
 use hipml_core::tokenizer::Tokenizer;
 use hipml_model::gpu::{GpuEngine, KvMode};
 use hipml_model::Model;
 
-const SYSTEM: &str = "You are a careful technical assistant. Answer with \
+pub(crate) const SYSTEM: &str = "You are a careful technical assistant. Answer with \
     measured numbers and state what is unverified. Read the whole question, \
     keep the reasoning short, and never invent a benchmark that was not run. \
     Prefer an exact token match over a guess, and say when a cache cannot be \
@@ -104,7 +105,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
 /// Repeat `base` until it is exactly `n` tokens. The result is a valid token
 /// sequence; repeating the source text keeps it realistic without inventing
 /// ids.
-fn fill(tok: &Tokenizer, text: &str, n: usize) -> Vec<u32> {
+pub(crate) fn fill(tok: &Tokenizer, text: &str, n: usize) -> Vec<u32> {
     let mut base = tok.encode(text);
     if base.is_empty() {
         base = vec![220];
@@ -117,7 +118,7 @@ fn fill(tok: &Tokenizer, text: &str, n: usize) -> Vec<u32> {
     out
 }
 
-fn decode(
+pub(crate) fn decode(
     engine: &mut GpuEngine<'_>,
     st: &mut hipml_model::gpu::GpuState,
     first: u32,
@@ -133,7 +134,7 @@ fn decode(
 }
 
 /// Prefill `tokens` (from `st.pos`), then emit `n` greedy ids.
-fn run(
+pub(crate) fn run(
     engine: &mut GpuEngine<'_>,
     tokens: &[u32],
     chunk: usize,
@@ -206,14 +207,23 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
     let at_end = engine.prefix_capture(&p, p.len(), Some(&logits_end))?;
     drop(st);
     let seeded = engine.prefix_stats().ok_or("cache disabled")?;
-    let entries = engine.prefix_entries().unwrap_or_default();
-    let bytes_at = |i: usize| entries.get(i).map(|e| e.1).unwrap_or(0) as f64 / 1048576.0;
+    let describe = |pos: usize, out: &InsertOutcome| {
+        let mib = out.bytes as f64 / 1048576.0;
+        if out.refused {
+            format!(
+                "refused P@{pos} ({mib:.1} MiB > {:.0} MiB cap)",
+                a.bytes as f64 / 1048576.0
+            )
+        } else if out.replaced {
+            format!("replaced P@{pos} ({mib:.1} MiB)")
+        } else {
+            format!("captured P@{pos} ({mib:.1} MiB)")
+        }
+    };
     println!(
-        "seed: captured P@{} ({:.1} MiB) and P@{} ({:.1} MiB); cache {} entries / {:.1} MiB{}",
-        a.shared,
-        bytes_at(0),
-        a.len,
-        bytes_at(1),
+        "seed: {} and {}; cache {} entries / {:.1} MiB{}",
+        describe(a.shared, &at_shared),
+        describe(a.len, &at_end),
         seeded.entries,
         seeded.bytes as f64 / 1048576.0,
         if at_shared.evicted + at_end.evicted > 0 {
@@ -223,25 +233,40 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
         }
     );
 
-    // 3. Hit latency: lookup + restore alone, no forward pass.
-    let mut st = engine.new_state();
-    let t = Instant::now();
-    let hit = engine.prefix_lookup(&p).ok_or("exact lookup missed")?;
-    let _cached = engine
-        .prefix_restore(hit, &mut st)?
-        .ok_or("end snapshot has no cached logits")?;
-    let restore_ms = t.elapsed().as_secs_f64() * 1e3;
+    // 3. Exact hit: only a full-length entry may skip prefill. A refused or
+    //    evicted snapshot is a miss, never a shorter prefix used as exact.
+    let exact_hit = engine.prefix_lookup_exact(&p);
+    let restore_ms = match exact_hit {
+        Some(hit) => {
+            let mut st = engine.new_state();
+            let t = Instant::now();
+            let _cached = engine
+                .prefix_restore(hit, &mut st)?
+                .ok_or("end snapshot has no cached logits")?;
+            t.elapsed().as_secs_f64() * 1e3
+        }
+        None => 0.0,
+    };
 
-    // 4. Warm exact P: restore + cached logits, then decode.
-    let mut st = engine.new_state();
-    let t = Instant::now();
-    let hit = engine.prefix_lookup(&p).ok_or("exact lookup missed")?;
-    let cached = engine
-        .prefix_restore(hit, &mut st)?
-        .ok_or("end snapshot has no cached logits")?;
-    let first = argmax_f32(&cached) as u32;
-    let warm_exact = t.elapsed().as_secs_f64() * 1e3;
-    let ids_exact = decode(engine, &mut st, first, a.tokens)?;
+    // 4. Warm exact P: restore + cached logits, or a full prefill when the
+    //    snapshot was refused. Both paths must produce the cold ids.
+    let (warm_exact, ids_exact, exact_kind, exact_matched, exact_computed) = match exact_hit {
+        Some(hit) => {
+            let mut st = engine.new_state();
+            let t = Instant::now();
+            let cached = engine
+                .prefix_restore(hit, &mut st)?
+                .ok_or("end snapshot has no cached logits")?;
+            let first = argmax_f32(&cached) as u32;
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            (ms, decode(engine, &mut st, first, a.tokens)?, "hit", p.len(), 0)
+        }
+        None => {
+            let (ms, ids) = run(engine, &p, a.chunk, a.tokens)?;
+            let kind = if at_end.refused { "refused" } else { "miss" };
+            (ms, ids, kind, 0, a.len)
+        }
+    };
 
     // 5. Cold Q: a shared prefix but a different suffix, computed from zero.
     let (cold_q, ids_q) = run(engine, &q, a.chunk, a.tokens)?;
@@ -301,7 +326,15 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
         );
     };
     row("cold P", "miss", 0, a.len, cold_p, cold_p, true);
-    row("warm exact P", "hit", p.len(), 0, warm_exact, cold_p, ids_exact == ids_p);
+    row(
+        "warm exact P",
+        exact_kind,
+        exact_matched,
+        exact_computed,
+        warm_exact,
+        cold_p,
+        ids_exact == ids_p,
+    );
     row("cold Q", "miss", 0, a.len, cold_q, cold_q, true);
     row(
         "warm shared Q",
@@ -314,10 +347,19 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
     );
     row("cold R", "miss", 0, a.len, cold_r, cold_r, true);
 
-    println!(
-        "\nhit latency (lookup + restore + argmax, no compute): {:.2} ms for {} tokens",
-        restore_ms, p.len()
-    );
+    if exact_hit.is_some() {
+        println!(
+            "\nhit latency (lookup + restore + argmax, no compute): {:.2} ms for {} tokens",
+            restore_ms,
+            p.len()
+        );
+    } else {
+        println!(
+            "\nhit latency: n/a (exact P@{} snapshot {}, so the repeat prefills)",
+            p.len(),
+            if at_end.refused { "was refused" } else { "was evicted" }
+        );
+    }
     println!(
         "first 20 ids: cold P {:?}\n              warm exact {:?} (equal: {})\n              warm shared Q {:?} (equal to cold: {})",
         &ids_p[..ids_p.len().min(20)],
@@ -347,16 +389,23 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
         ssm_mib + kv_mib + logits_mib
     );
     println!(
-        "3-request sequence: exact repeat -> hit @{}; shared prefix -> hit @{}; unrelated -> {} ({} at {:.1} MiB, {} evicted)",
-        p.len(),
+        "3-request sequence: exact repeat -> {} @{}; shared prefix -> hit @{}; unrelated -> {} ({} at {:.1} MiB, {} evicted)",
+        exact_kind,
+        exact_matched,
         a.shared,
         if miss { "miss" } else { "HIT" },
-        if inserted.replaced { "replaced" } else { "inserted" },
+        if inserted.refused {
+            "refused"
+        } else if inserted.replaced {
+            "replaced"
+        } else {
+            "inserted"
+        },
         final_stats.bytes as f64 / 1048576.0,
         inserted.evicted
     );
     println!(
-        "cache bound: {} entries / {:.0} MiB -> {} entries / {:.1} MiB, {} hits, {} misses, {} evictions, {} too large",
+        "cache bound: {} entries / {:.0} MiB -> {} entries / {:.1} MiB, {} hits, {} misses, {} evictions, {} refused",
         a.entries,
         a.bytes as f64 / 1048576.0,
         final_stats.entries,
@@ -364,15 +413,20 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
         final_stats.hits,
         final_stats.misses,
         final_stats.evictions,
-        final_stats.too_large
+        final_stats.refused
     );
     match after_evict {
         Some(h) => println!(
-            "post-eviction exact repeat: partial hit at {} of {} tokens (the full entry was the LRU victim)",
+            "post-run exact repeat: partial hit at {} of {} tokens ({})",
             h.pos,
-            p.len()
+            p.len(),
+            if at_end.refused {
+                "the full snapshot was refused"
+            } else {
+                "the full entry was the LRU victim"
+            }
         ),
-        None => println!("post-eviction exact repeat: miss (the whole prompt was evicted)"),
+        None => println!("post-run exact repeat: miss (no prefix of the prompt is cached)"),
     }
     Ok(())
 }

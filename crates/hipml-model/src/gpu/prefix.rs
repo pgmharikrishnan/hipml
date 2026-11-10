@@ -44,6 +44,10 @@ pub struct KvBufs {
 /// A complete prefix state, owned by the cache.
 pub struct Snapshot {
     pub pos: usize,
+    /// Both halves (every SSM buffer and every KV buffer) were copied in
+    /// full. An entry is only published when this is true; lookups treat a
+    /// snapshot without it as a miss.
+    pub complete: bool,
     /// Logits after the last cached token, if the capture was at a token
     /// boundary the caller already computed. Reusing them is exact: the prefix
     /// key guarantees the same state.
@@ -138,6 +142,29 @@ impl<'a> GpuEngine<'a> {
         if self.prefix.is_none() {
             return Err("prefix cache is not enabled".to_string());
         }
+        // Size the entry before touching device memory. An oversized capture is
+        // refused here, so it never allocates 1 GiB of buffers only to drop
+        // them, and a zero-byte placeholder is never published.
+        let bytes = self.snapshot_bytes(pos, logits);
+        let evicted = {
+            let cache = self.prefix.as_mut().expect("checked above");
+            let slice = &prompt[..pos];
+            if cache.contains(slice) && bytes <= cache.max_bytes() {
+                // A replacement frees its own bytes; no room needs making.
+                0
+            } else {
+                match cache.reserve(bytes) {
+                    Some(n) => n,
+                    None => {
+                        return Ok(InsertOutcome {
+                            refused: true,
+                            bytes,
+                            ..InsertOutcome::default()
+                        })
+                    }
+                }
+            }
+        };
         // All state writes are kernels on the engine stream; finish them before
         // the copies so a snapshot never catches a half-written tile.
         let l = self.model.launcher();
@@ -145,7 +172,6 @@ impl<'a> GpuEngine<'a> {
 
         let mut ssm = Vec::with_capacity(self.layers.len());
         let mut kv = Vec::with_capacity(self.layers.len());
-        let mut bytes = logits.map(|l| l.len() * 4).unwrap_or(0);
 
         for b in &self.layers {
             match &b.kind {
@@ -155,7 +181,6 @@ impl<'a> GpuEngine<'a> {
                     let s_buf = Buffer::alloc(sl.max(1))?;
                     conv.copy_from_device_on(s.conv_state_buf(), cl, l.stream())?;
                     s_buf.copy_from_device_on(s.s_state_buf(), sl, l.stream())?;
-                    bytes += (cl + sl) * 4;
                     ssm.push(Some(SsmBufs {
                         conv,
                         s: s_buf,
@@ -171,7 +196,6 @@ impl<'a> GpuEngine<'a> {
                     let v = Buffer::alloc(n.max(1))?;
                     k.copy_from_device_on(attn.kv_k_buf(), n, l.stream())?;
                     v.copy_from_device_on(attn.kv_v_buf(), n, l.stream())?;
-                    bytes += 2 * n * 4;
                     ssm.push(None);
                     kv.push(Some(KvBufs {
                         k,
@@ -197,7 +221,6 @@ impl<'a> GpuEngine<'a> {
                         dk.k.copy_range_on(&k, h * dk.seq * row, h * per, per, l.stream())?;
                         dk.v.copy_range_on(&v, h * dk.seq * row, h * per, per, l.stream())?;
                     }
-                    bytes += 2 * words * 4;
                     ssm.push(None);
                     kv.push(Some(KvBufs {
                         k,
@@ -216,20 +239,72 @@ impl<'a> GpuEngine<'a> {
 
         let snap = Snapshot {
             pos,
+            complete: true,
             logits: logits.map(|l| l.to_vec()),
             ssm,
             kv,
         };
-        Ok(self
+        let mut out = self
             .prefix
             .as_mut()
             .expect("checked above")
-            .insert(prompt[..pos].to_vec(), bytes, snap))
+            .insert(prompt[..pos].to_vec(), bytes, snap);
+        out.evicted += evicted;
+        Ok(out)
+    }
+
+    /// Bytes a snapshot at `pos` will occupy, computed without allocating it.
+    fn snapshot_bytes(&self, pos: usize, logits: Option<&[f32]>) -> usize {
+        let mut bytes = logits.map(|l| l.len() * 4).unwrap_or(0);
+        for b in &self.layers {
+            match &b.kind {
+                BlockKind::Ssm(s) => {
+                    let (cl, sl) = s.state_lens();
+                    bytes += (cl + sl) * 4;
+                }
+                BlockKind::Full { deep: None, attn } => {
+                    bytes += 2 * pos * attn.dims.width * 4;
+                }
+                BlockKind::Full { deep: Some(dk), .. } => {
+                    bytes += 2 * dk.heads() * pos * dk.row_words() * 4;
+                }
+            }
+        }
+        bytes
     }
 
     /// Longest cached exact prefix of `prompt`, touching it for LRU.
+    ///
+    /// Only complete entries whose snapshot position equals the entry's token
+    /// length qualify. A half-published or inconsistent entry is skipped, so
+    /// it can never be served as a hit.
     pub fn prefix_lookup(&mut self, prompt: &[u32]) -> Option<PrefixHit> {
-        let hit = self.prefix.as_mut()?.find_longest(prompt)?;
+        let hit = self.prefix.as_mut()?.find_longest_where(prompt, |e| {
+            e.payload.complete && e.payload.pos == e.tokens.len()
+        })?;
+        let has_logits = self
+            .prefix
+            .as_ref()
+            .and_then(|c| c.entry(hit.index).payload.logits.as_ref())
+            .is_some();
+        Some(PrefixHit {
+            index: hit.index,
+            pos: hit.pos,
+            has_logits,
+        })
+    }
+
+    /// An exact hit: the entry covers the whole prompt, not just a prefix.
+    ///
+    /// The exact-repeat fast path (restore + cached logits, no prefill) must
+    /// use this. [`prefix_lookup`](Self::prefix_lookup) deliberately returns a
+    /// shorter prefix for the shared-prefix path, and treating that as exact
+    /// would produce the wrong next token.
+    pub fn prefix_lookup_exact(&mut self, prompt: &[u32]) -> Option<PrefixHit> {
+        let n = prompt.len();
+        let hit = self.prefix.as_mut()?.find_longest_where(prompt, |e| {
+            e.payload.complete && e.payload.pos == e.tokens.len() && e.tokens.len() == n
+        })?;
         let has_logits = self
             .prefix
             .as_ref()
