@@ -12,7 +12,7 @@ and the same token ids fed to both engines. Raw output is under
 | --- | --- |
 | GPU | AMD Radeon AI PRO R9700 (gfx1201), 32 GiB |
 | GPU driver | 32.0.32015.7029 (2026-10-18) |
-| OS | Windows 11 Pro 10.0.26200 |
+| OS | Windows 11 Pro (build 26200) |
 | ROCm | 7.2.1 (`C:\rocm-sdk\_rocm_sdk_core`, HIP packaging 53211-158bd99533) |
 | llama.cpp | 0.7.0-dev, build **11820**, commit **`d7725699`**, Clang 24.0.0 |
 | model | `Qwen3.8-27B-Q4_K_M.gguf` |
@@ -56,12 +56,10 @@ checks on the stock file: 4/4 round-trip tensors byte-identical; embedding rows
 
 ```bash
 # fixture + head-to-head matrix, both engines
-HIPML_GGUF='C:\models\Qwen3.8-27B-Q4_K_M.gguf' \
-HIPML_MTP_GGUF='C:\models\mtp-Qwen3.8-27B-Q4_0.gguf' \
-LLAMA_SERVER='C:\llama.cpp\rocm-gfx120x\llama-server.exe' \
-HIPML_GPU_LOCK='C:\models\gpu-lock.ps1' HIPML_LOCK_LABEL=wp55 \
-  bench/run.sh --host rtx --remote-dir 'C:\hipml-release2' \
-    --refresh-fixture --validate --llama-kv q8_0 --hipml-kv q8
+HIPML_GGUF=<stock-Q4_K_M.gguf> HIPML_MTP_GGUF=<mtp-Q4_0.gguf> \
+LLAMA_SERVER=<llama-server> HIPML_GPU_LOCK=<gpu-lock.ps1> \
+HIPML_LOCK_LABEL=wp55 bench/run.sh --host <gpu-host> --remote-dir <checkout> \
+  --refresh-fixture --validate --llama-kv q8_0 --hipml-kv q8
 
 # MTP, chat divergence, server, batch, cache, tokenizer
 python bench/chat/compare.py --tokens 256 --llama-fa on
@@ -269,7 +267,7 @@ tree keeps WP52's split-K scratch sizing and WP53's `splitk-gate`.
 
 | gate | result |
 | --- | --- |
-| `cargo test --workspace` | **82 passed, 0 failed** (local and rtx) |
+| `cargo test --workspace` | **82 passed, 0 failed** (local and on the GPU host) |
 | `cargo check --workspace --features hip` | clean |
 | `oracle-gate --ids-file p2_math_169.ids --steps 20 --chunk 2048 --kv q8` | **20/20**, step 19 = **41020** |
 | 20-id acceptance (stock model) | `11751 13 198 760 6511 314 9564 369 19241 13 198 760 6511 314 14898 369 21047 13 198 760`; chunked = token loop; CPU text identical |
