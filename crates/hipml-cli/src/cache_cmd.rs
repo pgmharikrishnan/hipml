@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml cache-bench`: cold, warm-exact and warm-shared TTFT on the real
 //! hybrid graph, with the 48 SSM recurrent states snapshotted alongside the 16
 //! f32 attention KV caches.

@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Portions of this file are derived from llama.cpp
+# (https://github.com/ggml-org/llama.cpp, commit d7725699),
+# Copyright (c) the ggml authors, used under the MIT License.
+# See NOTICE and docs/reference/LICENSE.
+
 """Generate crates/hipml-core/src/unicode_tables.rs from llama.cpp's tables.
 
 The pretokenizer's general-category tests must be llama.cpp's, not Rust's
@@ -66,7 +72,13 @@ merged = [r for r in merged if r[2] != 0]
 entries = [f"(0x{a:X}, 0x{b:X}, {v})," for a, b, v in merged]
 lines = ["    " + " ".join(entries[i:i + 10]) for i in range(0, len(entries), 10)]
 
-header = '''//! Unicode category bits, generated from llama.cpp's `unicode-data.cpp`.
+header = '''// SPDX-License-Identifier: Apache-2.0
+// Portions of this file are derived from llama.cpp
+// (https://github.com/ggml-org/llama.cpp, tag b12126 unless noted),
+// Copyright (c) the ggml authors, used under the MIT License.
+// See NOTICE and docs/reference/LICENSE.
+// Unicode character data (c) Unicode, Inc., Unicode License v3.
+//! Unicode category bits, generated from llama.cpp's `unicode-data.cpp`.
 //!
 //! Do not edit by hand: regenerate with
 //! `bench/tokenizer/gen_unicode_table.py unicode-data.cpp \\`

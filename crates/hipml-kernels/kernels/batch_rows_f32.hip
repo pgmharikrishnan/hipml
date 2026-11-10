@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Batched row-wise helpers: slot on `blockIdx.y`, the existing per-row axis on
 // `blockIdx.x`. Arithmetic is the single-row kernel's, unchanged.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The chunk-attention launch: one matrix-unit kernel over an f32 mirror, a
 //! q8_0 cache or a q4_0 cache.
 //!

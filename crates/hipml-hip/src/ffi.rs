@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Raw `amdhip64` declarations — the only place hipml touches the vendor API.
 //!
 //! Deliberately narrow: no opaque property structs (their layout is a version

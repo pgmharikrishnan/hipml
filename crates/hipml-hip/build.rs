@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Point the linker at the HIP runtime when the `hip` feature is on.
 //!
 //! `amdhip64.lib` lives in `$HIP_PATH/lib`; the matching DLL lives in

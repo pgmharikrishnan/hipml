@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Batched cache append + attention launches (WP37).
 //!
 //! One launch for all slots: `grid.y` is the slot, the per-slot cache and

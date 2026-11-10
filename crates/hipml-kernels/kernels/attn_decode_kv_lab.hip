@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Attribution lab for the q8 decode-attention kernel.
 //
 // `attn_decode_kv.hip` is the shipped kernel; this file is the same shape with

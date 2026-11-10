@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Weight matrices in their on-disk quantized form, and the reference GEMV.
 //!
 //! A 27B Q4_K_M model is 17 GB of bytes but 68 GB of f32, so the forward pass

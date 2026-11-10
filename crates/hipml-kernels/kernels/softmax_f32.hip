@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Row-wise softmax with max subtraction.
 //
 // One block per row: max reduction, exp+sum reduction, then write.

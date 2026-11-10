@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml mtp-accept`: how often an MTP drafter agrees with greedy decode.
 //!
 //! Runs the CPU oracle greedily over a prompt and, at every generated position,

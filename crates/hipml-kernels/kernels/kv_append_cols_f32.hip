@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Append `rows` token rows to a position-major f32 KV cache pair in one launch.
 //
 // k_cache and v_cache are [n_ctx][width]; the row for column `r` goes to

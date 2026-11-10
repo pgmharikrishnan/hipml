@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Resident weight views for the GPU graph.
 //!
 //! A `Proj` points at a loader `ByteBuffer` in its GGUF block form and carries

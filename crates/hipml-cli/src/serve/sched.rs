@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The serving loop: one GPU, one model, many requests.
 //!
 //! The loop is single-threaded on purpose. `GpuEngine`, `MtpGpu` and

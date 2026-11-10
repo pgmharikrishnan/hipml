@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml prefill-bench` and `hipml prefill-model`: the two measurements that
 //! make prefill a number rather than a claim.
 //!

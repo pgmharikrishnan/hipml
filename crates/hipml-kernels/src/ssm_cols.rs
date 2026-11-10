@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The GDN per-token chain over a chunk of verify columns, in one launch per
 //! stage. Split from `ssm_ops.rs` for size; the arithmetic is the single-token
 //! kernels' and the row/column index is folded into the block index.

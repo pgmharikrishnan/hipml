@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Row-block full attention (WP47).
 //!
 //! A row block concatenates several slots' tails. The projections run over all

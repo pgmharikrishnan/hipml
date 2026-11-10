@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml oracle-gate`: the CPU f32 oracle and the production GPU path, step
 //! for step, on one prompt.
 //!

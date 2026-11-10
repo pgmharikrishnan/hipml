@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Host-side foundation for hipml: tensors, deterministic RNG, reference kernels
 //! and the parity harness.
 //!

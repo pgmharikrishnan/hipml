@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Single-op parity launchers for the attention kernels.
 //!
 //! The layer itself lives in `attn_gpu.rs`; these entry points exist so every

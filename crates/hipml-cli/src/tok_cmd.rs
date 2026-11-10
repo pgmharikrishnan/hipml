@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml tokenize-batch`: tokenize a hex-encoded corpus in one process.
 //!
 //! The differential harness (bench/tokenizer/diff.py) needs thousands of

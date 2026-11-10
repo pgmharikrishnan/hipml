@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! R-column attention for the verify pass: one launch for the append and one
 //! for the causal mix, plus the front end (q/gate split, head norm, rope) batched
 //! over the columns.

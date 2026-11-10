@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml gpu-sweep`: is the decode stream launch-bound or bandwidth-bound?
 //!
 //! The decode graph streams ~17 GB of weights through ~500 GEMV launches and

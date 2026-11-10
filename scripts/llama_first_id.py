@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """One llama-server request on the synthetic 100K prompt; print the first token.
 
 The synthetic prompt matches `hipml gpu-bench --prefill N` exactly:

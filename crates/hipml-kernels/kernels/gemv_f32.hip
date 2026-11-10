@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // One block per output row, one thread per column stride.
 //
 // y[row] = sum_j W[row][j] * x[j]

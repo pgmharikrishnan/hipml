@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Load-time verification: device bytes against the file, and the two accessors
 //! against host references.
 //!

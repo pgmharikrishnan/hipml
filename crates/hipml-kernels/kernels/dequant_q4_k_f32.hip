@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// Block format decoding follows ggml's K-quant / q8_0 layout
+// (https://github.com/ggml-org/llama.cpp, tag b12126),
+// Copyright (c) the ggml authors, used under the MIT License.
+// See NOTICE and docs/reference/LICENSE.
 // Dequantise Q4_K super-blocks to f32.
 //
 // One block of 256 threads per super-block; thread `l` writes value `l` using

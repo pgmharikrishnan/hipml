@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml gpu-profile`: where a decode token's non-weight time goes.
 //!
 //! Four measurements, all on the resident graph's own buffers:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! A small JSON reader/writer for the server.
 //!
 //! The workspace has no external crates, so this is the minimum needed for

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Greedy speculative decode: the MTP drafter plus the R-column verify.
 //!
 //! One step produces `1 + a` tokens where `a` is the length of the accepted

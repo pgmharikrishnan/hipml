@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! A read-only memory map of the GGUF file.
 //!
 //! The weights are 17 GB. Holding them in an anonymous `Vec<u8>` makes them

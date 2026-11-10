@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Skinny quantized GEMM on the matrix unit: R <= 16 activation rows against a
 // K x N quantized weight, `y[r, :] = W @ x[r, :]`.
 //

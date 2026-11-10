@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Load-time warm-up.
 //!
 //! The first prefill after a cold load pays for things no later request pays

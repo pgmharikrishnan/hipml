@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // In-place SiLU, the activation qwen35 applies to the conv1d output.
 //
 // Kernel: ssm_silu_inplace_f32. Reference: the `a / (1 + exp(-a))` loop in

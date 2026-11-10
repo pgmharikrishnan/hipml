@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The quantized KV formats are a contract with the kernels, so they get exact
 //! tests: known vectors, bit layout, and the error bound each encode promises.
 //!

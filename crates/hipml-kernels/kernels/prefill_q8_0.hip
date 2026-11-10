@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// Block format decoding follows ggml's K-quant / q8_0 layout
+// (https://github.com/ggml-org/llama.cpp, tag b12126),
+// Copyright (c) the ggml authors, used under the MIT License.
+// See NOTICE and docs/reference/LICENSE.
 // Tiled prefill GEMM over Q8_0 weights. Structure identical to prefill_q4_k:
 // one block owns 256 tokens x 64 output rows, the weight tile is dequantised
 // once into shared and reused for every token, f32 accumulators in registers.

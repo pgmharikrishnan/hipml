@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Device memory: f32 buffers for activations, byte buffers for weights.
 //!
 //! No allocator lives here. The weight loader allocates one `ByteBuffer` per

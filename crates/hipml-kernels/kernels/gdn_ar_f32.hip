@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Gated delta net, one token, autoregressive form.
 //
 // For value head h (key head hk = h % n_k) and every value axis j:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Decode-time attention over the whole KV cache, online softmax.
 //
 // One block per query head; block width equals head_dim, so every thread owns

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Device-side dispatch: one match arm per kernel, argument lists written out.
 //!
 //! Shapes and scalars come from the parity case, so the launcher and the

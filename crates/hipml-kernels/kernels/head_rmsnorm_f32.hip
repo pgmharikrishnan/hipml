@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Per-head RMS norm over the last axis: y[h][d] = x[h][d] / sqrt(mean + eps) * w[d]
 //
 // One block per head. `x` and `y` may alias: the reduction reads every element

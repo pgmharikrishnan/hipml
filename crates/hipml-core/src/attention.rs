@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Full-attention layers: Q projection with gate, per-head q/k RMS norm, M-RoPE,
 //! causal attention over a per-layer KV cache, and the output projection.
 //!

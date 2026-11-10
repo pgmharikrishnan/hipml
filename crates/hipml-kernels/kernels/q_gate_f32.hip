@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Attention output gate: y[i] = x[i] * sigmoid(gate[i]).
 //
 // Kernel: q_gate_f32, elementwise. y may alias x.

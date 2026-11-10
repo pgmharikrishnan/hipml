@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Chat rendering and tokenization for the HTTP surface.
 //!
 //! The server reuses the WP43 path exactly: the GGUF's own template, special

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Chunked prefill: a prompt tile as batched GEMMs instead of N decode steps.
 //!
 //! The decode graph is one token at a time, so a 512-token prompt streams the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Split the joint q|gate projection into two [n_heads][head_dim] tensors.
 //
 // Row layout of attn_q is per head: head_dim query values followed by head_dim

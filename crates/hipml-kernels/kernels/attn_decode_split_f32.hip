@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Split-K decode attention over the position-major f32 KV cache.
 //
 // The single-block-per-head kernel (`attn_decode_f32`) reduces each row with

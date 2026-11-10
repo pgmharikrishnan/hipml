@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Gated RMS norm of the recurrence output.
 //
 //   y[h][i] = rms_norm(o[h], ssm_norm) * silu(z[h][i])

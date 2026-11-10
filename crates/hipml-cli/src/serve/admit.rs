@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Admission control: a hard bound on concurrent generation requests and on
 //! connection threads.
 //!

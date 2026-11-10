@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Batched per-slot work for the decode step.
 //
 // Every kernel here runs one block-grid axis over the slots (`blockIdx.y`) and

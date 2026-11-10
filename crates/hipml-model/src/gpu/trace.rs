@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Per-stage timing and per-stage byte accounting for one token.
 //!
 //! `gpu-profile --trace` uses this: every stage boundary records a HIP event,

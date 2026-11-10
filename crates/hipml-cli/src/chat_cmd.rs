@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml chat`: render the model's GGUF chat template and tokenize it with
 //! special tokens as single ids.
 //!

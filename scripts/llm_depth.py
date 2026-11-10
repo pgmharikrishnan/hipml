@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """llama.cpp reference target: build a prompt of a target depth, then measure
 prefill and decode on it.
 

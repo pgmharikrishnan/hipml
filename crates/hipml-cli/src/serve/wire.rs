@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The HTTP wire layer: response writing, the chunked SSE writer and the
 //! incremental token-to-text decoder.
 //!

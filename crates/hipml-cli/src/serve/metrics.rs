@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Server counters, served as Prometheus text on `GET /metrics`.
 
 use std::sync::Mutex;

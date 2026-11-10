@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Prefix snapshots for the hybrid prefill graph.
 //!
 //! A qwen35 prefix is summarised by two things: the 16 full-attention layers'

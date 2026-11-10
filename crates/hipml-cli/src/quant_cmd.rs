@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml gguf` and `hipml decode-bench`: inspect the real model file and
 //! stream every quantized weight tensor through the matching GEMV once.
 //!

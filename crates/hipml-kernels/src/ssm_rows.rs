@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Row-block SSM stages (WP47).
 //!
 //! A row block is a concatenation of independent sequences' tails: each tail

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // One block per output column, staging each weight tile once for all R rows.
 // y[r][row] = sum_j W[row][j] * x[r][j]
 //

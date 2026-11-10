@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Greedy argmax on the device: 248,320 logits in, one index out.
 //
 // The graph used to copy the whole logit vector back (993 KB) and walk it on

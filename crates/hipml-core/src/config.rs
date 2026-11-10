@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Architecture hyperparameters, read from the GGUF metadata table.
 //!
 //! Everything the forward pass needs is in `qwen35.*`; nothing here is

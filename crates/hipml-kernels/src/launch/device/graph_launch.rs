@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The elementwise launches the decode graph chains between its GEMVs.
 //!
 //! Every method here works on device buffers and does not synchronize; the

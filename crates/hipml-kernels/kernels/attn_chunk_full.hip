@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Split-K chunk attention with the whole head width in one block.
 //
 // The shipped matrix-unit kernel (`attn_chunk_wmma.hip`, and its split copy)

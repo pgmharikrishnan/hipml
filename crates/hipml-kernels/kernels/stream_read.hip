@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Pure streaming read: the memory side of a GEMV with no dequant math.
 //
 // These exist to separate two explanations for the decode stream running at

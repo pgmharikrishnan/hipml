@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // SwiGLU activation: out[i] = silu(gate[i]) * up[i]
 
 #include <hip/hip_runtime.h>

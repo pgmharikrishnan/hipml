@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Layer construction: the resident weights one block borrows.
 //!
 //! Child module of `gpu` so the engine can build a block without exposing the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Gated-delta-net layer over a whole prefill chunk.
 //
 // The decode path launches seven kernels per token (gates, conv, silu, two

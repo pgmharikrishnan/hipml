@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml serve`: an HTTP server with continuous batching, MTP for the lone
 //! request, and the SSM+KV prefix cache.
 //!

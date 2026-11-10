@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! One batched decode step: the shared weight pass, then each slot's own
 //! verdict — a token, a stop, a cancel, or that slot's own failure.
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // R-column split-K decode attention over the position-major f32 KV cache.
 //
 // One launch verifies every speculative column. The split partition is fixed

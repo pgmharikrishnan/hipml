@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The gated-delta-net layer over a prefill chunk.
 //!
 //! The five projections are linear in x, so a chunk runs them as tiled GEMMs

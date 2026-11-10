@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Quantized decode-attention parity cases.
 //!
 //! Separated from `parity.rs` only by size: the cache-shape matrix is twelve

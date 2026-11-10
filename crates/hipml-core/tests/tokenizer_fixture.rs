@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Permanent round-trip gate for the tokenizer and the chat template.
 //!
 //! Both fixtures store llama.cpp's own ids (captured by

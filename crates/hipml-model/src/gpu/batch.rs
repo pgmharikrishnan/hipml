@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Multi-sequence decode: B token rows through one weight pass.
 //!
 //! The single-stream engine assumes one sequence everywhere: one KV cache per

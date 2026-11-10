@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml attn-parity` / `attn-bench`: the GPU full-attention block against the
 //! CPU reference, and its per-layer timing at real context depths.
 //!

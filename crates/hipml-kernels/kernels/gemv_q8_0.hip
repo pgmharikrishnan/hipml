@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// Block format decoding follows ggml's K-quant / q8_0 layout
+// (https://github.com/ggml-org/llama.cpp, tag b12126),
+// Copyright (c) the ggml authors, used under the MIT License.
+// See NOTICE and docs/reference/LICENSE.
 // y[row] = dequant_q8_0(W[row,:]) . x
 //
 // Q8_0 is a 34-byte block: one fp16 scale and 32 int8 values. It is the cheap

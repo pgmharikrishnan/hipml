@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Residual connection: out[i] = a[i] + b[i]
 
 #include <hip/hip_runtime.h>

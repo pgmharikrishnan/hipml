@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Quantized-KV decode attention bench: depth x dtype x (1 head | 24 heads x 16
 //! layers), at the Qwen3.8-27B geometry.
 //!

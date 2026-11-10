@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Reference checks for the forward-pass ops that are not covered by the
 //! kernel parity suite (which compares against the device, not against
 //! llama.cpp's algebra).

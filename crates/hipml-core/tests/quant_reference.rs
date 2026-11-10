@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Hand-computed known vectors for the GGML block formats.
 //!
 //! These are the only tests that can catch a misread spec: every input byte is

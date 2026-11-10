@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Multi-row prefill over independent sequences (WP47).
 //!
 //! One weight pass serves the prompt tails of several slots at once: the rows

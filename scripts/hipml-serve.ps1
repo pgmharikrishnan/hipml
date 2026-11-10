@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 <#
 .SYNOPSIS
   Keep `hipml serve` running: relaunch it whenever it exits.

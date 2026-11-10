@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Hand-rolled HTTP/1.1: one request per connection, chunked SSE when asked.
 //!
 //! No external crates. The surface is what a benchmark client or `curl`

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Split-K chunk attention: the matrix-unit kernel of `attn_chunk_wmma.hip`
 // with the key axis cut into `splits` contiguous slices across blocks, plus the
 // combine pass that folds them (flash-decoding, for prefill).

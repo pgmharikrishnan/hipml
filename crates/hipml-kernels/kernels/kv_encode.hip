@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// Portions of this file are derived from llama.cpp
+// (https://github.com/ggml-org/llama.cpp, tag b12126 unless noted),
+// Copyright (c) the ggml authors, used under the MIT License.
+// See NOTICE and docs/reference/LICENSE.
 // Device-side q8_0 / q4_0 KV encode: quantize one token's K and V rows straight
 // into the cache at `pos`.
 //

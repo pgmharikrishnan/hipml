@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Full attention over a prefill chunk: four launches per layer instead of eight
 // per token.
 //
