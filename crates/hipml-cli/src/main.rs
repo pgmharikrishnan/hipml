@@ -18,6 +18,8 @@ mod cache_cmd;
 #[cfg(feature = "hip")]
 mod batch_cmd;
 #[cfg(feature = "hip")]
+mod mtp_batch_cmd;
+#[cfg(feature = "hip")]
 mod device_cmd;
 #[cfg(feature = "hip")]
 mod gdn_parity;
@@ -29,6 +31,8 @@ mod load_cmd;
 mod mtp_cmd;
 #[cfg(feature = "hip")]
 mod oracle_gate;
+#[cfg(feature = "hip")]
+mod splitk_gate;
 mod prefill_cmd;
 mod tok_cmd;
 #[cfg(feature = "hip")]
@@ -106,6 +110,8 @@ fn main() {
         "ssm" => std::process::exit(ssm_cmd::ssm(&args[1..])),
         #[cfg(feature = "hip")]
         "spec-bench" => std::process::exit(spec_cmd::bench(&args[1..])),
+        #[cfg(feature = "hip")]
+        "mtp-batch-bench" => std::process::exit(mtp_batch_cmd::run(&args[1..])),
         "serve" => {
             #[cfg(feature = "hip")]
             std::process::exit(serve::run(&args[1..]));
@@ -181,6 +187,8 @@ fn main() {
         }
         #[cfg(feature = "hip")]
         "oracle-gate" => std::process::exit(oracle_gate::run(&args[1..])),
+        #[cfg(feature = "hip")]
+        "splitk-gate" => std::process::exit(splitk_gate::run(&args[1..])),
         "help" | "--help" | "-h" => help(),
         other => {
             eprintln!("unknown command: {other}\n");
@@ -221,6 +229,8 @@ fn help() {
          \x20 gpu-bench --gguf PATH [--prefill N] [--depth D --kv q8]\n\
          \x20 oracle-gate --gguf PATH --ids-file F --steps N  CPU oracle vs the\n\
          \x20           production chunked path, step by step (exit 1 on a real split)\n\
+         \x20 splitk-gate --gguf PATH [--chunk 2048 --tails 40]  split-K ffn\n\
+         \x20           scratch vs HIPML_SPLITK=0 at every chunk tail\n\
          \x20 gpu-profile --gguf PATH  launch cost, host round-trips, graph token\n\
          \x20 bench-kv  quantized-KV decode attention: depth x q8/q4 x 1 head / 16 layers\n\
          \x20           --depths 1024,8192,32768,100000 --reps 3\n\

@@ -29,6 +29,13 @@ mod kv;
 mod adopt;
 #[path = "batch/rows.rs"]
 mod rows;
+#[path = "batch/verify.rs"]
+mod verify;
+#[path = "batch/mtp.rs"]
+mod mtp;
+
+pub use verify::VerifySnap;
+pub use mtp::MtpBatch;
 
 /// Slot bookkeeping. Capacity is fixed when the engine is built; allocation
 /// just hands out the indices, so nothing in the forward path assumes slot 0
@@ -151,6 +158,8 @@ pub struct BatchEngine<'a> {
     /// Rows the last row block ran and its wall time in ms.
     row_login: usize,
     row_ms: f64,
+    /// `[M][..]` verify tile, allocated on the first speculative verify.
+    verify: Option<verify::VerifyScratch>,
 }
 
 impl<'a> BatchEngine<'a> {
@@ -264,6 +273,7 @@ impl<'a> BatchEngine<'a> {
             rows: None,
             row_login: 0,
             row_ms: 0.0,
+            verify: None,
         })
     }
 

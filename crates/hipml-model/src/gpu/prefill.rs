@@ -107,8 +107,11 @@ pub(crate) struct Chunk {
     /// `tokens * max(n_embd, n_ff, ssm inner)` halves, i.e. half that many
     /// 4-byte words.
     pub xh: Buffer,
-    /// Second k-partial for split-K ffn projections. Only allocated for short
-    /// prompts, where the ffn tile is wave-starved; `tokens * max(n_embd,n_ff)`.
+    /// Second k-partial for split-K ffn projections. Sized for the largest
+    /// `tokens * rows` the split predicate can select at any tile length up to
+    /// the chunk capacity (see `prefill_split_scratch_cap`), not for the chunk
+    /// alone: a one-token tail at the end of a long prompt still splits the
+    /// wide ffn shapes.
     pub sk: Buffer,
     /// Split-K attention partials: `[splits][qslots][n_head][head_dim]` and
     /// `[splits][qslots][n_head][2]`, f32, `qslots` the chunk rounded up to a
@@ -134,10 +137,11 @@ impl Chunk {
         // The fp16 activation copy must hold the widest tile any projection
         // reads: the ffn tiles, the ssm `out` input and the plain residual.
         let wide = n.max(ff).max(sd.inner());
-        // Split-K only fires for prompts short enough that the ffn tile is
-        // under three waves (see `prefill_should_split`); at the 2048-token
-        // chunk used by long prompts the scratch would never be touched.
-        let sk = if tokens <= 1024 { tokens * wide } else { 1 };
+        // Split-K is chosen per tile, not per prompt: a prompt of 8,193 tokens
+        // leaves a one-token final tile, and the wide ffn shapes split there
+        // even though the 2,048-token chunk does not. Size the scratch for the
+        // worst tile the predicate can select at any length up to the chunk.
+        let sk = ::hipml_kernels::prefill_split_scratch_cap(tokens, wide);
         // Split-K attention scratch. `splits` is the env knob; the buffer is
         // capped at 1 GiB so a deep prompt cannot turn it into a residency
         // problem (8 splits of a 2048-token chunk is 403 MiB).
