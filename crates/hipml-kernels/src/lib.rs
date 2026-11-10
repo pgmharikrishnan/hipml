@@ -20,6 +20,7 @@ pub mod ssm_launch;
 mod ssm_ops;
 #[cfg(feature = "hip")]
 mod ssm_cols;
+#[cfg(feature = "hip")]
 #[path = "ssm_cols_rows.rs"]
 mod ssm_cols_rows;
 #[cfg(feature = "hip")]
