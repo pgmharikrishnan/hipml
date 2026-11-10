@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Fail unless the table satisfies the acceptance contract.
 
 Checks, for every planned cell:

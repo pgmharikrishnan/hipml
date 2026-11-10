@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # One command for the like-for-like bench.
 #
 #   bench/run.sh                         # all prompts, all depths, both engines

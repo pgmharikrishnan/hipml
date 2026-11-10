@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """MTP acceptance on chat-formatted prompts, with EOS stop.
 
 Runs `hipml spec-bench` (plain greedy + 1..3 drafts) on the prompts rendered by

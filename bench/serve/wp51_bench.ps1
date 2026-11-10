@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Run one serve_bench cell under the optional GPU lock, releasing it even on
 # failure.
 #

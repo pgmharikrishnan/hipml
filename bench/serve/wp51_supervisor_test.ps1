@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Prove the supervisor restarts a dead server.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File wp51_supervisor_test.ps1

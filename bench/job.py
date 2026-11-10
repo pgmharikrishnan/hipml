@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Run one (engine, prompt, depth) cell and write its raw measurements.
 
 This runs on the GPU host, inside the GPU-lock window. It does exactly one

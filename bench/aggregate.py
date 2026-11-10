@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Turn raw per-cell job files into bench/results.json and bench/RESULTS.md.
 
 Every prompt is its own row; nothing is averaged across prompt classes. Each

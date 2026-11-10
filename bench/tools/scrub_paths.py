@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Normalise machine paths in committed result JSON, without touching a number.
 
 Results are measurement records: this script rewrites only path strings and the

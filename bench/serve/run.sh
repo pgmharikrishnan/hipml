@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Run one benchmark cell on the GPU host.
 #   sh bench/serve/run.sh hipml a
 #   sh bench/serve/run.sh llama b

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Chat-template branch verification: hipml vs llama-server /apply-template.
 
 Each case is the exact request body llama accepts (messages, tools,

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """End-to-end server check for the WP47 row-block tail path.
 
 Starts a hipml server (no MTP, so every request takes the batched engine),

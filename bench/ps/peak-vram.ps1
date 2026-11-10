@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Sample one process's dedicated GPU memory until it exits; write the peak
 # byte count to -Out. WDDM exposes this per process, so it works for both the
 # hipml child and llama-server without touching either program's memory.

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Benchmark the hipml serving loop against llama-server on one machine.
 
 One invocation runs one (engine, cell) so the caller can keep each GPU-lock

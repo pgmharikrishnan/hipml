@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared path and environment resolution for the bench scripts.
 
 Every machine-specific path is an environment variable or a CLI flag. Nothing
