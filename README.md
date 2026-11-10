@@ -43,7 +43,7 @@ conversations, token-exact in every cell at f32 KV. The server aggregates
 214.41 tok/s at 16 slots. Batch decode at B=8 runs at 107.46 tok/s on the exact
 path and 149.43 tok/s on the opt-in WMMA tile (llama.cpp `-np 8`: 97.54 tok/s);
 at B=16 the figures are 107.33 and 272.97 vs 227.89 tok/s. A prefix-cache hit
-restores 2,048 tokens in 2.0 ms versus 1,619.9 ms cold.
+restores 2,048 tokens in 1.8 ms versus 1,614.2 ms cold.
 
 ## Honest limits
 
@@ -68,8 +68,8 @@ restores 2,048 tokens in 2.0 ms versus 1,619.9 ms cold.
   each; treat a small difference there as noise.
 - **The default prefix-cache budget is 1 GiB.** An 8,192-token snapshot is
   1,174.6 MiB and is refused at capture; the refusal is counted, the ids stay
-  exact, and an exact repeat of that prompt costs a full prefill (6,766.2 ms
-  against 6,691.7 ms cold). Pass `--bytes-mib 4096` for the 4.6 ms hit (1,460×).
+  exact, and an exact repeat of that prompt costs a full prefill (6,794.5 ms
+  against 6,722.7 ms cold). Pass `--bytes-mib 4096` for the 4.6 ms hit (1,460×).
 - **Some paths are unmeasured.** MTP at q8 KV, batch decode at depth > 0, the
   full `mtp-batch-bench` matrix, and servers above 16 slots have no release
   numbers.
