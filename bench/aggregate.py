@@ -109,6 +109,17 @@ def pct(a, b):
     return (a / b - 1.0) * 100.0
 
 
+def public_model(model):
+    """Model identity for the report: basename plus size and hash, never a path."""
+    if not model:
+        return None
+    out = {"path": os.path.basename(str(model.get("path") or ""))}
+    for key in ("bytes", "sha256"):
+        if model.get(key) is not None:
+            out[key] = model[key]
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fixture", default=os.path.join(HERE, "fixtures", "prompts.json"))
@@ -201,8 +212,8 @@ def main():
         "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "meta": meta,
         "fixture": {
-            "path": os.path.abspath(args.fixture),
-            "model": fixture.get("model"),
+            "path": os.path.relpath(args.fixture, os.path.dirname(HERE)),
+            "model": public_model(fixture.get("model")),
             "tokenizer": fixture.get("tokenizer"),
             "depths": fixture.get("depths"),
             "document_tokens": fixture.get("document", {}).get("tokens"),
