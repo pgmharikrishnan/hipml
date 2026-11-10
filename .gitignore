@@ -1,4 +1,5 @@
 /target
+target/
 **/*.rs.bk
 *.code
 *.hsaco
@@ -6,8 +7,16 @@
 __pycache__/
 .DS_Store
 
+# model weights: hipml ships none, and never commits one
+*.gguf
+*.safetensors
+
 # bench raw output (results.json and RESULTS.md are committed)
 /bench/out/
+bench/out/
 
 # supervisor logs (scripts/hipml-serve.ps1)
 /logs/
+
+# scratch space (never part of the release)
+/temp/
