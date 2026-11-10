@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Feature request
+description: A command, a kernel, a model or a workflow you want.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Scope matters here: the engine targets one GPU family, one OS and no
+        external crates. New models, new GPUs and Linux support are welcome as
+        discussions before they become requests.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The task, not the implementation. What command do you type today, and where does it stop?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: The command line, flag or behaviour you have in mind.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: What you do today instead, in hipml or another engine.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - kernels / GPU
+        - prefill, decode, batching or MTP
+        - the CLI
+        - the server
+        - benchmarks and docs
+        - build and packaging
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This does not need an external crate.
+          required: false
+        - label: I can test this on an R9700 (gfx1201).
+          required: false

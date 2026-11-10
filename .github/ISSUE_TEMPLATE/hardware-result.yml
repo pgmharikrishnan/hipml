@@ -1,0 +1,109 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Hardware result
+description: A benchmark row for a GPU other than the R9700.
+labels: [hardware-result]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for running it. The maintainers have one R9700 and cannot verify
+        any other card, so this is how a new row gets added.
+
+        Fill every cell from one run of `bench/run.sh` on one binary; do not
+        mix runs. Attach the `results.json` that run produced — the rows below
+        must match it.
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and architecture
+      placeholder: Radeon RX 7900 XTX, gfx1100
+    validations:
+      required: true
+
+  - type: input
+    id: driver-rocm
+    attributes:
+      label: Driver and ROCm
+      placeholder: driver 31.0.x, ROCm 7.2.1 (or Mesa x.y, kernel z.z on Linux)
+    validations:
+      required: true
+
+  - type: input
+    id: vram
+    attributes:
+      label: VRAM
+      description: Total VRAM and the peak the run reported.
+      placeholder: 24 GB total, 21.8 GB peak on the 100K cell
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model and SHA-256
+      placeholder: Qwen3.8-27B-Q4_K_M.gguf, sha256 3f9a…
+    validations:
+      required: true
+
+  - type: input
+    id: binary
+    attributes:
+      label: hipml commit and binary SHA-256
+      placeholder: abc1234, sha256 of hipml.exe
+    validations:
+      required: true
+
+  - type: textarea
+    id: rows
+    attributes:
+      label: Results rows
+      description: One row per (prompt, depth) cell, from the same run.
+      render: text
+      placeholder: |
+        prompt      depth  prefill tok/s  decode tok/s  peak VRAM  kv
+        code_edit   0       1234.5         45.6          18.2 GB    q8
+        code_edit   8192    1102.1         41.0          19.9 GB    q8
+        ...
+    validations:
+      required: true
+
+  - type: input
+    id: prompt-set
+    attributes:
+      label: Prompt set
+      description: The prompts and depths you ran (`bench/fixtures/prompts.json` classes, or your own).
+      placeholder: the five committed prompts at depth 0 and 8192, 3 reps
+    validations:
+      required: true
+
+  - type: dropdown
+    id: gates
+    attributes:
+      label: Do the correctness gates pass?
+      description: The commands in docs/reproduce.md, steps 2 to 9.
+      options:
+        - "Yes: parity, oracle-gate, attn-parity and the rest all pass"
+        - "No: something fails (say which cell and attach the log)"
+        - "Partially: some gates skip on this hardware (say which)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: differences
+    attributes:
+      label: What differs from the R9700 numbers
+      description: Your read of the gap — bandwidth, clocks, VRAM spill, driver. Optional but useful.
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: attach
+    attributes:
+      label: Attached
+      options:
+        - label: I have attached the raw `results.json` from this run.
+          required: true
+        - label: The gates above were run on the same binary as the rows.
+          required: true
