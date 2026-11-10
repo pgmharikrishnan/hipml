@@ -74,7 +74,7 @@ impl RowScratch {
             aout: zeros(cap * qd)?,
             y: zeros(cap * n)?,
             xh: zeros((cap * wide + 1) / 2)?,
-            sk: zeros(if cap <= 1024 { cap * wide } else { 1 })?,
+            sk: zeros(::hipml_kernels::prefill_split_scratch_cap(cap, wide))?,
             ssm: SsmChunk::new(&sd, cap)?,
         })
     }
