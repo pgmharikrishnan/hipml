@@ -156,7 +156,7 @@ speedup is against plain greedy on the same ids.
 The draft stream is token-exact against plain greedy over the whole stream in
 every cell (`exact` column). Raw: `bench/release/mtp/`.
 
-CLI `spec-bench` (Qwen3.8-27B gate model, 128 tokens) agrees: drafts 0/1/2/3 at
+CLI `spec-bench` (gate model, 128 tokens) agrees: drafts 0/1/2/3 at
 29.15 / 43.07 / 47.84 / 45.59 tok/s, 128/128 exact on every row
 (`bench/release/gates/gateE.out`).
 
@@ -287,9 +287,9 @@ tree keeps WP52's split-K scratch sizing and WP53's `splitk-gate`.
 asserts. Raw gate logs: `bench/release/gates/`.
 
 The gate rows above (oracle, parity, gemv, spec, batch check, rows, splitk,
-chunk-boundary prefill) were run on `Qwen3.8-27B-Q4_K_M.gguf`, the model the gate
-corpus and the MTP drafter were built for. The 20-id acceptance and every
-release cell in this document use the stock `Qwen3.8-27B-Q4_K_M.gguf`.
+chunk-boundary prefill) were run before the switch to the stock model. The
+20-id acceptance and every release cell in this document use
+`Qwen3.8-27B-Q4_K_M.gguf`.
 
 ## What is still unmeasured
 
@@ -307,22 +307,21 @@ release cell in this document use the stock `Qwen3.8-27B-Q4_K_M.gguf`.
 
 ## Still citing pre-fix numbers (note for P6)
 
-`bench/RESULTS.md` and `bench/results.json` are kept frozen on the Qwen3.8-27B
-fine-tune at `cef7657` and predate the WP42 correctness fix. Files that still
-quote that generation of numbers and need a refresh or an explicit "historical"
-label before publication:
+The pre-fix benchmark tables were measured at `cef7657`, on an earlier model,
+and predate the WP42 correctness fix. Those files have been removed. Files
+that still quote that generation of numbers and need a refresh or an explicit
+"historical" label before publication:
 
 | file | what it quotes |
 | --- | --- |
-| `bench/RESULTS.md`, `bench/results.json` | the full old matrix (1,198/1,014 tok/s etc.) |
 | `docs/benchmarks.md` | the old headline table and per-feature rows (now points here) |
 | `docs/server.md` | 129.5 vs 95.3 tok/s at 8 slots, 214.4 vs 215.8 at 16 |
 | `docs/notes/wp43-chat-parity.md` | MTP 1.46–1.80×, the old chat table |
 | `docs/notes/wp45-51-serve.md` | the server cells and the 38.3 tok/s single stream |
 | `docs/notes/wp41-final-tree.md` | batch 152.33 / +49.3% and the 30.0 tok/s decode |
 | `docs/notes/wp26-batch.md` | the first batch numbers (+53%) |
-| `docs/notes/wp35-merged-tree.md` | the 20-id acceptance string (Qwen3.8-27B) |
-| `docs/integrate.md`, `docs/mtp-batch.md`, `docs/wp52.md` | Qwen3.8-27B gate results; valid as integration evidence, not release numbers |
+| `docs/notes/wp35-merged-tree.md` | the 20-id acceptance string (gate model) |
+| `docs/integrate.md`, `docs/mtp-batch.md`, `docs/wp52.md` | gate results; valid as integration evidence, not release numbers |
 | `docs/notes/README.md` | index that calls `benchmarks.md` the current numbers |
 
 Everything above is superseded by this file for release copy. The older notes
