@@ -1,13 +1,15 @@
 # Full attention on the GPU
 
+> *Engineering log from development; internal work-package IDs and paths have been sanitized or removed where they were machine-specific. Current numbers: [docs/benchmarks.md](../benchmarks.md).*
+
 The 16 full-attention blocks of Qwen3.8-27B run on the device as one layer
 function over resident quantized weights. The CPU reference is
 `crates/hipml-core/src/attention.rs` / `model.rs`; this note records what was
 checked and what it costs.
 
 ```
-hipml attn-parity --gguf C:\models\Qwen3.8-27B-Q4_K_M.gguf
-hipml attn-bench  --gguf C:\models\Qwen3.8-27B-Q4_K_M.gguf --depths 0,8192,100000
+hipml attn-parity --gguf %HIPML_GGUF%
+hipml attn-bench  --gguf %HIPML_GGUF% --depths 0,8192,100000
 ```
 
 Device: AMD Radeon AI PRO R9700 (gfx1201), 31.9 GiB. Layer 3:

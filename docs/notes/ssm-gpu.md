@@ -1,5 +1,7 @@
 # Gated delta net on the GPU (WP11)
 
+> *Engineering log from development; internal work-package IDs and paths have been sanitized or removed where they were machine-specific. Current numbers: [docs/benchmarks.md](../benchmarks.md).*
+
 The 48 recurrent blocks of Qwen3.8-27B (qwen35) now run on the card. The CPU
 reference in `crates/hipml-core/src/delta.rs` is the specification; the kernels
 are ports of the same algebra, with the layout taken from
@@ -77,7 +79,7 @@ Per sequence, per layer (carried across tokens, not per token):
 
 ## Commands
 
-On the GPU box, from `C:\hipml-ssm`:
+From the repo root, with `HIP_PATH` and `HIPML_GGUF` set:
 
 ```
 target\release\hipml.exe ssm

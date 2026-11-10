@@ -1,6 +1,8 @@
 # Greedy parity against llama-server
 
-Oracle: `llama-server` on the RTX host, `C:\models\Qwen3.8-27B-Q4_K_M.gguf`,
+> *Engineering log from development; internal work-package IDs and paths have been sanitized or removed where they were machine-specific. Current numbers: [docs/benchmarks.md](../benchmarks.md).*
+
+Oracle: `llama-server` (build 11820) on the GPU host, the same GGUF,
 `-c 4096 -ngl 99`, request `temperature 0, top_k 1, ignore_eos true,
 n_predict 24`, token ids read from `completion_probabilities`. The prompt token
 ids come from `/tokenize` and are identical to `hipml tokenize` for all three
@@ -103,7 +105,7 @@ same ids, for the same number of greedy steps, and compares the id streams and
 the prefill logits.
 
 ```
-hipml oracle-gate --gguf C:\models\Qwen3.8-27B-Q4_K_M.gguf \
+hipml oracle-gate --gguf %HIPML_GGUF% \
   --ids-file bench/fixtures/p2_math_169.ids --steps 20 --chunk 2048 --kv q8
 ```
 

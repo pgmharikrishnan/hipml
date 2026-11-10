@@ -1,5 +1,7 @@
 # Review: what is left between hipml and llama.cpp on one R9700
 
+> *Engineering log from development; internal work-package IDs and paths have been sanitized or removed where they were machine-specific. Current numbers: [docs/benchmarks.md](../benchmarks.md).*
+
 Scope: Qwen3.8-27B Q4_K_M, single stream, Radeon AI PRO R9700 (gfx1201, 64 CUs,
 32 GB, 640 GB/s spec, 633.6 GB/s measured GEMV, 171-188 TFLOPS measured WMMA).
 Every number below is measured on the box unless it is marked *model*
@@ -82,7 +84,7 @@ the 3.48 GB q8 KV is re-read 2,345 times at an effective 137 GB/s. Its FLOPs
    k values, which is exactly one Q4_K sub-block row run) needs about 2 bytes
    of LDS per weight regardless of R and should hold 1.0-1.1x to 16 columns.
 3. **An MTP drafter exists on the box and nobody loaded it.**
-   `C:\models\mtp-Qwen3.8-27B-Q4_0.gguf` is a qwen35-family nextn block
+   the MTP drafter GGUF (`mtp-Qwen3.8-27B-Q4_0.gguf`) is a qwen35-family nextn block
    (blk.64: eh_proj 10240→5120, one full-attention block, one FFN, Q6_K/Q4_K)
    plus a Q3_K head. It is trained for a sibling base, not for Qwen3.8-27B's SFT, so
    its acceptance had to be measured (§3).

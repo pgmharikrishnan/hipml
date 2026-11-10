@@ -1,5 +1,7 @@
 # WP41: the final tree
 
+> *Engineering log from development; internal work-package IDs and paths have been sanitized or removed where they were machine-specific. Current numbers: [docs/benchmarks.md](../benchmarks.md).*
+
 `feat/final`, base `04dbdf9` (`feat/merged2`, WP35). Two measured branches
 merged in this order, no textual conflicts, two integration fixes.
 
@@ -24,7 +26,7 @@ Two fixes were required after the merges:
 | check | result |
 | --- | --- |
 | 20-id acceptance | `11751 13 198 760 6511 314 14898 369 21047 13 198 760 6511 314 17163 369 23327 13 198 760`, first id 11751, 29.50 tok/s over 20 tokens |
-| `cargo test --workspace` | 59 passed, 0 failed (local and rtx) |
+| `cargo test --workspace` | 59 passed, 0 failed (local and GPU host) |
 | `cargo check --workspace --features hip` | clean |
 | `parity prefill --deep` | 6 passed, 0 failed, 0 skipped |
 | `parity --deep` | 56 passed, 0 failed, 1 skipped (`sample_top_p_f32`, host-only by design) |
@@ -205,7 +207,7 @@ is measured on the merged arithmetic, not on a third code change.
 
 ## Verdict
 
-The owner's M3 gate was "faster than llama.cpp on the same card, or the project
+The project's M3 gate was "faster than llama.cpp on the same card, or the project
 stops". On this model and card the merged engine now wins prefill at every
 depth (0, 8K, 32K, 100K), wins TTFT in all 12 cells (1.04-1.18x, including
 1.12x at 100K), and matches llama's plain decode to within 3.5% while sitting

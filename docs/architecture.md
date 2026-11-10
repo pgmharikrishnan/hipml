@@ -1,122 +1,108 @@
 # Architecture
 
-## Why this exists
+hipml is a from-scratch LLM inference engine for one model on one card: a Rust
+host, HIP kernels, and no external crates. This page is the map of the current
+engine. The development logs behind it are in [`docs/notes/`](notes/), starting
+with [`m0-m2-architecture.md`](notes/m0-m2-architecture.md) for the original
+design decisions.
 
-On Apple silicon, MLX gives you one host language, one driver API (Metal) and
-kernels you can read. On Windows with a Radeon there is nothing equivalent: every
-option is llama.cpp underneath, and the research stacks (vLLM, SGLang, ExLlama)
-are Linux-only because PyTorch has no ROCm wheels for Windows.
+## Crate map
 
-`hipml` is an attempt at the missing layer for one card: an inference engine whose
-host is Rust, whose kernels are HIP, and whose dependency list is empty.
+| crate | what it owns | needs a GPU |
+|---|---|---|
+| `hipml-core` | GGUF reader, tokenizer, chat template, quant block formats, KV layout, the CPU f32 reference forward pass and the parity case table | no |
+| `hipml-hip` | raw `amdhip64` FFI: device, streams, buffers, module load, launch | yes |
+| `hipml-kernels` | 56 `.hip` kernels plus the launcher ABI and the build script that runs `hipcc --genco` | yes |
+| `hipml-model` | `GpuEngine` (single stream, one graph launch per token) and `BatchEngine` (rows), the layer loop, MTP drafter, resident weights | yes |
+| `hipml-cli` | the commands in [`usage.md`](usage.md) and the HTTP server in [`server.md`](server.md) | for GPU commands |
 
-## Layer budget
+Without `HIP_PATH`, `cargo build` still succeeds: the two `build.rs` files skip
+kernel compilation with a warning and you get the CPU reference engine, which
+is exact but slow. That is the supported way to read and test the engine on a
+machine without a Radeon.
 
-The point of the project is the number of layers between a token and the GPU.
+## Data flow
 
-| Stack | Layers |
+```text
+ HTTP clients ──► hipml serve ─┐            hipml generate / chat / *-bench
+                 (admit, queue,│                      │
+                  backpressure)▼                      ▼
+ ┌──────────────────────── hipml-cli ─────────────────────────────┐
+ │ scheduler: admit → prefill tiles (2048) → batched step | MTP   │
+ │ prefix cache (KV rows + SSM snapshots) · failure scopes · /metrics
+ └──────────────┬─────────────────────────────────────────────────┘
+                ▼
+ ┌──────────────────────── hipml-model ───────────────────────────┐
+ │ GpuEngine (single stream, graph launch) · BatchEngine (rows)   │
+ │ MTP drafter + one-pass verify · resident Q4_K/Q5_K/Q6_K/Q8_0   │
+ └──────────────┬─────────────────────────────────────────────────┘
+                ▼
+ ┌──────── hipml-kernels ────────┐   ┌────────── hipml-core (no GPU) ─────────┐
+ │ 56 .hip → hipcc --genco       │   │ GGUF mmap · tokenizer · chat template  │
+ │ GEMV, WMMA prefill, split-K   │   │ quant formats · CPU f32 oracle forward │
+ │ attention, GDN recurrence, KV │   │ parity harness (every kernel has a ref)│
+ └──────────────┬────────────────┘   └────────────────────────────────────────┘
+                ▼
+        hipml-hip (raw amdhip64 FFI) ──► amdhip64.dll (ROCm) ──► R9700 / gfx1201
+```
+
+**Prefill.** Prompt tokens are cut into 2048-token tiles. Each tile runs the
+whole model in one graph: embedding, then per layer the quantized GEMV and WMMA
+tile GEMMs, full attention over the tile plus the cached prefix (split-K over
+the context), and the gated-delta-net recurrence for the SSM layers. The tile
+size is a flag (`--chunk`), because it is the main prefill knob.
+
+**Decode.** One token per step. Weights stay quantized in VRAM and are
+dequantized inside the GEMV that consumes them; the KV cache is quantized
+(`q8` or `q4`) and the recurrent state is a fixed-size per-slot buffer. A
+single stream runs one graph launch per token; the batched engine runs a
+row-block over the active slots.
+
+**MTP.** The model ships a multi-token-prediction head. It drafts 1–3 tokens
+from the same weight stream and the target verifies all of them in one pass,
+so a correct draft converts a weight pass into several tokens. The output is
+token-exact against plain greedy; see
+[`wp43-chat-parity.md`](notes/wp43-chat-parity.md).
+
+**Batch and serve.** Two or more concurrent requests take the batched engine;
+one lone request may take MTP. The server admits against slots plus a queue
+bound, answers the overflow with 503 and `Retry-After` before tokenizing, and
+keeps a prefix cache of KV rows plus SSM snapshots so a shared system prompt is
+prefilled once.
+
+## Memory budget
+
+Measured on the release model (17,203,416,064 bytes), q8 KV, from
+[`bench/RESULTS.md`](../bench/RESULTS.md):
+
+| item | size |
 |---|---|
-| PyTorch / vLLM | Python → dispatcher → ATen → HIP → HSA → driver |
-| llama.cpp | server → ggml graph → backend → Vulkan → ICD → driver |
-| MLX | Python → C++ → Metal → driver |
-| **hipml** | **Rust core → HIP (`amdhip64`) → driver** |
+| weights, resident and quantized | 16.0 GiB (17.19 GB) |
+| KV, q8, 100K tokens | ≈3.2 GiB |
+| recurrent (SSM) state | 156.9 MB per sequence |
+| peak VRAM, single stream, depth 0 / 8K / 32K / 100K | 17.62 / 18.84 / 19.75 / 21.93 GiB |
+| peak VRAM, 8-slot server | see [`wp45-51-serve.md`](notes/wp45-51-serve.md) |
 
-One layer of our own code. Everything above it is ours too, which is the cost:
-there is no ecosystem to borrow from.
+Two arenas, no general allocator: one persistent device allocation per weight
+tensor (uploaded once, never moved) and a per-graph activation arena sized at
+load. There is no `hipMalloc` in the decode loop.
 
-What cannot be removed: a discrete GPU means explicit host-to-device copies. MLX
-does not pay that cost because Apple's memory is unified. hipml hides the copies
-behind asynchronous staging buffers rather than pretending they are free.
+## Correctness model
 
-## Decisions
+The reference is the specification. Every kernel has a plain-Rust twin with the
+same name, signature and layout, and `hipml parity` compares them from one case
+table. `hipml parity --deep` adds the 100K-context cases.
 
-**HIP, not Vulkan.** Vulkan adds an ICD layer, an explicit descriptor and barrier
-model, and no first-class device-memory semantics — more host code and fewer
-kernels. HIP gives device allocations, streams, events and `hipcc` compiling the
-kernels directly. Vulkan stays as the fallback if `gfx1201` proves flaky under
-HIP on Windows.
+Kernel-vs-kernel parity cannot catch a launch-configuration bug in the
+production path, which is why there is a second gate: `hipml oracle-gate` runs
+the production chunked prefill and the CPU f32 forward pass on the same ids, for
+the same number of greedy steps, and compares the id streams and the logits.
+The bug that motivated it is written up in
+[`wp42-forward-parity.md`](notes/wp42-forward-parity.md).
 
-**No external crates.** No `rand`, no `bytemuck`, no `half`. Each dependency is a
-layer, a version constraint and an audit surface. The RNG is xorshift64\*, the
-tensors are `Vec<f32>`.
+## What it does not do
 
-**The reference is the specification.** Every kernel has a plain-Rust twin with
-the same name, signature and layout in `hipml-core`. Parity is a tolerance
-comparison against that twin, driven by one table of cases, so "does it work" is
-one command with one verdict.
-
-**Explicit kernel ABI.** `hipModuleLaunchKernel` takes an array of pointers to
-arguments, so each launcher writes its argument array out by hand. A macro would
-be shorter and would hide exactly the thing that breaks.
-
-**Deterministic inputs.** Cases are seeded, and a test asserts that rebuilding a
-case reproduces it bit-for-bit. A failure on the GPU host has to be replayable.
-
-## Memory model (M2)
-
-Two arenas, no general allocator:
-
-- **Weights:** one persistent device allocation per tensor, uploaded once at load
-  and never moved. Kept quantized in VRAM; dequantized inside the GEMV.
-- **Activations:** a per-graph arena, sized at load from the maximum sequence
-  length, reused every token. No `hipMalloc` in the decode loop.
-
-Copies go through pinned host staging buffers and an explicit stream. The
-allocator is a bump allocator over the arena with no free list, because nothing
-inside a graph frees.
-
-## Quantization (M2)
-
-Weights stay compressed in VRAM and are decompressed inside the kernel that
-consumes them — that is the entire bandwidth win on a dense model. The reference
-implementation defines the block format first, and the kernel must match it
-exactly, block scale rounding included.
-
-Own pack format: one file per GPU, 4096-byte-aligned records, a sha256 per record.
-Corruption then becomes a load-time error instead of a wrong answer.
-
-## Milestones
-
-**M0 — harness (done).** Reference kernels for gemv, rmsnorm, rope, silu_mul,
-softmax, residual add and top-p sampling; a manifest; a CLI; a HIP layer that
-typechecks without a GPU. 10 tests, no GPU required.
-
-**M1 — first real numbers (done).** Kernels compile to a single 24 KB code
-object with `hipcc --genco`, load with `hipModuleLoad`, and all six device cases
-`PASS` within tolerance on gfx1201. A naive fp32 GEMV at the `ffn_up` shape
-(`[40960, 5120]`, 838 MB) runs at **633.6 GB/s**, i.e. 99% of the card's 640 GB/s
-spec.
-
-Two things had to change to get there, both recorded in the log rather than
-hidden: `hipcc` refuses one `-o` with several sources, so the sources are
-amalgamated into one translation unit; and rope parity failed at 7.1e-5 until
-both sides built the rotation angle in f64, which is a precision-path fix rather
-than a widened tolerance.
-
-The M1 result reframes M3. Since the memory path already reaches the roofline,
-the remaining speed is in the parts llama.cpp does not implement for a given
-architecture — attention without Flash Attention, above all.
-
-**M2 — a model.** Quantized GEMV, KV cache, a tokenizer, and one small model
-generating tokens that match llama.cpp's output on the same prompt. This is where
-the engine stops being a kernel library.
-
-**M3 — the verdict.** Run the same model as llama.cpp Vulkan on the same card and
-compare tokens per second at a deep context. The measured baseline to beat is a
-65B dense model at 67% of the memory roofline; below roughly 85% there is no
-reason to keep the second engine.
-
-## Non-goals
-
-Training. Autograd. Multi-GPU. Portability beyond one architecture and one card.
-Loading arbitrary checkpoints — packs are built for this engine, not imported.
-
-## Risks
-
-- **`gfx1201` under HIP on Windows is unproven for us.** If the runtime is slower
-  than Vulkan, the premise weakens before any kernel is written. The cheapest test
-  is running the existing llama.cpp HIP build on the same box.
-- **Tolerance drift.** RDNA4 fuses operations differently from the scalar
-  reference. Tolerances may need to widen; they must never be widened silently.
-- **Scope.** An engine that only runs one model family is a research project, not
-  infrastructure. M3 is deliberately a stop-or-continue gate.
+One model architecture, one quantization mix, one GPU target (`gfx1201`), one
+OS. No training, no autograd, no multi-GPU, no sampling (greedy only in
+v0.1.0), no general checkpoint import. See the honest-limits block in the
+README for the measured consequences.

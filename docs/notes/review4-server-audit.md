@@ -1,5 +1,7 @@
 # Review 4: final audit of the server, batch engine and MTP verify
 
+> *Engineering log from development; internal work-package IDs and paths have been sanitized or removed where they were machine-specific. Current numbers: [docs/benchmarks.md](../benchmarks.md).*
+
 Base: `a9523ef` (feat/tail-prefill). Fixes are on `feat/review4`. The box is
 an R9700 (gfx1201, 32 GB) running Qwen3.8-27B Q4_K_M with q8 KV. All GPU work
 ran under the `review4` lock in five holds, each under 20 minutes, on port

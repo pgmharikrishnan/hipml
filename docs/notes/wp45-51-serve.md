@@ -1,5 +1,7 @@
 # WP45: a serving loop and where it loses
 
+> *Engineering log from development; internal work-package IDs and paths have been sanitized or removed where they were machine-specific. Current numbers: [docs/benchmarks.md](../benchmarks.md).*
+
 `hipml serve` is an HTTP server with continuous batching, MTP speculation for a
 lone request, and a hybrid (KV + SSM) prefix cache. This note records the
 design, the first cross-engine measurements against llama-server, and the
