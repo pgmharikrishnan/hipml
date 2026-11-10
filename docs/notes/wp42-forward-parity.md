@@ -27,6 +27,10 @@ a loaded machine).
 
 ### (a) The capital of France is
 
+> These ids are from the gate model; this run predates the switch to the stock
+> Q4_K_M release model. The model-specific acceptance string the release asserts
+> is in [`../release-run.md`](../release-run.md).
+
 ```
 llama: 11751 13 198 760 6511 314 14898 369 21047 13 198 760 6511 314 17163 369 23327 13 198 760
 hipml: 11751 13 198 760 6511 314 14898 369 21047 13 198 760 6511 314 17163 369 23327 13 198 760

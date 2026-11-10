@@ -155,7 +155,7 @@ Prompt `760,6511,314,9338,369`, 20 greedy tokens:
 
 | source | ids |
 | --- | --- |
-| device (GPU graph) | `11751 13 198 760 6511 314 14898 369 21047 13 198 760 6511 314 17163 369 23327 13 198 760` |
+| device (GPU graph) | `11751 13 198 760 6511 314 …` (the full string is model-specific and is in [`../release-run.md`](../release-run.md)) |
 | device, chunked prefill | identical |
 | CPU reference | identical |
 | llama.cpp | identical (`docs/notes/wp42-forward-parity.md`) |
@@ -182,12 +182,12 @@ attention kernel, so its prefill is measured fresh in the release run.
 llama.cpp HIP on the same box: 31.4 tok/s short context, 21.86 tok/s at a
 97,387-token prompt, pp512 **1256.5 tok/s**, 97K prefill **844.9 tok/s**.
 
-The 20-id acceptance string is unchanged by WP15 (fp16 projections, chunked
-recurrence and chunked attention) and by WP19 (the accumulator-index fix):
-`11751 13 198 760 6511 314 14898 369 21047 13 198 760 6511 314 17163 369 23327
-13 198 760`. That prompt is five tokens, which is why it never exercised the
-WP19 bug; the 512-token bench prompt's last id does — it is back to **489**, the
-pre-WP17 value (the buggy kernel read 122271).
+The 20-id acceptance ids were unchanged by WP15 (fp16 projections, chunked
+recurrence and chunked attention) and by WP19 (the accumulator-index fix). The
+string itself is model-specific; the one this release asserts is recorded in
+[`../release-run.md`](../release-run.md). That prompt is five tokens, which is
+why it never exercised the WP19 bug; the 512-token bench prompt's last id does —
+it is back to **489**, the pre-WP17 value (the buggy kernel read 122271).
 
 ### Where a short-context token's 33.5 ms goes
 
