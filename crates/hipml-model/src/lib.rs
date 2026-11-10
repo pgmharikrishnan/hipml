@@ -139,9 +139,12 @@ pub struct Model {
 }
 
 fn supported(ty: TensorType) -> bool {
+    // Q5_K has a decode GEMV (`gemv_q5_k`), a batched GEMV and an fp16-copy
+    // prefill path; it is a fine-tune tensor type too (`blk.51/55.ffn_down`),
+    // so treating it as raw-only was wrong.
     matches!(
         ty,
-        TensorType::F32 | TensorType::Q4K | TensorType::Q6K | TensorType::Q8_0
+        TensorType::F32 | TensorType::Q4K | TensorType::Q5K | TensorType::Q6K | TensorType::Q8_0
     )
 }
 
@@ -213,7 +216,10 @@ impl Model {
 
         // Fixed order so two runs print identical tables.
         let mut per_type = Vec::new();
-        for name in ["F32", "Q8_0", "Q4_K", "Q5_K", "Q6_K"] {
+        for name in [
+            "F32", "F16", "Q8_0", "Q6_K", "Q5_K", "Q4_K", "Q3_K", "Q2_K", "Q4_0", "IQ4_XS",
+            "IQ4_NL", "IQ3_S",
+        ] {
             let mut n = 0usize;
             let mut bytes = 0u64;
             for t in &tensors {
@@ -402,12 +408,6 @@ impl Model {
 
     pub fn lm_head_reps(&self, x: &[f32], reps: usize) -> Result<(Vec<f32>, f64), String> {
         let t = self.require(OUTPUT)?;
-        if t.ty() != TensorType::Q6K {
-            return Err(format!(
-                "{OUTPUT}: expected Q6_K, found {}",
-                t.ty().name()
-            ));
-        }
         let k = t.ne0() as usize;
         if x.len() != k {
             return Err(format!(
@@ -415,7 +415,22 @@ impl Model {
                 x.len()
             ));
         }
+        // The head's type is whatever the file stores (Q6_K on the fine-tune,
+        // Q8_0 on the stock Q6_K build); pick the matching GEMV entry.
+        let entry = match t.ty() {
+            TensorType::F32 => "gemv_f32",
+            TensorType::Q4K => "gemv_q4_k",
+            TensorType::Q5K => "gemv_q5_k",
+            TensorType::Q6K => "gemv_q6_k",
+            TensorType::Q8_0 => "gemv_q8_0",
+            other => {
+                return Err(format!(
+                    "{OUTPUT}: {} has no GEMV entry",
+                    other.name()
+                ))
+            }
+        };
         self.launcher
-            .run_quant_resident_reps("gemv_q6_k", &t.buffer, x, t.rows() as usize, k, reps)
+            .run_quant_resident_reps(entry, &t.buffer, x, t.rows() as usize, k, reps)
     }
 }

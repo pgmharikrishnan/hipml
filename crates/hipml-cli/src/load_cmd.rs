@@ -12,9 +12,25 @@ use hipml_model::verify::{
 };
 use hipml_model::{LoadReport, Model};
 
-/// Fixed token ids for the embedding check. 248319 is the last row of Qwen3.8-27B's
-/// 248320-row vocabulary.
-const PROBE_TOKENS: [u32; 5] = [0, 1, 1234, 100_000, 248_319];
+/// Fixed token ids for the embedding check, plus the vocabulary's last row.
+/// The last row used to be the literal 248319 ("Qwen3.8-27B's 248320-row
+/// vocabulary"); it now comes from the loaded embedding shape, so a model with
+/// a different vocabulary probes a valid id.
+fn probe_tokens(rows: u64) -> Vec<u32> {
+    let mut out = Vec::new();
+    for id in [0u32, 1, 1234, 100_000] {
+        if (id as u64) < rows && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    if rows > 0 {
+        let last = (rows - 1) as u32;
+        if !out.contains(&last) {
+            out.push(last);
+        }
+    }
+    out
+}
 const ROUNDTRIP_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
 fn arg<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
@@ -62,11 +78,16 @@ pub fn load(args: &[String]) -> i32 {
 fn run_load(path: &Path, count: usize) -> Result<(), String> {
     let (model, report) = Model::load(path)?;
     print_report(&model, &report, path);
+    print_config(path)?;
 
     let trips = round_trip(&model, path, count, ROUNDTRIP_SEED)?;
     print_round_trip(&trips);
 
-    print_embeddings(&model, path)?;
+    let rows = model
+        .tensor(hipml_model::TOKEN_EMBD)
+        .map(|t| t.rows())
+        .unwrap_or(0);
+    print_embeddings(&model, path, &probe_tokens(rows))?;
 
     let k = model
         .tensor(hipml_model::OUTPUT)
@@ -74,6 +95,55 @@ fn run_load(path: &Path, count: usize) -> Result<(), String> {
         .unwrap_or(5120);
     let x = fixed_vector(k);
     print_lm_head(&model, &x, 1)?;
+    Ok(())
+}
+
+fn print_config(path: &Path) -> Result<(), String> {
+    use hipml_core::config::Config;
+    use hipml_core::gguf::Gguf;
+    let mut g = Gguf::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let c = Config::from_gguf(&mut g).map_err(|e| format!("config: {e}"))?;
+    let full: Vec<usize> = c
+        .is_recr
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| !**r)
+        .map(|(i, _)| i)
+        .collect();
+    println!(
+        "\nconfig ({}): {} blocks ({} decoder + {} nextn), hidden {}, ffn {}, \
+         heads {} / kv {}, head_dim {}, vocab {}, eps {:e}, rope base {:e} rot {} sections {:?}, \
+         ctx {}",
+        c.arch,
+        c.n_layer + c.nextn_layers,
+        c.n_layer,
+        c.nextn_layers,
+        c.n_embd,
+        c.n_ff,
+        c.n_head,
+        c.n_head_kv,
+        c.head_dim,
+        c.n_vocab,
+        c.eps,
+        c.rope_base,
+        c.n_rot,
+        c.rope_sections,
+        c.context_length
+    );
+    println!(
+        "  ssm: conv {}, state {}, groups {}, dt_rank {}, inner {} (head_v {})",
+        c.ssm_d_conv,
+        c.ssm_d_state,
+        c.ssm_n_group,
+        c.ssm_dt_rank,
+        c.ssm_d_inner,
+        c.ssm_head_v()
+    );
+    println!(
+        "  full-attention layers ({}): {:?}",
+        full.len(),
+        full
+    );
     Ok(())
 }
 
@@ -106,8 +176,8 @@ fn print_report(model: &Model, r: &LoadReport, path: &Path) {
         "dtype", "tensors", "bytes", "resident", "GiB", "status"
     );
     for t in &r.per_type {
-        let status = if t.ty == "Q5_K" {
-            "raw only (no dequant)"
+        let status = if r.unsupported.iter().any(|(_, ty, _)| ty == &t.ty) {
+            "sized, no dequant"
         } else {
             "supported"
         };
@@ -171,7 +241,7 @@ fn print_round_trip(trips: &[RoundTrip]) {
     );
 }
 
-fn print_embeddings(model: &Model, path: &Path) -> Result<(), String> {
+fn print_embeddings(model: &Model, path: &Path, probes: &[u32]) -> Result<(), String> {
     let t = model
         .tensor(hipml_model::TOKEN_EMBD)
         .ok_or_else(|| format!("no tensor {}", hipml_model::TOKEN_EMBD))?;
@@ -185,7 +255,7 @@ fn print_embeddings(model: &Model, path: &Path) -> Result<(), String> {
         "  {:<10} {:>14} {:>12} {:>12}",
         "token", "exact/values", "max_abs", "max_rel"
     );
-    for &token in &PROBE_TOKENS {
+    for &token in probes {
         let device = model.embedding_row(token)?;
         let cpu = cpu_embedding_row(path, token)?;
         let c = compare_rows(&device, &cpu)
