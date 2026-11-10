@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // fp16 prefill GEMM on the matrix unit (gfx12 WMMA), over Q4_K / Q6_K / Q8_0.
 //
 // Same contract as `prefill_f16` — `y[t, :] = W @ x[t, :]`, weights dequantised

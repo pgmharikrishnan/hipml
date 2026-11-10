@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Deterministic RNG so parity failures reproduce exactly.
 //!
 //! xorshift64* plus Box–Muller. No dependencies, and the same seed gives the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Per-head L2 normalisation of q and k.
 //
 // `build_gdn_l2_norm` is `rms_norm(x, eps/n) * 1/sqrt(n)`, which is exactly

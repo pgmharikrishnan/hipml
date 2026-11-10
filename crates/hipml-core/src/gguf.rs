@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! A read-only GGUF v2/v3 reader: header, metadata KV table, tensor-info table,
 //! and 32-byte-aligned tensor data.
 //!

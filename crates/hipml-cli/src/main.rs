@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml` — probe the device, list the kernel manifest, run the parity suite.
 //!
 //! The parity runner is the gate: a kernel that is not compared against the

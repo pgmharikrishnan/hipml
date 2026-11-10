@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Fragment layout of the gfx12 matrix-unit instruction used by
 // `prefill_wmma.hip`, measured rather than assumed.
 //

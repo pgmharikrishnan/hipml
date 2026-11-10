@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! GGUF metadata values.
 //!
 //! The tensor table is enough to read weights; the tokenizer and the

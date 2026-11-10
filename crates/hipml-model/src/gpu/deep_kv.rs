@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The quantized K/V cache for one full-attention layer, and its split-K
 //! scratch.
 //!

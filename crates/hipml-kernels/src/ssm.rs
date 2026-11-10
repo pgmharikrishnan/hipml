@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! One gated-delta-net layer on the device, end to end.
 //!
 //! Weights and state stay resident; `step` launches the seven kernels that make

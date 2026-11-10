@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Move a prefilled single-sequence state into a batch slot.
 //!
 //! The serving loop prefills on `GpuEngine` because that is the engine with the

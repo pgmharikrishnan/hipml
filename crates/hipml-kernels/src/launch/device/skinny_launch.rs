@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Skinny quantized GEMM launches (`R <= 16` column tile).
 //!
 //! Child module of `device`, like `prefill_launch`: the free functions are what

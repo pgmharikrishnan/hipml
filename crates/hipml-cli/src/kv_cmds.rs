@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! CLI commands added for the KV work: VRAM arithmetic and the depth bench.
 //!
 //! Split from `main.rs` by size. Both are thin: the launch path lives in

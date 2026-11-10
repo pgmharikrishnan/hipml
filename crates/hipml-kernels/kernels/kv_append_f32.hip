@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Append one token row to a position-major KV cache pair.
 //
 // k_cache and v_cache are [n_ctx][width]; the row at `step[0]` is overwritten

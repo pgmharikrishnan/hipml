@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Per-layer quantized KV caches for the batched engine.
 //!
 //! The caches are contiguous across slots: slot `b`'s K cache starts at

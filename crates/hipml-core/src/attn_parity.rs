@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Parity cases for the GPU full-attention block, kept out of the main table so
 //! the two files stay readable.
 

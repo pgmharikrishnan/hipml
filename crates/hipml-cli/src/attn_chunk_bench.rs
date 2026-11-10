@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `attn-bench --chunk POS0,TOK`: one layer's chunk attention at real depth.
 //!
 //! The full-model prefill takes 136 s at 100K, which is too slow to iterate a

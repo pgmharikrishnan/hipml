@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The batched decode step. Child of `batch` so it can reach the engine's
 //! private per-slot state.
 //!

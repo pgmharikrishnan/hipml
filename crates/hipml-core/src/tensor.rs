@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! A plain host tensor: row-major, f32, shape only.
 //!
 //! Deliberately dumb. Layout is the contract with the kernels, so it stays

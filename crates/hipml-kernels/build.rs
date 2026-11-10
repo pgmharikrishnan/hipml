@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Compile the HIP kernels when a HIP toolchain is present.
 //!
 //! `hipcc --genco` produces a code object per source file, which the host loads

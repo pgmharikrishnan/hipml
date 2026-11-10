@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml generate --device`: the same greedy loop as the CPU oracle, run on
 //! the resident-weight GPU graph.
 //!

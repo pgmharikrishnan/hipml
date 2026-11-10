@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Build `Message`s and `ChatOptions` from a JSON request body.
 //!
 //! The body is the same shape llama-server's `/apply-template` accepts

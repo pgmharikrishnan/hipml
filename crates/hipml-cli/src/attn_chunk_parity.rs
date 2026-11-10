@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The chunked-prefill attention kernel against the CPU reference.
 //!
 //! One case: 37 queries at position 29 over a 66-row cache, compared row by

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Pure streaming-read launches, for the bandwidth instrument in `gpu-sweep`.
 //!
 //! Child module of `device` so `Launcher`'s module and stream stay private.

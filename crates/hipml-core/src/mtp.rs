@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! A next-token-prediction (MTP / "nextn") drafter on the CPU reference.
 //!
 //! Qwen-family hybrids ship one extra decoder block that predicts token

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Row-wise RMS normalisation: y[i] = x[i] / sqrt(mean(x^2) + eps) * w[i]
 //
 // One block per row; the block reduces the sum of squares, then scales.

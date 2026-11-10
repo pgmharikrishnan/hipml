@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// Block format decoding follows ggml's K-quant / q8_0 layout
+// (https://github.com/ggml-org/llama.cpp, tag b12126),
+// Copyright (c) the ggml authors, used under the MIT License.
+// See NOTICE and docs/reference/LICENSE.
 // y[row] = dequant_q6_k(W[row,:]) . x
 //
 // Row-tile GEMV: one block owns Q6K_ROW_TILE output rows and stages the x k-tile in

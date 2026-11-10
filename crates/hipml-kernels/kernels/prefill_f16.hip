@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // fp16 prefill GEMM over Q4_K / Q6_K / Q8_0 weights.
 //
 // Same tiling as `prefill_q4_k` (a weight tile is dequantised once into shared

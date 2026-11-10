@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// Portions of this file are derived from llama.cpp
+// (https://github.com/ggml-org/llama.cpp, tag b12126 unless noted),
+// Copyright (c) the ggml authors, used under the MIT License.
+// See NOTICE and docs/reference/LICENSE.
 //! Quantized KV-cache block formats: q8_0 and q4_0, encode and decode.
 //!
 //! Both formats copy the llama.cpp/ggml block layout exactly, so a cache packed

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! A thin, explicit device layer: memory, streams, modules, launches.
 //!
 //! There is no allocator abstraction here on purpose. The caching allocator and

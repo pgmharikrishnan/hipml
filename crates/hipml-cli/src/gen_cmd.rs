@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml generate`: load a GGUF, run the forward pass, print greedy tokens.
 
 use std::time::Instant;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Greedy generation: prompt tokens in, argmax tokens out.
 
 use crate::model::Model;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Tool-call arguments: parsing and the exact byte format the Qwen3.5
 //! template's `arguments | items` loop emits.
 //!

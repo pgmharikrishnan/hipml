@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Bit-identity check: the shipped WMMA prefill kernel against the occupancy
 // shape (`prefill_wmma2`). Both are compiled from their own headers into this
 // one translation unit and launched on the same weights and activations.

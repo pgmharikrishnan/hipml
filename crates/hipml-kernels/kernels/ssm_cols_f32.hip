@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // The GDN per-token chain over a chunk of `rows` verify columns.
 //
 // The recurrence is sequential in token order, so the columns are walked inside

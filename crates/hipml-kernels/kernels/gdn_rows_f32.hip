@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Gated-delta-net recurrence over a prefill chunk, split by value rows.
 //
 // `gdn_chunk_f32` gives each value head one 1024-thread block: 48 blocks on a

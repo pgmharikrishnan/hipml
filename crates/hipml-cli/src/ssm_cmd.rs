@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml ssm`: parity for the gated-delta-net kernels, then a per-layer
 //! timing breakdown at the production shape.
 //!

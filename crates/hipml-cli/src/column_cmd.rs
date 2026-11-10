@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml column-bench`: the R-column verify pass, measured on its own.
 //!
 //! `forward_columns` runs `R` tokens through the whole graph in one weight

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! R-column verify: the speculative decode pass.
 //!
 //! One weight pass over the 64 layers for `R` tokens at once. Every projection

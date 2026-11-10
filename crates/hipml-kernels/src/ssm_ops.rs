@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Kernel launches for one GDN layer, split from `ssm.rs` for size.
 //!
 //! Every launch writes its arguments out explicitly, matching the existing

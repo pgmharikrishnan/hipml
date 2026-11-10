@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The decoder: weights, per-sequence state, and the token loop.
 //!
 //! Lay out the same order as `llama_model_qwen35::graph` in

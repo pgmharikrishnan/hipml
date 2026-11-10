@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Batched per-slot SSM launches (WP37).
 //!
 //! One launch per stage for all `B` slots: the slot index is `grid.y` and every

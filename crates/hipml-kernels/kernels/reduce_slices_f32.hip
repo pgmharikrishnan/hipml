@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Sum the k-slice partials of a split prefill GEMM into `y`, in slice order so
 // the result is deterministic: y[i] += s[0][i] + s[1][i] + ... (`n - 1` slices).
 // One launch instead of `n - 1` residual adds: the SSM projections run 4704

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Prefix reuse: a KV cache for the full-attention layers and the matcher that
 //! decides how much of a prompt is already computed.
 //!

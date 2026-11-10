@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Quantized-block decoding shared by the tiled prefill GEMMs.
 //
 // Q4_K, Q6_K and Q8_0 differ only in how 8 contiguous values of a row are

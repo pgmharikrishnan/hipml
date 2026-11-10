@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Occupancy-driven prefill GEMM on the gfx12 matrix unit.
 //
 // Same contract and same numerics as `prefill_wmma.hip` (`y[t,:] = W @ x[t,:]`,

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// Portions of this file are derived from llama.cpp
+// (https://github.com/ggml-org/llama.cpp, tag b12126 unless noted),
+// Copyright (c) the ggml authors, used under the MIT License.
+// See NOTICE and docs/reference/LICENSE.
 //! Quantized block formats from GGML, and their reference dequantisation.
 //!
 //! Only the formats Qwen3.8-27B Q4_K_M actually stores are here: Q4_K, Q6_K,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml gemv-check` / `hipml gemv-bench`: the batched GEMV's exactness and
 //! cost against `R` single launches, per resident weight format.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Register-only throughput probe for the gfx12 matrix unit, the same shape as
 // the `v_dot2_f32_f16` probe that measured 41.4 TFLOPS on this card.
 //

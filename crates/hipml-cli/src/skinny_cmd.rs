@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml skinny-bench`: the R x K GEMM cost curve on the real shapes.
 //!
 //! The question this answers is not "how fast is one launch" but "what does the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The parity harness: one table of cases that both the reference and the GPU
 //! run, so "does the kernel match" is a single command and a single verdict.
 //!

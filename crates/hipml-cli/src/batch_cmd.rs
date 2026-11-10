@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml batch-bench`: aggregate decode throughput for B concurrent slots.
 //!
 //! This is the multi-sequence counterpart of `gpu-bench`. It builds a

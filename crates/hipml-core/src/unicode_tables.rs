@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Portions of this file are derived from llama.cpp
+// (https://github.com/ggml-org/llama.cpp, tag b12126 unless noted),
+// Copyright (c) the ggml authors, used under the MIT License.
+// See NOTICE and docs/reference/LICENSE.
+// Unicode character data (c) Unicode, Inc., Unicode License v3.
 //! Unicode category bits, generated from llama.cpp's `unicode-data.cpp`.
 //!
 //! Do not edit by hand: regenerate with

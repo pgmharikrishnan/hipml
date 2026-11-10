@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // The attention front end over `rows` verify columns, one launch per stage.
 //
 // These are the same kernels as `qg_split_f32`, `head_rmsnorm_f32` and

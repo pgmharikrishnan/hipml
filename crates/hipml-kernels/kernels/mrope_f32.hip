@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// Portions of this file are derived from llama.cpp
+// (https://github.com/ggml-org/llama.cpp, tag b12126 unless noted),
+// Copyright (c) the ggml authors, used under the MIT License.
+// See NOTICE and docs/reference/LICENSE.
 // M-RoPE (GGML_ROPE_TYPE_MROPE) over the first `n_rot` channels of each head.
 //
 // NeoX pair `k` is `(k, k + n_rot/2)`. Pair `k` takes its position id from

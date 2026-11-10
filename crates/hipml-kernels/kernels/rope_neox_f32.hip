@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // NeoX (half-split) rotary embedding at one position.
 //
 // One warp per head; thread t handles rotations t, t+32, ... below half.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The captured token graph: one `hipGraphLaunch` per decode step.
 //!
 //! Child module of `gpu` so it can reach the engine's scratch buffers and the

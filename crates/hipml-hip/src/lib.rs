@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Minimal HIP runtime bindings for hipml.
 //!
 //! One vendor API, no wrappers on top of it. Build with `--features hip` on a

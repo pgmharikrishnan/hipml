@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Parity and bench cases for the tiled prefill GEMM.
 //!
 //! Same contract as `quant_parity.rs`: the reference is `ops::gemm_q*_k`, the

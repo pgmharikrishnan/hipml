@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml rows-check`: prove the multi-row tail prefill (WP47) matches the
 //! single-sequence chunk path token for token and state for state.
 //!

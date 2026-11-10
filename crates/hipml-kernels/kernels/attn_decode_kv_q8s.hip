@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // q8 decode attention, two alternatives to the f32 staging in
 // `attn_decode_kv.hip`, built to find what the 12 ms/step at 100K is bound by.
 //

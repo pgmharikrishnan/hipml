@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The two generation endpoints, in the shapes llama-server clients expect.
 //!
 //! `/v1/chat/completions` speaks OpenAI chunks; `/completion` speaks llama's

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! What happens when one job dies.
 //!
 //! Before WP51 every `?` in the scheduler loop returned to `sched::run` and the

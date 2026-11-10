@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Tiled prefill GEMM over raw f32 weights (the SSM alpha/beta pair).
 //
 // y[t, row] = W[row, :] . x[t, :] for `tokens` rows of x at once. This is

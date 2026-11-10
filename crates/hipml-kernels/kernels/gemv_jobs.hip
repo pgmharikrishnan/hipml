@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // One launch over a device-side job list of independent GEMVs.
 //
 // The decode step issues 336 GEMVs a token and each one pays its own memory

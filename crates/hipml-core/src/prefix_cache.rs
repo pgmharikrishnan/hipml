@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! A bounded prefix cache for prefill state.
 //!
 //! A hybrid model's prefill state is not just the attention KV rows: the SSM

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Decode attention over the q8 cache, one warp per (KV head, key range, head
 // subset).
 //

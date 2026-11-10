@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Flash-style decode attention over a *quantized* KV cache.
 //
 //   attn_decode_kv_q8 / _q4   grid = n_kv * splits, one block per

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml gdn-parity`: the row-split chunk recurrence against the per-head one.
 //!
 //! `gdn_rows_f32` claims to do the arithmetic of `gdn_chunk_f32` element for

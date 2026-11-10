@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! One layer's chunk attention, dispatched by cache: the q8/q4 decode cache
 //! read in place, the f32 tile, or the row-at-a-time fallbacks.
 //!

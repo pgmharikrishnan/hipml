@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Tool-argument formatting tests (nlohmann-compatible numbers, escaping and
 //! the template's `<tool_call>` spacing).
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Small-m multi-row f32 GEMM: one warp per (token, output row).
 //
 // `gemm_f32` is a decode-shaped kernel: one block per output row and a

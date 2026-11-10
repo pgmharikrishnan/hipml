@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The A/B passes behind `gpu-sweep`: real-GEMV spans, a two-stream pair test
 //! and the 1-row-per-warp variant test.
 //!

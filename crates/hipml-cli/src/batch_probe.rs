@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Per-tensor batched-GEMV probe behind `batch-bench --probe`.
 
 use std::time::Instant;

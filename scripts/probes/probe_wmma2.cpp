@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Standalone driver for the occupancy/pipeline prefill GEMM (`prefill_wmma2`).
 //
 //   hipcc -O3 --offload-arch=gfx1201 -I crates/hipml-kernels/kernels \

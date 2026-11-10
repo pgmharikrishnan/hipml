@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The full-attention block on the device: resident weights, one layer call,
 //! and the small kernels that sit between the projections and the attention.
 //!

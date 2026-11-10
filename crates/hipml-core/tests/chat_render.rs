@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Chat-template rendering tests: tool calls, thinking preservation, content
 //! parts. Moved out of `chat.rs` to keep that module under the file-size cap.
 

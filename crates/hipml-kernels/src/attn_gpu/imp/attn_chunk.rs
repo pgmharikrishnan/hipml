@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The full-attention block over a prefill chunk: batched projections, then the
 //! per-token rope, cache append and causal attention the decode path already
 //! uses.

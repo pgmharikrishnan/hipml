@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The kernel manifest: the one table that maps an op to its HIP entry point and
 //! launch geometry.
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml spec-bench`: MTP speculative decode on the resident GPU engine.
 //!
 //! Runs plain greedy decode (0 drafts) and speculative decode with 1..D drafts

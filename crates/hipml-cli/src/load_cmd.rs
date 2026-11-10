@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml load` and `hipml logits`: put the whole model in VRAM and prove it.
 //!
 //! `load` is the acceptance gate: residency table, per-dtype totals,

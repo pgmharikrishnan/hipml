@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Fused residual add + row RMS normalisation:
 //
 //   res[i] = a[i] + b[i]

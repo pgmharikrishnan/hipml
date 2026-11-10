@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Parity and bench cases for the quantized GEMV kernels.
 //!
 //! Kept out of `parity.rs` only to keep both files readable; `parity.rs`

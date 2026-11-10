@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The batch and split probes behind `gpu-sweep --merge` / `--split`.
 //!
 //! Both read the model's own resident weights: one kernel over a device job list

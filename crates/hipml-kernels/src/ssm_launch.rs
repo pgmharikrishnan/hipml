@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Parity / bench dispatch for the gated-delta-net cases.
 //!
 //! Each function mirrors one row of `parity::cases()`: it uploads the named

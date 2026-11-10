@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Quantized-KV decode attention: the case driver and the two-kernel ABI.
 //!
 //! Split out of `launch.rs` by size. The split pass and the reduce are one

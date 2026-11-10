@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The reference kernels have to be right before anything is compared to them.
 //!
 //! These tests run anywhere (no GPU): they check the maths by identity rather

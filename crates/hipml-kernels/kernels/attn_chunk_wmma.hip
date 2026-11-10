@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Matrix-unit (gfx12 WMMA) flash attention over a prefill chunk.
 //
 // The f32 tiled kernel (`attn_chunk_tile_f32`) reduces every (query, key)

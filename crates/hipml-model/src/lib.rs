@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Load every GGUF tensor into VRAM once, then expose the model by name.
 //!
 //! # Allocation policy

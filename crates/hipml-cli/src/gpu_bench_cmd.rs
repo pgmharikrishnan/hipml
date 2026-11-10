@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! `hipml gpu-bench`: decode speed at depth and prefill throughput.
 //!
 //! Split from `device_cmd` because it drives the engine differently: no

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The event loop. A child of `sched` so it can see the state structs'
 //! private fields without making them part of the module's API.
 //!
