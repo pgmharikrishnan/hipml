@@ -32,6 +32,7 @@
 bench/fixtures/**     -text
 bench/sensitivity/**  -text
 bench/serve/results/** -text
+bench/integrate/**    -text
 
 # Binaries and build artefacts.
 *.gguf        binary
