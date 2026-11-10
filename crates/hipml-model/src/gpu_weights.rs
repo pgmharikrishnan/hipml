@@ -83,8 +83,8 @@ pub struct Proj<'a> {
     w: &'a ByteBuffer,
     entry: &'static str,
     /// Q5_K only: the fp16 copy the tiled prefill GEMM streams. One per tensor,
-    /// 0.12 GB for Qwen3.8-27B's two `ffn_down` tensors; the decode GEMV still reads
-    /// the original blocks.
+    /// 0.12 GB for Qwen3.8-27B's two `ffn_down` tensors; the decode GEMV
+    /// still reads the original blocks.
     q5_half: Option<ByteBuffer>,
     pub rows: usize,
     pub cols: usize,

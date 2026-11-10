@@ -11,8 +11,8 @@
 //   kv_lab_nostage score + PV, no staging (reads uninitialised shared)
 //
 // Only the timing matters here: the entries are not in the parity table and
-// are not used by the engine. Geometry is fixed to the Qwen3.8-27B decode case
-// (head_dim 256, GQA group 6, TILE 4) so the body stays readable.
+// are not used by the engine. Geometry is fixed to the Qwen3.8-27B decode
+// case (head_dim 256, GQA group 6, TILE 4) so the body stays readable.
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>

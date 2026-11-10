@@ -7,7 +7,7 @@
 //! tok/s. The prompt is the `--ids-file` fixture the rest of the bench uses.
 //!
 //! ```text
-//! hipml spec-bench --gguf Qwen3.8-27B.gguf --mtp mtp.gguf --ids-file prompt.ids \
+//! hipml spec-bench --gguf model.gguf --mtp mtp.gguf --ids-file prompt.ids \
 //!     --tokens 128 --drafts 3 --kv f32
 //! ```
 

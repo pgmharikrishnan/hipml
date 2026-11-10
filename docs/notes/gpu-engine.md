@@ -177,7 +177,7 @@ device and CPU argmax both 11751.
 \* WP20 prefill used the WP17 prefill kernel, which skipped half of every GEMM
 (see `docs/notes/roofline-log.md`); WP19 is the same kernel with the accumulator index
 fixed. The merged tree uses the WP19 prefill GEMM with the WP20 matrix-unit
-attention kernel, so its prefill is measured fresh in `bench/RESULTS.md`.
+attention kernel, so its prefill is measured fresh in the release run.
 
 llama.cpp HIP on the same box: 31.4 tok/s short context, 21.86 tok/s at a
 97,387-token prompt, pp512 **1256.5 tok/s**, 97K prefill **844.9 tok/s**.
@@ -339,7 +339,7 @@ index fixed (WP17 skipped half the MACs, see `docs/notes/roofline-log.md`). WP17
 0.44 s / 1153.8 and 9.93 s / 825.1 for a kernel that produced zeros for the
 second 16 tokens of every 32-token warp span. WP20 replaced the attention stage
 in the 8K row (3.58 s → 0.78 s) and reported 6.82 s / 1201 tok/s; the merged
-tree has both changes and is re-measured in `bench/RESULTS.md`.
+tree has both changes and is re-measured in the release run.
 
 The chunk graph is the device default (`--chunk N`, 512 unless overridden;
 `--chunk 0` and `--compare-cpu` keep the token loop). Four changes from WP14,
@@ -427,7 +427,7 @@ Nothing on the decode path round-trips to the host except the 4-byte id.
   the boundary is a token boundary the graph actually stopped at.
 - The 8,192-token prefill is a real prefill. 100K prefill is now timed too:
   156.6 s (638 tok/s) after the q8 chunk kernel replaced the row-at-a-time
-  fallback (860.8 s, 116 tok/s); see `bench/RESULTS.md`, WP25.
+  fallback (860.8 s, 116 tok/s); see the release run, WP25.
 - Q5_K still has no GEMV kernel: two decode tensors take the f32 GEMV. Prefill
   uses a half copy made at load.
 - No fp16 KV path.

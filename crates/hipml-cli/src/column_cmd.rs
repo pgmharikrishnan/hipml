@@ -7,7 +7,7 @@
 //! visible, and `--trace` folds the per-stage GPU time of the `R = 2` pass.
 //!
 //! ```text
-//! hipml column-bench --gguf Qwen3.8-27B.gguf --ids-file prose.ids --cols 4 --trace
+//! hipml column-bench --gguf model.gguf --ids-file prose.ids --cols 4 --trace
 //! ```
 
 use std::time::Instant;

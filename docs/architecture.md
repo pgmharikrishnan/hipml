@@ -72,15 +72,15 @@ prefilled once.
 
 ## Memory budget
 
-Measured on the release model (17,203,416,064 bytes), q8 KV, from
-[`bench/RESULTS.md`](../bench/RESULTS.md):
+Measured on the release model (16,810,714,336 bytes), q8 KV, from the
+[`bench/release/`](../bench/release/) run:
 
 | item | size |
 |---|---|
-| weights, resident and quantized | 16.0 GiB (17.19 GB) |
+| weights, resident and quantized | 15.7 GiB (16.81 GB) |
 | KV, q8, 100K tokens | ≈3.2 GiB |
 | recurrent (SSM) state | 156.9 MB per sequence |
-| peak VRAM, single stream, depth 0 / 8K / 32K / 100K | 17.62 / 18.84 / 19.75 / 21.93 GiB |
+| peak VRAM, single stream, depth 0 / 8K / 32K / 100K | 16.94 / 18.17 / 19.08 / 21.26 GiB |
 | peak VRAM, 8-slot server | see [`wp45-51-serve.md`](notes/wp45-51-serve.md) |
 
 Two arenas, no general allocator: one persistent device allocation per weight

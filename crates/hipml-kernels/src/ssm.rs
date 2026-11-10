@@ -29,7 +29,7 @@ use std::ffi::c_void;
 #[derive(Clone, Copy, Debug)]
 pub struct SsmDims {
     pub n_embd: usize,
-    /// q | k | v channels fed to the conv1d (2048 + 2048 + 6144 for Qwen3.8-27B).
+    /// q | k | v channels fed to the conv1d (2048 + 2048 + 6144, Qwen3.8).
     pub conv_ch: usize,
     pub d_conv: usize,
     /// Value heads (`ssm_dt_rank`).

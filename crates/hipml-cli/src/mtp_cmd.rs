@@ -9,7 +9,7 @@
 //! which is the whole speculative upside before the cost of the passes.
 //!
 //! ```text
-//! hipml mtp-accept --gguf Qwen3.8-27B.gguf --mtp mtp-sidecar.gguf --blk 64 \
+//! hipml mtp-accept --gguf model.gguf --mtp mtp-sidecar.gguf --blk 64 \
 //!     --ids-file prompt.ids --tokens 64 --depth 3
 //! ```
 

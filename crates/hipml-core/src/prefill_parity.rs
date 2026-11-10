@@ -278,8 +278,9 @@ pub fn skinny_cases() -> Vec<PrefillCase> {
     ]
 }
 
-/// The three Qwen3.8-27B ffn shapes at the prompt length being measured. These are
-/// timed only; parity at the same shapes would need minutes of host reference.
+/// The three Qwen3.8-27B ffn shapes at the prompt length being measured.
+/// These are timed only; parity at the same shapes would need minutes of host
+/// reference.
 pub fn qwen38_prefill_cases(tokens: usize) -> Vec<PrefillCase> {
     vec![
         PrefillCase {

@@ -1,8 +1,8 @@
 # Benchmarks
 
 Every number here is measured, committed and re-derivable. The raw report is
-[`bench/RESULTS.md`](../bench/RESULTS.md) and the machine-readable form is
-[`bench/results.json`](../bench/results.json). The method is in
+[`bench/release/`](../bench/release/) and the prose summary is
+[`release-run.md`](release-run.md). The method is in
 [`bench/README.md`](../bench/README.md).
 
 **Status: superseded.** The current numbers are the **release run** on the stock
@@ -10,7 +10,7 @@ Every number here is measured, committed and re-derivable. The raw report is
 [`release-run.md`](release-run.md) and [`../bench/release/`](../bench/release/).
 Quote only that file.
 
-The table and per-feature rows below are the **historical** Qwen3.8-27B fine-tune
+The table and per-feature rows below are the **historical** pre-release
 matrix: hipml binary `5713f143…`, commit `cef7657`, on a Radeon AI PRO R9700
 (gfx1201), Windows 11, ROCm 7.2.1, against llama.cpp build 11820 (commit
 `d7725699`). They predate the WP42 projection-path correctness fix and name a
@@ -51,7 +51,7 @@ history.
 Gaps, hipml minus llama.cpp: prefill +18.1% / +5.7% / +7.2% / +12.1%, decode
 −3.1% / −2.2% / −1.2% / +7.4%, TTFT ratio 1.18× / 1.06× / 1.07× / 1.12×.
 The full 5-prompt × 4-depth table, the warm-pass table and the prefill stage
-breakdown are in [`bench/RESULTS.md`](../bench/RESULTS.md).
+breakdown are in [`bench/release/`](../bench/release/).
 
 ## Roofline
 
@@ -66,7 +66,7 @@ GB/s fp32 GEMV result that established the memory path, is in
 
 ## Per-feature tables (historical)
 
-The rows in this section are the pre-release Qwen3.8-27B measurements. The release
+The rows in this section are the pre-release measurements. The release
 cells are in [`release-run.md`](release-run.md).
 
 | feature | result | source |
@@ -105,6 +105,6 @@ python bench/validate_results.py
 ```
 
 `bench/run.sh` runs locally when `HIPML_BENCH_HOST` is unset and over ssh when it
-is set. Your `bench/results.json` records the GPU, the driver, the binary
+is set. The generated results file records the GPU, the driver, the binary
 SHA-256 and the llama.cpp version next to every number; please attach it if you
 report a result. The environment table is in [`usage.md`](usage.md).
