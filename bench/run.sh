@@ -6,19 +6,24 @@
 #   bench/run.sh --engine llama          # only llama.cpp
 #   bench/run.sh --force                 # rerun cells that already have a result
 #
-# It syncs HEAD to rtx, builds hipml, then runs one (engine, prompt, depth) job
-# per GPU-lock acquisition. That chunking keeps every hold short: the 100K
-# cells default to one rep and never share a lock window with anything else.
-# Results are pulled back and rendered locally by bench/aggregate.py.
+# It runs one (engine, prompt, depth) job per GPU-lock acquisition. That
+# chunking keeps every hold short: the 100K cells default to one rep and never
+# share a lock window with anything else. Results are rendered locally by
+# bench/aggregate.py.
+#
+# Two modes. With no host set it builds and runs in this checkout. In remote
+# mode (--host / HIPML_BENCH_HOST) it syncs HEAD to that host over ssh, builds
+# there and pulls the raw results back.
 
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-HOST="${RTX_HOST:-rtx}"
-REMOTE_DIR='C:\hipml-bench'
-MODEL="${HIPML_BENCH_MODEL:-C:\\models\\Qwen3.8-27B-Q4_K_M.gguf}"
-LLAMA_SERVER="${HIPML_BENCH_LLAMA_SERVER:-C:\\llama.cpp\\rocm-gfx120x\\llama-server.exe}"
+HOST="${HIPML_BENCH_HOST:-}"
+REMOTE_DIR="${HIPML_BENCH_REMOTE_DIR:-}"
+MODEL="${HIPML_GGUF:-${HIPML_BENCH_MODEL:-}}"
+LLAMA_SERVER="${LLAMA_SERVER:-${HIPML_BENCH_LLAMA_SERVER:-}}"
+PYTHON="${HIPML_PYTHON:-python3}"
 DEPTHS="0,8192,32768,100000"
 ENGINES="hipml,llama"
 REPS=3
@@ -36,7 +41,7 @@ HIPML_KV="${HIPML_BENCH_HIPML_KV:-q8}"
 PROMPTS=""
 
 usage() {
-  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
   cat <<'EOF'
 
 Options:
@@ -47,7 +52,7 @@ Options:
   --reps-deep N       cold reps for depths 32768 and 100000 (default: 1)
   --reps-100k N       alias for the 100000 rep count (default: 1)
   --force             rerun cells even if a result file exists
-  --no-sync           use the tree already at C:\hipml-bench
+  --no-sync           use the tree already at --remote-dir (remote mode only)
   --skip-build        do not run cargo build on the host
   --refresh-fixture   regenerate bench/fixtures/prompts.json from the host
   --no-stage          skip the hipml prefill stage breakdown at depth 0
@@ -58,8 +63,18 @@ Options:
                       has the wrong rep count, or has the wrong KV type
   --llama-kv TYPE     f32, f16 or q8_0 (default: q8_0)
   --hipml-kv TYPE     f32, q8 or q4 (default: q8; same class as llama q8_0)
-  --host NAME         ssh host (default: rtx, or $RTX_HOST)
+  --host NAME         ssh host (default: none = run locally; or $HIPML_BENCH_HOST)
+  --remote-dir DIR    the checkout on that host (or $HIPML_BENCH_REMOTE_DIR)
   -h, --help          this text
+
+Environment:
+  HIPML_GGUF          the target GGUF (required)
+  LLAMA_SERVER        the llama.cpp server binary (required for --engine llama)
+  HIPML_EXE           the hipml binary (default: target/release/hipml[.exe])
+  HIPML_GPU_LOCK      optional lock script: acquire <label>, release <label>,
+                      status. Unset means no locking.
+  HIP_PATH            ROCm SDK root; used by the build on the host
+  HIPML_BENCH_OUT     raw output root (default: bench/out)
 EOF
 }
 
@@ -83,6 +98,7 @@ while [ $# -gt 0 ]; do
     --llama-kv) LLAMA_KV="$2"; shift 2 ;;
     --hipml-kv) HIPML_KV="$2"; shift 2 ;;
     --host) HOST="$2"; shift 2 ;;
+    --remote-dir) REMOTE_DIR="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument $1 (try --help)" ;;
   esac
@@ -90,56 +106,104 @@ done
 
 cd "$ROOT" || die "cannot cd to $ROOT"
 
-# ---------------------------------------------------------------- sync + build
-if [ "$SYNC" = 1 ]; then
-  echo "== sync HEAD to $HOST"
-  git archive HEAD -o /tmp/hipml-bench.tar || die "git archive failed"
-  scp -q /tmp/hipml-bench.tar "$HOST":x.tar || die "scp failed"
-  ssh "$HOST" 'cmd /c "if exist C:\hipml-bench rmdir /s /q C:\hipml-bench"' || true
-  ssh "$HOST" 'cmd /c "mkdir C:\hipml-bench"' || die "remote mkdir failed"
-  ssh "$HOST" 'cmd /c "tar -xf %USERPROFILE%\x.tar -C C:\hipml-bench"' || die "remote extract failed"
-fi
+[ -n "$MODEL" ] || die "set HIPML_GGUF (or HIPML_BENCH_MODEL) to the target GGUF"
 
-if [ "$BUILD" = 1 ]; then
-  echo "== build hipml on $HOST"
-  ssh "$HOST" "$REMOTE_DIR\\bench\\remote\\with-env.cmd cargo build --release -p hipml-cli --features hip" \
-    || die "cargo build failed"
+REMOTE=0
+if [ -n "$HOST" ]; then
+  REMOTE=1
+  [ -n "$REMOTE_DIR" ] || die "remote mode needs HIPML_BENCH_REMOTE_DIR (or --remote-dir)"
+fi
+# scp wants forward slashes in a Windows path.
+REMOTE_DIR_FWD="${REMOTE_DIR//\\//}"
+
+case ",$ENGINES," in
+  *,llama,*) [ -n "$LLAMA_SERVER" ] || die "engine llama needs LLAMA_SERVER (or HIPML_BENCH_LLAMA_SERVER)" ;;
+esac
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    echo ""
+  fi
+}
+
+# ---------------------------------------------------------------- sync + build
+if [ "$REMOTE" = 1 ]; then
+  if [ "$SYNC" = 1 ]; then
+    echo "== sync HEAD to $HOST"
+    git archive HEAD -o /tmp/hipml-bench.tar || die "git archive failed"
+    scp -q /tmp/hipml-bench.tar "$HOST":x.tar || die "scp failed"
+    ssh "$HOST" "cmd /c \"if exist $REMOTE_DIR rmdir /s /q $REMOTE_DIR\"" || true
+    ssh "$HOST" "cmd /c \"mkdir $REMOTE_DIR\"" || die "remote mkdir failed"
+    ssh "$HOST" "cmd /c \"tar -xf %USERPROFILE%\\x.tar -C $REMOTE_DIR\"" || die "remote extract failed"
+  fi
+
+  if [ "$BUILD" = 1 ]; then
+    echo "== build hipml on $HOST"
+    ssh "$HOST" "$REMOTE_DIR\\bench\\remote\\with-env.cmd cargo build --release -p hipml-cli --features hip" \
+      || die "cargo build failed"
+  fi
+else
+  if [ "$BUILD" = 1 ]; then
+    echo "== build hipml in $ROOT"
+    cargo build --release -p hipml-cli --features hip || die "cargo build failed"
+  fi
 fi
 
 if [ "$REFRESH_FIXTURE" = 1 ]; then
-  echo "== regenerate token fixture on $HOST"
-  ssh "$HOST" "$REMOTE_DIR\\bench\\remote\\with-env.cmd python bench\\prepare_fixture.py --hipml target\\release\\hipml.exe --gguf $MODEL --out bench\\fixtures\\prompts.json" \
-    || die "fixture generation failed"
-  mkdir -p bench/fixtures
-  scp -q "$HOST":'C:/hipml-bench/bench/fixtures/prompts.json' bench/fixtures/prompts.json \
-    || die "fixture pull failed"
+  echo "== regenerate token fixture"
+  if [ "$REMOTE" = 1 ]; then
+    ssh "$HOST" "$REMOTE_DIR\\bench\\remote\\with-env.cmd python bench\\prepare_fixture.py --hipml target\\release\\hipml.exe --gguf $MODEL --out bench\\fixtures\\prompts.json" \
+      || die "fixture generation failed"
+    mkdir -p bench/fixtures
+    scp -q "$HOST":"$REMOTE_DIR_FWD/bench/fixtures/prompts.json" bench/fixtures/prompts.json \
+      || die "fixture pull failed"
+  else
+    "$PYTHON" bench/prepare_fixture.py --hipml target/release/hipml --gguf "$MODEL" \
+      --out bench/fixtures/prompts.json || die "fixture generation failed"
+  fi
 fi
 
 [ -f bench/fixtures/prompts.json ] || die "bench/fixtures/prompts.json missing (use --refresh-fixture)"
 
 # ------------------------------------------------------------------- lock helpers
-lock_status() {
-  ssh "$HOST" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\models\gpu-lock.ps1 status' 2>/dev/null
+# HIPML_GPU_LOCK is optional. Unset means the GPU is yours for the run.
+LOCK_LABEL="${HIPML_LOCK_LABEL:-bench}"
+LOCKED=0
+
+lock_cmd() {
+  [ -n "${HIPML_GPU_LOCK:-}" ] || return 0
+  if [ "$REMOTE" = 1 ]; then
+    ssh "$HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File \"$HIPML_GPU_LOCK\" $*"
+  else
+    powershell -NoProfile -ExecutionPolicy Bypass -File "$HIPML_GPU_LOCK" "$@"
+  fi
 }
-LOCK_LABEL="${HIPML_LOCK_LABEL:-wp24}"
+
 acquire_lock() {
+  [ -n "${HIPML_GPU_LOCK:-}" ] || { LOCKED=1; return 0; }
   local st
-  st="$(lock_status)"
+  st="$(lock_cmd status 2>/dev/null)"
   case "$st" in
     *"HELD by $LOCK_LABEL"*) LOCKED=1; return 0 ;;
-    *FREE*) ssh "$HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\models\\gpu-lock.ps1 acquire $LOCK_LABEL" || return 1 ;;
+    *FREE*) lock_cmd acquire "$LOCK_LABEL" || return 1 ;;
     *)
       echo "== waiting for GPU lock ($st)"
       # acquire blocks for up to 30 minutes by itself.
-      ssh "$HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\models\\gpu-lock.ps1 acquire $LOCK_LABEL" || return 1
+      lock_cmd acquire "$LOCK_LABEL" || return 1
       ;;
   esac
   LOCKED=1
 }
+
 release_lock() {
-  ssh "$HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\models\\gpu-lock.ps1 release $LOCK_LABEL" >/dev/null 2>&1 || true
+  [ -n "${HIPML_GPU_LOCK:-}" ] || return 0
+  lock_cmd release "$LOCK_LABEL" >/dev/null 2>&1 || true
 }
-LOCKED=0
+
 cleanup() { if [ "$LOCKED" = 1 ]; then release_lock; fi; }
 trap cleanup EXIT INT TERM
 
@@ -221,9 +285,21 @@ for depth in "${DEPTH_ARR[@]}"; do
           extra="--stage-report"
         fi
 
+        job_args=(bench/job.py --engine "$engine" --prompt "$prompt" --depth "$depth"
+                  --reps "$reps" --model "$MODEL"
+                  --llama-kv "$LLAMA_KV" --hipml-kv "$HIPML_KV"
+                  --fixture bench/fixtures/prompts.json
+                  --out-dir bench/out/jobs --tmp bench/out/tmp)
+        [ -n "$LLAMA_SERVER" ] && job_args+=(--llama-server "$LLAMA_SERVER")
+        [ -n "$extra" ] && job_args+=("$extra")
+
         echo "== run $engine $prompt@$depth reps=$reps"
         start=$(date +%s)
-        ssh "$HOST" "$REMOTE_DIR\\bench\\remote\\with-env.cmd python bench\\job.py --engine $engine --prompt $prompt --depth $depth --reps $reps --model $MODEL --llama-server $LLAMA_SERVER --llama-kv $LLAMA_KV --hipml-kv $HIPML_KV --fixture bench\\fixtures\\prompts.json --out-dir bench\\out\\jobs --tmp bench\\out\\tmp $extra"
+        if [ "$REMOTE" = 1 ]; then
+          ssh "$HOST" "$REMOTE_DIR\\bench\\remote\\with-env.cmd python ${job_args[*]}"
+        else
+          "$PYTHON" "${job_args[@]}"
+        fi
         rc=$?
         elapsed=$(( $(date +%s) - start ))
         echo "   ${elapsed}s, exit $rc"
@@ -259,21 +335,46 @@ echo "== collect metadata"
 HIPML_COMMIT="$(git rev-parse HEAD)"
 HIPML_DIRTY="false"
 if [ -n "$(git status --porcelain)" ]; then HIPML_DIRTY="true"; fi
-HIPML_SHA="$(ssh "$HOST" 'powershell -NoProfile -Command "(Get-FileHash C:\hipml-bench\target\release\hipml.exe -Algorithm SHA256).Hash.ToLower()"' 2>/dev/null | tr -d '\r')"
-LLAMA_VERSION="$(ssh "$HOST" "\"$LLAMA_SERVER\" --version" 2>&1 | head -1 | tr -d '\r')"
+if [ "$REMOTE" = 1 ]; then
+  HIPML_SHA="$(ssh "$HOST" "powershell -NoProfile -Command \"(Get-FileHash '$REMOTE_DIR\\target\\release\\hipml.exe' -Algorithm SHA256).Hash.ToLower()\"" 2>/dev/null | tr -d '\r')"
+else
+  BIN=target/release/hipml
+  [ -f "$BIN" ] || BIN=target/release/hipml.exe
+  HIPML_SHA="$(sha256_file "$BIN")"
+fi
+
+LLAMA_VERSION=""
+if [ -n "$LLAMA_SERVER" ]; then
+  if [ "$REMOTE" = 1 ]; then
+    LLAMA_VERSION="$(ssh "$HOST" "\"$LLAMA_SERVER\" --version" 2>&1 | head -1 | tr -d '\r')"
+  else
+    LLAMA_VERSION="$("$LLAMA_SERVER" --version 2>&1 | head -1 | tr -d '\r')"
+  fi
+fi
 LLAMA_BUILD="$(echo "$LLAMA_VERSION" | sed -n 's/.*build \([0-9][0-9]*\).*/\1/p')"
 LLAMA_COMMIT="$(echo "$LLAMA_VERSION" | sed -n 's/.*commit \([0-9a-f][0-9a-f]*\).*/\1/p')"
-GPU_INFO="$(ssh "$HOST" 'powershell -NoProfile -Command "Get-CimInstance Win32_VideoController | Format-Table -HideTableHeaders Name,DriverVersion"' 2>/dev/null | grep -i 'R9700' | head -1 | tr -d '\r')"
-[ -n "$GPU_INFO" ] || GPU_INFO="$(ssh "$HOST" 'powershell -NoProfile -Command "Get-CimInstance Win32_VideoController | Format-Table -HideTableHeaders Name,DriverVersion"' 2>/dev/null | grep -i radeon | tail -1 | tr -d '\r')"
-OS_INFO="$(ssh "$HOST" 'powershell -NoProfile -Command "(Get-CimInstance Win32_OperatingSystem).Caption"' 2>/dev/null | tr -d '\r')"
+
+# Record the role, not the machine's name: results.json is published.
+HOST_NAME="gpu-host"
+GPU_INFO=""
+OS_INFO=""
+if [ "$REMOTE" = 1 ]; then
+  GPU_INFO="$(ssh "$HOST" 'powershell -NoProfile -Command "Get-CimInstance Win32_VideoController | Format-Table -HideTableHeaders Name,DriverVersion"' 2>/dev/null | grep -v '^[[:space:]]*$' | head -1 | tr -d '\r')"
+  OS_INFO="$(ssh "$HOST" 'powershell -NoProfile -Command "(Get-CimInstance Win32_OperatingSystem).Caption"' 2>/dev/null | tr -d '\r')"
+elif command -v powershell >/dev/null 2>&1; then
+  GPU_INFO="$(powershell -NoProfile -Command "Get-CimInstance Win32_VideoController | Format-Table -HideTableHeaders Name,DriverVersion" 2>/dev/null | grep -v '^[[:space:]]*$' | head -1 | tr -d '\r')"
+  OS_INFO="$(powershell -NoProfile -Command "(Get-CimInstance Win32_OperatingSystem).Caption" 2>/dev/null | tr -d '\r')"
+else
+  OS_INFO="$(uname -srm 2>/dev/null)"
+fi
 
 mkdir -p bench/out
 HIPML_COMMIT="$HIPML_COMMIT" HIPML_DIRTY="$HIPML_DIRTY" HIPML_SHA="$HIPML_SHA" \
 LLAMA_VERSION="$LLAMA_VERSION" LLAMA_BUILD="$LLAMA_BUILD" LLAMA_COMMIT="$LLAMA_COMMIT" \
-GPU_INFO="$GPU_INFO" OS_INFO="$OS_INFO" HOST_NAME="$HOST" LLAMA_KV="$LLAMA_KV" \
+GPU_INFO="$GPU_INFO" OS_INFO="$OS_INFO" HOST_NAME="$HOST_NAME" LLAMA_KV="$LLAMA_KV" \
 HIPML_KV="$HIPML_KV" MODEL_PATH="$MODEL" LLAMA_SERVER_PATH="$LLAMA_SERVER" \
 DEPTHS="$DEPTHS" REPS="$REPS" REPS_DEEP="$REPS_DEEP" REPS_100K="$REPS_100K" \
-python3 - <<'PY'
+"$PYTHON" - <<'PY'
 import json, os
 meta = {
     "host": os.environ.get("HOST_NAME"),
@@ -287,8 +388,8 @@ meta = {
     "llama_commit": os.environ.get("LLAMA_COMMIT"),
     "llama_kv": os.environ.get("LLAMA_KV"),
     "hipml_kv": os.environ.get("HIPML_KV"),
-    "model_path": os.environ.get("MODEL_PATH"),
-    "llama_server_path": os.environ.get("LLAMA_SERVER_PATH"),
+    "model_path": os.path.basename(os.environ.get("MODEL_PATH") or ""),
+    "llama_server_path": os.path.basename(os.environ.get("LLAMA_SERVER_PATH") or ""),
     "depths": os.environ.get("DEPTHS"),
     "reps": os.environ.get("REPS"),
     "reps_deep": os.environ.get("REPS_DEEP"),
@@ -301,17 +402,19 @@ print(json.dumps(meta, indent=2))
 PY
 
 # ---------------------------------------------------------------- pull + render
-echo "== pull raw results"
-mkdir -p bench/out
-rm -rf bench/out/jobs
-ssh "$HOST" 'cmd /c "cd /d C:\hipml-bench\bench\out && tar -cf jobs.tar jobs"' \
-  || die "failed to archive job results"
-scp -q "$HOST":'C:/hipml-bench/bench/out/jobs.tar' /tmp/hipml-bench-jobs.tar \
-  || die "failed to pull job results"
-tar -xf /tmp/hipml-bench-jobs.tar -C bench/out \
-  || die "failed to extract job results"
+if [ "$REMOTE" = 1 ]; then
+  echo "== pull raw results"
+  mkdir -p bench/out
+  rm -rf bench/out/jobs
+  ssh "$HOST" "cmd /c \"cd /d $REMOTE_DIR\\bench\\out && tar -cf jobs.tar jobs\"" \
+    || die "failed to archive job results"
+  scp -q "$HOST":"$REMOTE_DIR_FWD/bench/out/jobs.tar" /tmp/hipml-bench-jobs.tar \
+    || die "failed to pull job results"
+  tar -xf /tmp/hipml-bench-jobs.tar -C bench/out \
+    || die "failed to extract job results"
+fi
 
-python3 bench/aggregate.py \
+"$PYTHON" bench/aggregate.py \
   --fixture bench/fixtures/prompts.json \
   --jobs bench/out/jobs \
   --meta bench/out/meta.json \
@@ -325,5 +428,5 @@ echo "   bench/results.json"
 echo "   bench/RESULTS.md"
 [ "$JOBS_FAILED" = 0 ] || exit 1
 if [ "$VALIDATE" = 1 ]; then
-  python3 bench/validate_results.py || die "results validation failed"
+  "$PYTHON" bench/validate_results.py || die "results validation failed"
 fi

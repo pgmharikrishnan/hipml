@@ -24,6 +24,8 @@ import time
 import urllib.error
 import urllib.request
 
+import _paths
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 GEN_TOKENS = 33          # tokens 1..33; decode rate is over 2..33
 DEFAULT_PORT = 8092
@@ -144,7 +146,11 @@ def run_hipml(args, fixture, cell, ids, out):
         "kv_bytes": payload.get("kv_bytes"),
         "model_load_s": payload.get("model_load_s"),
         "peak_vram_mib": read_peak(peak_path),
-        "command": cmd,
+        "command": _paths.public_argv(cmd, [
+            (args.hipml, "<HIPML_EXE>"),
+            (args.model, "<HIPML_GGUF>"),
+            (ids_path, "<IDS_FILE>"),
+        ]),
         "duration_s": duration,
         "started": started,
         "stderr_tail": stderr[-2000:],
@@ -315,7 +321,11 @@ def run_llama(args, fixture, cell, ids, out):
         "spilled": spilled,
         "server_version": llama_version(args.llama_server),
         "peak_vram_mib": peak,
-        "command": cmd,
+        "command": _paths.public_argv(cmd, [
+            (args.llama_server, "<LLAMA_SERVER>"),
+            (args.model, "<HIPML_GGUF>"),
+            (log_path, "<SERVER_LOG>"),
+        ]),
         "duration_s": duration,
         "started": started,
     }
@@ -323,16 +333,22 @@ def run_llama(args, fixture, cell, ids, out):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="Run one (engine, prompt, depth) bench cell. The paths come "
+                    "from the environment so a run is reproducible anywhere.")
     ap.add_argument("--engine", required=True, choices=["hipml", "llama"])
     ap.add_argument("--prompt", required=True)
     ap.add_argument("--depth", required=True, type=int)
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--fixture", default=os.path.join(HERE, "fixtures", "prompts.json"))
-    ap.add_argument("--model", required=True)
-    ap.add_argument("--hipml", default=r"C:\hipml-bench\target\release\hipml.exe")
-    ap.add_argument("--llama-server",
-                    default=r"C:\llama.cpp\rocm-gfx120x\llama-server.exe")
+    ap.add_argument("--model", default=os.environ.get("HIPML_GGUF"),
+                    help="target GGUF (default: $HIPML_GGUF)")
+    ap.add_argument("--hipml", default=None,
+                    help="hipml binary (default: $HIPML_EXE or "
+                         "target/release/hipml[.exe])")
+    ap.add_argument("--llama-server", default=os.environ.get("LLAMA_SERVER"),
+                    help="llama.cpp server binary (default: $LLAMA_SERVER; "
+                         "required only for --engine llama)")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--llama-kv", default="q8_0", choices=["f32", "f16", "q8_0"])
     ap.add_argument("--hipml-kv", default="q8", choices=["f32", "q8", "q4"])
@@ -344,6 +360,12 @@ def main():
     ap.add_argument("--out-dir", default=os.path.join(HERE, "out", "jobs"))
     ap.add_argument("--tmp", default=os.path.join(HERE, "out", "tmp"))
     args = ap.parse_args()
+
+    if not args.model:
+        sys.exit("error: no target model; pass --model or set HIPML_GGUF")
+    args.hipml = _paths.hipml_exe(args.hipml)
+    if args.engine == "llama" and not args.llama_server:
+        sys.exit("error: engine llama needs --llama-server or LLAMA_SERVER")
 
     os.makedirs(args.out_dir, exist_ok=True)
     os.makedirs(args.tmp, exist_ok=True)
