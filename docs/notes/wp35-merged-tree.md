@@ -21,7 +21,7 @@ case below are green.
 
 | check | result |
 | --- | --- |
-| 20-id acceptance | `11751 13 198 760 6511 314 14898 369 21047 13 198 760 6511 314 17163 369 23327 13 198 760`, first id 11751, 29.80 tok/s over 20 tokens |
+| 20-id acceptance | PASS, 20/20, first id 11751; the string is model-specific and is in [`../release-run.md`](../release-run.md), 29.80 tok/s over 20 tokens |
 | `cargo test --workspace` | 59 tests, 0 failed (local and GPU host) |
 | `cargo check --workspace --features hip` | clean |
 | `parity prefill --deep` | 6 passed, 0 failed |
