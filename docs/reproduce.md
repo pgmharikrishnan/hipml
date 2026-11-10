@@ -195,13 +195,13 @@ that from its TTFT, not that column.
   --len 8192 --shared 4096 --chunk 2048 --bytes-mib 4096
 ```
 
-On the patched build (`bench/release/cache/cache_8192_4gib_fixed.txt`): cold
-8,192-token prefill 6,724.4 ms; exact repeat 4.6 ms (1,460×); 50% shared prefix
-3,498.8 ms (1.94×); hit latency 4.59 ms at 8,192 tokens.
+On the release run (`docs/release-run.md`, "Prefix cache"): cold 8,192-token
+prefill 6,722.7 ms; exact repeat 4.6 ms (1,460.2×); 50% shared prefix at the
+default cap 3,499.7 ms (1.95×); hit latency 4.59 ms at 8,192 tokens.
 
-At the default 1 GiB cap the same snapshot needs 1,174.6 MiB, so it is
+At the default 1 GiB cap the exact snapshot needs 1,174.6 MiB, so it is
 **refused at capture** (counted in `refused`, never truncated) and the exact
-repeat falls back to a full prefill: 6,766.2 ms against 6,691.7 ms cold, with
+repeat falls back to a full prefill: 6,794.5 ms against 6,722.7 ms cold, with
 token-identical ids. That is the fixed behaviour, not a measurement error.
 
 Then run the gate. It replays the old consumer (a partial hit used as exact) and
