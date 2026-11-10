@@ -8,9 +8,9 @@ full generation run.
 
 | file | bytes | tensors |
 | --- | ---: | ---: |
-| `C:\models\Qwen3.8-27B-UD-Q4_K_XL.gguf` | 17,559,178,144 (16.35 GiB) | 866 |
-| `C:\models\Qwen3.8-27B-UD-Q6_K_XL.gguf` | 25,299,061,664 (23.56 GiB) | 866 |
-| `C:\models\Qwen3.8-27B-Q4_K_M.gguf` (fine-tune) | 17,192,421,376 (16.01 GiB) | 851 |
+| `Qwen3.8-27B-UD-Q4_K_XL.gguf` | 17,559,178,144 (16.35 GiB) | 866 |
+| `Qwen3.8-27B-UD-Q6_K_XL.gguf` | 25,299,061,664 (23.56 GiB) | 866 |
+| `Qwen3.8-27B-Q4_K_M.gguf` (fine-tune) | 17,192,421,376 (16.01 GiB) | 851 |
 
 Both stock files carry the MTP (`nextn`) block **inline** as `blk.64.*`;
 `block_count` is 65 and `nextn_predict_layers` is 1.
@@ -125,7 +125,7 @@ Q6_K_XL: 866 tensors  25,288,065,024 B (23.55 GiB)  read+upload 16.55 s (1.53 GB
 ## Generation blocker
 
 ```
-$ hipml generate --device --gguf C:\models\Qwen3.8-27B-UD-Q4_K_XL.gguf \
+$ hipml generate --device --gguf <HIPML_GGUF> \
     --ids 1,2,3 --tokens 2 --ctx 64 --kv q8
 prompt ids: [1, 2, 3]
 resident: 16.34 GiB in 866 tensors on AMD Radeon AI PRO R9700 (upload 5.9s)
@@ -193,7 +193,7 @@ mixed bidi, tool-call XML, URL escapes.
 Committed fixtures also pass against the stock file:
 
 ```
-$ HIPML_GGUF=C:\models\Qwen3.8-27B-UD-Q4_K_XL.gguf \
+$ HIPML_GGUF=<HIPML_GGUF> \
     cargo test -p hipml-core --test tokenizer_fixture
 2 passed (266 multilingual strings, 16 template conversations)
 ```
@@ -239,29 +239,29 @@ here.
 
 ```bash
 # sync and build
-git archive HEAD -o /tmp/x.tar && scp /tmp/x.tar rtx:x.tar
-ssh rtx "tar -xf x.tar -C C:\hipml-native"
-ssh rtx "cd C:\hipml-native && set HIP_PATH=C:\rocm-sdk\_rocm_sdk_core& \
-  set HIPML_ARCH=gfx1201& set PATH=C:\rocm-sdk\_rocm_sdk_core\bin;%PATH%& \
+git archive HEAD -o /tmp/x.tar && scp /tmp/x.tar gpu-host:x.tar
+ssh gpu-host "tar -xf x.tar -C <REPO>"
+ssh gpu-host "cd <REPO> && set HIP_PATH=<ROCM>& \
+  set HIPML_ARCH=gfx1201& set PATH=<ROCM>\bin;%PATH%& \
   cargo build --release --features hip"
 
 # config + residency + type table + unsupported list
-target\release\hipml.exe load --gguf C:\models\Qwen3.8-27B-UD-Q4_K_XL.gguf --roundtrip 4
+target\release\hipml.exe load --gguf <HIPML_GGUF> --roundtrip 4
 
 # the blocker
-target\release\hipml.exe generate --device --gguf C:\models\Qwen3.8-27B-UD-Q4_K_XL.gguf \
+target\release\hipml.exe generate --device --gguf <HIPML_GGUF> \
   --ids 1,2,3 --tokens 2 --ctx 64 --kv q8
 
 # tokenizer differential (llama-server cpu on 8092, add_special=false)
 python bench/job.py --engine llama --prompt prose_explanation --depth 0 --reps 3 \
-  --model C:\models\Qwen3.8-27B-UD-Q4_K_XL.gguf
+  --model <HIPML_GGUF>
 ```
 
 ## Checks on this tree
 
 | check | result |
 | --- | --- |
-| `cargo test --workspace` | local and rtx: all pass (0 failed) |
+| `cargo test --workspace` | local and gpu-host: all pass (0 failed) |
 | `cargo check --workspace --features hip` | clean |
 | `hipml parity --deep` | 56 passed, 0 failed, 1 skipped |
 | `hipml oracle-gate` (Qwen3.8-27B, 169 ids, chunk 2048) | PASS, 20/20 ids identical |
