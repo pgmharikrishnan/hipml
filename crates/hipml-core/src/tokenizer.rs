@@ -148,20 +148,22 @@ impl Tokenizer {
     }
 
     /// Encode text to token ids. No BOS unless the file says to add one.
+    ///
+    /// User-defined tokens (`<tool_call>`, type 4) are split out even here:
+    /// that is llama.cpp's behaviour with `parse_special = false`, which only
+    /// suppresses control tokens (type 3, `<|im_start|>`).
     pub fn encode(&self, text: &str) -> Vec<u32> {
-        let mut out = Vec::new();
-        if self.add_bos {
-            out.push(self.bos_id);
-        }
-        out.extend(self.encode_normal(text));
-        out
+        self.encode_impl(text, false)
     }
 
-    /// As [`encode`], but text that spells a control/user-defined token is
-    /// emitted as that single id. This is llama.cpp's `parse_special = true`
-    /// path and is what a chat template needs: `<|im_end|>` must be 248046,
-    /// never a handful of BPE pieces.
+    /// As [`encode`], but control tokens are split too. This is llama.cpp's
+    /// `parse_special = true` path and is what a chat template needs:
+    /// `<|im_end|>` must be 248046, never a handful of BPE pieces.
     pub fn encode_special(&self, text: &str) -> Vec<u32> {
+        self.encode_impl(text, true)
+    }
+
+    fn encode_impl(&self, text: &str, control: bool) -> Vec<u32> {
         let mut out = Vec::new();
         if self.add_bos {
             out.push(self.bos_id);
@@ -170,10 +172,9 @@ impl Tokenizer {
         let mut pos = 0usize;
         let mut plain = 0usize;
         while pos < bytes.len() {
-            let hit = self
-                .special
-                .iter()
-                .find(|(s, _)| bytes[pos..].starts_with(s.as_bytes()));
+            let hit = self.special.iter().find(|(s, id)| {
+                (control || self.token_type(*id) == 4) && bytes[pos..].starts_with(s.as_bytes())
+            });
             match hit {
                 Some((s, id)) => {
                     if plain < pos {
