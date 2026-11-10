@@ -27,7 +27,7 @@ B=8→1) and MTP off at B=16, from the `B·(1+R) ≤ 16` 16-row verify tile.
 
 | gate | result |
 | --- | --- |
-| `cargo test --workspace` (local and rtx) | all suites pass; 1 hip unit test (`split_scratch_cap_covers_every_selectable_tile`) passes on rtx |
+| `cargo test --workspace` (local and gpu-host) | all suites pass; 1 hip unit test (`split_scratch_cap_covers_every_selectable_tile`) passes on gpu-host |
 | `cargo check --workspace --features hip` | clean |
 | `oracle-gate --ids-file p2_math_169.ids --steps 20 --chunk 2048 --kv q8` | **20/20**, step 19 = **41020** |
 | 20-id acceptance | `11751 13 198 760 6511 314 14898 369 21047 13 198 760 6511 314 17163 369 23327 13 198 760` |
