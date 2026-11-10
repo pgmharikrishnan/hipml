@@ -80,7 +80,7 @@ body:
     attributes:
       label: Model file and SHA-256
       description: File name plus the hash, so the report can be reproduced without the file.
-      placeholder: Qwen3.8-27B-Q4_K_M.gguf, sha256 3f9a…
+      placeholder: Qwen3.8-27B-Q4_K_M.gguf, sha256 e00082…
     validations:
       required: true
 

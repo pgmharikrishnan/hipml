@@ -1,13 +1,16 @@
-# Native Qwen3.8-27B (stock, Unsloth UD)
+# Native Qwen3.8-27B (stock Q4_K_M, Unsloth UD variants)
 
 `feat/native-qwen`, base `6a1207f` (`feat/release`). Every earlier hipml
 measurement used a private fine-tune with the same geometry. This package
-points the engine at the **stock** model the release names, removes the
-fine-tune constants that made it work only there, and records what blocks a
-full generation run.
+points the engine at the **stock** model family and removes the fine-tune
+constants that made it work only there. It records why the Unsloth dynamic
+quantisations do not run, and what the release does instead: it runs
+`Qwen3.8-27B-Q4_K_M.gguf`, the file
+[`release-run.md`](release-run.md) measured, which contains no IQ or Q3_K type.
 
 | file | bytes | tensors |
 | --- | ---: | ---: |
+| `Qwen3.8-27B-Q4_K_M.gguf` (the release model) | 16,810,714,336 (15.65 GiB) | 866 |
 | `Qwen3.8-27B-UD-Q4_K_XL.gguf` | 17,559,178,144 (16.35 GiB) | 866 |
 | `Qwen3.8-27B-UD-Q6_K_XL.gguf` | 25,299,061,664 (23.56 GiB) | 866 |
 | private fine-tune (`<model>.gguf`) | 17,192,421,376 (16.01 GiB) | 851 |
