@@ -18,8 +18,12 @@ import sys
 import urllib.error
 import urllib.request
 
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "bench"))
+import _paths  # noqa: E402
+
 BASE = "http://127.0.0.1:8092"
-HIPML = os.path.join(os.path.dirname(__file__), "..", "..", "target", "release", "hipml")
+HIPML = None
 WS = "Get the current weather for a city."
 
 TOOLS = [{
@@ -165,11 +169,26 @@ def hipml(gguf, body, out_prefix):
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--gguf", required=True)
-    ap.add_argument("--out", default="/tmp/template-out")
+    global BASE, HIPML
+    ap = argparse.ArgumentParser(
+        description="Diff hipml's chat template against llama-server's "
+                    "/apply-template. Needs HIPML_GGUF or --gguf.")
+    ap.add_argument("--base", default=os.environ.get("HIPML_BASE_URL", BASE),
+                    help="llama-server base URL (default: %(default)s)")
+    ap.add_argument("--gguf", default=os.environ.get("HIPML_GGUF"),
+                    help="target GGUF (default: $HIPML_GGUF)")
+    ap.add_argument("--hipml", default=None,
+                    help="hipml binary (default: $HIPML_EXE or target/release/hipml)")
+    ap.add_argument("--out", default=os.path.join(
+                        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "out", "template"),
+                    help="output directory (default: bench/out/template)")
     ap.add_argument("--save", help="write the permanent fixture here")
     args = ap.parse_args()
+    if not args.gguf:
+        raise SystemExit("error: set HIPML_GGUF or pass --gguf")
+    HIPML = _paths.hipml_exe(args.hipml)
+    BASE = args.base.rstrip("/")
     os.makedirs(args.out, exist_ok=True)
 
     failures = 0

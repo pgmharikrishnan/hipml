@@ -32,12 +32,15 @@ import time
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "bench"))
+import _paths  # noqa: E402
+
 PORT_HIPML = 8093
 PORT_LLAMA = 8092
-MODEL = r"C:\models\Qwen3.8-27B-Q4_K_M.gguf"
-MTP = r"C:\models\mtp-Qwen3.8-27B-Q4_0.gguf"
-HIPML = os.path.join(ROOT, "target", "release", "hipml.exe")
-LLAMA = r"C:\llama.cpp\rocm-gfx120x\llama-server.exe"
+MODEL = None
+MTP = None
+HIPML = None
+LLAMA = None
 
 CELLS = {
     "a": {"slots": 1, "ctx": 32768, "requests": 5, "reps": 3},
@@ -129,15 +132,15 @@ def wait_health(port, proc, timeout_s):
 def start_hipml(cell, out_dir):
     if port_open(PORT_HIPML):
         raise RuntimeError(f"port {PORT_HIPML} is already in use")
-    env = dict(os.environ)
-    env["HIP_PATH"] = r"C:\rocm-sdk\_rocm_sdk_core"
-    env["HIPML_ARCH"] = "gfx1201"
-    env["PATH"] = r"C:\rocm-sdk\_rocm_sdk_core\bin;" + env.get("PATH", "")
-    cmd = [HIPML, "serve", "--gguf", MODEL, "--mtp", MTP,
-           "--port", str(PORT_HIPML),
-           "--ctx", str(cell["ctx"]), "--slots", str(cell["slots"]),
-           "--chunk", "256", "--drafts", "1",
-           "--prefix-entries", "16", "--prefix-mb", "2048"]
+    env = _paths.rocm_env()
+    env["HIPML_ARCH"] = env.get("HIPML_ARCH", "gfx1201")
+    cmd = [HIPML, "serve", "--gguf", MODEL]
+    if MTP:
+        cmd += ["--mtp", MTP]
+    cmd += ["--port", str(PORT_HIPML),
+            "--ctx", str(cell["ctx"]), "--slots", str(cell["slots"]),
+            "--chunk", "256", "--drafts", "1",
+            "--prefix-entries", "16", "--prefix-mb", "2048"]
     log = open(os.path.join(out_dir, "server.log"), "w", encoding="utf-8")
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
     return proc, log, cmd, PORT_HIPML
@@ -329,15 +332,37 @@ def summarize(results, cell):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    global MODEL, MTP, HIPML, LLAMA
+    ap = argparse.ArgumentParser(
+        description="Serve-loop benchmark. Paths come from HIPML_GGUF, "
+                    "HIPML_MTP_GGUF, LLAMA_SERVER and HIPML_EXE.")
     ap.add_argument("--engine", required=True, choices=["hipml", "llama"])
     ap.add_argument("--cell", required=True, choices=sorted(CELLS))
     ap.add_argument("--tokens", type=int, default=64)
     ap.add_argument("--reps", type=int, default=0, help="override the cell's wave count")
-    ap.add_argument("--out-dir", default=os.path.join(ROOT, "bench", "serve", "out"))
+    ap.add_argument("--model", default=None,
+                    help="target GGUF (default: $HIPML_GGUF)")
+    ap.add_argument("--mtp", default=None,
+                    help="MTP drafter GGUF (default: $HIPML_MTP_GGUF; omit to "
+                         "run without MTP)")
+    ap.add_argument("--hipml", default=None,
+                    help="hipml binary (default: $HIPML_EXE or target/release/hipml)")
+    ap.add_argument("--llama-server", default=None,
+                    help="llama.cpp server binary (default: $LLAMA_SERVER)")
+    ap.add_argument("--out-dir", default=None,
+                    help="output directory (default: $HIPML_BENCH_OUT or "
+                         "bench/out/serve)")
     ap.add_argument("--load-timeout", type=int, default=420)
     ap.add_argument("--request-timeout", type=int, default=900)
     args = ap.parse_args()
+
+    MODEL = _paths.model(args.model)
+    MTP = _paths.mtp_model(args.mtp)
+    HIPML = _paths.hipml_exe(args.hipml)
+    LLAMA = _paths.env_or_flag("LLAMA_SERVER", args.llama_server)
+    if args.engine == "llama" and not LLAMA:
+        sys.exit("error: engine llama needs --llama-server or LLAMA_SERVER")
+    args.out_dir = _paths.out_dir("serve", args.out_dir)
 
     cell = dict(CELLS[args.cell])
     if args.reps:
@@ -395,7 +420,12 @@ def main():
         "summary": summary,
         "metrics": metrics,
         "peak_vram_mib": read_peak(peak_path),
-        "command": cmd,
+        "command": _paths.public_argv(cmd, [
+            (HIPML, "<HIPML_EXE>"),
+            (LLAMA, "<LLAMA_SERVER>"),
+            (MODEL, "<HIPML_GGUF>"),
+            (MTP, "<HIPML_MTP_GGUF>"),
+        ]),
         "duration_s": time.time() - started,
         "waves": results,
     }

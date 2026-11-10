@@ -28,13 +28,17 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 
-PORT = 8093
-MODEL = r"C:\models\Qwen3.8-27B-Q4_K_M.gguf"
-MTP = r"C:\models\mtp-Qwen3.8-27B-Q4_0.gguf"
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+import _paths  # noqa: E402
+
+PORT = 8093
+MODEL = None
+MTP = None
 FIXTURE = os.path.join(os.path.dirname(HERE), "fixtures", "p2_math_169.ids")
 
 
@@ -93,10 +97,8 @@ class Server:
     def __enter__(self):
         if port_open():
             raise RuntimeError(f"port {PORT} is already in use")
-        env = dict(os.environ)
-        env["HIP_PATH"] = r"C:\rocm-sdk\_rocm_sdk_core"
-        env["HIPML_ARCH"] = "gfx1201"
-        env["PATH"] = r"C:\rocm-sdk\_rocm_sdk_core\bin;" + env.get("PATH", "")
+        env = _paths.rocm_env()
+        env["HIPML_ARCH"] = env.get("HIPML_ARCH", "gfx1201")
         env.update(self.env)
         cmd = [self.hipml, "serve", "--gguf", MODEL, "--port", str(PORT),
                "--ctx", str(self.ctx), "--slots", str(self.slots), "--chunk", "256",
@@ -527,12 +529,26 @@ PLANS = {"isolation": plan_isolation, "backpressure": plan_backpressure,
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--hipml", required=True)
+    global MODEL, MTP
+    ap = argparse.ArgumentParser(
+        description="Server hardening probes. Paths come from HIPML_GGUF / "
+                    "HIPML_MTP_GGUF or the flags below.")
+    ap.add_argument("--hipml", default=None,
+                    help="hipml binary (default: $HIPML_EXE or target/release/hipml)")
+    ap.add_argument("--model", default=None,
+                    help="target GGUF (default: $HIPML_GGUF)")
+    ap.add_argument("--mtp", default=None,
+                    help="MTP drafter GGUF (default: $HIPML_MTP_GGUF)")
     ap.add_argument("--plan", required=True, choices=sorted(PLANS))
     ap.add_argument("--out", required=True)
     ap.add_argument("--tag", required=True)
     a = ap.parse_args()
+    a.hipml = _paths.hipml_exe(a.hipml)
+    MODEL = _paths.model(a.model)
+    MTP = _paths.mtp_model(a.mtp)
+    if not MTP:
+        sys.exit("error: the server probes need the MTP drafter; "
+                 "pass --mtp or set HIPML_MTP_GGUF")
 
     out = open(a.out, "a", encoding="utf-8")
 
