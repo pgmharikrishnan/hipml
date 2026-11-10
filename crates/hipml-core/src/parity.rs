@@ -562,6 +562,7 @@ fn parity_config(d: &SsmParityDims) -> Config {
         ssm_dt_rank: d.n_v,
         ssm_d_inner: d.n_v * d.head_v,
         context_length: 0,
+        nextn_layers: 0,
     }
 }
 

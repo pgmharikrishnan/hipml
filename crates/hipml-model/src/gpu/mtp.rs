@@ -21,8 +21,13 @@ use super::*;
 use crate::gpu_weights::{gemv_entry, Proj};
 use crate::OUTPUT;
 
-/// The sidecar's block index (`blk.64` is the nextn block for a 64-layer base).
-pub const MTP_BLK: usize = 64;
+/// The MTP sidecar's block index is the base model's decoder depth, i.e.
+/// `block_count - nextn_predict_layers`. It was `64` for the 64-layer
+/// fine-tune; the stock file also names its inline MTP block `blk.64`, but
+/// `block_count` there is 65, so the index has to come from the metadata.
+pub fn mtp_blk(cfg: &Config) -> usize {
+    cfg.n_layer
+}
 
 pub struct MtpGpu<'a> {
     cfg: Config,
@@ -68,7 +73,7 @@ impl<'a> MtpGpu<'a> {
             Config::from_gguf(&mut g).map_err(|e| format!("config: {e}"))?
         };
         let n = cfg.n_embd;
-        let blk = MTP_BLK;
+        let blk = mtp_blk(&cfg);
         let p = |name: &str| Proj::of(model, &format!("blk.{blk}.{name}"));
         let m = |name: &str| -> Result<(&'a ByteBuffer, usize, usize, Kind), String> {
             let t = model
