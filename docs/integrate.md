@@ -55,10 +55,13 @@ tile 4 slots 67.3 vs exact 66.1, tile 8 slots 106.9 vs exact 75.2.
 
 * Full `mtp-batch-bench` matrix (B=4, B=16, admission, exact `_b` mode) was not
   re-run on the merged tree; the two operating-point cells above were.
-* The 8,193 gpu-bench cell reports last id **293** on this tree; `docs/wp52.md`
-  records 852 for the same command. The gate's ids and the fixture gate's worst
-  logit delta (9.309817) match WP52 exactly, and 8,192 still gives 292, so this
-  is treated as a documentation/measurement discrepancy, not a gate failure.
+* The 8,193 gpu-bench cell reports last id **293** on this tree (twice, and
+  6.74/6.78 s); `docs/wp52.md` records 852 for the same command. This tree's
+  `gpu/prefill.rs`, `prefill_launch.rs` and `gpu_bench_cmd.rs` are byte-identical
+  to `feat/splitk-fix`, and WP51 did not touch them, so 852 cannot be produced
+  by the shipped split path. It is most likely a `HIPML_SPLITK=0` or pre-fix
+  observation; the gate result (ids identical, worst \|dlogit\| 9.309817, exactly
+  WP52's number) is unaffected. 8,192 still gives 292.
 * WP50's doc lists the p2 oracle cell as unverified because that run was
   aborted. On this tree it is green (20/20, step 19 = 41020).
 * Peak VRAM for the batched verify tile was not sampled beyond the serve cell's
