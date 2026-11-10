@@ -31,15 +31,56 @@ impl<'a> SsmGpuLayer<'a> {
         s_snap: *mut c_void,
         snap_layers: usize,
     ) -> Result<(), String> {
+        self.recurrent_cols_at(
+            self.conv_state.as_ptr(),
+            self.s_state.as_ptr(),
+            rows,
+            alpha,
+            beta,
+            g,
+            beta_sig,
+            qkv,
+            conv,
+            o,
+            z,
+            gated,
+            conv_snap,
+            s_snap,
+            snap_layers,
+        )
+    }
+
+    /// Same chain against explicit recurrent-state pointers, so one layer's
+    /// weights can serve many sequences: the speculative batch verify walks a
+    /// slot's columns against that slot's own conv window and delta-net matrix.
+    #[allow(clippy::too_many_arguments)]
+    pub fn recurrent_cols_at(
+        &self,
+        conv_state: *mut c_void,
+        s_state: *mut c_void,
+        rows: usize,
+        alpha: &Buffer,
+        beta: &Buffer,
+        g: &Buffer,
+        beta_sig: &Buffer,
+        qkv: &Buffer,
+        conv: &Buffer,
+        o: &Buffer,
+        z: &Buffer,
+        gated: &Buffer,
+        conv_snap: *mut c_void,
+        s_snap: *mut c_void,
+        snap_layers: usize,
+    ) -> Result<(), String> {
         let d = &self.dims;
         let conv_stride = snap_layers * (d.d_conv - 1) * d.conv_ch;
         let s_stride = snap_layers * d.n_v * d.head_v * d.head_v;
         self.gates_cols(rows, alpha, beta, g, beta_sig)?;
-        self.conv_cols(rows, qkv, conv, conv_snap, conv_stride)?;
+        self.conv_cols_at(conv_state, rows, qkv, conv, conv_snap, conv_stride)?;
         let base = conv.as_ptr();
         self.l2norm_cols(base, 0, rows)?;
         self.l2norm_cols(base, d.key_dim(), rows)?;
-        self.gdn_cols(rows, conv, g, beta_sig, o, s_snap, s_stride)?;
+        self.gdn_cols_at(s_state, rows, conv, g, beta_sig, o, s_snap, s_stride)?;
         self.gate_norm_cols(rows, o, z, gated)
     }
 
@@ -78,8 +119,9 @@ impl<'a> SsmGpuLayer<'a> {
         )
     }
 
-    fn conv_cols(
+    fn conv_cols_at(
         &self,
+        conv_state: *mut c_void,
         rows: usize,
         qkv: &Buffer,
         conv: &Buffer,
@@ -90,7 +132,7 @@ impl<'a> SsmGpuLayer<'a> {
         let kernel = self.module.kernel("ssm_conv1d_cols_f32")?;
         let mut p_x = qkv.as_ptr();
         let mut p_w = self.conv_w.as_ptr();
-        let mut p_state = self.conv_state.as_ptr();
+        let mut p_state = conv_state;
         let mut p_y = conv.as_ptr();
         let mut p_snap = snap;
         let mut v_stride = snap_stride as i32;
@@ -147,8 +189,9 @@ impl<'a> SsmGpuLayer<'a> {
         kernel.launch(cfg, self.stream, &mut params)
     }
 
-    fn gdn_cols(
+    fn gdn_cols_at(
         &self,
+        s_state: *mut c_void,
         rows: usize,
         conv: &Buffer,
         g: &Buffer,
@@ -159,7 +202,7 @@ impl<'a> SsmGpuLayer<'a> {
     ) -> Result<(), String> {
         let d = &self.dims;
         let kernel = self.module.kernel("gdn_cols_f32")?;
-        let mut p_s = self.s_state.as_ptr();
+        let mut p_s = s_state;
         let mut p_qkv = conv.as_ptr();
         let mut p_g = g.as_ptr();
         let mut p_beta = beta.as_ptr();
@@ -202,12 +245,22 @@ impl<'a> SsmGpuLayer<'a> {
         z: &Buffer,
         gated: &Buffer,
     ) -> Result<(), String> {
+        self.gate_norm_cols_at(o.as_ptr(), z.as_ptr(), gated.as_ptr(), rows)
+    }
+
+    pub(crate) fn gate_norm_cols_at(
+        &self,
+        o: *mut c_void,
+        z: *mut c_void,
+        gated: *mut c_void,
+        rows: usize,
+    ) -> Result<(), String> {
         let d = &self.dims;
         let kernel = self.module.kernel("ssm_gate_norm_cols_f32")?;
-        let mut p_o = o.as_ptr();
+        let mut p_o = o;
         let mut p_norm = self.norm.as_ptr();
-        let mut p_z = z.as_ptr();
-        let mut p_y = gated.as_ptr();
+        let mut p_z = z;
+        let mut p_y = gated;
         let mut v_h = d.n_v as i32;
         let mut v_d = d.head_v as i32;
         let mut v_eps = d.eps;
