@@ -10,7 +10,7 @@ or sanitized, but the evidence is unchanged.
 
 Commit hashes quoted inside a note refer to the internal development tree, not
 to the public history; the v0.1.0 release commit names the internal source
-commit. For the current numbers, read [`../benchmarks.md`](../benchmarks.md).
+commit. For the current numbers, read [`../release-run.md`](../release-run.md).
 
 | file | work package | date | what it decided | headline number |
 |---|---|---|---|---|

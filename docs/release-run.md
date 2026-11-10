@@ -315,25 +315,16 @@ chunk-boundary prefill) were run before the switch to the stock model. The
 - Server cells at 32 slots or on a different context split.
 - Any GPU other than gfx1201, and any OS other than Windows 11.
 
-## Still citing pre-fix numbers (note for P6)
+## Still citing pre-fix numbers
 
 The pre-fix benchmark tables were measured at `cef7657`, on an earlier model,
-and predate the WP42 correctness fix. Those files have been removed. Files
-that still quote that generation of numbers and need a refresh or an explicit
-"historical" label before publication:
+and predate the WP42 correctness fix. `bench/results.json` and `bench/RESULTS.md`
+have been removed, and `docs/benchmarks.md` now opens with a "superseded"
+banner that points here.
 
-| file | what it quotes |
-| --- | --- |
-| `docs/benchmarks.md` | the old headline table and per-feature rows (now points here) |
-| `docs/server.md` | 129.5 vs 95.3 tok/s at 8 slots, 214.4 vs 215.8 at 16 |
-| `docs/notes/wp43-chat-parity.md` | MTP 1.46–1.80×, the old chat table |
-| `docs/notes/wp45-51-serve.md` | the server cells and the 38.3 tok/s single stream |
-| `docs/notes/wp41-final-tree.md` | batch 152.33 / +49.3% and the 30.0 tok/s decode |
-| `docs/notes/wp26-batch.md` | the first batch numbers (+53%) |
-| `docs/notes/wp35-merged-tree.md` | the 20-id acceptance string (gate model) |
-| `docs/integrate.md`, `docs/mtp-batch.md`, `docs/wp52.md` | gate results; valid as integration evidence, not release numbers |
-| `docs/notes/README.md` | index that calls `benchmarks.md` the current numbers |
-
-Everything above is superseded by this file for release copy. The older notes
-remain useful as engineering history and should be labelled as such, not
-deleted.
+The engineering logs under [`notes/`](notes/) record that generation of numbers
+on purpose; each carries the "engineering log" banner and none is release copy.
+`docs/integrate.md`, `docs/mtp-batch.md` and `docs/wp52.md` are gate logs (which
+model each gate ran on is stated there and above). Everything in this file is
+superseded by this file for release copy; the older notes remain useful as
+engineering history and are labelled as such, not deleted.
