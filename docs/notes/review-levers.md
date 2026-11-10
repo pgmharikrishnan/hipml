@@ -86,9 +86,8 @@ the 3.48 GB q8 KV is re-read 2,345 times at an effective 137 GB/s. Its FLOPs
 3. **An MTP drafter exists on the box and nobody loaded it.**
    the MTP drafter GGUF (`mtp-Qwen3.8-27B-Q4_0.gguf`) is a qwen35-family nextn block
    (blk.64: eh_proj 10240→5120, one full-attention block, one FFN, Q6_K/Q4_K)
-   plus a Q3_K head. It is trained for a sibling base, not for this model's SFT,
-   so
-   its acceptance had to be measured (§3).
+   plus a Q3_K head. It is trained for a sibling base, not for this model's
+   SFT, so its acceptance had to be measured (§3).
 4. **Chunk size was only ever measured at 128/256/512.** At 512 tokens the
    gate/up GEMM launches 80 output tiles on 64 CUs (1.25 waves), so a quarter
    of the GEMM time runs at 25% occupancy. `--chunk 1024` gives 2.5 waves.
