@@ -50,6 +50,9 @@ pub struct Hit {
 }
 
 /// What an insert did.
+///
+/// Admission is all-or-nothing: a payload larger than `max_bytes` is refused
+/// before it is published. It is never truncated, and the refusal is counted.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InsertOutcome {
     /// An entry with the identical token prefix was replaced.
@@ -57,7 +60,9 @@ pub struct InsertOutcome {
     /// Number of entries evicted to stay inside the bound.
     pub evicted: usize,
     /// The payload alone exceeded `max_bytes`; nothing was stored.
-    pub too_large: bool,
+    pub refused: bool,
+    /// Bytes the entry would have occupied (also set on refusal).
+    pub bytes: usize,
 }
 
 /// Cumulative counters, for the hit/miss report.
@@ -68,7 +73,8 @@ pub struct CacheStats {
     pub hits: u64,
     pub misses: u64,
     pub evictions: u64,
-    pub too_large: u64,
+    /// Captures refused because a single entry exceeded the byte bound.
+    pub refused: u64,
 }
 
 /// LRU prefix cache with an entry bound and a byte bound.
@@ -81,7 +87,7 @@ pub struct PrefixCache<T> {
     hits: u64,
     misses: u64,
     evictions: u64,
-    too_large: u64,
+    refused: u64,
 }
 
 impl<T> PrefixCache<T> {
@@ -97,7 +103,7 @@ impl<T> PrefixCache<T> {
             hits: 0,
             misses: 0,
             evictions: 0,
-            too_large: 0,
+            refused: 0,
         }
     }
 
@@ -132,7 +138,7 @@ impl<T> PrefixCache<T> {
             hits: self.hits,
             misses: self.misses,
             evictions: self.evictions,
-            too_large: self.too_large,
+            refused: self.refused,
         }
     }
 
@@ -142,10 +148,22 @@ impl<T> PrefixCache<T> {
     /// `entry.tokens.len() <= prompt.len()` and the slices are equal. Ties
     /// cannot happen because identical prefixes are replaced on insert.
     pub fn find_longest(&mut self, prompt: &[u32]) -> Option<Hit> {
+        self.find_longest_where(prompt, |_| true)
+    }
+
+    /// Like [`find_longest`](Self::find_longest), but an entry only qualifies
+    /// when `valid` accepts it. The engine uses this to reject a snapshot whose
+    /// recorded position does not match the entry's token length: a corrupt or
+    /// half-published entry is a miss, never a hit.
+    pub fn find_longest_where(
+        &mut self,
+        prompt: &[u32],
+        valid: impl Fn(&Entry<T>) -> bool,
+    ) -> Option<Hit> {
         let mut best: Option<(usize, usize)> = None; // (len, index)
         for (i, e) in self.entries.iter().enumerate() {
             let n = e.tokens.len();
-            if n > prompt.len() {
+            if n > prompt.len() || !valid(e) {
                 continue;
             }
             if let Some((best_len, _)) = best {
@@ -171,13 +189,46 @@ impl<T> PrefixCache<T> {
         }
     }
 
-    /// Insert or replace `tokens -> payload`, evicting LRU entries until the
-    /// entry and byte bounds hold. An oversized payload is refused.
-    pub fn insert(&mut self, tokens: Vec<u32>, bytes: usize, payload: T) -> InsertOutcome {
-        let mut out = InsertOutcome::default();
+    /// Does an entry with exactly these token ids already exist?
+    pub fn contains(&self, tokens: &[u32]) -> bool {
+        self.entries.iter().any(|e| e.tokens == tokens)
+    }
+
+    /// Make room for a `bytes`-sized entry, evicting LRU entries when that is
+    /// enough. Returns the number evicted, or `None` when a single entry cannot
+    /// fit in the whole cache (counted as a refusal, nothing evicted).
+    ///
+    /// Callers use this *before* allocating the payload, so an oversized
+    /// capture costs no device memory and leaves no half-built entry behind.
+    pub fn reserve(&mut self, bytes: usize) -> Option<usize> {
         if bytes > self.max_bytes {
-            self.too_large += 1;
-            out.too_large = true;
+            self.refused += 1;
+            return None;
+        }
+        let mut evicted = 0;
+        while (self.bytes + bytes > self.max_bytes || self.entries.len() + 1 > self.max_entries)
+            && !self.entries.is_empty()
+        {
+            self.evict_lru();
+            evicted += 1;
+        }
+        if self.bytes + bytes > self.max_bytes || self.entries.len() + 1 > self.max_entries {
+            self.refused += 1;
+            return None;
+        }
+        Some(evicted)
+    }
+
+    /// Insert or replace `tokens -> payload`, evicting LRU entries until the
+    /// entry and byte bounds hold. An oversized payload is refused and counted.
+    pub fn insert(&mut self, tokens: Vec<u32>, bytes: usize, payload: T) -> InsertOutcome {
+        let mut out = InsertOutcome {
+            bytes,
+            ..InsertOutcome::default()
+        };
+        if bytes > self.max_bytes {
+            self.refused += 1;
+            out.refused = true;
             return out;
         }
 
@@ -212,21 +263,29 @@ impl<T> PrefixCache<T> {
     fn evict_if_needed(&mut self) -> usize {
         let mut evicted = 0;
         while self.entries.len() > self.max_entries || self.bytes > self.max_bytes {
-            // Least recently used. There is always a victim: an oversized
-            // single entry is rejected before it is pushed.
-            let victim = self
-                .entries
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, e)| e.last_used)
-                .map(|(i, _)| i);
-            let Some(victim) = victim else { break };
-            self.bytes -= self.entries[victim].bytes;
-            self.entries.remove(victim);
-            self.evictions += 1;
+            if !self.evict_lru() {
+                break;
+            }
             evicted += 1;
         }
         evicted
+    }
+
+    /// Drop the least-recently-used entry. Returns false when the cache is
+    /// empty. An oversized single entry is refused before it is pushed, so a
+    /// victim always exists while the bounds are exceeded.
+    fn evict_lru(&mut self) -> bool {
+        let victim = self
+            .entries
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, e)| e.last_used)
+            .map(|(i, _)| i);
+        let Some(victim) = victim else { return false };
+        self.bytes -= self.entries[victim].bytes;
+        self.entries.remove(victim);
+        self.evictions += 1;
+        true
     }
 
     /// Remove every entry (and its payload). Counters are kept.
@@ -354,9 +413,40 @@ mod tests {
         assert_eq!(c.bytes(), 60);
 
         let out = push(&mut c, &[3], 3, 101);
-        assert!(out.too_large);
+        assert!(out.refused);
+        assert_eq!(out.bytes, 101);
         assert_eq!(c.len(), 1);
-        assert_eq!(c.stats().too_large, 1);
+        assert_eq!(c.stats().refused, 1);
+    }
+
+    #[test]
+    fn reserve_evicts_before_it_refuses() {
+        let mut c = PrefixCache::new(10, 100);
+        push(&mut c, &[1], 1, 40);
+        push(&mut c, &[2], 2, 40);
+        // Room is made by evicting LRU; the capture is then admitted.
+        assert_eq!(c.reserve(80), Some(2));
+        assert_eq!(c.stats().evictions, 2);
+        assert_eq!(c.stats().refused, 0);
+        // A single entry that cannot fit is refused without evicting.
+        let before = c.stats().evictions;
+        assert_eq!(c.reserve(101), None);
+        assert_eq!(c.stats().evictions, before);
+        assert_eq!(c.stats().refused, 1);
+    }
+
+    #[test]
+    fn lookup_skips_entries_the_validator_rejects() {
+        let mut c = PrefixCache::new(4, 1 << 20);
+        push(&mut c, &[1, 2], 20, 10);
+        push(&mut c, &[1, 2, 3], 30, 10);
+        // Treat the longer entry as half-published: lookups fall back to the
+        // shorter prefix instead of serving the invalid one.
+        let h = c
+            .find_longest_where(&[1, 2, 3, 4], |e| e.payload != 30)
+            .unwrap();
+        assert_eq!(h.pos, 2);
+        assert_eq!(c.entry(h.index).payload, 20);
     }
 
     #[test]
