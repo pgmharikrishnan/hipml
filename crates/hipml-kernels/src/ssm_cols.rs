@@ -158,12 +158,7 @@ impl<'a> SsmGpuLayer<'a> {
         )
     }
 
-    fn l2norm_cols(
-        &self,
-        base: *mut c_void,
-        off: usize,
-        rows: usize,
-    ) -> Result<(), String> {
+    fn l2norm_cols(&self, base: *mut c_void, off: usize, rows: usize) -> Result<(), String> {
         let d = &self.dims;
         let kernel = self.module.kernel("l2norm_cols_f32")?;
         let mut p_x = offset(base, off);

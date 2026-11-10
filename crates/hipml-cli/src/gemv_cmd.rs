@@ -44,9 +44,7 @@ pub fn gemv_check(args: &[String]) -> i32 {
     };
     match hipml_model::gpu_weights::check_batched_gemv(&model, &tensor, rows, 0x9E37_79B9) {
         Ok((n, diff, worst)) => {
-            println!(
-                "{tensor}: {rows} columns, {n} values, {diff} differ, max |d| {worst:.3e}"
-            );
+            println!("{tensor}: {rows} columns, {n} values, {diff} differ, max |d| {worst:.3e}");
             if diff == 0 {
                 0
             } else {
@@ -138,4 +136,3 @@ pub fn gemv_bench(args: &[String]) -> i32 {
         0
     }
 }
-

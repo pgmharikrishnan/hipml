@@ -31,12 +31,12 @@ use hipml_model::gpu::{GpuEngine, GpuState, Snap, SpecStats};
 
 use super::metrics::Metrics;
 
-#[path = "sched/run.rs"]
-mod run;
 #[path = "sched/fail.rs"]
 mod fail;
 #[path = "sched/rows.rs"]
 mod rows;
+#[path = "sched/run.rs"]
+mod run;
 #[path = "sched/step.rs"]
 mod step;
 #[path = "sched/warm.rs"]
@@ -165,7 +165,14 @@ struct RowTail {
     hit_tokens: usize,
 }
 
-fn send_done(tx: &Sender<Event>, job: &Job, finish: &str, completion: usize, prefill_ms: f64, hit: usize) {
+fn send_done(
+    tx: &Sender<Event>,
+    job: &Job,
+    finish: &str,
+    completion: usize,
+    prefill_ms: f64,
+    hit: usize,
+) {
     let _ = tx.send(Event::Done(Done {
         finish: finish.to_string(),
         prompt_tokens: job.prompt.len(),
@@ -306,13 +313,8 @@ fn prefill_step(
     let end = cut.unwrap_or(limit);
     let tile = &pf.job.prompt[pf.done..end];
     let t = Instant::now();
-    let first = engine.prefill_tile_capture(
-        tile,
-        &mut pf.st,
-        pf.cap,
-        pf.deep,
-        pf.capture.as_ref(),
-    )?;
+    let first =
+        engine.prefill_tile_capture(tile, &mut pf.st, pf.cap, pf.deep, pf.capture.as_ref())?;
     let ms = t.elapsed().as_secs_f64() * 1e3;
     pf.done = end;
     pf.prefill_ms += ms;

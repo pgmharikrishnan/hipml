@@ -164,7 +164,11 @@ impl SsmChunk {
 
     /// Bytes the chunk scratch holds.
     pub fn bytes(&self) -> usize {
-        (self.qkv.len() + self.z.len() + self.alpha.len() + self.beta.len() + self.conv.len()
+        (self.qkv.len()
+            + self.z.len()
+            + self.alpha.len()
+            + self.beta.len()
+            + self.conv.len()
             + self.o.len()
             + self.gated.len()
             + self.out.len()
@@ -450,10 +454,7 @@ impl<'a> SsmGpuLayer<'a> {
     /// A prefix snapshot copies exactly these many values.
     pub fn state_lens(&self) -> (usize, usize) {
         let d = &self.dims;
-        (
-            (d.d_conv - 1) * d.conv_ch,
-            d.n_v * d.head_v * d.head_v,
-        )
+        ((d.d_conv - 1) * d.conv_ch, d.n_v * d.head_v * d.head_v)
     }
 
     /// The live conv window buffer (destination for a restore).

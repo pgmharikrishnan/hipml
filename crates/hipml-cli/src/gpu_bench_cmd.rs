@@ -63,7 +63,11 @@ fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
                 i += 2;
             }
             "--prefill" => {
-                a.prefill = Some(need(i)?.parse().map_err(|e| format!("bad --prefill: {e}"))?);
+                a.prefill = Some(
+                    need(i)?
+                        .parse()
+                        .map_err(|e| format!("bad --prefill: {e}"))?,
+                );
                 i += 2;
             }
             "--chunk" => {
@@ -151,7 +155,11 @@ pub fn bench(args: &[String]) -> i32 {
         engine.weight_bytes() as f64 / (1u64 << 30) as f64,
         engine.kv_mode.name(),
         kv_bytes as f64 / (1u64 << 30) as f64,
-        if a.prefill.is_some() { a.prefill.unwrap() } else { a.depth },
+        if a.prefill.is_some() {
+            a.prefill.unwrap()
+        } else {
+            a.depth
+        },
     );
     println!("build: {:.1}s", t0.elapsed().as_secs_f64());
 

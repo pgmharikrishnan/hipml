@@ -129,12 +129,9 @@ impl<'a> SsmGpuLayer<'a> {
             let k = self.module.kernel("gdn_ar_b")?;
             let mut p_s = s_state.as_ptr();
             let mut p_q = conv.as_ptr();
-            let mut p_k = unsafe {
-                (conv.as_ptr() as *mut u8).add(d.key_dim() * 4) as *mut c_void
-            };
-            let mut p_v = unsafe {
-                (conv.as_ptr() as *mut u8).add(2 * d.key_dim() * 4) as *mut c_void
-            };
+            let mut p_k = unsafe { (conv.as_ptr() as *mut u8).add(d.key_dim() * 4) as *mut c_void };
+            let mut p_v =
+                unsafe { (conv.as_ptr() as *mut u8).add(2 * d.key_dim() * 4) as *mut c_void };
             let mut p_g = g.as_ptr();
             let mut p_beta = beta_sig.as_ptr();
             let mut p_out = o.as_ptr();

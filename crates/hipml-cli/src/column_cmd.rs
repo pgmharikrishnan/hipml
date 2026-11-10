@@ -267,8 +267,10 @@ fn check(model: &Model, prompt: &[u32], a: &Args, n_ctx: usize, chunk: usize) ->
     };
     let mut col_st = col_eng.new_state();
     let mut ref_st = ref_eng.new_state();
-    let first = match (col_eng.prefill_chunked(prompt, &mut col_st, chunk),
-                       ref_eng.prefill_chunked(prompt, &mut ref_st, chunk)) {
+    let first = match (
+        col_eng.prefill_chunked(prompt, &mut col_st, chunk),
+        ref_eng.prefill_chunked(prompt, &mut ref_st, chunk),
+    ) {
         (Ok(x), Ok(y)) if x == y => x,
         (Ok(_), Ok(_)) => {
             eprintln!("column-check: the two prefills disagree");

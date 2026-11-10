@@ -271,7 +271,6 @@ impl AttnLayer<'_> {
 
         self.prep_chunk_row(l, qg, k, q, gate, t, pos)?;
 
-
         let append = self.module_kernel(l, "kv_append_f32")?;
         let mut p_kc = self.kv_k.as_ptr();
         let mut p_vc = self.kv_v.as_ptr();

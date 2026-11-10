@@ -60,10 +60,7 @@ pub fn listen(listener: TcpListener, shared: Arc<Shared>) {
         match stream {
             Ok(mut s) => {
                 let Some(conn) = shared.conns.try_enter() else {
-                    let msg = format!(
-                        "too many connections ({} open)",
-                        shared.conns.used()
-                    );
+                    let msg = format!("too many connections ({} open)", shared.conns.used());
                     let _ = admit::busy(&mut s, &msg, 1, &shared.metrics, true);
                     continue;
                 };
@@ -127,7 +124,12 @@ fn handle(shared: Arc<Shared>, mut stream: TcpStream) -> Result<(), String> {
         ("GET", "/metrics") => {
             let vram = vram();
             let body = shared.metrics.render(vram);
-            write_body(&mut stream, "200 OK", "text/plain; version=0.0.4", body.as_bytes())
+            write_body(
+                &mut stream,
+                "200 OK",
+                "text/plain; version=0.0.4",
+                body.as_bytes(),
+            )
         }
         ("GET", "/props") => {
             let body = format!(
@@ -141,7 +143,9 @@ fn handle(shared: Arc<Shared>, mut stream: TcpStream) -> Result<(), String> {
             write_json(&mut stream, "200 OK", &body)
         }
         ("POST", "/tokenize") => tokenize(&shared, &mut stream, &req),
-        ("POST", p) if p.starts_with("/v1/chat/completions") || p.starts_with("/chat/completions") => {
+        ("POST", p)
+            if p.starts_with("/v1/chat/completions") || p.starts_with("/chat/completions") =>
+        {
             api::chat_completion(&shared, &mut stream, &req.body)
         }
         ("POST", "/completion") => api::completion(&shared, &mut stream, &req.body),
@@ -153,7 +157,9 @@ fn handle(shared: Arc<Shared>, mut stream: TcpStream) -> Result<(), String> {
 fn vram() -> Option<(usize, usize)> {
     #[cfg(feature = "hip")]
     {
-        hipml_hip::Device::first().ok().and_then(|d| d.mem_info().ok())
+        hipml_hip::Device::first()
+            .ok()
+            .and_then(|d| d.mem_info().ok())
     }
     #[cfg(not(feature = "hip"))]
     {
@@ -182,7 +188,10 @@ fn tokenize(shared: &Shared, stream: &mut TcpStream, req: &Request) -> Result<()
 fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
     let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
     let mut line = String::new();
-    (&mut reader).take(MAX_LINE).read_line(&mut line).map_err(|e| e.to_string())?;
+    (&mut reader)
+        .take(MAX_LINE)
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
     if line.is_empty() {
         return Err("empty request".to_string());
     }
@@ -192,7 +201,11 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
     let mut parts = line.trim_end().split_whitespace();
     let method = parts.next().ok_or("no method")?.to_string();
     let target = parts.next().ok_or("no path")?.to_string();
-    let path = target.split_once('?').map(|(p, _)| p).unwrap_or(&target).to_string();
+    let path = target
+        .split_once('?')
+        .map(|(p, _)| p)
+        .unwrap_or(&target)
+        .to_string();
 
     let mut length = 0usize;
     let mut expect_continue = false;
@@ -202,7 +215,10 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
             return Err("too many headers".to_string());
         }
         let mut h = String::new();
-        let n = (&mut reader).take(MAX_LINE).read_line(&mut h).map_err(|e| e.to_string())?;
+        let n = (&mut reader)
+            .take(MAX_LINE)
+            .read_line(&mut h)
+            .map_err(|e| e.to_string())?;
         if n == 0 || h == "\r\n" || h == "\n" {
             break;
         }
@@ -235,18 +251,28 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
     }
     let mut body = vec![0u8; length];
     reader.read_exact(&mut body).map_err(|e| e.to_string())?;
-    Ok(Request {
-        method,
-        path,
-        body,
-    })
+    Ok(Request { method, path, body })
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn new_job(shared: &Shared, prompt: chat::Prompt, max_tokens: usize, ignore_eos: bool,
-               stop_strings: &[String], stop_ids: Vec<u32>, drafts: usize, cache: bool)
-    -> Result<(u64, std::sync::mpsc::Receiver<super::sched::Event>, Instant, Arc<AtomicU8>), String>
-{
+pub fn new_job(
+    shared: &Shared,
+    prompt: chat::Prompt,
+    max_tokens: usize,
+    ignore_eos: bool,
+    stop_strings: &[String],
+    stop_ids: Vec<u32>,
+    drafts: usize,
+    cache: bool,
+) -> Result<
+    (
+        u64,
+        std::sync::mpsc::Receiver<super::sched::Event>,
+        Instant,
+        Arc<AtomicU8>,
+    ),
+    String,
+> {
     let (tx, rx) = channel();
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let mut stops = stop_ids;

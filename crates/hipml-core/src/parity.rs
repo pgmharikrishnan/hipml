@@ -13,9 +13,7 @@ use crate::rng::Rng;
 use crate::tensor::Tensor;
 
 pub use crate::parity_kv::deep_cases;
-pub use crate::prefill_parity::{
-    prefill_cases, qwen38_prefill_cases, skinny_cases, PrefillCase,
-};
+pub use crate::prefill_parity::{prefill_cases, qwen38_prefill_cases, skinny_cases, PrefillCase};
 pub use crate::quant_parity::{quant_bench_cases, quant_cases, QuantCase};
 
 /// Absolute and relative tolerance for a case.
@@ -499,7 +497,9 @@ fn build_ssm_layer(rng: &mut Rng, d: &SsmParityDims) -> (Vec<Tensor>, Vec<f32>) 
     let norm = Tensor::from_fn(vec![d.head_v], |_| 1.0 + rng.normal_scaled(0.1));
     let wout = Tensor::from_fn(vec![d.n_embd, inner], |_| rng.normal_scaled(0.02));
     let conv_s = Tensor::from_fn(vec![(d.d_conv - 1) * d.conv_ch], |_| rng.normal_scaled(0.3));
-    let s = Tensor::from_fn(vec![d.n_v * d.head_v * d.head_v], |_| rng.normal_scaled(0.1));
+    let s = Tensor::from_fn(vec![d.n_v * d.head_v * d.head_v], |_| {
+        rng.normal_scaled(0.1)
+    });
 
     let w = SsmW {
         wqkv: f32_mat(d.conv_ch, d.n_embd, wqkv.data()),

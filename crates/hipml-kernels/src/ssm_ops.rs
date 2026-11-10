@@ -11,8 +11,8 @@
 //! scratch.
 
 use crate::ssm::{SsmGpuLayer, SsmWeight};
-use hipml_hip::{Buffer, LaunchConfig};
 use crate::Launcher;
+use hipml_hip::{Buffer, LaunchConfig};
 use std::ffi::c_void;
 use std::time::Instant;
 
@@ -185,8 +185,8 @@ impl<'a> SsmGpuLayer<'a> {
                 .k_gemv
                 .launch(LaunchConfig::per_row(m, 256), self.stream, &mut params),
             Some(entry) => {
-                let spec = crate::spec(entry)
-                    .ok_or_else(|| format!("{entry} is not in the manifest"))?;
+                let spec =
+                    crate::spec(entry).ok_or_else(|| format!("{entry} is not in the manifest"))?;
                 let cfg = match spec.kind {
                     crate::KernelKind::RowTile { rows, block } => {
                         LaunchConfig::row_tile(m, rows, block)
@@ -282,8 +282,11 @@ impl<'a> SsmGpuLayer<'a> {
             &mut p_x as *mut _ as *mut c_void,
             &mut v_n as *mut _ as *mut c_void,
         ];
-        self.k_silu
-            .launch(LaunchConfig::linear(d.conv_ch, 256), self.stream, &mut params)
+        self.k_silu.launch(
+            LaunchConfig::linear(d.conv_ch, 256),
+            self.stream,
+            &mut params,
+        )
     }
 
     fn l2norms(&self) -> Result<(), String> {
@@ -370,11 +373,7 @@ impl<'a> SsmGpuLayer<'a> {
     }
 
     fn gate_norm(&self) -> Result<(), String> {
-        self.gate_norm_at(
-            self.o.as_ptr(),
-            self.z.as_ptr(),
-            self.gated.as_ptr(),
-        )
+        self.gate_norm_at(self.o.as_ptr(), self.z.as_ptr(), self.gated.as_ptr())
     }
 
     /// `gated = rmsnorm(o, norm) * silu(z)`.

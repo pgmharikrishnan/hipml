@@ -90,16 +90,7 @@ pub fn gemm_q6_k(w: &[u8], x: &[f32], tokens: usize, m: usize, k: usize) -> Vec<
 
 /// `y[t,m] = W[m,k] · x[t,k]` with `W` stored as Q8_0 blocks, row-major.
 pub fn gemm_q8_0(w: &[u8], x: &[f32], tokens: usize, m: usize, k: usize) -> Vec<f32> {
-    gemm_quant_blocks(
-        w,
-        x,
-        tokens,
-        m,
-        k,
-        Q8_0_VALUES,
-        Q8_0_BYTES,
-        dequant_q8_0,
-    )
+    gemm_quant_blocks(w, x, tokens, m, k, Q8_0_VALUES, Q8_0_BYTES, dequant_q8_0)
 }
 
 /// One dequantise-a-row-then-dot implementation for every block format.
@@ -116,7 +107,11 @@ fn gemm_quant_blocks(
     assert_eq!(k % block_values, 0, "k must be a whole number of blocks");
     let blocks_per_row = k / block_values;
     let row_bytes = blocks_per_row * block_bytes;
-    assert_eq!(w.len(), m * row_bytes, "W must be m rows of quantized blocks");
+    assert_eq!(
+        w.len(),
+        m * row_bytes,
+        "W must be m rows of quantized blocks"
+    );
     assert_eq!(x.len(), tokens * k, "x must be tokens*k");
 
     let mut y = vec![0.0f32; tokens * m];
@@ -233,7 +228,10 @@ pub fn rope_multi_f32(
     theta_base: f32,
 ) -> Vec<f32> {
     assert_eq!(x.len(), n_heads * head_dim, "x must be n_heads*head_dim");
-    assert!(n_rot <= head_dim && n_rot % 2 == 0, "n_rot must be even and <= head_dim");
+    assert!(
+        n_rot <= head_dim && n_rot % 2 == 0,
+        "n_rot must be even and <= head_dim"
+    );
     let half = n_rot / 2;
     let sect: usize = sections.iter().sum();
     let mut y = x.to_vec();
@@ -276,7 +274,11 @@ pub fn rope_multi_f32(
 ///
 /// Kernel: `qg_split_f32`, one block per head.
 pub fn qg_split_f32(qg: &[f32], n_heads: usize, head_dim: usize) -> Vec<f32> {
-    assert_eq!(qg.len(), n_heads * 2 * head_dim, "qg must be n_heads*2*head_dim");
+    assert_eq!(
+        qg.len(),
+        n_heads * 2 * head_dim,
+        "qg must be n_heads*2*head_dim"
+    );
     let mut out = vec![0.0f32; 2 * n_heads * head_dim];
     for h in 0..n_heads {
         let src = &qg[h * 2 * head_dim..(h + 1) * 2 * head_dim];
@@ -417,7 +419,10 @@ pub fn attn_decode_kv(
     dtype: KvDtype,
 ) -> Vec<f32> {
     assert_eq!(q.len(), n_heads * head_dim, "q must be n_heads*head_dim");
-    assert!(head_dim % kv::BLOCK == 0, "head_dim must be a multiple of 32");
+    assert!(
+        head_dim % kv::BLOCK == 0,
+        "head_dim must be a multiple of 32"
+    );
     assert!(seq > 0, "attention needs at least one position");
     assert!(n_heads % n_kv == 0, "n_heads must be a multiple of n_kv");
     let nb = head_dim / kv::BLOCK;

@@ -30,23 +30,26 @@ pub(super) fn attention_tile(
             if steps || !attn.chunk_supported() {
                 for t in 0..n_tok {
                     attn.step_chunk_row(
-                        l, &c.qg, &c.k, &c.v, &c.q, &c.aq_gate, &c.aout, t, pos0 + t,
+                        l,
+                        &c.qg,
+                        &c.k,
+                        &c.v,
+                        &c.q,
+                        &c.aq_gate,
+                        &c.aout,
+                        t,
+                        pos0 + t,
                     )?;
                 }
             } else {
-                attn.step_chunk(
-                    l, &c.qg, &c.k, &c.v, &c.q, &c.aq_gate, &c.aout, pos0, n_tok,
-                )?;
+                attn.step_chunk(l, &c.qg, &c.k, &c.v, &c.q, &c.aq_gate, &c.aout, pos0, n_tok)?;
             }
         }
         Some(dk) => {
             // Escape hatches HIPML_TOKEN_STEPS and HIPML_Q8_ROW both select the
             // row-at-a-time quantized path; this engine carries no f32 mirror
             // for `step_chunk_row` to append to.
-            if attn.q8_chunk_supported()
-                && !steps
-                && std::env::var_os("HIPML_Q8_ROW").is_none()
-            {
+            if attn.q8_chunk_supported() && !steps && std::env::var_os("HIPML_Q8_ROW").is_none() {
                 // Quantize the tile straight into the decode cache, then run the
                 // same matrix-unit attention over it.
                 attn.chunk_front(l, &c.qg, &c.k, &c.q, &c.aq_gate, pos0, n_tok)?;
@@ -191,7 +194,11 @@ pub(super) fn deep_attention_ptr_on(
         if side { l.stream2() } else { l.stream() },
         // Each stream carries its own position, so the side stream must read
         // the side step buffer (the KV append above already used it).
-        if side { l.step_side_buf() } else { l.step_buf() },
+        if side {
+            l.step_side_buf()
+        } else {
+            l.step_buf()
+        },
         // Decode-attention entry id (warp-per-KV-head variants included); the
         // batch path shares the same selector as the single-stream path.
         dk.kernel,

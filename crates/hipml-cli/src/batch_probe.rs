@@ -32,14 +32,20 @@ pub fn probe_kernels(model: &Model, slots: usize) {
     };
     println!("kernel probe (weight-only GB/s, one pass):");
     for name in names {
-        let Some(t) = model.tensor(name) else { continue };
+        let Some(t) = model.tensor(name) else {
+            continue;
+        };
         let shape = t.shape();
         if shape.len() != 2 {
             continue;
         }
         let (m, k) = (shape[0] as usize, shape[1] as usize);
-        let Ok(entry) = gemv_entry(t.ty()) else { continue };
-        let Some(kind) = batch_kind_tensor(t.ty()) else { continue };
+        let Ok(entry) = gemv_entry(t.ty()) else {
+            continue;
+        };
+        let Some(kind) = batch_kind_tensor(t.ty()) else {
+            continue;
+        };
         let bytes = t.nbytes() as f64;
         let x = match Buffer::alloc(slots * k) {
             Ok(b) => b,
@@ -78,4 +84,3 @@ pub fn probe_kernels(model: &Model, slots: usize) {
         );
     }
 }
-

@@ -15,8 +15,8 @@
 //! Every projection and norm is the row-wise kernel the plain batched step
 //! already uses, so the same row with the same input produces the same bits.
 
-use crate::gpu::deep_kv::MAX_SPLITS;
 use super::*;
+use crate::gpu::deep_kv::MAX_SPLITS;
 use hipml_kernels::ssm::SsmDims;
 use std::ffi::c_void;
 
@@ -189,7 +189,11 @@ impl<'a> BatchEngine<'a> {
         snap: &VerifySnap,
     ) -> Result<Vec<Vec<u32>>, String> {
         if cols.len() != self.active.len() {
-            return Err(format!("{} column sets for {} slots", cols.len(), self.active.len()));
+            return Err(format!(
+                "{} column sets for {} slots",
+                cols.len(),
+                self.active.len()
+            ));
         }
         if self.active.iter().enumerate().any(|(i, &s)| i != s) {
             return Err("verify: active set is not dense".to_string());
@@ -250,16 +254,7 @@ impl<'a> BatchEngine<'a> {
         let s = self.verify.take().expect("allocated above");
         s.pos.upload_bytes_async(0, &pos_bytes, l.stream())?;
 
-        let result = self.verify_layers(
-            &cfg,
-            &s,
-            snap,
-            cols,
-            &lens,
-            &base,
-            &positions,
-            total,
-        );
+        let result = self.verify_layers(&cfg, &s, snap, cols, &lens, &base, &positions, total);
         self.verify = Some(s);
         let ids = result?;
         let mut out = Vec::with_capacity(cols.len());
@@ -336,8 +331,7 @@ impl<'a> BatchEngine<'a> {
                         while c0 < len {
                             let splits = ((start + c0 + 1) / 64).clamp(1, MAX_SPLITS);
                             let mut c1 = c0 + 1;
-                            while c1 < len
-                                && ((start + c1 + 1) / 64).clamp(1, MAX_SPLITS) == splits
+                            while c1 < len && ((start + c1 + 1) / 64).clamp(1, MAX_SPLITS) == splits
                             {
                                 c1 += 1;
                             }
@@ -379,8 +373,10 @@ impl<'a> BatchEngine<'a> {
                             &snap.conv,
                             slot * snap.cols * n_ssm * snap_cl + ssm_idx * snap_cl,
                         );
-                        let snap_s =
-                            at(&snap.s, slot * snap.cols * n_ssm * snap_sl + ssm_idx * snap_sl);
+                        let snap_s = at(
+                            &snap.s,
+                            slot * snap.cols * n_ssm * snap_sl + ssm_idx * snap_sl,
+                        );
                         ssm.inst.recurrent_cols_rows(
                             at(&ssm.conv_state, slot * conv_stride),
                             at(&ssm.s_state, slot * s_stride),
@@ -513,6 +509,7 @@ impl<'a> BatchEngine<'a> {
             return Err(format!("verify hidden row {row} beyond {}", s.cap));
         }
         let l = self.model.launcher();
-        s.final_h.copy_range_on(dst, row * width, dst_row * width, width, l.stream())
+        s.final_h
+            .copy_range_on(dst, row * width, dst_row * width, width, l.stream())
     }
 }

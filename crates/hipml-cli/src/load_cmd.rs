@@ -140,11 +140,7 @@ fn print_config(path: &Path) -> Result<(), String> {
         c.ssm_d_inner,
         c.ssm_head_v()
     );
-    println!(
-        "  full-attention layers ({}): {:?}",
-        full.len(),
-        full
-    );
+    println!("  full-attention layers ({}): {:?}", full.len(), full);
     Ok(())
 }
 
@@ -259,8 +255,8 @@ fn print_embeddings(model: &Model, path: &Path, probes: &[u32]) -> Result<(), St
     for &token in probes {
         let device = model.embedding_row(token)?;
         let cpu = cpu_embedding_row(path, token)?;
-        let c = compare_rows(&device, &cpu)
-            .ok_or_else(|| format!("token {token}: length mismatch"))?;
+        let c =
+            compare_rows(&device, &cpu).ok_or_else(|| format!("token {token}: length mismatch"))?;
         println!(
             "  {:<10} {:>14} {:>12.3e} {:>12.3e}",
             token,

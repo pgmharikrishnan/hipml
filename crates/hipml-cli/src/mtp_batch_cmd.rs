@@ -327,7 +327,11 @@ pub fn run(args: &[String]) -> i32 {
                 "all {} slots reproduce the plain batched stream over {} tokens{}",
                 a.active,
                 horizon,
-                if horizon < a.tokens { " (admission window)" } else { "" }
+                if horizon < a.tokens {
+                    " (admission window)"
+                } else {
+                    ""
+                }
             )
         } else {
             "TOKENS DIFFER".to_string()
@@ -441,8 +445,7 @@ fn spec_run<'a>(
         let done = (0..active).all(|b| streams[b].len() >= tokens);
         // With admission the new slot starts 256 tokens behind, so the run is
         // bounded by the original slots plus a short window after the join.
-        let done = done
-            || admit_at.map(|at| steps > at + 24).unwrap_or(false);
+        let done = done || admit_at.map(|at| steps > at + 24).unwrap_or(false);
         if done {
             break;
         }
@@ -469,15 +472,30 @@ fn spec_run<'a>(
                 seed.push(first);
                 let step_start = Instant::now();
                 let (d, v, r, z, a) = spec_step(
-                    batch, mtp, snap, &mut seed, &mut plan, &mut drafted, &mut accepted,
-                    drafts_max, &mut zero_run, adapt, tokens, &mut streams, n,
+                    batch,
+                    mtp,
+                    snap,
+                    &mut seed,
+                    &mut plan,
+                    &mut drafted,
+                    &mut accepted,
+                    drafts_max,
+                    &mut zero_run,
+                    adapt,
+                    tokens,
+                    &mut streams,
+                    n,
                 )?;
                 let step_ms = step_start.elapsed().as_secs_f64() * 1e3;
                 draft_s += d;
                 verify_s += v;
                 rewrite_s += r;
                 zero_steps += z;
-                if z == 1 { zero_step_ms += step_ms } else { accept_step_ms += step_ms }
+                if z == 1 {
+                    zero_step_ms += step_ms
+                } else {
+                    accept_step_ms += step_ms
+                }
                 admit_step_ms = Some(step_start.elapsed().as_secs_f64() * 1e3);
                 let _ = a;
                 steps += 1;
@@ -486,21 +504,34 @@ fn spec_run<'a>(
         }
         let step_start = Instant::now();
         let (d, v, r, z, _) = spec_step(
-            batch, mtp, snap, &mut seed, &mut plan, &mut drafted, &mut accepted, drafts_max,
-            &mut zero_run, adapt, tokens, &mut streams, n,
+            batch,
+            mtp,
+            snap,
+            &mut seed,
+            &mut plan,
+            &mut drafted,
+            &mut accepted,
+            drafts_max,
+            &mut zero_run,
+            adapt,
+            tokens,
+            &mut streams,
+            n,
         )?;
         let step_ms = step_start.elapsed().as_secs_f64() * 1e3;
         draft_s += d;
         verify_s += v;
         rewrite_s += r;
         zero_steps += z;
-        if z == 1 { zero_step_ms += step_ms } else { accept_step_ms += step_ms }
+        if z == 1 {
+            zero_step_ms += step_ms
+        } else {
+            accept_step_ms += step_ms
+        }
         steps += 1;
     }
     let secs = started.elapsed().as_secs_f64();
-    let emitted: usize = (0..active0)
-        .map(|b| streams[b].len().min(tokens) - 1)
-        .sum();
+    let emitted: usize = (0..active0).map(|b| streams[b].len().min(tokens) - 1).sum();
     Ok(Run {
         steps,
         ms_per_step: secs * 1e3 / steps.max(1) as f64,

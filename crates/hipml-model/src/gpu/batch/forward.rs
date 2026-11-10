@@ -7,8 +7,8 @@
 //! The two streams carry alternating slots so the small per-slot kernels
 //! overlap instead of serialising.
 
-use super::*;
 use super::deep_kv::MAX_SPLITS;
+use super::*;
 use std::time::Instant;
 
 impl<'a> BatchEngine<'a> {
@@ -17,7 +17,11 @@ impl<'a> BatchEngine<'a> {
     pub fn forward(&mut self, tokens: &[u32]) -> Result<Vec<u32>, String> {
         let b = tokens.len();
         if b != self.active.len() {
-            return Err(format!("{} tokens for {} active slots", b, self.active.len()));
+            return Err(format!(
+                "{} tokens for {} active slots",
+                b,
+                self.active.len()
+            ));
         }
         // The batched kernels use `grid.y` as both the row index and the
         // physical stateslot, so the active set has to be dense.
@@ -124,7 +128,8 @@ impl<'a> BatchEngine<'a> {
                 }
                 BatchKind::Ssm(s) => {
                     stage!(4);
-                    s.inst.gemvs_batched(l, &self.t, &s.qkv, &s.z, &s.alpha, &s.beta, b)?;
+                    s.inst
+                        .gemvs_batched(l, &self.t, &s.qkv, &s.z, &s.alpha, &s.beta, b)?;
                     stage!(5);
                     s.inst.recurrent_batched(
                         l,
@@ -200,5 +205,4 @@ impl<'a> BatchEngine<'a> {
             })
             .collect())
     }
-
 }

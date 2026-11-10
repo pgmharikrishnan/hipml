@@ -148,10 +148,10 @@ pub fn bench(args: &[String]) -> i32 {
     let mut stop_ids = a.stop_ids.clone();
     if a.stop_eos {
         // The file is the authority; read its EOS rather than hard-coding.
-        match hipml_core::gguf::Gguf::open(&a.gguf)
-            .ok()
-            .and_then(|g| g.meta("tokenizer.ggml.eos_token_id").and_then(|v| v.as_u32()))
-        {
+        match hipml_core::gguf::Gguf::open(&a.gguf).ok().and_then(|g| {
+            g.meta("tokenizer.ggml.eos_token_id")
+                .and_then(|v| v.as_u32())
+        }) {
             Some(eos) => stop_ids.push(eos),
             None => eprintln!("spec-bench: --stop-eos but the GGUF has no eos id"),
         }
@@ -262,13 +262,14 @@ pub fn bench(args: &[String]) -> i32 {
                 return 1;
             }
         };
-        let run: SpecRun = match engine.spec_generate(&mut mtp, &prompt, a.tokens, d, chunk, &stop_ids) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("spec-bench: spec {d}: {e}");
-                return 1;
-            }
-        };
+        let run: SpecRun =
+            match engine.spec_generate(&mut mtp, &prompt, a.tokens, d, chunk, &stop_ids) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("spec-bench: spec {d}: {e}");
+                    return 1;
+                }
+            };
         let accept: Vec<f64> = (0..d).map(|k| run.stats.accept_rate(k)).collect();
         let steps = run.stats.steps;
         rows.push(Row {
@@ -294,12 +295,14 @@ pub fn bench(args: &[String]) -> i32 {
     let mut exact = Vec::new();
     for r in rows.iter().skip(1) {
         let n = r.ids.len().min(base.len());
-        let same = r.ids.iter().zip(&base).take(n).filter(|(a, b)| a == b).count();
-        let first_diff = r
+        let same = r
             .ids
             .iter()
             .zip(&base)
-            .position(|(a, b)| a != b);
+            .take(n)
+            .filter(|(a, b)| a == b)
+            .count();
+        let first_diff = r.ids.iter().zip(&base).position(|(a, b)| a != b);
         exact.push((r.drafts, same, n, first_diff));
     }
 
@@ -364,7 +367,11 @@ pub fn bench(args: &[String]) -> i32 {
             r.tokens_per_step,
             r.tok_s,
             r.tok_s / rows[0].tok_s.max(1e-9),
-            if acc.is_empty() { "-".to_string() } else { acc.join(",") },
+            if acc.is_empty() {
+                "-".to_string()
+            } else {
+                acc.join(",")
+            },
             ex_s,
             r.prefill_s * 1e3,
             r.draft_prefill_s * 1e3,

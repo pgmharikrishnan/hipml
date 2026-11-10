@@ -120,9 +120,7 @@ fn end_of_turn(text: &str, content: &str) -> Option<usize> {
 
 /// `/completion`: a raw prompt string or an array of token ids.
 pub fn completion(tok: &Tokenizer, body: &Value) -> Result<Prompt, String> {
-    let p = body
-        .get("prompt")
-        .ok_or("prompt is required")?;
+    let p = body.get("prompt").ok_or("prompt is required")?;
     let ids = match p {
         Value::Str(s) => tok.encode_special(s),
         Value::Arr(items) => {
@@ -134,9 +132,13 @@ pub fn completion(tok: &Tokenizer, body: &Value) -> Result<Prompt, String> {
             let vocab = tok.tokens.len() as u64;
             let mut ids = Vec::with_capacity(items.len());
             for it in items {
-                let n = it.as_u64().ok_or("prompt ids must be non-negative integers")?;
+                let n = it
+                    .as_u64()
+                    .ok_or("prompt ids must be non-negative integers")?;
                 if n >= vocab {
-                    return Err(format!("prompt id {n} is outside the {vocab}-token vocabulary"));
+                    return Err(format!(
+                        "prompt id {n} is outside the {vocab}-token vocabulary"
+                    ));
                 }
                 ids.push(n as u32);
             }

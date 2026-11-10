@@ -41,16 +41,16 @@ use hipml_kernels::{AttnLayer, Launcher};
 use crate::gpu_weights::{gemv_entry, mat_kind, Proj};
 use crate::Model;
 
+#[path = "gpu/attn_tile.rs"]
+mod attn_tile;
+#[path = "gpu/deep_kv.rs"]
+mod deep_kv;
+#[path = "gpu/layers.rs"]
+mod layers;
 /// Chunked prefill (a prompt tile as batched GEMMs). A child module so it can
 /// reach the engine's private scratch and layer list.
 #[path = "gpu/prefill.rs"]
 mod prefill;
-#[path = "gpu/deep_kv.rs"]
-mod deep_kv;
-#[path = "gpu/attn_tile.rs"]
-mod attn_tile;
-#[path = "gpu/layers.rs"]
-mod layers;
 #[path = "gpu/trace.rs"]
 mod trace;
 
@@ -60,12 +60,12 @@ pub use graph::{launches_per_token, GraphTiming};
 #[path = "gpu/batch.rs"]
 mod batch;
 pub use batch::{BatchEngine, MtpBatch, SlotPool, VerifySnap};
-#[path = "gpu/prefix.rs"]
-mod prefix;
 #[path = "gpu/columns.rs"]
 mod columns;
 #[path = "gpu/mtp.rs"]
 mod mtp;
+#[path = "gpu/prefix.rs"]
+mod prefix;
 #[path = "gpu/spec.rs"]
 mod spec;
 
@@ -74,9 +74,9 @@ use trace::mark;
 
 pub use columns::Snap;
 pub use mtp::MtpGpu;
-pub use spec::{SpecRun, SpecStats, SpecStep};
 pub use prefill::PrefillReport;
 pub use prefix::PrefixHit;
+pub use spec::{SpecRun, SpecStats, SpecStep};
 
 pub use deep_kv::DeepKv;
 pub use trace::Trace;
@@ -193,11 +193,7 @@ const MIRROR_ROWS: usize = 1;
 
 impl<'a> GpuEngine<'a> {
     /// Build every resident layer, borrowing the loader's weight payloads.
-    pub fn new(
-        model: &'a Model,
-        n_ctx: usize,
-        kv_mode: KvMode,
-    ) -> Result<GpuEngine<'a>, String> {
+    pub fn new(model: &'a Model, n_ctx: usize, kv_mode: KvMode) -> Result<GpuEngine<'a>, String> {
         let cfg = {
             let mut g = Gguf::open(model.path()).map_err(|e| format!("{e}"))?;
             Config::from_gguf(&mut g).map_err(|e| format!("config: {e}"))?
@@ -218,8 +214,10 @@ impl<'a> GpuEngine<'a> {
 
         let mut layers = Vec::with_capacity(cfg.n_layer);
         for i in 0..cfg.n_layer {
-            let attn_norm = Buffer::from_host(&model.f32_vec(&format!("blk.{i}.attn_norm.weight"))?)?;
-            let post_norm = Buffer::from_host(&model.f32_vec(&format!("blk.{i}.post_attention_norm.weight"))?)?;
+            let attn_norm =
+                Buffer::from_host(&model.f32_vec(&format!("blk.{i}.attn_norm.weight"))?)?;
+            let post_norm =
+                Buffer::from_host(&model.f32_vec(&format!("blk.{i}.post_attention_norm.weight"))?)?;
             let gate = Proj::of(model, &format!("blk.{i}.ffn_gate.weight"))?;
             let up = Proj::of(model, &format!("blk.{i}.ffn_up.weight"))?;
             let down = Proj::of(model, &format!("blk.{i}.ffn_down.weight"))?;
@@ -309,7 +307,11 @@ impl<'a> GpuEngine<'a> {
                 BlockKind::Ssm(s) => s.weight_bytes(),
             };
         }
-        b + self.model.tensor(crate::OUTPUT).map(|t| t.nbytes() as usize).unwrap_or(0)
+        b + self
+            .model
+            .tensor(crate::OUTPUT)
+            .map(|t| t.nbytes() as usize)
+            .unwrap_or(0)
     }
 
     /// One token through the whole graph; returns the `n_vocab` logits.
@@ -382,7 +384,10 @@ impl<'a> GpuEngine<'a> {
                     mark(&mut self.trace, l, "block")?;
                     attn.output()
                 }
-                BlockKind::Full { attn, deep: Some(dk) } => {
+                BlockKind::Full {
+                    attn,
+                    deep: Some(dk),
+                } => {
                     l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
                     mark(&mut self.trace, l, "attn_in")?;
                     attn.prepare_qkv(l, &self.t)?;
@@ -419,7 +424,13 @@ impl<'a> GpuEngine<'a> {
         }
 
         st.pos += 1;
-        l.rmsnorm_buf(&self.x, &self.output_norm, &self.final_h, cfg.n_embd, cfg.eps)?;
+        l.rmsnorm_buf(
+            &self.x,
+            &self.output_norm,
+            &self.final_h,
+            cfg.n_embd,
+            cfg.eps,
+        )?;
         mark(&mut self.trace, l, "out_norm")?;
         let out = self
             .model
@@ -471,7 +482,10 @@ impl<'a> GpuEngine<'a> {
             .iter()
             .map(|b| match &b.kind {
                 BlockKind::Full { attn, deep: None } => 2 * depth * attn.dims.width * 4,
-                BlockKind::Full { attn: _, deep: Some(d) } => d.bytes(),
+                BlockKind::Full {
+                    attn: _,
+                    deep: Some(d),
+                } => d.bytes(),
                 BlockKind::Ssm(_) => 0,
             })
             .sum()

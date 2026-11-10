@@ -21,21 +21,21 @@
 use super::layers::{build_attn, build_ssm};
 use super::*;
 
+#[path = "batch/adopt.rs"]
+mod adopt;
 #[path = "batch/forward.rs"]
 mod forward;
 #[path = "batch/kv.rs"]
 mod kv;
-#[path = "batch/adopt.rs"]
-mod adopt;
+#[path = "batch/mtp.rs"]
+mod mtp;
 #[path = "batch/rows.rs"]
 mod rows;
 #[path = "batch/verify.rs"]
 mod verify;
-#[path = "batch/mtp.rs"]
-mod mtp;
 
-pub use verify::VerifySnap;
 pub use mtp::MtpBatch;
+pub use verify::VerifySnap;
 
 /// Slot bookkeeping. Capacity is fixed when the engine is built; allocation
 /// just hands out the indices, so nothing in the forward path assumes slot 0
@@ -173,7 +173,10 @@ impl<'a> BatchEngine<'a> {
             return Err(format!("slots={slots}: batched kernels cover 1..=32"));
         }
         if kv_mode == KvMode::F32 {
-            return Err("batch decode needs --kv q8 or q4 (the f32 cache is the single-stream oracle)".to_string());
+            return Err(
+                "batch decode needs --kv q8 or q4 (the f32 cache is the single-stream oracle)"
+                    .to_string(),
+            );
         }
         let cfg = {
             let mut g = Gguf::open(model.path()).map_err(|e| format!("{e}"))?;
@@ -192,7 +195,8 @@ impl<'a> BatchEngine<'a> {
         let zeros = |count: usize| Buffer::alloc(count);
         let mut layers = Vec::with_capacity(cfg.n_layer);
         for i in 0..cfg.n_layer {
-            let attn_norm = Buffer::from_host(&model.f32_vec(&format!("blk.{i}.attn_norm.weight"))?)?;
+            let attn_norm =
+                Buffer::from_host(&model.f32_vec(&format!("blk.{i}.attn_norm.weight"))?)?;
             let post_norm =
                 Buffer::from_host(&model.f32_vec(&format!("blk.{i}.post_attention_norm.weight"))?)?;
             let gate = Proj::of(model, &format!("blk.{i}.ffn_gate.weight"))?;
@@ -314,8 +318,12 @@ impl<'a> BatchEngine<'a> {
         let mut seed = 0x9E37_79B9_7F4A_7C15u64;
         for b in &self.layers {
             if let BatchKind::Full(f) = &b.kind {
-                let depths: Vec<usize> =
-                    self.active.iter().enumerate().map(|(bi, _)| depth[bi]).collect();
+                let depths: Vec<usize> = self
+                    .active
+                    .iter()
+                    .enumerate()
+                    .map(|(bi, _)| depth[bi])
+                    .collect();
                 f.kv.fill_synthetic(&depths, seed)?;
                 seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
             }
@@ -325,7 +333,11 @@ impl<'a> BatchEngine<'a> {
 
     pub fn set_positions(&mut self, pos: &[usize]) -> Result<(), String> {
         if pos.len() != self.active.len() {
-            return Err(format!("{} positions for {} slots", pos.len(), self.active.len()));
+            return Err(format!(
+                "{} positions for {} slots",
+                pos.len(),
+                self.active.len()
+            ));
         }
         for (bi, &p) in pos.iter().enumerate() {
             self.positions[self.active[bi]] = p;

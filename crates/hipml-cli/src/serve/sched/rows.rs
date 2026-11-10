@@ -66,9 +66,12 @@ pub fn gather<'a>(
         }
         let job = queue.pop_front().expect("checked");
         let plen = job.prompt.len();
-        let alone =
-            slots.iter().all(|s| s.is_none()) && queue.is_empty() && gathered.is_empty();
-        let mode = if alone && cfg.mtp { Mode::Spec } else { Mode::Batch };
+        let alone = slots.iter().all(|s| s.is_none()) && queue.is_empty() && gathered.is_empty();
+        let mode = if alone && cfg.mtp {
+            Mode::Spec
+        } else {
+            Mode::Batch
+        };
         match begin(engine, job, cfg, mode, metrics) {
             Ok(pf) => {
                 let tail = pf.job.prompt.len().saturating_sub(pf.done);

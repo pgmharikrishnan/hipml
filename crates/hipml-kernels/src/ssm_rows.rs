@@ -49,9 +49,11 @@ impl<'a> SsmGpuLayer<'a> {
             &mut v_nv as *mut _ as *mut c_void,
             &mut v_t as *mut _ as *mut c_void,
         ];
-        self.module
-            .kernel("ssm_gates_chunk_f32")?
-            .launch(LaunchConfig::linear(rows * d.n_v, 256), self.stream, &mut params)
+        self.module.kernel("ssm_gates_chunk_f32")?.launch(
+            LaunchConfig::linear(rows * d.n_v, 256),
+            self.stream,
+            &mut params,
+        )
     }
 
     /// `ssm_conv1d_chunk_f32` on one tail: `tokens` rows at `x`, this slot's
@@ -87,9 +89,11 @@ impl<'a> SsmGpuLayer<'a> {
             &mut v_t as *mut _ as *mut c_void,
         ];
         let _ = l;
-        self.module
-            .kernel("ssm_conv1d_chunk_f32")?
-            .launch(LaunchConfig::linear(tokens * d.conv_ch, 256), self.stream, &mut params)
+        self.module.kernel("ssm_conv1d_chunk_f32")?.launch(
+            LaunchConfig::linear(tokens * d.conv_ch, 256),
+            self.stream,
+            &mut params,
+        )
     }
 
     /// Per-head L2 norm of the q and k halves of every row's conv output.
@@ -119,7 +123,9 @@ impl<'a> SsmGpuLayer<'a> {
             shared_mem_bytes: 0,
         };
         let _ = l;
-        self.module.kernel("l2norm_chunk_f32")?.launch(cfg, self.stream, &mut params)
+        self.module
+            .kernel("l2norm_chunk_f32")?
+            .launch(cfg, self.stream, &mut params)
     }
 
     /// `gdn_rows_f32` on one tail: block grid `(n_v, head_v/32)`, the state
@@ -166,7 +172,9 @@ impl<'a> SsmGpuLayer<'a> {
             shared_mem_bytes: 0,
         };
         let _ = l;
-        self.module.kernel("gdn_rows_f32")?.launch(cfg, self.stream, &mut params)
+        self.module
+            .kernel("gdn_rows_f32")?
+            .launch(cfg, self.stream, &mut params)
     }
 
     /// Gated RMS norm over every row's recurrence output.

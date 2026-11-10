@@ -73,7 +73,9 @@ pub fn run(
     let mut qc = vec![0.0f32; a.tok * nhd];
     let mut s = 0x1234_5678u64;
     for v in qc.iter_mut() {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *v = ((s >> 40) as f32 / 16777216.0 - 0.5) * 0.2;
     }
     let qb = hipml_hip::Buffer::from_host(&qc)?;
@@ -100,10 +102,7 @@ pub fn run(
     let ms = t0.elapsed().as_secs_f64() * 1e3 / a.reps as f64;
 
     // Useful work in this launch.
-    let pairs: f64 = (0..a.tok)
-        .map(|t| (a.pos0 + t + 1) as f64)
-        .sum::<f64>()
-        * cfg.n_head as f64;
+    let pairs: f64 = (0..a.tok).map(|t| (a.pos0 + t + 1) as f64).sum::<f64>() * cfg.n_head as f64;
     let flops = pairs * 2.0 * hd as f64 * 2.0;
     // Staged bytes: K in full plus V at half width per (query tile, d half).
     let mut staged = 0.0f64;

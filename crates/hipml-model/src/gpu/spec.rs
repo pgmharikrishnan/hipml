@@ -280,7 +280,8 @@ impl<'a> GpuEngine<'a> {
         let t_decode = Instant::now();
 
         while gen.len() < tokens && !stopped {
-            let step = self.spec_step(mtp, &mut st, &mut snaps, next, drafts, stop_ids, &mut stats)?;
+            let step =
+                self.spec_step(mtp, &mut st, &mut snaps, next, drafts, stop_ids, &mut stats)?;
             draft_s += step.draft_s;
             verify_s += step.verify_s;
             rollback_s += step.rollback_s;

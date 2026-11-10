@@ -27,7 +27,9 @@ fn attn_mat<'a>(
     model: &'a Model,
     name: &str,
 ) -> Result<(&'a ByteBuffer, usize, usize, Kind), String> {
-    let t = model.tensor(name).ok_or_else(|| format!("model has no tensor {name}"))?;
+    let t = model
+        .tensor(name)
+        .ok_or_else(|| format!("model has no tensor {name}"))?;
     let shape = t.shape();
     if shape.len() != 2 {
         return Err(format!("{name}: expected a matrix, got {shape:?}"));
@@ -49,7 +51,9 @@ pub(super) fn build_ssm<'a>(
 ) -> Result<SsmGpuLayer<'a>, String> {
     let dims = SsmDims::from_config(cfg);
     let proj = |name: &str| -> Result<(&'a ByteBuffer, &'static str), String> {
-        let t = model.tensor(name).ok_or_else(|| format!("model has no tensor {name}"))?;
+        let t = model
+            .tensor(name)
+            .ok_or_else(|| format!("model has no tensor {name}"))?;
         Ok((t.buffer(), gemv_entry(t.ty())?))
     };
     let conv = model.f32_vec(&format!("blk.{i}.ssm_conv1d.weight"))?;

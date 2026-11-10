@@ -92,8 +92,11 @@ impl<'a> AttnLayer<'a> {
             // the single-block-per-head kernel.
             for c in 0..rows {
                 l.set_step(pos0 + c, pos0 + c + 1, 0)?;
-                self.legacy_attention(l, row_ptr_ptr(q, c, d.n_head * d.head_dim),
-                    row_ptr_ptr(out, c, d.n_head * d.head_dim))?;
+                self.legacy_attention(
+                    l,
+                    row_ptr_ptr(q, c, d.n_head * d.head_dim),
+                    row_ptr_ptr(out, c, d.n_head * d.head_dim),
+                )?;
             }
             return Ok(());
         }

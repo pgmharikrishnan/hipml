@@ -298,7 +298,11 @@ pub fn run(args: &[String]) -> i32 {
         cfg.slots,
         queue_max,
         a.max_conns,
-        if skinny { "no (WMMA tile at B>=4)" } else { "yes" }
+        if skinny {
+            "no (WMMA tile at B>=4)"
+        } else {
+            "yes"
+        }
     );
 
     let inflight = Arc::clone(&shared.inflight);

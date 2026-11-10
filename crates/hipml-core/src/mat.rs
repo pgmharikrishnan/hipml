@@ -99,9 +99,8 @@ impl Mat {
             .clone();
         let cols = info.ne0() as usize;
         let rows = info.rows() as usize;
-        let kind = Kind::of(info.ty).map_err(|e| {
-            io::Error::new(e.kind(), format!("tensor {name}: {e}"))
-        })?;
+        let kind = Kind::of(info.ty)
+            .map_err(|e| io::Error::new(e.kind(), format!("tensor {name}: {e}")))?;
         let expect = rows * kind.row_bytes(cols);
         if expect as u64 != info.nbytes {
             return Err(io::Error::new(
@@ -124,11 +123,7 @@ impl Mat {
     }
 
     /// Map a tensor directly from the file, without copying it.
-    pub fn from_map<R: Read + Seek>(
-        map: &Arc<Map>,
-        g: &Gguf<R>,
-        name: &str,
-    ) -> io::Result<Mat> {
+    pub fn from_map<R: Read + Seek>(map: &Arc<Map>, g: &Gguf<R>, name: &str) -> io::Result<Mat> {
         let info = g
             .tensor(name)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no tensor {name}")))?
@@ -181,7 +176,10 @@ impl Mat {
     /// splits rows across threads because a full model pass is 17 GB.
     pub fn gemv(&self, x: &[f32]) -> Vec<f32> {
         assert_eq!(x.len(), self.cols, "gemv: x must be cols");
-        let threads = match std::env::var("HIPML_THREADS").ok().and_then(|v| v.parse().ok()) {
+        let threads = match std::env::var("HIPML_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
             Some(n) => n,
             None => std::thread::available_parallelism()
                 .map(|n| n.get())

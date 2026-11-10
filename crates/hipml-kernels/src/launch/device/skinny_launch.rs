@@ -84,7 +84,9 @@ pub fn skinny_resident_rows(
         return Err(format!("{name}: resident weight is not 2-byte aligned"));
     }
     if !q8 && !q6 && (w.as_ptr() as usize) % 16 != 0 {
-        return Err(format!("{name}: Q4_K resident weight is not 16-byte aligned"));
+        return Err(format!(
+            "{name}: Q4_K resident weight is not 16-byte aligned"
+        ));
     }
     let kernel = module.kernel(name)?;
     let mut p_w = w.as_ptr();
@@ -148,7 +150,8 @@ impl Launcher {
     /// Upload `w`/`x`, launch `reps` times, return `y` and the launch-loop
     /// seconds (uploads and the one download outside the timer).
     #[allow(clippy::too_many_arguments)]
-    pub fn run_skinny_reps(        &self,
+    pub fn run_skinny_reps(
+        &self,
         name: &str,
         w: &[u8],
         x: &[f32],
@@ -161,7 +164,8 @@ impl Launcher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn skinny_launch(        &self,
+    fn skinny_launch(
+        &self,
         name: &str,
         w: &[u8],
         x: &[f32],

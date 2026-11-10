@@ -10,34 +10,31 @@ use std::path::PathBuf;
 
 pub mod attn_gpu;
 pub mod attn_ops;
-pub mod launch;
 #[cfg(feature = "hip")]
 pub mod kvbench;
+pub mod launch;
 #[cfg(feature = "hip")]
 pub mod ssm;
 #[cfg(feature = "hip")]
-pub mod ssm_launch;
+mod ssm_batch_ops;
 #[cfg(feature = "hip")]
-mod ssm_ops;
+mod ssm_chunk;
 #[cfg(feature = "hip")]
 mod ssm_cols;
 #[cfg(feature = "hip")]
 #[path = "ssm_cols_rows.rs"]
 mod ssm_cols_rows;
 #[cfg(feature = "hip")]
-mod ssm_batch_ops;
+pub mod ssm_launch;
 #[cfg(feature = "hip")]
-mod ssm_chunk;
+mod ssm_ops;
 #[cfg(feature = "hip")]
 mod ssm_rows;
 
 pub use attn_gpu::AttnLayer;
 #[cfg(feature = "hip")]
 pub mod launch_kv;
-pub use launch::{
-    prefill_entry_for, prefill_half, prefill_path, prefill_slices, prefill_v2, set_prefill_half,
-    set_prefill_path, PrefillPath,
-};
+pub use launch::Launcher;
 #[cfg(feature = "hip")]
 pub use launch::{
     gemm_rows_f32, prefill_entry_for_half, prefill_has_xhalf, prefill_resident,
@@ -46,11 +43,14 @@ pub use launch::{
 };
 #[cfg(feature = "hip")]
 pub use launch::{gemv_job_tiles, GemvJob, ReadJob};
+pub use launch::{
+    prefill_entry_for, prefill_half, prefill_path, prefill_slices, prefill_v2, set_prefill_half,
+    set_prefill_path, PrefillPath,
+};
 #[cfg(feature = "hip")]
 pub use launch::{GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
 #[cfg(feature = "hip")]
 pub use launch::{GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80};
-pub use launch::Launcher;
 
 /// The batched-GEMV kind for a resident matrix kind, when one exists.
 #[cfg(feature = "hip")]
@@ -134,11 +134,7 @@ pub enum KernelKind {
     /// One block per `rows` output rows x `tokens` prompt tokens, dequantising
     /// the weight tile once into shared. The kernel's geometry defines must
     /// match.
-    Prefill {
-        rows: u32,
-        tokens: u32,
-        block: u32,
-    },
+    Prefill { rows: u32, tokens: u32, block: u32 },
     /// One warp (or one block) per head.
     PerHead { block: u32 },
     /// One block per head, sized to `head_dim` at launch.
@@ -264,17 +260,26 @@ pub const KERNELS: &[KernelSpec] = &[
     KernelSpec {
         name: "gemm_skinny_q4_k",
         entry: "gemm_skinny_q4_k",
-        kind: KernelKind::RowTile { rows: 32, block: 128 },
+        kind: KernelKind::RowTile {
+            rows: 32,
+            block: 128,
+        },
     },
     KernelSpec {
         name: "gemm_skinny_q6_k",
         entry: "gemm_skinny_q6_k",
-        kind: KernelKind::RowTile { rows: 32, block: 128 },
+        kind: KernelKind::RowTile {
+            rows: 32,
+            block: 128,
+        },
     },
     KernelSpec {
         name: "gemm_skinny_q8_0",
         entry: "gemm_skinny_q8_0",
-        kind: KernelKind::RowTile { rows: 32, block: 128 },
+        kind: KernelKind::RowTile {
+            rows: 32,
+            block: 128,
+        },
     },
     KernelSpec {
         name: "dequant_q4_k_f32",

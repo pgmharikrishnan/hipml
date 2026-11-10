@@ -71,7 +71,12 @@ pub fn ssm(_args: &[String]) -> i32 {
 
 /// Run one case, print the verdict, and dump the worst element on failure.
 /// Returns true on pass.
-fn report(launcher: &Launcher, case: &OpCase, inputs: &[hipml_core::tensor::Tensor], expected: &[f32]) -> bool {
+fn report(
+    launcher: &Launcher,
+    case: &OpCase,
+    inputs: &[hipml_core::tensor::Tensor],
+    expected: &[f32],
+) -> bool {
     match launcher.run(case, inputs) {
         Err(e) => {
             println!("{:<22} {:<7} launch failed: {e}", case.name, "FAIL");
@@ -88,12 +93,7 @@ fn report(launcher: &Launcher, case: &OpCase, inputs: &[hipml_core::tensor::Tens
             Err(stats) => {
                 println!(
                     "{:<22} {:<7} max_abs {:.2e} > {:.1e}, max_rel {:.2e} > {:.1e}",
-                    case.name,
-                    "FAIL",
-                    stats.max_abs,
-                    case.tol.abs,
-                    stats.max_rel,
-                    case.tol.rel
+                    case.name, "FAIL", stats.max_abs, case.tol.abs, stats.max_rel, case.tol.rel
                 );
                 dump(expected, &actual);
                 false

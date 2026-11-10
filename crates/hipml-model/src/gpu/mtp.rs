@@ -166,7 +166,8 @@ impl<'a> MtpGpu<'a> {
     pub fn set_hidden_row(&self, src: &Buffer, row: usize) -> Result<(), String> {
         let n = self.cfg.n_embd;
         let l = self.attn_launcher();
-        self.hnext.copy_from_device_on_at(src, row * n, n, l.stream())
+        self.hnext
+            .copy_from_device_on_at(src, row * n, n, l.stream())
     }
 
     /// Take a hidden state from host memory (the parity probe).

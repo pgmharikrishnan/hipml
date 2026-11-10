@@ -9,7 +9,6 @@ use hipml_core::parity::OpCase;
 use hipml_core::tensor::Tensor;
 use hipml_hip::{Buffer, LaunchConfig, Module, Stream};
 
-
 pub fn run(
     module: &Module,
     stream: &Stream,
@@ -18,53 +17,37 @@ pub fn run(
     inputs: &[Tensor],
     reps: usize,
 ) -> Result<Vec<f32>, String> {
-            let n_heads = case.scalar("n_heads") as usize;
-            let n_kv = case.scalar("n_kv") as usize;
-            let head_dim = case.scalar("head_dim") as usize;
-            let seq = case.scalar("seq") as usize;
-            let scale = case.scalar("scale");
-            let splits = (case.scalar("splits") as usize).max(1);
-            let dtype = case.scalar("dtype") as usize;
+    let n_heads = case.scalar("n_heads") as usize;
+    let n_kv = case.scalar("n_kv") as usize;
+    let head_dim = case.scalar("head_dim") as usize;
+    let seq = case.scalar("seq") as usize;
+    let scale = case.scalar("scale");
+    let splits = (case.scalar("splits") as usize).max(1);
+    let dtype = case.scalar("dtype") as usize;
 
-            let q = Buffer::from_host(inputs[0].data())?;
-            let k = Buffer::from_host(inputs[1].data())?;
-            let v = Buffer::from_host(inputs[2].data())?;
-            let out = Buffer::alloc(n_heads * head_dim)?;
-            let part_acc = Buffer::alloc(n_heads * splits * head_dim)?;
-            let part_ml = Buffer::alloc(n_heads * splits * 2)?;
-            // The kernel reads the position count from `step`; this arm decodes
-            // `seq` positions against a cache of `seq` rows.
-            let mut step_bytes = [0u8; 32];
-            for (i, v) in [0i32, seq as i32, 0, 0, 0, 0, 0, 0].iter().enumerate() {
-                step_bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
-            }
-            step.upload_bytes(0, &step_bytes)?;
+    let q = Buffer::from_host(inputs[0].data())?;
+    let k = Buffer::from_host(inputs[1].data())?;
+    let v = Buffer::from_host(inputs[2].data())?;
+    let out = Buffer::alloc(n_heads * head_dim)?;
+    let part_acc = Buffer::alloc(n_heads * splits * head_dim)?;
+    let part_ml = Buffer::alloc(n_heads * splits * 2)?;
+    // The kernel reads the position count from `step`; this arm decodes
+    // `seq` positions against a cache of `seq` rows.
+    let mut step_bytes = [0u8; 32];
+    for (i, v) in [0i32, seq as i32, 0, 0, 0, 0, 0, 0].iter().enumerate() {
+        step_bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    step.upload_bytes(0, &step_bytes)?;
 
-            for _ in 0..reps {
-                launch(
-                    module,
-                    stream,
-                    step,
-                    dtype,
-                    &q,
-                    &k,
-                    &v,
-                    &part_acc,
-                    &part_ml,
-                    &out,
-                    n_heads,
-                    n_kv,
-                    head_dim,
-                    seq,
-                    scale,
-                    splits,
-                    0,
-                    0,
-                )?;
-            }
-            stream.synchronize()?;
-            out.to_host()
-        }
+    for _ in 0..reps {
+        launch(
+            module, stream, step, dtype, &q, &k, &v, &part_acc, &part_ml, &out, n_heads, n_kv,
+            head_dim, seq, scale, splits, 0, 0,
+        )?;
+    }
+    stream.synchronize()?;
+    out.to_host()
+}
 
 /// Launch the quantized decode pair once: `attn_decode_kv_{q8,q4}` over
 /// `n_kv * splits` blocks, then `attn_decode_kv_reduce` over `n_heads`.
@@ -145,14 +128,20 @@ pub fn launch_ptrs(
     v_off: usize,
 ) -> Result<(), String> {
     if n_kv == 0 || n_heads % n_kv != 0 {
-        return Err(format!("n_heads {n_heads} is not a multiple of n_kv {n_kv}"));
+        return Err(format!(
+            "n_heads {n_heads} is not a multiple of n_kv {n_kv}"
+        ));
     }
     let group = n_heads / n_kv;
     if group > 8 {
-        return Err(format!("GQA group {group} > 8: one block holds at most 8 warps"));
+        return Err(format!(
+            "GQA group {group} > 8: one block holds at most 8 warps"
+        ));
     }
     if head_dim % 32 != 0 || head_dim > 256 {
-        return Err(format!("head_dim {head_dim}: must be 32..=256, multiple of 32"));
+        return Err(format!(
+            "head_dim {head_dim}: must be 32..=256, multiple of 32"
+        ));
     }
     // The shipped q8 path at head_dim 256 is the warp kernel: the parity cases
     // and the engine both take it, so `parity --deep` exercises what runs.
@@ -180,12 +169,16 @@ pub fn launch_ptrs(
         other => return Err(format!("unknown KV dtype {other}")),
     };
     if dtype >= 2 && dtype <= 3 && head_dim % 128 != 0 {
-        return Err(format!("head_dim {head_dim}: this variant needs a multiple of 128"));
+        return Err(format!(
+            "head_dim {head_dim}: this variant needs a multiple of 128"
+        ));
     }
     // The warp-per-KV-head kernel owns eight components per lane, so it is
     // head_dim 256 only; other widths keep the staged kernel.
     if dtype >= 4 && head_dim != 256 {
-        return Err(format!("head_dim {head_dim}: the warp kernel is head_dim 256 only"));
+        return Err(format!(
+            "head_dim {head_dim}: the warp kernel is head_dim 256 only"
+        ));
     }
     // Same constants as KV_TILE_Q8 / KV_TILE_Q4 in attn_decode_kv.hip and
     // Q8S_TILE in attn_decode_kv_q8s.hip.
@@ -236,8 +229,16 @@ pub fn launch_ptrs(
     // they need `ceil(group/3)` warps per task. Missing that factor launched
     // only the first `grid*4` warps of `tasks*wpr` and silently dropped the
     // rest of the key range.
-    let warps = if matches!(dtype, 4 | 5 | 7 | 13 | 14) { 4 } else { 0 };
-    let hpw = if matches!(dtype, 4 | 5) { group } else { group.min(3) };
+    let warps = if matches!(dtype, 4 | 5 | 7 | 13 | 14) {
+        4
+    } else {
+        0
+    };
+    let hpw = if matches!(dtype, 4 | 5) {
+        group
+    } else {
+        group.min(3)
+    };
     let wpr = group.div_ceil(hpw);
     let tasks = n_kv * splits;
     let grid = if warps > 0 {

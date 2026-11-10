@@ -14,11 +14,11 @@
 //! f32. Q5_K has no numeric dequant yet, so its bytes are loaded and the tensor
 //! is marked `supported() == false` rather than failing the load.
 
-pub mod verify;
 #[cfg(feature = "hip")]
 pub mod gpu;
 #[cfg(feature = "hip")]
 pub mod gpu_weights;
+pub mod verify;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -164,8 +164,7 @@ impl Model {
     /// Read, allocate and upload every tensor in `path`, once.
     pub fn load(path: impl AsRef<Path>) -> Result<(Model, LoadReport), String> {
         let path = path.as_ref();
-        let mut g =
-            Gguf::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut g = Gguf::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let file_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
         // Load the code object before allocating 17 GB: a kernel/ABI problem
@@ -191,8 +190,9 @@ impl Model {
                     info.nbytes
                 ));
             }
-            let buffer = ByteBuffer::from_host(&raw)
-                .map_err(|e| format!("{}: upload of {} bytes failed: {e}", info.name, info.nbytes))?;
+            let buffer = ByteBuffer::from_host(&raw).map_err(|e| {
+                format!("{}: upload of {} bytes failed: {e}", info.name, info.nbytes)
+            })?;
             let ok = supported(info.ty);
             if !ok {
                 unsupported.push((info.name.clone(), info.ty.name(), info.nbytes));
@@ -272,8 +272,7 @@ impl Model {
     /// Returns the bytes uploaded.
     pub fn load_sidecar(&mut self, path: impl AsRef<Path>) -> Result<u64, String> {
         let path = path.as_ref();
-        let mut g =
-            Gguf::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut g = Gguf::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let infos = g.tensors.clone();
         let mut added = 0u64;
         for info in &infos {
@@ -346,7 +345,9 @@ impl Model {
 
     /// Read an F32 tensor back as a host vector (norms, conv taps, biases).
     pub fn f32_vec(&self, name: &str) -> Result<Vec<f32>, String> {
-        let t = self.tensor(name).ok_or_else(|| format!("model has no tensor {name}"))?;
+        let t = self
+            .tensor(name)
+            .ok_or_else(|| format!("model has no tensor {name}"))?;
         if t.ty() != TensorType::F32 {
             return Err(format!("{name}: expected F32, found {}", t.ty().name()));
         }
@@ -395,11 +396,8 @@ impl Model {
         }
         let blocks = k as usize / QK_K;
         let row_bytes = t.nbytes / rows;
-        self.launcher.dequant_q4_k(
-            &t.buffer,
-            token as u64 * row_bytes,
-            blocks,
-        )
+        self.launcher
+            .dequant_q4_k(&t.buffer, token as u64 * row_bytes, blocks)
     }
 
     /// `logits = output.weight @ x` on device, with the weights already resident.
@@ -424,12 +422,7 @@ impl Model {
             TensorType::Q5K => "gemv_q5_k",
             TensorType::Q6K => "gemv_q6_k",
             TensorType::Q8_0 => "gemv_q8_0",
-            other => {
-                return Err(format!(
-                    "{OUTPUT}: {} has no GEMV entry",
-                    other.name()
-                ))
-            }
+            other => return Err(format!("{OUTPUT}: {} has no GEMV entry", other.name())),
         };
         self.launcher
             .run_quant_resident_reps(entry, &t.buffer, x, t.rows() as usize, k, reps)

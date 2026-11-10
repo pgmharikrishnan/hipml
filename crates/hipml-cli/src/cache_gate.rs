@@ -70,7 +70,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 i += 2;
             }
             "--bytes-mib" => {
-                let mib: usize = need(i)?.parse().map_err(|e| format!("bad --bytes-mib: {e}"))?;
+                let mib: usize = need(i)?
+                    .parse()
+                    .map_err(|e| format!("bad --bytes-mib: {e}"))?;
                 a.bytes = mib.max(1) * 1024 * 1024;
                 i += 2;
             }
@@ -87,11 +89,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
 }
 
 /// The old exact-repeat consumer: any longest-prefix hit is treated as exact.
-fn legacy_ids(
-    engine: &mut GpuEngine<'_>,
-    hit: PrefixHit,
-    n: usize,
-) -> Result<Vec<u32>, String> {
+fn legacy_ids(engine: &mut GpuEngine<'_>, hit: PrefixHit, n: usize) -> Result<Vec<u32>, String> {
     let mut st = engine.new_state();
     let cached = engine
         .prefix_restore(hit, &mut st)?
@@ -194,9 +192,7 @@ fn gate(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
         "fallback ids equal cold ids ({} tokens); stats: {} entries, {} refused, {} hits, {} misses",
         a.tokens, s.entries, s.refused, s.hits, s.misses
     );
-    println!(
-        "cold {cold_ms:.1} ms; an undersized cap is a miss, not a divergent hit: pass"
-    );
+    println!("cold {cold_ms:.1} ms; an undersized cap is a miss, not a divergent hit: pass");
     Ok(())
 }
 

@@ -45,11 +45,7 @@ impl Launcher {
             &mut nvec as *mut _ as *mut std::ffi::c_void,
             &mut p_out as *mut _ as *mut std::ffi::c_void,
         ];
-        kernel.launch(
-            LaunchConfig::linear(blocks, 256),
-            &self.stream,
-            &mut params,
-        )
+        kernel.launch(LaunchConfig::linear(blocks, 256), &self.stream, &mut params)
     }
 
     /// Read every job in `jobs` in one launch. `jobs` is the device-side copy.
@@ -69,10 +65,6 @@ impl Launcher {
             &mut v_n as *mut _ as *mut std::ffi::c_void,
             &mut p_out as *mut _ as *mut std::ffi::c_void,
         ];
-        kernel.launch(
-            LaunchConfig::linear(blocks, 256),
-            &self.stream,
-            &mut params,
-        )
+        kernel.launch(LaunchConfig::linear(blocks, 256), &self.stream, &mut params)
     }
 }

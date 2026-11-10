@@ -172,8 +172,14 @@ pub fn run(args: &[String]) -> i32 {
                 || {
                     let t = Instant::now();
                     for _ in 0..reps {
-                        launcher
-                            .run_quant_resident(gemv_for(shape.ty), &wb, x1, y1, shape.n, shape.k)?;
+                        launcher.run_quant_resident(
+                            gemv_for(shape.ty),
+                            &wb,
+                            x1,
+                            y1,
+                            shape.n,
+                            shape.k,
+                        )?;
                     }
                     launcher.synchronize()?;
                     Ok(t.elapsed().as_secs_f64() / reps as f64)
@@ -186,11 +192,7 @@ pub fn run(args: &[String]) -> i32 {
 
         let entry = entry_for(shape.ty);
         let mut base = 0.0f64;
-        println!(
-            "{}  ({:.1} MB)",
-            shape.label,
-            bytes as f64 / 1e6
-        );
+        println!("{}  ({:.1} MB)", shape.label, bytes as f64 / 1e6);
         if let Some(g) = gemv {
             println!(
                 "  gemv r=1        {:8.3} ms  {:6.0} GB/s",

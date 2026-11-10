@@ -188,11 +188,7 @@ pub fn ssm_layer_f32(
     // Gated normalisation: rms_norm(o, ssm_norm) * silu(z), per 128-value head.
     let mut normed = vec![0.0f32; o.len()];
     for h in 0..n_v {
-        let r = rmsnorm_f32(
-            &o[h * head_v..(h + 1) * head_v],
-            &w.norm[..head_v],
-            cfg.eps,
-        );
+        let r = rmsnorm_f32(&o[h * head_v..(h + 1) * head_v], &w.norm[..head_v], cfg.eps);
         normed[h * head_v..(h + 1) * head_v].copy_from_slice(&r);
     }
     let gated = silu_mul_f32(&z, &normed);

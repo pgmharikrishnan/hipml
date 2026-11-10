@@ -70,9 +70,7 @@ impl Config {
         if nextn_layers > n_layer_total {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "nextn_predict_layers {nextn_layers} > block_count {n_layer_total}"
-                ),
+                format!("nextn_predict_layers {nextn_layers} > block_count {n_layer_total}"),
             ));
         }
         let n_layer = n_layer_total - nextn_layers;
@@ -87,7 +85,9 @@ impl Config {
 
         let mut rope_sections = [0usize; 4];
         if let Some(v) = g.meta(&key("rope.dimension_sections")) {
-            let s = v.as_usizes().ok_or_else(|| bad("rope.dimension_sections", "array"))?;
+            let s = v
+                .as_usizes()
+                .ok_or_else(|| bad("rope.dimension_sections", "array"))?;
             for (i, val) in s.iter().take(4).enumerate() {
                 rope_sections[i] = *val;
             }

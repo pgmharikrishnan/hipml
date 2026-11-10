@@ -222,7 +222,10 @@ fn run_q8_splits(
         }
         eprintln!(
             "  diag: q8 worst at row {} head {} d {} (cpu {:.5} gpu {:.5}, max|d| {worst:.3e})",
-            at.0, at.1, at.2, cpu[at.0 * nhd + at.1 * hd + at.2],
+            at.0,
+            at.1,
+            at.2,
+            cpu[at.0 * nhd + at.1 * hd + at.2],
             gpu[at.0 * nhd + at.1 * hd + at.2]
         );
     }
@@ -239,4 +242,3 @@ fn env_usize(name: &str, default: usize) -> usize {
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
 }
-

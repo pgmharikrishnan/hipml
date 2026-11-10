@@ -53,17 +53,17 @@ impl Bound {
             if cur >= self.max {
                 return None;
             }
-            match self.used.compare_exchange_weak(
-                cur,
-                cur + 1,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
+            match self
+                .used
+                .compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Relaxed)
+            {
                 Ok(_) => {
                     let n = cur as u64 + 1;
                     let f = self.field;
                     self.metrics.update(|s| *f(s) = n);
-                    return Some(Ticket { bound: self.clone() });
+                    return Some(Ticket {
+                        bound: self.clone(),
+                    });
                 }
                 Err(v) => cur = v,
             }

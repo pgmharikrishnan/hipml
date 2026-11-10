@@ -14,52 +14,52 @@ mod attn_cmd;
 mod chat_cmd;
 
 #[cfg(feature = "hip")]
+mod batch_cmd;
+#[cfg(feature = "hip")]
 mod cache_cmd;
 #[cfg(feature = "hip")]
 mod cache_gate;
 #[cfg(feature = "hip")]
-mod batch_cmd;
-#[cfg(feature = "hip")]
-mod mtp_batch_cmd;
+mod column_cmd;
 #[cfg(feature = "hip")]
 mod device_cmd;
 #[cfg(feature = "hip")]
 mod gdn_parity;
 #[cfg(feature = "hip")]
-mod gpu_bench_cmd;
+mod gemv_cmd;
 mod gen_cmd;
+#[cfg(feature = "hip")]
+mod gpu_bench_cmd;
 mod kv_cmds;
 mod load_cmd;
+#[cfg(feature = "hip")]
+mod mtp_batch_cmd;
 mod mtp_cmd;
 #[cfg(feature = "hip")]
 mod oracle_gate;
-#[cfg(feature = "hip")]
-mod splitk_gate;
 mod prefill_cmd;
-mod tok_cmd;
+#[cfg(feature = "hip")]
+mod profile_cmd;
+mod quant_cmd;
 #[cfg(feature = "hip")]
 mod rows_cmd;
 #[cfg(feature = "hip")]
-mod profile_cmd;
-#[cfg(feature = "hip")]
-mod sweep_ab;
-#[cfg(feature = "hip")]
-mod sweep_merge;
-#[cfg(feature = "hip")]
-mod sweep_cmd;
-mod quant_cmd;
-#[cfg(feature = "hip")]
-mod ssm_cmd;
+mod serve;
 #[cfg(feature = "hip")]
 mod skinny_cmd;
 #[cfg(feature = "hip")]
-mod column_cmd;
-#[cfg(feature = "hip")]
-mod gemv_cmd;
-#[cfg(feature = "hip")]
 mod spec_cmd;
 #[cfg(feature = "hip")]
-mod serve;
+mod splitk_gate;
+#[cfg(feature = "hip")]
+mod ssm_cmd;
+#[cfg(feature = "hip")]
+mod sweep_ab;
+#[cfg(feature = "hip")]
+mod sweep_cmd;
+#[cfg(feature = "hip")]
+mod sweep_merge;
+mod tok_cmd;
 
 /// What happened to one case.
 enum Outcome {
@@ -188,11 +188,7 @@ fn main() {
             }
         }
         "parity" => {
-            let filter = args
-                .iter()
-                .skip(1)
-                .find(|a| !a.starts_with('-'))
-                .cloned();
+            let filter = args.iter().skip(1).find(|a| !a.starts_with('-')).cloned();
             let deep = args.iter().any(|a| a == "--deep");
             std::process::exit(parity(filter.as_deref(), deep));
         }
@@ -610,12 +606,8 @@ fn bytes_moved(case: &OpCase, inputs: &[Tensor]) -> usize {
         "gemm_f32" => case.scalar("r") as usize * case.scalar("m") as usize * 4,
         "attn_decode_f32" => case.scalar("n_heads") as usize * case.scalar("head_dim") as usize * 4,
         "rmsnorm_f32" | "softmax_f32" => case.scalar("n") as usize * 4,
-        "gdn_ar_f32" => {
-            (case.scalar("n_v") * case.scalar("sd")) as usize * 4
-        }
-        "ssm_gate_norm_f32" => {
-            (case.scalar("n_v") * case.scalar("head_v")) as usize * 4
-        }
+        "gdn_ar_f32" => (case.scalar("n_v") * case.scalar("sd")) as usize * 4,
+        "ssm_gate_norm_f32" => (case.scalar("n_v") * case.scalar("head_v")) as usize * 4,
         "ssm_layer_f32" => case.scalar("n_embd") as usize * 4,
         _ => inputs[0].numel() * 4,
     };

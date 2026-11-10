@@ -79,7 +79,11 @@ impl<'a> GpuEngine<'a> {
                 }
             }
         }
-        let lm = self.model.tensor(crate::OUTPUT).map(|t| t.nbytes() as usize).unwrap_or(0);
+        let lm = self
+            .model
+            .tensor(crate::OUTPUT)
+            .map(|t| t.nbytes() as usize)
+            .unwrap_or(0);
         vec![
             ("gate", gate),
             ("up", up),
@@ -99,4 +103,3 @@ pub(super) fn mark(tr: &mut Option<Trace>, l: &Launcher, name: &'static str) -> 
         None => Ok(()),
     }
 }
-

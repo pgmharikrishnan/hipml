@@ -144,21 +144,16 @@ pub fn attn_layer_f32(
 
     // Append to the cache.
     let off = pos * width;
-    assert!(pos < kv.n_ctx, "position {pos} beyond KV cache {}", kv.n_ctx);
+    assert!(
+        pos < kv.n_ctx,
+        "position {pos} beyond KV cache {}",
+        kv.n_ctx
+    );
     kv.k[off..off + width].copy_from_slice(&k);
     kv.v[off..off + width].copy_from_slice(&v);
 
     let scale = 1.0 / (hd as f32).sqrt();
-    let mut out = attn_causal_f32(
-        &q,
-        &kv.k,
-        &kv.v,
-        n_h,
-        n_kv,
-        hd,
-        pos + 1,
-        scale,
-    );
+    let mut out = attn_causal_f32(&q, &kv.k, &kv.v, n_h, n_kv, hd, pos + 1, scale);
 
     let g = sigmoid_f32(&gate);
     for (o, g) in out.iter_mut().zip(&g) {

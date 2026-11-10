@@ -16,10 +16,10 @@ use hipml_core::parity::{compare, Tol};
 use hipml_core::rng::Rng;
 use hipml_kernels::{AttnLayer, Launcher};
 
-#[path = "attn_chunk_parity.rs"]
-mod attn_chunk_parity;
 #[path = "attn_chunk_bench.rs"]
 mod attn_chunk_bench;
+#[path = "attn_chunk_parity.rs"]
+mod attn_chunk_parity;
 
 struct Args {
     gguf: String,
@@ -211,7 +211,10 @@ fn parity_run(l: &Launcher, m: &Loaded) -> i32 {
     let hd = cfg.head_dim;
     let width = cfg.n_head_kv * hd;
     let tol = Tol::new(1e-4, 1e-3);
-    println!("\n{:<30} {:>10} {:>10}  {}", "case", "max_abs", "max_rel", "verdict");
+    println!(
+        "\n{:<30} {:>10} {:>10}  {}",
+        "case", "max_abs", "max_rel", "verdict"
+    );
 
     let mut failed = false;
 
@@ -440,7 +443,10 @@ fn bench_run(l: &Launcher, m: &Loaded, a: &Args) -> i32 {
         }
     };
 
-    println!("\n{:<10} {:>12} {:>12} {:>12} {:>10}", "depth", "seq", "layer_ms", "weight_GB/s", "16x_ms");
+    println!(
+        "\n{:<10} {:>12} {:>12} {:>12} {:>10}",
+        "depth", "seq", "layer_ms", "weight_GB/s", "16x_ms"
+    );
     let mut per_layer = Vec::new();
     for &depth in &a.depths {
         let n_ctx = depth + 1;
@@ -504,15 +510,20 @@ fn bench_run(l: &Launcher, m: &Loaded, a: &Args) -> i32 {
     }
     println!(
         "\nweights streamed per layer: {:.1} MB; 16 layers {:.1} MB",
-        m.w.wq.data.len() as f64 / 1e6 + m.w.wk.data.len() as f64 / 1e6
-            + m.w.wv.data.len() as f64 / 1e6 + m.w.wo.data.len() as f64 / 1e6,
+        m.w.wq.data.len() as f64 / 1e6
+            + m.w.wk.data.len() as f64 / 1e6
+            + m.w.wv.data.len() as f64 / 1e6
+            + m.w.wo.data.len() as f64 / 1e6,
         16.0 * (m.w.wq.data.len() + m.w.wk.data.len() + m.w.wv.data.len() + m.w.wo.data.len())
             as f64
             / 1e6
     );
     println!("weight-read reference (whole model decode step): 27.19 ms");
-    println!("kv cache width: {} floats/token/layer = {} KiB per token over 16 layers",
-        width, 2 * width * 4 * 16 / 1024);
+    println!(
+        "kv cache width: {} floats/token/layer = {} KiB per token over 16 layers",
+        width,
+        2 * width * 4 * 16 / 1024
+    );
     let _ = per_layer;
     0
 }
