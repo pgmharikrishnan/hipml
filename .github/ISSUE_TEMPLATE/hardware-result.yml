@@ -42,7 +42,7 @@ body:
     id: model
     attributes:
       label: Model and SHA-256
-      placeholder: Qwen3.8-27B-Q4_K_M.gguf, sha256 3f9a…
+      placeholder: Qwen3.8-27B-Q4_K_M.gguf, sha256 e00082…
     validations:
       required: true
 

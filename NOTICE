@@ -112,8 +112,11 @@ No model weights are distributed with hipml. The repository contains no GGUF
 file, no tokenizer file and no converted weights. hipml is an engine.
 
 The engine is tested on Qwen3.8-27B, specifically the quantized file
-Qwen3.8-27B-UD-Q4_K_XL.gguf. A fine-tune of Qwen3.8-27B that was benchmarked
-during development is referred to here only as "a Qwen3.8-27B variant".
+Qwen3.8-27B-Q4_K_M.gguf (16,810,714,336 bytes, SHA-256
+e00082f779fa385cee8c68a3ec8833a75778cc87272240b942f74e0b8243e520). A fine-tune
+of Qwen3.8-27B with the same geometry was benchmarked during development; it is
+not distributed and is not the file the release numbers were measured on, and it
+is referred to here only as "a Qwen3.8-27B variant".
 
 Qwen3.8-27B is distributed by its publisher under its own license; check that
 license before downloading. That license, not hipml's Apache-2.0 license,
