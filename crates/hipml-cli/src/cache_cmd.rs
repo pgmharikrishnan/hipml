@@ -417,11 +417,16 @@ fn main_bench(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
     );
     match after_evict {
         Some(h) => println!(
-            "post-eviction exact repeat: partial hit at {} of {} tokens (the full entry was the LRU victim)",
+            "post-run exact repeat: partial hit at {} of {} tokens ({})",
             h.pos,
-            p.len()
+            p.len(),
+            if at_end.refused {
+                "the full snapshot was refused"
+            } else {
+                "the full entry was the LRU victim"
+            }
         ),
-        None => println!("post-eviction exact repeat: miss (the whole prompt was evicted)"),
+        None => println!("post-run exact repeat: miss (no prefix of the prompt is cached)"),
     }
     Ok(())
 }

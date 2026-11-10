@@ -117,11 +117,23 @@ fn gate(engine: &mut GpuEngine<'_>, a: &Args) -> Result<(), String> {
     let (_, ids_cold) = run(engine, &p, a.chunk, a.tokens)?;
     let cold_ms = t.elapsed().as_secs_f64() * 1e3;
 
-    // 2. Capture with a cap below the full snapshot. The shared prefix may
-    //    still be admitted (that is what makes the legacy path dangerous).
+    // 2. Capture with a cap below the full snapshot. The shared prefix is
+    //    admitted first; that shorter entry is what makes the legacy path
+    //    dangerous when the full snapshot is refused.
     engine.reset_state()?;
     let mut st = engine.new_state();
-    engine.prefill_chunked(&p, &mut st, a.chunk)?;
+    engine.prefill_chunked(&p[..a.shared], &mut st, a.chunk)?;
+    let logits_shared = engine.logits_host()?;
+    let shared = engine.prefix_capture(&p, a.shared, Some(&logits_shared))?;
+    if shared.refused {
+        return Err(format!(
+            "the shared P@{} half ({:.1} MiB) must fit a {:.0} MiB cap",
+            a.shared,
+            shared.bytes as f64 / 1048576.0,
+            a.bytes as f64 / 1048576.0
+        ));
+    }
+    engine.prefill_chunked(&p[a.shared..], &mut st, a.chunk)?;
     let logits = engine.logits_host()?;
     let cap = engine.prefix_capture(&p, p.len(), Some(&logits))?;
     drop(st);
