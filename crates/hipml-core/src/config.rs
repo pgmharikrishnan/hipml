@@ -34,6 +34,10 @@ pub struct Config {
     pub ssm_dt_rank: usize,
     pub ssm_d_inner: usize,
     pub context_length: usize,
+    /// Trailing `nextn` (MTP) blocks in `block_count` that are not decoder
+    /// layers. The stock Qwen3.8-27B files carry `blk.64` inline, so
+    /// `block_count` is 65 while the decoder is 64 layers deep.
+    pub nextn_layers: usize,
 }
 
 impl Config {
@@ -55,7 +59,23 @@ impl Config {
                 .ok_or_else(|| bad(&key(s), "float"))
         };
 
-        let n_layer = u("block_count")?;
+        let n_layer_total = u("block_count")?;
+        // `nextn_predict_layers` counts trailing MTP blocks inside
+        // `block_count`. They are not decoder layers: the forward pass must
+        // stop before them, and the MTP drafter reads the last one.
+        let nextn_layers = g
+            .meta(&key("nextn_predict_layers"))
+            .and_then(|v| v.as_usize())
+            .unwrap_or(0);
+        if nextn_layers > n_layer_total {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "nextn_predict_layers {nextn_layers} > block_count {n_layer_total}"
+                ),
+            ));
+        }
+        let n_layer = n_layer_total - nextn_layers;
         let n_embd = u("embedding_length")?;
         let n_ff = u("feed_forward_length")?;
         let n_head = u("attention.head_count")?;
@@ -130,6 +150,7 @@ impl Config {
             ssm_dt_rank,
             ssm_d_inner,
             context_length,
+            nextn_layers,
         })
     }
 
