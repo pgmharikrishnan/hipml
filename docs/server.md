@@ -87,9 +87,10 @@ It reads `HIPML_EXE`, `HIPML_GGUF`, `HIPML_MTP_GGUF`, `HIP_PATH` and
 
 ## Exactness
 
-Batched decode at B ≥ 4 uses a WMMA skinny GEMV that is about 1.5× faster than
-the exact kernels at fleet slot counts. It is not bit-identical to
-single-stream decode at 4+ rows. The server says which path served a reply:
+Batched decode at B ≥ 4 uses a WMMA skinny GEMV that is 1.4× (B=8) to 2.5×
+(B=16) faster than the exact kernels at fleet slot counts. It is not
+bit-identical to single-stream decode at 4+ rows. The server says which path
+served a reply:
 
 | header | meaning |
 |---|---|
@@ -97,8 +98,9 @@ single-stream decode at 4+ rows. The server says which path served a reply:
 | `X-Hipml-Batch-Exact: 0` | the WMMA tile did, with `X-Hipml-Batch-Tile-Min: 4` |
 
 A lone request, and every MTP verify, always take the exact path.
-`HIPML_BATCH_LEGACY=1` forces exact for everything; it costs about 30% at 8
-slots and loses to llama.cpp there.
+`HIPML_BATCH_LEGACY=1` forces exact for everything; it costs 28% at 8 slots
+(107.46 against 149.43 tok/s) and still beats llama.cpp's 97.54 tok/s there,
+but at 16 slots the exact path is 107.33 against llama.cpp's 227.89.
 
 ## Metrics
 
@@ -116,14 +118,15 @@ All names are prefixed `hipml_`. The ones an operator wants first:
 | `hipml_batch_exact_path` | gauge | 1 when the last batch used exact kernels |
 | `hipml_batch_resets_total`, `hipml_job_errors_total`, `hipml_slot_faults_total` | counter | failure scopes |
 | `hipml_prefix_lookups_total`, `hipml_prefix_hits_total`, `hipml_prefix_misses_total`, `hipml_prefix_hit_rate`, `hipml_prefix_hit_tokens_total` | counter/gauge | prefix cache |
-| `hipml_prefix_captures_total`, `hipml_prefix_invalidated_total`, `hipml_prefix_capture_seconds_total`, `hipml_prefix_restore_seconds_total` | counter | prefix cache cost |
+| `hipml_prefix_captures_total`, `hipml_prefix_refused_total`, `hipml_prefix_invalidated_total`, `hipml_prefix_capture_seconds_total`, `hipml_prefix_restore_seconds_total` | counter | prefix cache cost; `refused` counts a snapshot larger than the cache bound |
 | `hipml_spec_steps_total`, `hipml_spec_drafted_total`, `hipml_spec_accepted_total`, `hipml_mtp_requests_total` | counter | MTP |
 | `hipml_interleave_stall_seconds_total`, `hipml_interleave_stall_seconds_max` | counter/gauge | prefill/decode interleaving |
 
 ## What the numbers look like
 
-8 concurrent chats on a warm shared system prompt: 129.5 tok/s aggregate and
-491 ms TTFT p50, against llama-server `-np 8` at 95.3 tok/s and 637 ms. 16
-concurrent chats is a tie (214.4 vs 215.8 tok/s). The method and the full table
-are in [`notes/wp45-51-serve.md`](notes/wp45-51-serve.md); the summary is in
-[`benchmarks.md`](benchmarks.md).
+8 concurrent chats on a warm shared system prompt: 125.25 tok/s aggregate and
+518 ms TTFT p50, against llama-server `-np 8` at 94.75 tok/s and 497 ms p50
+(p95 526 ms against 1,377). 16 concurrent chats is a tie (212.14 vs 214.41
+tok/s), with a lower p50 (779 vs 1,237 ms). The method and the full table are in
+[`release-run.md`](release-run.md); the raw cells are in
+[`../bench/release/server/`](../bench/release/server/).
