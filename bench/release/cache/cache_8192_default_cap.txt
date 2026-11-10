@@ -1,0 +1,16 @@
+ACQUIRED wp55 at 2026-11-10T21:42:44.5875586Z
+=== cache-bench len 8192 shared 4096
+resident: 15.65 GiB in 866 tensors on AMD Radeon AI PRO R9700 (upload 5.2s)
+build: 8.5s
+prompts: P and Q 8192 tokens, shared prefix 4096 (50%), unrelated R 8192
+cache: 2 entries / 1024 MiB, chunk 2048; decode 33 ids per case
+seed: captured P@4096 (662.6 MiB) and P@8192 (0.0 MiB); cache 1 entries / 662.6 MiB
+exit=1
+hipml.exe : cache-bench: exact-repeat ids differ from the cold path
+At <HOME>\relD.ps1:9 char:3
++   & $exe cache-bench --gguf $m --len 8192 --shared 4096 --chunk 2048  ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (cache-bench: ex...m the cold path:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+RELEASED wp55

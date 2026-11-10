@@ -1,0 +1,24 @@
+ACQUIRED wp55 at 2026-11-10T21:43:39.2416251Z
+=== cache-bench len 8192 shared 4096
+case            cache  matched computed    TTFT ms   vs cold   prefill%     ids
+cold P           miss        0     2048     1619.9     1.00x         0%      ok
+warm exact P      hit     2048        0        2.0   810.80x       100%      ok
+cold Q           miss        0     2048     1621.4     1.00x         0%      ok
+warm shared Q     hit     1024     1024      838.1     1.93x        50%      ok
+cold R           miss        0     2048     1628.0     1.00x         0%      ok
+
+hit latency (lookup + restore + argmax, no compute): 1.92 ms for 2048 tokens
+first 20 ids: cold P [799, 25, 4087, 271, 248068, 198, 760, 1156, 369, 9859, 883, 3069, 264, 81726, 14934, 8978, 6297, 17397, 506, 220]
+              warm exact [799, 25, 4087, 271, 248068, 198, 760, 1156, 369, 9859, 883, 3069, 264, 81726, 14934, 8978, 6297, 17397, 506, 220] (equal: true)
+              warm shared Q [14162, 1330, 271, 248068, 198, 760, 1156, 369, 9859, 328, 14162, 1330, 1, 864, 7701, 310, 381, 25, 328, 18376] (equal to cold: true)
+unrelated ids: [7734, 264, 2716, 31708, 883, 279, 17415, 506] (its own cold path; not compared)
+
+entries after the seed:
+  P@1024   278.6 MiB  hash 9fec349f0268e879
+  P@2048   406.6 MiB  hash 4cb43530468d6fdf
+memory per entry at 2048 tokens: 149.6 MiB SSM (48 layers) + 256.0 MiB KV (16 layers, K+V) + 0.9 MiB logits = 406.6 MiB
+3-request sequence: exact repeat -> hit @2048; shared prefix -> hit @1024; unrelated -> miss (inserted at 685.1 MiB, 1 evicted)
+cache bound: 2 entries / 1024 MiB -> 2 entries / 685.1 MiB, 3 hits, 1 misses, 1 evictions, 0 too large
+post-eviction exact repeat: partial hit at 1024 of 2048 tokens (the full entry was the LRU victim)
+exit=0
+RELEASED wp55

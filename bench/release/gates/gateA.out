@@ -1,0 +1,43 @@
+ACQUIRED wp55 at 2026-11-10T20:07:37.6807371Z
+=== oracle-gate
+cpu oracle: 169 prompt tokens + 20 steps in 381.3s
+gpu engine: chunk 169-token tiles, q8 KV, 169 prompt tokens in 14.9s
+prefill logits: max |gpu - cpu| = 0.1615 at 378 (gpu argmax 248068 / cpu argmax 248068)
+  [ 0] cpu 248068 (m +23.7733)  gpu 248068 (m +23.7289)
+  [ 1] cpu    198 (m +6.7073)  gpu    198 (m +6.6790)
+  [ 2] cpu   1596 (m +2.1677)  gpu   1596 (m +2.2338)
+  [ 3] cpu   1144 (m +8.9167)  gpu   1144 (m +8.9432)
+  [ 4] cpu   4087 (m +2.4291)  gpu   4087 (m +2.4219)
+  [ 5] cpu   1156 (m +1.0751)  gpu   1156 (m +1.0621)
+  [ 6] cpu     25 (m +0.3696)  gpu     25 (m +0.3683)
+  [ 7] cpu  12870 (m +2.8806)  gpu  12870 (m +2.8618)
+  [ 8] cpu   9885 (m +10.9972)  gpu   9885 (m +10.9607)
+  [ 9] cpu  61695 (m +13.5134)  gpu  61695 (m +13.5806)
+  [10] cpu   1228 (m +0.7508)  gpu   1228 (m +0.7919)
+  [11] cpu    440 (m +1.7262)  gpu    440 (m +1.7435)
+  [12] cpu  47057 (m +6.1782)  gpu  47057 (m +6.1837)
+  [13] cpu  53107 (m +12.5351)  gpu  53107 (m +12.5356)
+  [14] cpu  85015 (m +9.6060)  gpu  85015 (m +9.6102)
+  [15] cpu   3434 (m +9.3944)  gpu   3434 (m +9.4222)
+  [16] cpu    451 (m +10.1919)  gpu    451 (m +10.1920)
+  [17] cpu     13 (m +5.7753)  gpu     13 (m +5.8052)
+  [18] cpu  14235 (m +0.4670)  gpu  14235 (m +0.4758)
+  [19] cpu  41020 (m +0.3384)  gpu  41020 (m +0.3484)
+PASS: 20 ids identical (chunk 2048, q8 KV, 169 prompt tokens)
+exit=0
+=== gemv-check
+exit=2
+=== prefill 8193
+hipml.exe : gemv-check: --gguf and --tensor are required
+At <HOME>\gateA.ps1:11 char:3
++   & $exe gemv-check --gguf $m 2>&1
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (gemv-check: --g...or are required:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+resident: 16.01 GiB in 851 tensors on AMD Radeon AI PRO R9700 (upload 6.9s)
+graph: 64 layers, 15.68 GiB streamed/token, q8 KV 0.266 GiB at depth 8193
+build: 10.3s
+prefill: 8193 tokens in 6.67s (1228.93 tok/s, 0.81 ms/token) [chunk 2048, 1691.0 MiB scratch, last id 293]
+exit=0
+RELEASED wp55

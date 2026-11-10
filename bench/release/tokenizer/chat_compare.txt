@@ -1,0 +1,43 @@
+ACQUIRED wp55 at 2026-11-10T21:21:06.9429673Z
+=== chat compare 256 tok
+longdoc: 33065 chars, prompt 8192 tokens (target 8192)
+starting llama-server on 8092
+  template ids: 91 match
+  llama: 238 tokens, eos=True, stop_type=eos
+  template ids: 134 match
+  llama: 256 tokens, eos=False, stop_type=limit
+  template ids: 364 match
+  llama: 65 tokens, eos=True, stop_type=eos
+  template ids: 8192 match
+  llama: 174 tokens, eos=True, stop_type=eos
+  template ids: 89 match
+  llama: 126 tokens, eos=True, stop_type=eos
+llama stopped; running hipml
+  hipml: 256 tokens, stopped=False, 29.43 tok/s
+  hipml: 256 tokens, stopped=False, 29.39 tok/s
+  hipml: 65 tokens, stopped=True, 29.38 tok/s
+  hipml: 174 tokens, stopped=True, 28.79 tok/s
+  hipml: 100 tokens, stopped=True, 29.13 tok/s
+
+=== cross-engine output comparison ===
+01_single_turn_code: DIVERGE at 2 (llama 310 / hipml 4087), llama_len=238 hipml_len=256, margin=0.2064 nats
+  llama ctx: [1596, 1144, 310, 5707, 310, 1156]
+  hipml ctx: [1596, 1144, 4087, 1156, 579, 1622]
+  text_equal=False
+  llama top: 310:-0.795 4087:-1.002 5707:-1.872 9559:-4.080 1156:-5.033 3165:-6.387
+02_multi_turn: DIVERGE at 130 (llama 30 / hipml 6970), llama_len=256 hipml_len=256, margin=0.0059 nats
+  llama ctx: [13, 271, 11195, 647, 30, 16018, 381, 328]
+  hipml ctx: [13, 271, 11195, 647, 6970, 264, 1558, 539]
+  text_equal=False
+  llama top: 30:-1.249 6970:-1.255 25:-1.659 1362:-2.206 2493:-2.809 1189:-3.851
+03_system_tool: IDENTICAL 65 tokens (eos=True)
+04_longdoc_qa: IDENTICAL 174 tokens (eos=True)
+05_copy: DIVERGE at 63 (llama 5469 / hipml 1330), llama_len=126 hipml_len=100, margin=0.026 nats
+  llama ctx: [1049, 2640, 11316, 694, 5469, 1330, 22157, 13]
+  hipml ctx: [1049, 2640, 11316, 694, 1330, 22157, 13, 14235]
+  text_equal=False
+  llama top: 5469:-0.847 1330:-0.873 3404:-2.662 5529:-3.378 1017:-3.565 5435:-4.549
+
+2/5 conversations token-identical
+exit=1
+RELEASED wp55
