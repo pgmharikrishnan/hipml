@@ -85,8 +85,6 @@ def _scrub_posix(match):
 def scrub_string(value):
     if not isinstance(value, str):
         return value
-    if value == "rtx":
-        return "gpu-host"
     out = WIN_PATH.sub(_scrub_windows, value)
     out = POSIX_PATH.sub(_scrub_posix, out)
     return out
