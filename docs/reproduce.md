@@ -18,7 +18,15 @@ $env:PATH         = "$env:HIP_PATH\bin;$env:PATH"
 $env:HIPML_GGUF     = "D:\models\Qwen3.8-27B-Q4_K_M.gguf"
 $env:HIPML_MTP_GGUF = "D:\models\mtp-Qwen3.8-27B-Q4_0.gguf"   # optional; MTP cells only
 $env:LLAMA_SERVER   = "D:\llama.cpp\build\bin\llama-server.exe"
+
+# optional: a lock script for a shared box (`acquire <label>` / `release <label>`)
+# $env:HIPML_GPU_LOCK = "C:\tools\gpu-lock.ps1"
 ```
+
+The variables and their failure behaviour are in [`usage.md`](usage.md): an
+unset `HIPML_GGUF` fails with "set HIPML_GGUF", never with somebody else's path.
+`HIPML_MTP_GGUF` and `LLAMA_SERVER` only skip the cells that need them, and they
+say so. Budget ~40 GB of disk for the model files and `bench/out/`.
 
 Check the model before using it: `Qwen3.8-27B-Q4_K_M.gguf` is 16,810,714,336
 bytes with SHA-256
@@ -33,9 +41,16 @@ passed, so the build defaults applied: `-fa auto`, `-b 2048`, `-ub 512`.
 
 One distinction: the correctness gates in §§1–3 were measured on the gate model
 named in [`release-run.md`](release-run.md) — the fine-tune the gate corpus and
-the MTP drafter were built for — while the performance matrix and the chat and
-server cells in §§4–6 use the stock `Qwen3.8-27B-Q4_K_M.gguf` above. Set
-`HIPML_GGUF` to the gate model for §§1–3, then back to the stock file.
+the MTP drafter were built for — while the batch throughput cells in §3 and the
+performance matrix and the chat and server cells in §§4–6 use the stock
+`Qwen3.8-27B-Q4_K_M.gguf` above. Set `HIPML_GGUF` to the gate model for the
+gates, then back to the stock file.
+
+The 20-id acceptance string is **model-specific**. On the stock
+`Qwen3.8-27B-Q4_K_M.gguf`, the prompt `760,6511,314,9338,369` decodes to
+`11751 13 198 760 6511 314 9564 369 19241 13 198 760 6511 314 14898 369 21047
+13 198 760`. The gate model produces a different string; compare against the one
+for the file you loaded, and record which file it was.
 
 ```powershell
 cargo build --release -p hipml-cli --features hip
@@ -105,7 +120,17 @@ B=1 path 16/16 ids over the full stream. Measured exact/skinny aggregate:
 
 The skinny path is the opt-in WMMA tile (`HIPML_SKINNY=1`). It is **not**
 bit-identical; `batch-bench --check` reports `TOKENS DIFFER` on it. Quote it as
-approximate.
+approximate. Run both checks so the skip is explicit rather than implied:
+
+```powershell
+.\target\release\hipml.exe batch-bench --gguf $env:HIPML_GGUF --slots 8 --tokens 16 --kv q8 --check
+# exact path: every slot 16/16 ids match B=1
+
+$env:HIPML_SKINNY = "1"
+.\target\release\hipml.exe batch-bench --gguf $env:HIPML_GGUF --slots 8 --tokens 16 --kv q8 --check
+# skinny path: TOKENS DIFFER, as expected; the throughput is approximate
+Remove-Item Env:\HIPML_SKINNY     # or start a fresh shell
+```
 
 ## 4. Head-to-head matrix
 
@@ -173,10 +198,28 @@ that from its TTFT, not that column.
 Expected: cold 8,192-token prefill 6,786.4 ms; exact repeat 4.7 ms (1,448.7×);
 50% shared prefix 3,528.3 ms (1.94×); hit latency 4.60 ms at 8,192 tokens.
 
-Use `--bytes-mib 4096`. With the default 1 GiB cache, the 8,192-token snapshot
-is 1,174.6 MiB and is larger than the cache; `cache-bench` admits it as a
-0-byte entry and the exact repeat diverges. That is an unpatched defect, not a
+Use `--bytes-mib 4096` for the exact 8,192-token hit: 4.6 ms against 6,724.4 ms
+cold, 1,460×, at 4.59 ms hit latency. At the default 1 GiB cap the same snapshot
+needs 1,174.6 MiB, so it is **refused at capture** (counted in `refused`, never
+truncated) and the exact repeat falls back to a full prefill: 6,766.2 ms against
+6,691.7 ms cold, with token-identical ids. That is the fixed behaviour, not a
 measurement error.
+
+Then run the gate. It replays the old consumer (a partial hit used as exact) and
+requires it to diverge, and checks that the fixed fallback matches the uncached
+ids:
+
+```powershell
+.\target\release\hipml.exe cache-gate --gguf $env:HIPML_GGUF `
+  --len 8192 --shared 4096 --chunk 2048
+# capture @8192 refused: needs 1174.6 MiB, cap 1024 MiB
+# legacy consumer (partial hit @4096 used as exact) diverges at id 0
+# fallback ids equal cold ids (20 tokens); stats: 1 entries, 1 refused, 1 hits, 1 misses
+# cold 7397.7 ms; an undersized cap is a miss, not a divergent hit: pass
+```
+
+Peak process VRAM at the default cap is 20,340.9 MiB (21,270.9 before the fix);
+at 4 GiB it is 21,462.9 MiB (22,553.5 before).
 
 ## 8. Tokenizer
 
@@ -195,3 +238,38 @@ The release run did not measure MTP at q8 KV, batch decode at depth > 0, the ful
 `mtp-batch-bench` matrix, the skinny path's logit error, server cells above 16
 slots, or any GPU other than gfx1201 and any OS other than Windows 11. Do not
 extrapolate those rows; add them as new measurements.
+
+## What will differ on your hardware
+
+- **Bandwidth decides the decode cells.** The R9700's spec is 640 GB/s and the
+  release GEMV streams at the card's limit, so a card with more bandwidth (an RX
+  7900 XTX is rated 960 GB/s) can beat the R9700 on the same kernel, and a card
+  with less will lose. That is the memory system, not the engine; say which card
+  you used.
+- **VRAM decides whether the 100K cell runs at all.** The 100K row needs the
+  weights plus a long KV; a 24 GB card will spill or refuse, and a spill is
+  reported as a spill, not as a slow number. The release peaks at 21.26 GiB.
+- **VRAM accounting differs by OS.** The peak column on Windows is WDDM "GPU
+  Process Memory \ Dedicated Usage" for the process. Linux reports differently,
+  so a Linux number is not directly comparable to that column.
+- **The ROCm version changes codegen.** The wheels here are 7.2.1. A different
+  HIP compiler can move a tolerance-edge case such as the q8 chunk attention by
+  a few e-4; check the max abs, not just PASS.
+- **The host CPU moves the wall clock, not the verdicts.** `parity --deep` and
+  `oracle-gate` run the f32 reference on the CPU, so a slower host takes longer
+  and prints the same verdicts.
+- **The llama.cpp column depends on the build.** 11820 (`d7725699`) is the
+  comparison baseline; a newer build is a different competitor, so do not mix
+  them in one table.
+- **Clocks and power plans are part of the result.** Run the matrix with the
+  same power plan you reported, and do not compare a laptop-on-battery number
+  with a desktop one.
+
+## If a step fails
+
+Attach the command, the output tail, your GPU, driver and ROCm version, and the
+model SHA-256 to a [bug report](../.github/ISSUE_TEMPLATE/bug.yml). Different
+hardware is welcome as a new row: open a
+[hardware-result issue](../.github/ISSUE_TEMPLATE/hardware-result.yml) with the
+`results.json` attached. For anything that looks like a memory-safety or server
+issue, read [`../SECURITY.md`](../SECURITY.md) first and report it privately.
