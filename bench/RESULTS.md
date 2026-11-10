@@ -4,9 +4,9 @@ Five prompt classes, each tokenised once by `hipml tokenize`. Both engines recei
 
 | field | value |
 | --- | --- |
-| model | `C:\models\Qwen3.8-27B-Q4_K_M.gguf` (17,203,416,064 bytes) |
+| model | `Qwen3.8-27B-Q4_K_M.gguf` (17,203,416,064 bytes) |
 | GPU | AMD Radeon AI PRO R9700 32.0.32015.7029  |
-| host | rtx |
+| host | gpu-host |
 | hipml commit | `cef765724eb4f7add7d52fa14c85185878f5560b` (dirty worktree) |
 | hipml binary sha256 | `5713f143872ea3c3128376f2fa5ec09aba24cf18babdfa5e48fc4db6331a725f` |
 | llama.cpp | version: 0.7.0-dev (build 11820, commit d7725699) |

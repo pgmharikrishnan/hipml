@@ -260,7 +260,11 @@ def main():
 def write_markdown(report, path):
     meta = report.get("meta", {})
     model = report["fixture"].get("model", {})
-    model_path = meta.get("model_path") or model.get("path", "?")
+    # Publish a portable model identity: the file name and its size, never the
+    # absolute path of the machine that produced the numbers.
+    model_path = meta.get("model_name") or os.path.basename(
+        str(meta.get("model_path") or model.get("path") or "?"))
+    model_sha = meta.get("model_sha256") or model.get("sha256")
     lines = []
     lines.append("# Like-for-like bench: hipml vs llama.cpp\n")
     lines.append(
@@ -276,6 +280,8 @@ def write_markdown(report, path):
     lines.append("| field | value |")
     lines.append("| --- | --- |")
     lines.append(f"| model | `{model_path}` ({model.get('bytes', 0):,} bytes) |")
+    if model_sha:
+        lines.append(f"| model sha256 | `{model_sha}` |")
     if meta.get("gpu"):
         lines.append(f"| GPU | {meta['gpu']} |")
     if meta.get("host"):

@@ -14,6 +14,7 @@
     "llama_kv": "q8_0",
     "hipml_kv": "q8",
     "model_path": "<HIPML_GGUF>",
+    "model_name": "Qwen3.8-27B-Q4_K_M.gguf",
     "llama_server_path": "<LLAMA_SERVER>",
     "depths": "8192",
     "reps": "3",
