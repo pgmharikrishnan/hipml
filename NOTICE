@@ -1,0 +1,146 @@
+hipml
+Copyright 2026 Hari Krishnan (pgmharikrishnan)
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file in this repository.
+
+===============================================================================
+1. Software derived from llama.cpp / ggml (MIT)
+===============================================================================
+
+hipml includes logic translated from llama.cpp and ggml
+(https://github.com/ggml-org/llama.cpp), Copyright (c) the ggml authors,
+used under the MIT License (the full text is in docs/reference/LICENSE).
+
+Ported logic, and the file that carries it:
+
+  the qwen3next / qwen3_5 hybrid architecture math (llama.cpp's
+  src/models/qwen35.cpp and llama-graph.cpp)
+      crates/hipml-model/src/gpu.rs            layer loop, attention block,
+                                               gated-delta-net block, FFN
+
+  gated delta net and the recurrent state
+      crates/hipml-core/src/delta.rs           ggml_compute_forward_ssm_conv_f32,
+                                               build_delta_net_autoregressive,
+                                               fused-kernel semantics from
+                                               gated_delta_net_f32.c
+      crates/hipml-kernels/kernels/ssm_conv1d_f32.hip
+      crates/hipml-kernels/kernels/ssm_gates_f32.hip
+                                               ggml_compute_softplus_f32 branch
+
+  rms_norm, rope and MROPE
+      crates/hipml-core/src/ops.rs             ggml_rms_norm identity,
+                                               ggml_compute_forward_rope_flt,
+                                               ggml_mrope_cache_init
+      crates/hipml-kernels/kernels/mrope_f32.hip
+                                               GGML_ROPE_TYPE_MROPE semantics
+
+  quantized block formats
+      crates/hipml-core/src/quant.rs           dequantize_row_q5_K and the
+                                               GGML block layouts
+      crates/hipml-core/src/kv.rs              q8_0 / q4_0 block layout and
+                                               scale convention
+      crates/hipml-kernels/kernels/kv_encode.hip
+      crates/hipml-kernels/kernels/gemv_q4_k.hip
+      crates/hipml-kernels/kernels/gemv_q5_k.hip
+      crates/hipml-kernels/kernels/gemv_q6_k.hip
+      crates/hipml-kernels/kernels/gemv_q8_0.hip
+      crates/hipml-kernels/kernels/dequant_q4_k_f32.hip
+      crates/hipml-kernels/kernels/prefill_q4_k.hip
+      crates/hipml-kernels/kernels/prefill_q6_k.hip
+      crates/hipml-kernels/kernels/prefill_q8_0.hip
+                                               block format decoding follows
+                                               ggml's layout; the kernels
+                                               themselves are original
+
+  tokenizer: the pretokenizer split pattern, BPE and the byte encoder
+      crates/hipml-core/src/tokenizer.rs       from llama-vocab.cpp and
+                                               unicode.cpp
+      crates/hipml-core/src/unicode_tables.rs  generated from src/unicode-data.cpp
+      bench/tokenizer/gen_unicode_table.py     the generator for that table
+
+  chat template rendering
+      crates/hipml-core/src/chat.rs            tool | tojson rendering, matching
+                                               llama.cpp's template engine
+
+Each of those files says so in its header. Nothing above is copied verbatim;
+it is a translation whose inputs are the reference copies in docs/reference/.
+
+Upstream revision. The reference copies in docs/reference/ are from llama.cpp
+tag b12126 (https://github.com/ggml-org/llama.cpp/tree/b12126), and the port was
+audited against that tag. The Unicode tables are generated from llama.cpp
+commit d7725699 (src/unicode-data.cpp). The benchmark baseline is llama.cpp
+build 11820, commit d7725699. Where a file names a different revision, that
+file's header wins.
+
+===============================================================================
+2. Reference copies in docs/reference/ (MIT, documentation only)
+===============================================================================
+
+docs/reference/ holds eleven unmodified llama.cpp source files:
+
+    qwen35.cpp              delta-net-base.cpp      gated_delta_net_f32.c
+    models.h                llama-graph.cpp         llama-vocab.cpp
+    unicode.cpp             unicode.h               ggml-cpu-ops.cpp
+    ggml-quants.c           ggml-impl.h
+
+They are Copyright (c) the ggml authors, licensed under the MIT License; the
+full text is docs/reference/LICENSE, and docs/reference/README.md says which
+file is used for what. They are kept so the port can be audited line by line,
+exactly as upstream published them, so their bytes - including line numbers
+cited in docs/notes/ - are unchanged. They are documentation only: nothing in
+docs/reference/ is compiled, linked or shipped in a build, and they are not
+covered by hipml's Apache-2.0 license.
+
+docs/reference/ggml-cpu-ops.cpp contains YaRN code that carries its own notice:
+"MIT licensed. Copyright (c) 2023 Jeffrey Quesnelle and Bowen Peng."
+
+===============================================================================
+3. Unicode character data
+===============================================================================
+
+crates/hipml-core/src/unicode_tables.rs is generated from llama.cpp's
+src/unicode-data.cpp (commit d7725699), which is in turn derived from the
+Unicode Character Database: Copyright (c) Unicode, Inc., used under the Unicode
+License v3 (https://www.unicode.org/license.txt).
+
+===============================================================================
+4. Trademarks and model weights
+===============================================================================
+
+No model weights are distributed with hipml. The repository contains no GGUF
+file, no tokenizer file and no converted weights. hipml is an engine.
+
+The engine is tested on Qwen3.8-27B, specifically the quantized file
+Qwen3.8-27B-UD-Q4_K_XL.gguf. A fine-tune of Qwen3.8-27B that was benchmarked
+during development is referred to here only as "a Qwen3.8-27B variant".
+
+Qwen3.8-27B is distributed by its publisher under its own license; check that
+license before downloading. That license, not hipml's Apache-2.0 license,
+governs your use of the weights. Benchmark numbers in this repository are
+measurements of the engine on those weights; they are not claims about the
+model, and hipml is not affiliated with or endorsed by the model's publisher.
+
+No AMD ROCm or HIP SDK component is redistributed. The build links amdhip64.lib
+and loads amdhip64.dll from the ROCm SDK the user installed; ROCm is under AMD's
+own license. Install it from AMD (repo.radeon.com) yourself.
+
+Trademarks are the property of their owners and are used here only to identify
+the software or hardware in question, with no claim of affiliation or
+endorsement:
+
+  - Qwen and Qwen3.8-27B are trademarks of their publisher.
+  - llama.cpp is a project of the ggml authors.
+  - AMD, Radeon, ROCm, HIP and RDNA are trademarks of Advanced Micro Devices,
+    Inc.
+  - Windows is a trademark of the Microsoft group of companies.
+  - Rust is a trademark of the Rust Foundation.
+
+===============================================================================
+5. This repository
+===============================================================================
+
+Everything not listed above - the Rust engine, the HIP kernels, the server, the
+benchmark harness and the documentation - is
+Copyright 2026 Hari Krishnan (pgmharikrishnan) and is licensed under the
+Apache License, Version 2.0 (see LICENSE).

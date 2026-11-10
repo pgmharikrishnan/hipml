@@ -1,0 +1,54 @@
+# Line endings: normalise text to LF in the index, so a clone on Windows,
+# macOS or Linux holds the same bytes and `git diff` stays clean across them.
+# Source that must be built verbatim stays LF even on Windows (rustc, MSVC and
+# hipcc all read LF); the Windows tooling scripts keep CRLF, which is what
+# cmd.exe and PowerShell expect.
+
+* text=auto eol=lf
+
+*.rs    text eol=lf
+*.toml  text eol=lf
+*.lock  text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.jsonl text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.c     text eol=lf
+*.cpp   text eol=lf
+*.h     text eol=lf
+*.inc   text eol=lf
+*.hip   text eol=lf
+*.py    text eol=lf
+*.sh    text eol=lf
+
+*.ps1   text eol=crlf
+*.psm1  text eol=crlf
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
+# Recorded measurements: these are outputs the bench wrote on Windows, kept
+# byte for byte as evidence. Do not renormalise them.
+bench/fixtures/**     -text
+bench/sensitivity/**  -text
+bench/serve/results/** -text
+
+# Binaries and build artefacts.
+*.gguf        binary
+*.safetensors binary
+*.hsaco       binary
+*.co          binary
+*.code        binary
+*.dll         binary
+*.lib         binary
+*.exe         binary
+*.pdb         binary
+*.obj         binary
+
+# GitHub language statistics: docs/reference/ is vendored third-party C/C++
+# (~34K lines) against ~39K lines of Rust of our own; without this the
+# repository is reported as mostly C++.
+docs/reference/** linguist-vendored
+bench/serve/results/** linguist-generated
+bench/results.json linguist-generated
+bench/RESULTS.md linguist-generated
