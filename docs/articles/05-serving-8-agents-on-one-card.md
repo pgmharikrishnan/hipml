@@ -1,6 +1,6 @@
 # Serving eight sessions on one 32 GB card: 125 tok/s, a 16-slot tie, and a cache that could not keep its promise
 
-*Continuous batching beats llama-server by 32% at eight slots and ties it at sixteen, with better tail latency; the hybrid prefix cache is where the release run found a real defect.*
+*Continuous batching beats llama-server by 32% at eight slots and ties it at sixteen, with better tail latency; the hybrid prefix cache is where the release run found — and then fixed — a real defect.*
 
 At eight slots the server returns 125.25 tok/s aggregate against llama-server's 94.75. The median time to first token is 518 ms against 497; the 95th percentile is 526 against 1,377. At sixteen slots the aggregate is a tie: 212.14 against 214.41. The latency is not a tie: p50 779 against 1,237 ms, p95 784 against 2,682.
 
@@ -41,9 +41,9 @@ Hits skip MTP, because the drafter's KV cannot cover a restored prefix; cells b 
 
 With the default 1 GiB cap, an 8,192-token snapshot does not fit. The snapshot is 1,174.6 MiB: 149.6 MiB of SSM state across 48 layers, 1,024.0 MiB of KV across 16, and 0.9 MiB of logits. Capture stored nothing and returned no error; the bench printed the second entry as 0.0 MiB and the cache held only the 4,096-token entry.
 
-The exact-repeat request asked for 8,192 tokens, got a 4,096-token hit, and the benchmark used that entry's logits as if they followed the full prompt. It decoded from the wrong position and produced different ids. With `--bytes-mib 4096` the same case is exact: a hit at 8,192 tokens, 4.7 ms against 6,786.4 ms cold, 1,448.7×.
+The exact-repeat request asked for 8,192 tokens, got a 4,096-token hit, and the benchmark used that entry's logits as if they followed the full prompt. It decoded from the wrong position and produced different ids. The pre-fix output is `bench/release/cache/cache_8192_default_cap.txt`. With `--bytes-mib 4096` the same case was already exact on the pre-fix build: a hit at 8,192 tokens, 4.7 ms against 6,786.4 ms cold, 1,448.7×.
 
-The serving path uses restored logits only for a whole-prompt hit and otherwise prefills the remainder, so no client was served a wrong answer. That is still a cache-contract failure. Capture must refuse an entry it cannot store and return that refusal; lookup must verify the hit length equals the requested prefix before using its logits as end-of-prompt logits. The defect is real and being fixed; the release run records it as unpatched. A cache that cannot store an entry must not claim it, and a caller that needs an exact hit must check the length it got.
+The serving path uses restored logits only for a whole-prompt hit and otherwise prefills the remainder, so no client was served a wrong answer. That is still a cache-contract failure, and it is now fixed. Capture refuses an entry it cannot store and counts the refusal instead of storing a 0-byte one; lookup verifies the hit length equals the requested prefix before using its logits as end-of-prompt logits; an oversized snapshot is a miss, not a truncated hit. Re-measured on the patched build, the default 1 GiB cap refuses the 1,174.6 MiB snapshot and falls back to a full prefill — 6,766.2 ms against 6,691.7 ms cold, token-identical ids — while `--bytes-mib 4096` keeps the 4.6 ms exact hit at 1,460×. `cache-gate` replays the old consumer and requires it to diverge: it does, at id 0, while the fixed fallback matches the uncached ids. A cache that cannot store an entry must not claim it, and a caller that needs an exact hit must check the length it got.
 
 ## What it costs, and where it stops
 
@@ -65,7 +65,7 @@ Not measured: 32 slots, a context split other than 16K and 8K, batch depth above
 - Raw per-cell server results and commands: [`../../bench/release/server/hipml_b/result.json`](../../bench/release/server/hipml_b/result.json) and the sibling directories [`hipml_a`](../../bench/release/server/hipml_a/result.json), [`hipml_c`](../../bench/release/server/hipml_c/result.json), [`llama_a`](../../bench/release/server/llama_a/result.json), [`llama_b`](../../bench/release/server/llama_b/result.json) and [`llama_c`](../../bench/release/server/llama_c/result.json).
 - Continuous batching, slot adoption, admission, cancellation and failure scopes: [`../notes/wp45-51-serve.md`](../notes/wp45-51-serve.md).
 - The per-slot fault test and the server review: [`../notes/review4-server-audit.md`](../notes/review4-server-audit.md).
-- The cache snapshot layout, the default-cap failure and the 4 GiB control: [`../../bench/release/cache/cache_8192_default_cap.txt`](../../bench/release/cache/cache_8192_default_cap.txt) and [`../../bench/release/cache/cache_8192_4gib.txt`](../../bench/release/cache/cache_8192_4gib.txt).
+- The cache snapshot layout, the default-cap failure it used to have, the fix and the 4 GiB control: [`../../bench/release/cache/cache_8192_default_cap.txt`](../../bench/release/cache/cache_8192_default_cap.txt) (pre-fix), [`../../bench/release/cache/cache_8192_default_cap_fixed.txt`](../../bench/release/cache/cache_8192_default_cap_fixed.txt), [`../../bench/release/cache/cache_8192_4gib_fixed.txt`](../../bench/release/cache/cache_8192_4gib_fixed.txt) and [`../../bench/release/cache/cache_gate.txt`](../../bench/release/cache/cache_gate.txt).
 - The cache's insert bound and the capture/restore code: [`../../crates/hipml-core/src/prefix_cache.rs`](../../crates/hipml-core/src/prefix_cache.rs) and [`../../crates/hipml-model/src/gpu/prefix.rs`](../../crates/hipml-model/src/gpu/prefix.rs).
 - The exact/skinny batch cost: [`../../bench/release/batch/exact_throughput.txt`](../../bench/release/batch/exact_throughput.txt).
 - Greedy-only, no-auth and loopback defaults: [`../server.md`](../server.md).

@@ -314,7 +314,6 @@ chunk-boundary prefill) were run before the switch to the stock model. The
   check (no logit margin measured).
 - Server cells at 32 slots or on a different context split.
 - Any GPU other than gfx1201, and any OS other than Windows 11.
-- The >1 GiB prefix-cache entry bug is measured but not fixed.
 
 ## Still citing pre-fix numbers (note for P6)
 

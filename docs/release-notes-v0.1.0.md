@@ -19,8 +19,9 @@ here is one cold run on one card — gfx1201, Windows 11 build 26200, driver
 a data point, not a promise about other hardware.
 
 What is next: MTP at q8 KV and batch decode at depth are implemented but
-unmeasured; the prefix cache's over-budget admission is a known unpatched bug;
-and no GPU other than gfx1201 and no OS other than Windows 11 has been tried.
-Reports from other RDNA4 cards are welcome as new rows. The engine, kernels,
-server and bench harness are Apache-2.0 (see [NOTICE](../NOTICE)); no model
-weights are distributed.
+unmeasured, and no GPU other than gfx1201 and no OS other than Windows 11 has
+been tried. The prefix cache's over-budget admission was a real defect found by
+this run; it is fixed — an undersized cap is a counted refusal and a miss, not a
+divergent hit, and `cache-gate` proves it. Reports from other RDNA4 cards are
+welcome as new rows. The engine, kernels, server and bench harness are
+Apache-2.0 (see [NOTICE](../NOTICE)); no model weights are distributed.

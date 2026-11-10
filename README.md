@@ -66,10 +66,10 @@ restores 2,048 tokens in 2.0 ms versus 1,619.9 ms cold.
   driver has been measured.
 - **The deep cells are single-rep.** 32,768 and 100,000 tokens are 1 cold rep
   each; treat a small difference there as noise.
-- **The prefix cache has an unpatched edge.** With the default 1 GiB budget, an
-  8,192-token snapshot (1,174.6 MiB) is larger than the whole cache, is admitted
-  as a 0-byte entry, and breaks an exact repeat. Pass `--bytes-mib 4096` for that
-  cell.
+- **The default prefix-cache budget is 1 GiB.** An 8,192-token snapshot is
+  1,174.6 MiB and is refused at capture; the refusal is counted, the ids stay
+  exact, and an exact repeat of that prompt costs a full prefill (6,766.2 ms
+  against 6,691.7 ms cold). Pass `--bytes-mib 4096` for the 4.6 ms hit (1,460×).
 - **Some paths are unmeasured.** MTP at q8 KV, batch decode at depth > 0, the
   full `mtp-batch-bench` matrix, and servers above 16 slots have no release
   numbers.
