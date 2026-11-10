@@ -64,7 +64,7 @@ pub(crate) mod device {
     pub use prefill_launch::{
         gemm_rows_f32, prefill_entry_for_half, prefill_has_xhalf, prefill_resident,
         prefill_resident_half, prefill_resident_slices, prefill_resident_split_half,
-        prefill_should_split, prefill_xhalf,
+        prefill_should_split, prefill_split_scratch_cap, prefill_xhalf,
     };
     #[path = "quant_launch.rs"]
     mod quant_launch;
@@ -601,7 +601,7 @@ pub use device::{gemm_rows_f32, prefill_resident, prefill_resident_slices, prefi
 #[cfg(feature = "hip")]
 pub use device::{
     prefill_entry_for_half, prefill_has_xhalf, prefill_resident_half,
-    prefill_resident_split_half, prefill_should_split,
+    prefill_resident_split_half, prefill_should_split, prefill_split_scratch_cap,
 };
 #[cfg(feature = "hip")]
 pub use device::{gemv_job_tiles, GemvJob, Launcher, ReadJob};

@@ -1,0 +1,5 @@
+{"tag": "integrate", "test": "exact_tile_4slots", "load_s": 13.0, "streams": 4, "aggregate_tok_s": 67.3, "per_stream_p50": 17.5, "ttft_p50_ms": 1430.0, "batch_exact": 0.0, "tile_steps": 58.0, "errors": []}
+{"tag": "integrate", "test": "exact_exact_4slots", "load_s": 13.0, "streams": 4, "aggregate_tok_s": 66.1, "per_stream_p50": 17.2, "ttft_p50_ms": 1433.0, "batch_exact": 1.0, "tile_steps": 0.0, "errors": []}
+{"tag": "integrate", "test": "exact_tile_8slots", "load_s": 13.1, "streams": 8, "aggregate_tok_s": 106.9, "per_stream_p50": 13.3, "ttft_p50_ms": 2500.0, "batch_exact": 0.0, "tile_steps": 70.0, "errors": []}
+{"tag": "integrate", "test": "exact_exact_8slots", "load_s": 13.1, "streams": 8, "aggregate_tok_s": 75.2, "per_stream_p50": 9.4, "ttft_p50_ms": 2511.0, "batch_exact": 1.0, "tile_steps": 0.0, "errors": []}
+{"tag": "integrate", "test": "single_mtp", "rates": [39.2, 38.9, 38.9], "p50": 38.9, "ttft_p50_ms": 247.0}

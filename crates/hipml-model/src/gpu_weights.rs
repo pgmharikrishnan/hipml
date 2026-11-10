@@ -228,9 +228,9 @@ impl<'a> Proj<'a> {
     /// caller has already converted (`prefill_xhalf`). Only the `_w2h` entries
     /// exist for it, so this requires the v2 prefill kernels.
     ///
-    /// `scratch` holds `tokens * rows` f32 and is only touched when the shape
-    /// is wave-starved enough for split-K (short prompts; 2048-token chunks
-    /// stay single-pass).
+    /// `scratch` holds the worst split-K tile the ffn shapes can select for any
+    /// tile up to the chunk (see `prefill_split_scratch_cap`); only a
+    /// wave-starved tile touches it, and a full 2048-token chunk does not.
     pub(crate) fn gemm_half(
         &self,
         l: &Launcher,
