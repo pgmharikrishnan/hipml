@@ -59,7 +59,7 @@ ids. `crates/hipml-core/tests/tokenizer_fixture.rs` replays them without a
 llama binary:
 
 ```bash
-HIPML_GGUF=/path/to/Qwen3.8-27B-Q4_K_M.gguf \
+HIPML_GGUF=/path/to/<model>.gguf \
   cargo test -p hipml-core --test tokenizer_fixture
 ```
 

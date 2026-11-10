@@ -50,7 +50,7 @@ slot's stream from the plain batched run, token for token, in the same GEMV mode
 ## Commands
 
 ```
-hipml mtp-batch-bench --gguf Qwen3.8-27B.gguf --mtp mtp.gguf \
+hipml mtp-batch-bench --gguf model.gguf --mtp mtp.gguf \
     --ids-file copy_200_words.ids --slots 8 --drafts 1 --tokens 256 --skinny
 hipml mtp-batch-bench ... --slots 9 --active 8 --drafts 1 --admit-at 100 --skinny
 ```

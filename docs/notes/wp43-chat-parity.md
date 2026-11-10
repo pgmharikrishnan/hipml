@@ -21,7 +21,7 @@ llama.cpp.
 ## Template and token ids
 
 The template is read from `tokenizer.chat_template` (8,952 bytes). It is the
-Qwen3.5/Qwen3.8-27B text-only template: system turn, `<|im_start|>`/`<|im_end|>`
+Qwen3.5/Qwen3.8 text-only template: system turn, `<|im_start|>`/`<|im_end|>`
 turns, `<think>` reasoning block, and the generation prompt. The renderer was
 verified against llama-server's own `/apply-template` + `/tokenize` on five
 conversations; the published table is the run with `--llama-fa off`.

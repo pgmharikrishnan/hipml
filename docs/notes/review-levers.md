@@ -86,7 +86,8 @@ the 3.48 GB q8 KV is re-read 2,345 times at an effective 137 GB/s. Its FLOPs
 3. **An MTP drafter exists on the box and nobody loaded it.**
    the MTP drafter GGUF (`mtp-Qwen3.8-27B-Q4_0.gguf`) is a qwen35-family nextn block
    (blk.64: eh_proj 10240→5120, one full-attention block, one FFN, Q6_K/Q4_K)
-   plus a Q3_K head. It is trained for a sibling base, not for Qwen3.8-27B's SFT, so
+   plus a Q3_K head. It is trained for a sibling base, not for this model's SFT,
+   so
    its acceptance had to be measured (§3).
 4. **Chunk size was only ever measured at 128/256/512.** At 512 tokens the
    gate/up GEMM launches 80 output tiles on 64 CUs (1.25 waves), so a quarter
@@ -114,7 +115,7 @@ no prototype.
 greedy decode and, at every position, drafts 3 tokens recursively with the
 sidecar block, under both hidden-state conventions (pre/post output_norm).
 
-48 generated tokens per prompt (45 scored windows), Qwen3.8-27B greedy on the CPU
+48 generated tokens per prompt (45 scored windows), greedy on the CPU
 oracle, bench fixture prompts:
 
 | Prompt | Hidden fed | P(draft 1) | P(2 \| 1) | P(3 \| 1,2) | Tokens/step, 1 / 2 / 3 drafts |
@@ -128,7 +129,7 @@ oracle, bench fixture prompts:
 
 Feeding the hidden state after `output_norm` (and `shared_head_norm` when
 recursing) is the right convention. The sidecar was trained for the base
-model, not for Qwen3.8-27B's SFT, and still agrees with Qwen3.8-27B's greedy choice 80% of
+model, not for this model's SFT, and still agrees with its greedy choice 80% of
 the time on free prose and essentially always on structured output. Caveats:
 45 windows per prompt, three prompts, CPU f32 reference rather than the GPU
 quantized path (both read the same Q4_K weights), and copy_200_words is an
@@ -281,7 +282,7 @@ hipml loses to llama.cpp by 3% in decode and 6-30% in TTFT, and the 27 work
 packages left two first-order things on the table. In decode the weight
 stream is at 99% of bandwidth, so kernel work can buy about 3% over llama
 (15% at the hard ceiling); the only real win is more than one token per pass, and the box
-already holds an MTP drafter that agrees with Qwen3.8-27B's greedy choice 80-100% of
+already holds an MTP drafter that agrees with the model's greedy choice 80-100% of
 the time, which with the existing bit-identical 2-column GEMV models to 48-54
 tok/s, 1.6-1.8x llama. That is the project's highest-value lever. Early exit
 is dominated by it, and batching is a throughput lever, not a latency one,

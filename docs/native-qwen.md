@@ -1,7 +1,7 @@
 # Native Qwen3.8-27B (stock, Unsloth UD)
 
 `feat/native-qwen`, base `6a1207f` (`feat/release`). Every earlier hipml
-measurement used the private fine-tune `Qwen3.8-27B-Q4_K_M.gguf`. This package
+measurement used a private fine-tune with the same geometry. This package
 points the engine at the **stock** model the release names, removes the
 fine-tune constants that made it work only there, and records what blocks a
 full generation run.
@@ -10,7 +10,7 @@ full generation run.
 | --- | ---: | ---: |
 | `Qwen3.8-27B-UD-Q4_K_XL.gguf` | 17,559,178,144 (16.35 GiB) | 866 |
 | `Qwen3.8-27B-UD-Q6_K_XL.gguf` | 25,299,061,664 (23.56 GiB) | 866 |
-| `Qwen3.8-27B-Q4_K_M.gguf` (fine-tune) | 17,192,421,376 (16.01 GiB) | 851 |
+| private fine-tune (`<model>.gguf`) | 17,192,421,376 (16.01 GiB) | 851 |
 
 Both stock files carry the MTP (`nextn`) block **inline** as `blk.64.*`;
 `block_count` is 65 and `nextn_predict_layers` is 1.
@@ -39,7 +39,7 @@ config (qwen35): 65 blocks (64 decoder + 1 nextn), hidden 5120, ffn 17408,
   full-attention layers (16): [3, 7, ..., 63]
 ```
 
-| field | stock Qwen3.8-27B | Qwen3.8-27B fine-tune |
+| field | stock Qwen3.8-27B | private fine-tune |
 | --- | --- | --- |
 | `general.architecture` | `qwen35` | `qwen35` |
 | `block_count` | **65** | **64** |
@@ -101,7 +101,7 @@ the same.
 | F32 | 360 | 10,686,464 | 0.01 |
 | total | 866 | 25,288,065,024 | 23.55 |
 
-Qwen3.8-27B, for comparison: Q4_K 257 / 10.66 GiB, Q6_K 79 / 3.84, Q8_0 64 / 1.30,
+The fine-tune, for comparison: Q4_K 257 / 10.66 GiB, Q6_K 79 / 3.84, Q8_0 64 / 1.30,
 Q5_K 2 / 0.11, F32 449 / 0.10; 851 tensors, 16.01 GiB.
 
 So Q6_K_XL **does** avoid every IQ/Q3 type; its only Q5_K tensors are 27
@@ -157,7 +157,7 @@ Q5_K GEMV/prefill entry.
 | --- | --- | --- |
 | `n_layer = block_count` (65) | `block_count - nextn_predict_layers` (64) | `qwen35.nextn_predict_layers` |
 | `MTP_BLK = 64` const | `cfg.n_layer` | `block_count - nextn_predict_layers` (64 in both files) |
-| probe token `248_319` ("Qwen3.8-27B's 248320-row vocab") | last row of `token_embd.weight` | tensor shape |
+| probe token `248_319` ("the 248320-row vocab") | last row of `token_embd.weight` | tensor shape |
 | `lm_head_reps` required `output.weight == Q6_K` | GEMV chosen from the head's own type | tensor type |
 | `supported()` returned false for Q5_K | true (decode/batched/prefill kernels exist) | kernel manifest |
 | IQ4_XS/IQ4_NL/IQ3_S aborted the parser | sized in `size_only`, so `load` reports them | type ids 23/20/21 |
@@ -264,13 +264,13 @@ python bench/job.py --engine llama --prompt prose_explanation --depth 0 --reps 3
 | `cargo test --workspace` | local and gpu-host: all pass (0 failed) |
 | `cargo check --workspace --features hip` | clean |
 | `hipml parity --deep` | 56 passed, 0 failed, 1 skipped |
-| `hipml oracle-gate` (Qwen3.8-27B, 169 ids, chunk 2048) | PASS, 20/20 ids identical |
-| Qwen3.8-27B generation after the config change | 64 layers, 8 tokens emitted |
+| `hipml oracle-gate` (fine-tune, 169 ids, chunk 2048) | PASS, 20/20 ids identical |
+| Fine-tune generation after the config change | 64 layers, 8 tokens emitted |
 | Q4_K_XL load checks | 4/4 byte-identical, embeddings 5120/5120 exact |
 | tokenizer, 20 strings × 2 modes | 40/40 ids identical |
 | template, 3 single-turn cases | text and ids identical |
 
-Qwen3.8-27B still reports 64 layers and generates, so subtracting
+The fine-tune still reports 64 layers and generates, so subtracting
 `nextn_predict_layers` did not change the fine-tune path.
 
 ## Unverified
