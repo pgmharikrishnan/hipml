@@ -36,11 +36,13 @@ back to one machine's layout:
 | variable | what it is | default if unset |
 |---|---|---|
 | `HIPML_GGUF` | the target GGUF | required: `run.sh` exits and says so |
+| `HIPML_MTP_GGUF` | the MTP drafter GGUF | unset: MTP cells are skipped |
 | `LLAMA_SERVER` | the llama.cpp server binary | required only for `--engine llama` |
 | `HIPML_EXE` | the hipml binary | `<repo>/target/release/hipml[.exe]` |
 | `HIP_PATH` | ROCm SDK root | the build skips the kernels |
 | `HIPML_ARCH` | offload arch | `gfx1201` |
 | `HIPML_GPU_LOCK` | optional lock script | unset = no locking |
+| `HIPML_LOCK_LABEL` | label passed to the lock | `bench` |
 | `HIPML_BENCH_HOST` | ssh host | unset = local mode |
 | `HIPML_BENCH_REMOTE_DIR` | checkout on that host | required in remote mode |
 | `HIPML_BENCH_OUT` | raw output root | `<repo>/bench/out/<tool>` |
