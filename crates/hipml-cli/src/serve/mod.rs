@@ -2,8 +2,8 @@
 //! request, and the SSM+KV prefix cache.
 //!
 //! ```text
-//! hipml serve --gguf C:\models\Qwen3.8-27B-Q4_K_M.gguf \
-//!             --mtp  C:\models\mtp-Qwen3.8-27B-Q4_0.gguf \
+//! hipml serve --gguf path\to\Qwen3.8-27B-Q4_K_M.gguf \
+//!             --mtp  path\to\mtp-Qwen3.8-27B-Q4_0.gguf \
 //!             --port 8093 --slots 16 --ctx 32768
 //! ```
 //!

@@ -8,3 +8,6 @@ __pycache__/
 
 # bench raw output (results.json and RESULTS.md are committed)
 /bench/out/
+
+# supervisor logs (scripts/hipml-serve.ps1)
+/logs/

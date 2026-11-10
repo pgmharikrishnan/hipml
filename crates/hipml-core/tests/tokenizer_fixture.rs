@@ -3,14 +3,14 @@
 //! Both fixtures store llama.cpp's own ids (captured by
 //! `bench/tokenizer/diff.py` and `bench/tokenizer/template_diff.py`), so this
 //! test needs no llama binary at test time. It does need the GGUF whose
-//! tokenizer the fixture was captured from; set `HIPML_GGUF`, or run it on a
-//! host with the model at the usual path. Without the model the test reports a
-//! skip instead of failing every unrelated `cargo test` run.
+//! tokenizer the fixture was captured from; set `HIPML_GGUF` to it. Without the
+//! model the test reports a skip instead of failing every unrelated
+//! `cargo test` run.
 //!
 //! Corpus fixture line: `hex(text) TAB label TAB [ids]`.
 //! Template fixture line: `hex(json request) TAB label TAB [ids]`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use hipml_core::chat::render;
 use hipml_core::chat_request;
@@ -28,24 +28,19 @@ const TEMPLATE: &str = concat!(
 );
 
 fn model() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("HIPML_GGUF") {
-        return Some(PathBuf::from(p));
+    match std::env::var("HIPML_GGUF") {
+        Ok(p) if !p.is_empty() => Some(PathBuf::from(p)),
+        _ => None,
     }
-    let mut candidates = vec![
-        PathBuf::from(r"C:\models\Qwen3.8-27B-Q4_K_M.gguf"),
-        PathBuf::from("/models/Qwen3.8-27B-Q4_K_M.gguf"),
-    ];
-    if let Ok(home) = std::env::var("HOME") {
-        candidates.push(Path::new(&home).join("models/Qwen3.8-27B-Q4_K_M.gguf"));
-    }
-    candidates.into_iter().find(|p| p.exists())
 }
 
 fn tokenizer() -> Option<Tokenizer> {
     let Some(path) = model() else {
         eprintln!(
-            "tokenizer fixture: no GGUF (set HIPML_GGUF), skipping id-equality gate; \
-             fixtures are {} and {}",
+            "SKIP tokenizer fixture: HIPML_GGUF is not set, so the tokenizer \
+             id-equality gate and the chat-template gate did not run. Set \
+             HIPML_GGUF to the GGUF the fixtures were captured from. \
+             Fixtures: {} and {}",
             CORPUS, TEMPLATE
         );
         return None;

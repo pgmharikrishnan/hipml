@@ -7,13 +7,20 @@ script only talks HTTP). One call per server instance, because the first prefill
 of a fresh slot is the one whose `timings` we want.
 
   # build a ~100K-token prompt from the calibration corpus and measure
-  python scripts/llm_depth.py --port 8092 --corpus C:\\models\\calib_longctx.txt \
-      --target 100000 --prompt C:\\models\\prompt100k.txt --out f16.json
+  python scripts/llm_depth.py --port 8092 --corpus %HIPML_LONGCTX_CORPUS% \
+      --target 100000 --prompt bench\\out\\prompt100k.txt --out f16.json
+
+  --corpus defaults to $HIPML_LONGCTX_CORPUS; the committed corpus is
+  bench/prompts/longdoc.txt. --prompt defaults to bench/out/prompt100k.txt.
 """
 import argparse
 import json
+import os
 import sys
 import urllib.request
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_PROMPT = os.path.join(ROOT, "bench", "out", "prompt100k.txt")
 
 TARGET_TOKENS = 100_000
 
@@ -64,12 +71,21 @@ def build_prompt(port, corpus, target, out_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8092)
-    ap.add_argument("--prompt", required=True, help="prompt file to read/write")
-    ap.add_argument("--corpus", help="build the prompt from this text first")
+    ap.add_argument("--prompt", default=DEFAULT_PROMPT,
+                    help="prompt file to read/write (default: "
+                         "bench/out/prompt100k.txt)")
+    ap.add_argument("--corpus", default=os.environ.get("HIPML_LONGCTX_CORPUS"),
+                    help="build the prompt from this text first (default: "
+                         "$HIPML_LONGCTX_CORPUS or bench/prompts/longdoc.txt)")
+    ap.add_argument("--out", default=None,
+                    help="result JSON (default: <prompt>.json)")
     ap.add_argument("--target", type=int, default=TARGET_TOKENS)
-    ap.add_argument("--out", required=True)
     ap.add_argument("--n-predict", type=int, default=128)
     args = ap.parse_args()
+
+    if not args.out:
+        args.out = os.path.splitext(args.prompt)[0] + ".json"
+    os.makedirs(os.path.dirname(os.path.abspath(args.prompt)), exist_ok=True)
 
     if args.corpus:
         text, toks = build_prompt(args.port, args.corpus, args.target, args.prompt)

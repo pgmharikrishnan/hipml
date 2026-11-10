@@ -9,7 +9,7 @@
 //! `--reps N` keeps the weights resident and builds a fresh `GpuEngine` for
 //! every repetition. That is a genuinely cold run (zeroed KV, zeroed GDN
 //! state, `pos = 0`) without paying the 17 GB upload again, which is what the
-//! bench needs to get five cold prefill numbers inside one GPU-lock window.
+//! bench needs to get five cold prefill numbers inside one shared-GPU window.
 //! `--json` makes the result machine-readable for `bench/job.py`.
 //!
 //! `--stage-report` additionally runs the synchronised stage breakdown once,

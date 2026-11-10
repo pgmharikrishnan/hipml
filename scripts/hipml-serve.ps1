@@ -21,14 +21,25 @@
   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\hipml-serve.ps1
 
 .EXAMPLE
-  # 8 slots on 16K, log to D:\logs
+  # 8 slots on 16K, logs under <repo>\logs
   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\hipml-serve.ps1 `
-      -Slots 8 -Ctx 16384 -LogDir D:\logs
+      -Slots 8 -Ctx 16384
+
+.NOTES
+  Paths come from the environment, not from this file:
+
+    HIPML_EXE       the hipml binary (default: <repo>\target\release\hipml.exe)
+    HIPML_GGUF      the target GGUF (required)
+    HIPML_MTP_GGUF  the MTP drafter (optional; --mtp is omitted when unset)
+    HIP_PATH        your ROCm SDK root (required; <root>\bin goes on PATH)
+    HIPML_ARCH      offload arch (default: gfx1201)
+
+  Logs go to <repo>\logs unless -LogDir says otherwise.
 #>
 param(
-    [string]$Exe = "C:\hipml-release\target\release\hipml.exe",
-    [string]$Gguf = "C:\models\Qwen3.8-27B-Q4_K_M.gguf",
-    [string]$Mtp = "C:\models\mtp-Qwen3.8-27B-Q4_0.gguf",
+    [string]$Exe = $(if ($env:HIPML_EXE) { $env:HIPML_EXE } else { Join-Path (Split-Path -Parent $PSScriptRoot) 'target\release\hipml.exe' }),
+    [string]$Gguf = $env:HIPML_GGUF,
+    [string]$Mtp = $env:HIPML_MTP_GGUF,
     [string]$HostAddr = "127.0.0.1",
     [int]$Port = 8093,
     [int]$Slots = 16,
@@ -36,7 +47,7 @@ param(
     [int]$Chunk = 256,
     [int]$Drafts = 1,
     [int]$MaxQueue = -1,
-    [string]$LogDir = "C:\hipml-release\logs",
+    [string]$LogDir = (Join-Path (Split-Path -Parent $PSScriptRoot) 'logs'),
     [int]$ReadyTimeoutS = 300,
     [int]$BackoffStartS = 2,
     [int]$BackoffMaxS = 60,
@@ -44,19 +55,30 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $Gguf) {
+    throw "set HIPML_GGUF (or pass -Gguf) to the target GGUF"
+}
+if (-not $env:HIP_PATH) {
+    throw "set HIP_PATH to your ROCm SDK root (the directory that holds bin\)"
+}
+if ($Drafts -gt 0 -and $Mtp -and -not (Test-Path $Mtp)) {
+    throw "HIPML_MTP_GGUF points at a missing file: $Mtp"
+}
+
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
-$env:HIP_PATH = "C:\rocm-sdk\_rocm_sdk_core"
-$env:HIPML_ARCH = "gfx1201"
-if (-not ($env:PATH -split ';' -contains "C:\rocm-sdk\_rocm_sdk_core\bin")) {
-    $env:PATH = "C:\rocm-sdk\_rocm_sdk_core\bin;" + $env:PATH
+if (-not $env:HIPML_ARCH) { $env:HIPML_ARCH = "gfx1201" }
+$hipBin = Join-Path $env:HIP_PATH "bin"
+if (-not (($env:PATH -split ';') -contains $hipBin)) {
+    $env:PATH = "$hipBin;$env:PATH"
 }
 
 $serverArgs = @(
     "serve", "--gguf", $Gguf, "--host", $HostAddr, "--port", "$Port",
     "--ctx", "$Ctx", "--slots", "$Slots", "--chunk", "$Chunk", "--drafts", "$Drafts"
 )
-if ($Drafts -gt 0 -and (Test-Path $Mtp)) { $serverArgs += @("--mtp", $Mtp) }
+if ($Drafts -gt 0 -and $Mtp) { $serverArgs += @("--mtp", $Mtp) }
 if ($MaxQueue -ge 0) { $serverArgs += @("--max-queue", "$MaxQueue") }
 
 $child = $null
