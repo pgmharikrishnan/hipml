@@ -32,21 +32,21 @@ nine; what differs is *how*, and that is the whole of the cost:
 | IQ4_XS | 23 | block form: `gemv_iq4_xs` (+ `_b`), `prefill_iq4_xs(_w2h)` | 1:1 |
 | IQ4_NL | 20 | block form: `gemv_iq4_nl` (+ `_b`), `prefill_iq4_nl(_w2h)` | 1:1 |
 | F32 | 0 | as stored (`gemv_f32`, `prefill_f32`) | 1:1 |
-| Q3_K | 11 | **expanded to F32 at load** (host `dequant_q3_k`), then the F32 path | 4.00× |
-| IQ3_S | 21 | **expanded to F32 at load** (host `dequant_iq3_s`), then the F32 path | 4.00× |
+| Q3_K | 11 | **expanded to F32 at load** (host `dequant_q3_k`), then the F32 path | 9.31× |
+| IQ3_S | 21 | **expanded to F32 at load** (host `dequant_iq3_s`), then the F32 path | 9.31× |
 
 - The six block types stay in their GGUF blocks in VRAM; the dequant happens
   inside the GEMV or the dequant-in-shared prefill tile, never into a resident
   copy.
 - Q3_K and IQ3_S are the exception: there is no block-form decode kernel for
   them, so the loader dequantises those rows on the host once at load and
-  uploads F32. They are 4× their file size.
+  uploads F32. A 110-byte 256-value block becomes 1,024 bytes, so they cost
+  9.31× their file size — the largest expansion in the format mix.
 - Both UD files load with `unsupported: none` and round-trip 866/866
-  byte-identical. On `UD-Q4_K_M` the expansion is **4 tensors,
-  153,190,400 B on disk → 1,426,063,360 B resident (+1,272,872,960 B,
-  +1.19 GiB)**. `UD-Q4_K_XL` expands the same four tensors, 153,190,400 B →
-  612,761,600 B (**+459,571,200 B, +0.43 GiB**; from the table below, not
-  re-measured in this tree).
+  byte-identical. In both, the same **4 tensors, 153,190,400 B on disk →
+  1,426,063,360 B resident (+1,272,872,960 B, +1.19 GiB)**:
+  `UD-Q4_K_M` finishes at 17,826,136,064 B (16.60 GiB) resident, `UD-Q4_K_XL`
+  at 18,821,054,464 B (17.53 GiB).
 - Still unmeasured: Q3_K and IQ3_S never run in block form (by design — the
   row count is small enough that expansion is the cheap choice), the 64-row
   f32-tile `prefill_iq4_*` entries are wired but the default WMMA path selects
@@ -114,21 +114,20 @@ the same.
 | F32 | 360 | 10,686,464 | 0.01 | 0.01 | as stored |
 | total | 866 | 16,553,263,104 | 15.42 | **16.60** | |
 
-`Qwen3.8-27B-UD-Q4_K_XL.gguf` (bytes as stored; the four Q3_K/IQ3_S tensors
-become 4× resident at load, see above):
+`Qwen3.8-27B-UD-Q4_K_XL.gguf`, measured in this tree:
 
-| type | tensors | bytes | GiB | engine |
-| --- | ---: | ---: | ---: | --- |
-| Q5_K | 191 | 7,926,251,520 | 7.38 | block form |
-| IQ4_XS (23) | 70 | 3,125,084,160 | 2.91 | block form |
-| Q4_K | 69 | 3,059,712,000 | 2.85 | block form |
-| Q6_K | 56 | 2,862,182,400 | 2.67 | block form |
-| IQ4_NL (20) | 6 | 280,166,400 | 0.26 | block form |
-| Q8_0 | 110 | 130,908,160 | 0.12 | block form |
-| Q3_K (11) | 3 | 114,892,800 | 0.11 | expanded to F32 |
-| IQ3_S (21) | 1 | 38,297,600 | 0.04 | expanded to F32 |
-| F32 | 360 | 10,686,464 | 0.01 | as stored |
-| total | 866 | 17,548,181,504 | 16.34 | |
+| type | tensors | bytes | GiB | resident | engine |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Q5_K | 191 | 7,926,251,520 | 7.38 | 7.38 | block form |
+| IQ4_XS (23) | 70 | 3,125,084,160 | 2.91 | 2.91 | block form |
+| Q4_K | 69 | 3,059,712,000 | 2.85 | 2.85 | block form |
+| Q6_K | 56 | 2,862,182,400 | 2.67 | 2.67 | block form |
+| IQ4_NL (20) | 6 | 280,166,400 | 0.26 | 0.26 | block form |
+| Q8_0 | 110 | 130,908,160 | 0.12 | 0.12 | block form |
+| Q3_K (11) | 3 | 114,892,800 | 0.11 | 1.00 | expanded to F32 |
+| IQ3_S (21) | 1 | 38,297,600 | 0.04 | 0.33 | expanded to F32 |
+| F32 | 360 | 10,686,464 | 0.01 | 0.01 | as stored |
+| total | 866 | 17,548,181,504 | 16.34 | **17.53** | |
 
 `Qwen3.8-27B-UD-Q6_K_XL.gguf`:
 
@@ -158,9 +157,12 @@ UD-Q4_K_M: 866 tensors  16,553,263,104 B (15.42 GiB)  read+upload 5.51 s (3.01 G
            round-trip 866/866 byte-identical
            embedding rows 0/1/1234/100000/248319: 5120/5120 exact, max_abs 0
            lm_head Q6_K 248,320 logits in 5.002 ms (208.5 GB/s)
-Q4_K_XL: 866 tensors  17,548,181,504 B (16.34 GiB)  read+upload 10.42 s (1.68 GB/s)
-         hipMemGetInfo free 34,023,604,224 -> 16,448,159,744 B
-         resident delta 17,575,444,480 B (16.37 GiB)  [before the F32 expansion]
+Q4_K_XL: 866 tensors  17,548,181,504 B (16.34 GiB)  read+upload 11.25 s (1.56 GB/s)
+         hipMemGetInfo free 34,023,604,224 -> 15,175,450,624 B
+         resident delta 18,848,153,600 B (17.55 GiB)
+         expanded at load: 4 tensors, 153,190,400 B -> 1,426,063,360 B (+1.19 GiB)
+         unsupported: none
+         round-trip 866/866 byte-identical
 Q6_K_XL: 866 tensors  25,288,065,024 B (23.55 GiB)  read+upload 16.55 s (1.53 GB/s)
          resident delta 25,263,079,424 B (23.53 GiB); 8.76 GB free after
 ```
@@ -322,7 +324,7 @@ python bench/job.py --engine llama --prompt prose_explanation --depth 0 --reps 3
 | `hipml oracle-gate` (stock Q4_K_M, 169 ids, chunk 2048) | PASS, 20/20, max abs 0.1481 at 34114 |
 | `hipml oracle-gate` (UD-Q4_K_M, 169 ids, chunk 2048) | PASS, 20/20, max abs 0.1019 at 29832 |
 | Fine-tune generation after the config change | 64 layers, 8 tokens emitted |
-| Q4_K_XL load checks | 4/4 byte-identical, embeddings 5120/5120 exact |
+| Q4_K_XL load checks | 866/866 byte-identical, embeddings 5120/5120 exact |
 | UD-Q4_K_M load checks | 866/866 byte-identical, embeddings 5120/5120 exact |
 | tokenizer, 20 strings × 2 modes | 40/40 ids identical |
 | template, 3 single-turn cases | text and ids identical |
