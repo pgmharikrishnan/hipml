@@ -31,3 +31,6 @@ the current numbers are in [`../release-run.md`](../release-run.md).
 | [`review-levers.md`](review-levers.md) | review | 2026-11-09 | what is left to win, ranked by expected gain | WMMA skinny GEMM and MTP identified |
 | [`review4-server-audit.md`](review4-server-audit.md) | review 4 | 2026-11-10 | adversarial server audit: exactness, malformed input, stress | the malformed-input cases are 400s, server stays up |
 | [`wp48-tokenizer-fidelity.md`](wp48-tokenizer-fidelity.md) | WP48 | 2026-11-09 | the tokenizer and template fixtures | 266 strings and 16 conversations match llama |
+| [`wp52.md`](wp52.md) | WP52 | 2026-11-10 | the split-K ffn scratch was sized from the chunk, not the tile; `splitk-gate` | 8,193-token prefill completes in 6.72 s |
+| [`mtp-batch.md`](mtp-batch.md) | WP50 | 2026-11-10 | MTP drafting per slot inside one verify pass; the schedule is `R = floor(16/B) - 1` | B=8 R=1 166.5 tok/s aggregate, 1.13× plain, token-exact |
+| [`integrate.md`](integrate.md) | WP50–WP53 | 2026-11-11 | the split-K fix and MTP-over-batch merged onto the server tree | 20/20 oracle at step 19 = 41020; 8,193-token prefill 6.82 s |

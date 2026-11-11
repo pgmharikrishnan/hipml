@@ -32,7 +32,7 @@ B=8→1) and MTP off at B=16, from the `B·(1+R) ≤ 16` 16-row verify tile.
 | `cargo test --workspace` (local and gpu-host) | all suites pass; 1 hip unit test (`split_scratch_cap_covers_every_selectable_tile`) passes on gpu-host |
 | `cargo check --workspace --features hip` | clean |
 | `oracle-gate --ids-file p2_math_169.ids --steps 20 --chunk 2048 --kv q8` | **20/20**, step 19 = **41020** |
-| 20-id acceptance | PASS, 20/20; the string is model-specific and is in [`release-run.md`](release-run.md) |
+| 20-id acceptance | PASS, 20/20; the string is model-specific and is in [`release-run.md`](../release-run.md) |
 | `parity --deep` | 56 passed, 0 failed, 1 skipped (`sample_top_p_f32`, host-only) |
 | `parity prefill --deep` | 6 passed, 0 failed, 0 skipped |
 | `splitk-gate` synthetic | PASS 44/44, worst \|dlogit\| 0.0112 ≤ 0.05 |
@@ -58,7 +58,7 @@ tile 4 slots 67.3 vs exact 66.1, tile 8 slots 106.9 vs exact 75.2.
 * Full `mtp-batch-bench` matrix (B=4, B=16, admission, exact `_b` mode) was not
   re-run on the merged tree; the two operating-point cells above were.
 * The 8,193 gpu-bench cell reports last id **293** on this tree (twice, and
-  6.74/6.78 s); `docs/wp52.md` records 852 for the same command. This tree's
+  6.74/6.78 s); `wp52.md` records 852 for the same command. This tree's
   `gpu/prefill.rs`, `prefill_launch.rs` and `gpu_bench_cmd.rs` are byte-identical
   to `feat/splitk-fix`, and WP51 did not touch them, so 852 cannot be produced
   by the shipped split path. It is most likely a `HIPML_SPLITK=0` or pre-fix
