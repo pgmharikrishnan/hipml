@@ -133,3 +133,15 @@ The GPU lock, status checked before every acquire, released between windows and 
 at the end. Holds: 23:49:18-00:09:31Z (20m13s, 13 s over the 20-minute target
 because the oracle and both deep-parity passes ran in one window), 00:09:42-
 00:13:36Z (3m54s), 00:14:11-00:21:54Z (7m43s), and a sub-minute probe window.
+
+## Re-run on the published tree
+
+Re-verified at tip `c816388` with the binary built from that tree, SHA-256 `eb4cf305e92543e51742b3f93fd2c853f56851e53e0ba2659efd04c9e2b2698d`; raw logs in [`bench/release/gates3/`](../bench/release/gates3/).
+
+- `load` on `Qwen3.8-27B-Q4_K_M.gguf`: 866 tensors, 16,799,719,424 B, `unsupported: none`, 20/20 round-trip byte-identical — [`load.out`](../bench/release/gates3/load.out).
+- `oracle-gate --ids-file bench/fixtures/p2_math_169.ids --steps 20 --chunk 2048 --kv q8`: 20/20, step 19 = **1420** — [`oracle-gate.out`](../bench/release/gates3/oracle-gate.out).
+- `cache-gate`: capture @8192 refused (needs 1,174.6 MiB, cap 1,024 MiB), legacy diverges at id 0, fallback ids equal cold ids (20 tokens) — [`cache-gate.out`](../bench/release/gates3/cache-gate.out).
+- `generate --text "The capital of France is" --tokens 64 --stop-eos --device`: 63 greedy ids, `stopped=false`, text `Paris. ... Lisbon.`, last ids `14227 369 31785 13 198 760 6511 314` — [`generate-stock.out`](../bench/release/gates3/generate-stock.out).
+- 20-id acceptance (`--ids 760,6511,314,9338,369`): `11751 13 198 760 6511 314 9564 369 19241 13 198 760 6511 314 14898 369 21047 13 198 760` — [`acceptance-20id.out`](../bench/release/gates3/acceptance-20id.out).
+
+`crates/**` is byte-identical to the earlier full gate run (`dd62925`), so the other gates above carry over.
