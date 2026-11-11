@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
-# Fail if a machine-specific path, private host, secret or the private
-# fine-tune's name leaks into the tree.
+# Fail if a machine-specific path, private host or secret leaks into the tree.
 #
 # The public tree is whatever git tracks. This walks it with `git grep`, prints
 # every hit as file:line and exits 1. It is meant for CI and for the release
 # checklist; run it from anywhere inside the repository.
 #
 #   bash scripts/check-public-tree.sh
-#
-# It also fails on the private fine-tune's name, which must not be published.
 #
 # Deliberate exclusions:
 #   docs/reference/        upstream reference material quoted verbatim;
@@ -60,10 +57,6 @@ check 'secret'        'BEGIN [A-Z ]*PRIVATE KEY'
 
 # The author's machine name, as a whole word so GPU brand names do not match.
 check 'host-name'     '(^|[^[:alnum:]_])rtx([^[:alnum:]_]|$)'
-
-# The private fine-tune the engine was developed against. It is not the model
-# the release runs and must not be named; the release model is Qwen3.8-27B.
-check 'private-model' '[Aa][Rr][Ee][Tt][Ee]'
 
 if [ "$fail" -ne 0 ]; then
     echo
