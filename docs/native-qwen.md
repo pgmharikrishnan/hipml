@@ -28,7 +28,7 @@ Both stock files carry the MTP (`nextn`) block **inline** as `blk.64.*`;
 - The Q6_K_XL file avoids every IQ type, loads 23.55 GiB, and stops at its
   Q6_K embedding (`token_embd.weight: expected Q4_K, found Q6_K`). Its next
   blocker is three Q5_K attention projections.
-- Implementing IQ4_XS is out of scope by instruction ("no new quant format").
+- Implementing IQ4_XS is out of scope: v0.1.0 adds no new quant format.
   Q6_K_XL needs no new *format* — it needs a Q6_K embedding-row kernel and a
   Q5_K attention path — but neither was added here. See "If this is unblocked".
 
