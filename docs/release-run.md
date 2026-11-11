@@ -156,9 +156,9 @@ speedup is against plain greedy on the same ids.
 The draft stream is token-exact against plain greedy over the whole stream in
 every cell (`exact` column). Raw: `bench/release/mtp/`.
 
-CLI `spec-bench` (gate model, 128 tokens) agrees: drafts 0/1/2/3 at
-29.15 / 43.07 / 47.84 / 45.59 tok/s, 128/128 exact on every row
-(`bench/release/gates/gateE.out`).
+CLI `spec-bench` on the stock model (128 tokens) agrees: drafts 0/1/2/3 at
+29.46 / 46.47 / 55.54 / 56.03 tok/s, 128/128 exact on every row
+(`bench/release/gates2/spec-bench.out`).
 
 ## Server, 1 / 8 / 16 slots
 

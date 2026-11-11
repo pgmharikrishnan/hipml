@@ -3,6 +3,8 @@
 This is the GPU runbook behind [`release-run.md`](release-run.md). Every expected
 value below is a line from that file; if your card disagrees, record the whole
 log (GPU, driver, ROCm, binary SHA-256, command line) and report it as new data.
+[`final-gates.md`](final-gates.md) is the recorded run of this gate list on tree
+`dd62925` with the stock model; compare your own output against it.
 
 The run is one GPU, one OS, one driver: Radeon AI PRO R9700 (`gfx1201`, 32 GiB),
 Windows 11 Pro build 26200, driver 32.0.32015.7029, ROCm 7.2.1. Close every
