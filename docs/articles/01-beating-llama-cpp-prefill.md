@@ -51,7 +51,7 @@ So the honest batch claim is narrow. Exact batching wins at eight slots and lose
 
 ## MTP is the honest answer to the decode gap
 
-The one lever the project found that raises single-stream decode is speculation. A sidecar holds the model's next-token-prediction block; it drafts up to three tokens and the target verifies them in one weight pass. On the five chat prompts in the release run that is 1.53× to 2.00× (44.79 to 58.60 tok/s against 29.29 to 29.43), and every cell is token-exact against plain greedy: 384/384, 384/384, 65/65, 174/174, 100/100. [Article 03](03-mtp-speculative-decoding-exact.md) covers the mechanism and the server bug it exposed.
+The one lever the project found that raises single-stream decode is speculation. A sidecar holds the model's next-token-prediction block; it drafts up to three tokens and the target verifies them in one weight pass. On the five chat prompts in the release run that is 1.53× to 2.00× (44.79 to 58.60 tok/s against a plain 25.14 to 29.43), and every cell is token-exact against plain greedy: 384/384, 384/384, 65/65, 174/174, 100/100. [Article 03](03-mtp-speculative-decoding-exact.md) covers the mechanism and the server bug it exposed.
 
 The caveat matters: those cells are f32 KV. MTP at q8 KV on the stock model is implemented but not measured, so the decode column above is plain decode, not the speculative path.
 
