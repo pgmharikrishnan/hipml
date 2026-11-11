@@ -8,9 +8,10 @@ or sanitized, but the evidence is unchanged.
 > *Engineering log from development; internal work-package IDs and paths have
 > been sanitized or removed where they were machine-specific.*
 
-Commit hashes quoted inside a note refer to the internal development tree, not
-to the public history; the v0.1.0 release commit names the internal source
-commit. For the current numbers, read [`../release-run.md`](../release-run.md).
+Commit hashes quoted inside a note come from the pre-publication history: the
+author identity was normalised at publication, so they cannot be resolved in
+this repository. The measurements and controls are what the notes are for, and
+the current numbers are in [`../release-run.md`](../release-run.md).
 
 | file | work package | date | what it decided | headline number |
 |---|---|---|---|---|
