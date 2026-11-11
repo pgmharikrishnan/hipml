@@ -356,7 +356,8 @@ impl<'a> SsmGpuLayer<'a> {
 
 /// One projection over the chunk: the tiled GEMM when the format has one, else
 /// the batched GEMV, one weight pass per 128 rows. Q5_K (a UD dynamic quant's
-/// attention/SSM projections) has no dequant-in-shared tile kernel.
+/// attention/SSM projections) streams its blocks through `prefill_q5_k`; the
+/// batched GEMV stays as the `HIPML_Q5K_COPY_GB=0` fallback.
 #[allow(clippy::too_many_arguments)]
 fn chunk_gemm(
     l: &Launcher,
@@ -371,7 +372,16 @@ fn chunk_gemm(
     half: bool,
 ) -> Result<(), String> {
     if entry == "gemv_q5_k" {
-        return l.gemv_batched_rows(crate::GEMV_B_Q5K, w, x, y, m, k, tokens);
+        if !crate::q5_tile_prefill_enabled() {
+            return l.gemv_batched_rows(crate::GEMV_B_Q5K, w, x, y, m, k, tokens);
+        }
+        // The Q5_K fp16-activation entry exists only in the v2 shape; other
+        // paths read the f32 tile rather than feeding halfs to an f32 kernel.
+        let e = prefill_entry(entry)?;
+        if half && crate::prefill_entry_for_half(e).is_some() {
+            return crate::prefill_resident_half(l.module(), l.stream(), e, w, xh, y, m, k, tokens);
+        }
+        return crate::prefill_resident(l.module(), l.stream(), e, w, x, y, m, k, tokens);
     }
     let e = prefill_entry(entry)?;
     if half {
@@ -387,6 +397,7 @@ fn prefill_entry(gemv: &str) -> Result<&'static str, String> {
     match gemv {
         "gemv_q4_k" => Ok("prefill_q4_k"),
         "gemv_q6_k" => Ok("prefill_q6_k"),
+        "gemv_q5_k" => Ok("prefill_q5_k"),
         "gemv_q8_0" => Ok("prefill_q8_0"),
         other => Err(format!("{other}: no tiled prefill kernel")),
     }

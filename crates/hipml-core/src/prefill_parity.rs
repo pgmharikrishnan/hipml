@@ -9,8 +9,8 @@
 use crate::ops;
 use crate::parity::Tol;
 use crate::quant::{
-    random_q4_k_bytes, random_q6_k_bytes, random_q8_0_bytes, Q4_K_BYTES, Q6_K_BYTES, Q8_0_BYTES,
-    QK_K,
+    random_q4_k_bytes, random_q5_k_bytes, random_q6_k_bytes, random_q8_0_bytes, Q4_K_BYTES,
+    Q5_K_BYTES, Q6_K_BYTES, Q8_0_BYTES, QK_K,
 };
 use crate::rng::Rng;
 
@@ -47,6 +47,7 @@ impl PrefillCase {
     pub fn row_bytes(&self) -> usize {
         match self.name {
             "prefill_q4_k" | "gemm_skinny_q4_k" => self.k / QK_K * Q4_K_BYTES,
+            "prefill_q5_k" | "gemm_skinny_q5_k" => self.k / QK_K * Q5_K_BYTES,
             "prefill_q6_k" | "gemm_skinny_q6_k" => self.k / QK_K * Q6_K_BYTES,
             "prefill_q8_0" | "gemm_skinny_q8_0" => self.k / 32 * Q8_0_BYTES,
             _ => 0,
@@ -62,6 +63,12 @@ impl PrefillCase {
 fn build_q4_k(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
     let (w, x) = inputs_q4_k(seed, m, k, tokens);
     let y = ops::gemm_q4_k(&w, &x, tokens, m, k);
+    (w, x, y)
+}
+
+fn build_q5_k(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
+    let (w, x) = inputs_q5_k(seed, m, k, tokens);
+    let y = ops::gemm_q5_k(&w, &x, tokens, m, k);
     (w, x, y)
 }
 
@@ -84,6 +91,13 @@ fn inputs_q4_k(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f3
     (w, x)
 }
 
+fn inputs_q5_k(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f32>) {
+    let mut rng = Rng::new(seed);
+    let w = random_q5_k_bytes(&mut rng, m * k / QK_K);
+    let x: Vec<f32> = (0..tokens * k).map(|_| rng.normal()).collect();
+    (w, x)
+}
+
 fn inputs_q6_k(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f32>) {
     let mut rng = Rng::new(seed);
     let w = random_q6_k_bytes(&mut rng, m * k / QK_K);
@@ -98,7 +112,7 @@ fn inputs_q8_0(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f3
     (w, x)
 }
 
-/// Parity: three formats at a small shape, plus one real Qwen3.8-27B shape.
+/// Parity: each format at a small shape, plus one real Qwen3.8-27B shape.
 pub fn prefill_cases() -> Vec<PrefillCase> {
     vec![
         PrefillCase {
@@ -111,6 +125,17 @@ pub fn prefill_cases() -> Vec<PrefillCase> {
             tokens: 4,
             build: build_q4_k,
             inputs: inputs_q4_k,
+        },
+        PrefillCase {
+            name: "prefill_q5_k",
+            label: "prefill_q5_k 64x512 t=4",
+            tol: Tol::DEFAULT,
+            seed: 0x9F11_0007,
+            m: 64,
+            k: 512,
+            tokens: 4,
+            build: build_q5_k,
+            inputs: inputs_q5_k,
         },
         PrefillCase {
             name: "prefill_q6_k",
@@ -155,6 +180,17 @@ pub fn prefill_cases() -> Vec<PrefillCase> {
             tokens: 40,
             build: build_q6_k,
             inputs: inputs_q6_k,
+        },
+        PrefillCase {
+            name: "prefill_q5_k",
+            label: "prefill_q5_k 64x512 t=40",
+            tol: Tol::DEFAULT,
+            seed: 0x9F11_0008,
+            m: 64,
+            k: 512,
+            tokens: 40,
+            build: build_q5_k,
+            inputs: inputs_q5_k,
         },
         PrefillCase {
             name: "prefill_q6_k",

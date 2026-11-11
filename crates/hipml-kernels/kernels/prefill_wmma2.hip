@@ -146,6 +146,13 @@ static __device__ __forceinline__ pww2_u4 pww2_loadraw(const unsigned char* __re
     } else if (KIND == 2) {
         const int blk = v >> 5, part = (v & 31) >> 3;
         pww2_ld8b(rp + (size_t)blk * PF_Q8_0_BLOCK_BYTES + 2 + part * 8, r, 1);
+    } else if (KIND == 4) {
+        // Q5_K needs both byte runs an 8-value chunk touches: 8 qs bytes (low
+        // nibble side) and the 8 qh bytes that carry the fifth bit.
+        const int blk = v >> 8, within = v & 255, g = within >> 6;
+        const unsigned char* b = rp + (size_t)blk * PF_Q5K_BLOCK_BYTES;
+        pww2_ld8b(b + 48 + g * 32 + (within & 31), r, 1);
+        pww2_ld8b(b + 16 + (within & 31), r, 0);
     } else {
         __builtin_memcpy(&r, rp + (size_t)v * 2, 16);
     }
@@ -196,6 +203,24 @@ static __device__ __forceinline__ void pww2_dequant8(const pww2_u4& r,
         const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
 #pragma unroll
         for (int i = 0; i < 8; ++i) out[i] = d * (float)(signed char)pww2_b(r.x, r.y, i);
+    } else if (KIND == 4) {
+        const int blk = v >> 8, within = v & 255, sub = within >> 5, g = within >> 6;
+        const unsigned char* b = rp + (size_t)blk * PF_Q5K_BLOCK_BYTES;
+        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
+        const float dmin = __half2float(pf_ldh(reinterpret_cast<const __half*>(b + 2)));
+        int sc, mn;
+        pf_scale_min(sub, b + 4, &sc, &mn);
+        const float scale = d * (float)sc;
+        const float minv = dmin * (float)mn;
+        const bool high = (sub & 1) != 0;
+        const unsigned int bit = high ? (2u << (2 * g)) : (1u << (2 * g));
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int qs = pww2_b(r.x, r.y, i);
+            const int nib = high ? (qs >> 4) : (qs & 0xF);
+            const int qh = pww2_b(r.z, r.w, i);
+            out[i] = scale * (float)(nib + ((qh & bit) ? 16 : 0)) - minv;
+        }
     } else {
 #pragma unroll
         for (int i = 0; i < 8; ++i) out[i] = __half2float(pww2_h(r, i));
@@ -535,6 +560,13 @@ extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) pref
     pww2_body<2, false>(w, x, y, m, k, tokens);
 }
 
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q5_k_w2(const unsigned char* __restrict__ w,
+                                            const float* __restrict__ x,
+                                            float* __restrict__ y, int m, int k, int tokens)
+{
+    pww2_body<4, false>(w, x, y, m, k, tokens);
+}
+
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_halfw_w2(const unsigned char* __restrict__ w,
                                             const float* __restrict__ x,
                                             float* __restrict__ y, int m, int k, int tokens)
@@ -561,6 +593,13 @@ extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) pref
                                             float* __restrict__ y, int m, int k, int tokens)
 {
     pww2_body<2, true>(w, x, y, m, k, tokens);
+}
+
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q5_k_w2h(const unsigned char* __restrict__ w,
+                                            const void* __restrict__ x,
+                                            float* __restrict__ y, int m, int k, int tokens)
+{
+    pww2_body<4, true>(w, x, y, m, k, tokens);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_halfw_w2h(const unsigned char* __restrict__ w,
@@ -596,6 +635,14 @@ extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) pref
                                                int ks)
 {
     pww2_body_split<2, true>(w, x, y, scratch, m, k, tokens, ks);
+}
+
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q5_k_w2h_sk(const unsigned char* __restrict__ w,
+                                            const void* __restrict__ x,
+                                            float* __restrict__ y, float* __restrict__ scratch, int m, int k, int tokens,
+                                            int ks)
+{
+    pww2_body_split<4, true>(w, x, y, scratch, m, k, tokens, ks);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_halfw_w2h_sk(const unsigned char* __restrict__ w,

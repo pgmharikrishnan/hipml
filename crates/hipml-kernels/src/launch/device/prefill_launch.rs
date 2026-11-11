@@ -234,6 +234,7 @@ pub fn prefill_entry_for_half(name: &str) -> Option<&'static str> {
     let name = crate::prefill_entry_for(name).unwrap_or(name);
     Some(match name {
         "prefill_q4_k_w2" => "prefill_q4_k_w2h",
+        "prefill_q5_k_w2" => "prefill_q5_k_w2h",
         "prefill_q6_k_w2" => "prefill_q6_k_w2h",
         "prefill_q8_0_w2" => "prefill_q8_0_w2h",
         "prefill_halfw_w2" => "prefill_halfw_w2h",
@@ -271,6 +272,7 @@ pub fn prefill_resident_half(
 fn split_entry(name: &str) -> Option<&'static str> {
     Some(match name {
         "prefill_q4_k_w2h" => "prefill_q4_k_w2h_sk",
+        "prefill_q5_k_w2h" => "prefill_q5_k_w2h_sk",
         "prefill_q6_k_w2h" => "prefill_q6_k_w2h_sk",
         "prefill_q8_0_w2h" => "prefill_q8_0_w2h_sk",
         "prefill_halfw_w2h" => "prefill_halfw_w2h_sk",

@@ -15,6 +15,7 @@
 #define PF_PREFILL_COMMON_INC
 
 #define PF_Q4K_BLOCK_BYTES 144
+#define PF_Q5K_BLOCK_BYTES 176
 #define PF_Q6K_BLOCK_BYTES 210
 #define PF_Q8_0_BLOCK_BYTES 34
 
@@ -58,7 +59,7 @@ static __device__ __forceinline__ void pf_scale_min(int j, const unsigned char* 
 }
 
 // Dequantise 8 contiguous values of one row, starting at value index `v`
-// (a multiple of 8). KIND: 0 Q4_K, 1 Q6_K, 2 Q8_0, 3 already-half.
+// (a multiple of 8). KIND: 0 Q4_K, 1 Q6_K, 2 Q8_0, 3 already-half, 4 Q5_K.
 template <int KIND>
 static __device__ __forceinline__ void pf_dequant8(const unsigned char* __restrict__ rp,
                                                    int v, float* out)
@@ -106,6 +107,32 @@ static __device__ __forceinline__ void pf_dequant8(const unsigned char* __restri
             const int nib = high ? (qb >> 4) : (qb & 0xF);
             out[i] = scale * (float)((nib | (hb << 4)) - 32);
         }
+    } else if (KIND == 4) {
+        // Q5_K: Q4_K's scale/min packing and qs nibbles plus the `qh` fifth
+        // bit, `1 << 2g` for the low half of each 64-value group and `2 << 2g`
+        // for the high half (dequantize_row_q5_K).
+        const int blk = v >> 8;
+        const int within = v & 255;
+        const int sub = within >> 5;
+        const int g = within >> 6;
+        const int part = (within & 31) >> 3;
+        const unsigned char* b = rp + (size_t)blk * PF_Q5K_BLOCK_BYTES;
+        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
+        const float dmin = __half2float(pf_ldh(reinterpret_cast<const __half*>(b + 2)));
+        int sc, mn;
+        pf_scale_min(sub, b + 4, &sc, &mn);
+        const float scale = d * (float)sc;
+        const float minv = dmin * (float)mn;
+        const bool high = (sub & 1) != 0;
+        const unsigned int bit = high ? (2u << (2 * g)) : (1u << (2 * g));
+        const unsigned char* qp = b + 48 + g * 32 + part * 8;
+        const unsigned char* hp = b + 16 + part * 8;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int nib = high ? (pf_ld8(qp + i) >> 4) : (pf_ld8(qp + i) & 0xF);
+            const int q = nib + ((pf_ld8(hp + i) & bit) ? 16 : 0);
+            out[i] = scale * (float)q - minv;
+        }
     } else {
         const int blk = v >> 5;
         const int part = (v & 31) >> 3;
@@ -124,6 +151,7 @@ static __device__ __forceinline__ size_t pf_row_bytes(int k, int kind)
     return kind == 3 ? (size_t)k * 2
          : kind == 0 ? (size_t)(k / 256) * PF_Q4K_BLOCK_BYTES
          : kind == 1 ? (size_t)(k / 256) * PF_Q6K_BLOCK_BYTES
+         : kind == 4 ? (size_t)(k / 256) * PF_Q5K_BLOCK_BYTES
                      : (size_t)(k / 32) * PF_Q8_0_BLOCK_BYTES;
 }
 

@@ -14,7 +14,8 @@
 
 use crate::kv::{self, KvDtype};
 use crate::quant::{
-    dequant_q4_k, dequant_q6_k, dequant_q8_0, Q4_K_BYTES, Q6_K_BYTES, Q8_0_BYTES, Q8_0_VALUES, QK_K,
+    dequant_q4_k, dequant_q5_k, dequant_q6_k, dequant_q8_0, Q4_K_BYTES, Q5_K_BYTES, Q6_K_BYTES,
+    Q8_0_BYTES, Q8_0_VALUES, QK_K,
 };
 
 /// `y[m] = W[m,k] · x[k]`
@@ -81,6 +82,14 @@ pub fn softplus_f32(x: f32) -> f32 {
 /// every token, which is the same arithmetic in the same k order.
 pub fn gemm_q4_k(w: &[u8], x: &[f32], tokens: usize, m: usize, k: usize) -> Vec<f32> {
     gemm_quant_blocks(w, x, tokens, m, k, QK_K, Q4_K_BYTES, dequant_q4_k)
+}
+
+/// `y[t,m] = W[m,k] · x[t,k]` with `W` stored as Q5_K blocks, row-major.
+///
+/// Same contract as `gemm_q4_k`: the shared weight tile is dequantised once and
+/// reused for every token, which is the arithmetic the Q5_K tile kernel does.
+pub fn gemm_q5_k(w: &[u8], x: &[f32], tokens: usize, m: usize, k: usize) -> Vec<f32> {
+    gemm_quant_blocks(w, x, tokens, m, k, QK_K, Q5_K_BYTES, dequant_q5_k)
 }
 
 /// `y[t,m] = W[m,k] · x[t,k]` with `W` stored as Q6_K blocks, row-major.

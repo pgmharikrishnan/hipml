@@ -821,6 +821,21 @@ pub fn prefill_half() -> bool {
     prefill_path() != PrefillPath::F32
 }
 
+/// Q5_K prefill route: the dequant-in-shared tile kernel (`prefill_q5_k`) is
+/// the default. `HIPML_Q5K_COPY_GB` is also read by the resident loader, which
+/// copies the Q5_K blocks to fp16 when the file's total fits in the budget it
+/// names; setting it to exactly `0` keeps the old batched-GEMV fallback as well,
+/// so the two prefill routes can be measured without a rebuild.
+pub fn q5_tile_prefill_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("HIPML_Q5K_COPY_GB")
+            .ok()
+            .map(|v| v.trim() != "0")
+            .unwrap_or(true)
+    })
+}
+
 /// The occupancy-shape prefill kernels (`prefill_wmma2.hip`). On by default on
 /// the wmma path; `HIPML_PREFILL_V2=0` selects the shipped `prefill_wmma.hip`
 /// shape. They keep the shipped kernel's k order, so switching between them is
@@ -841,6 +856,7 @@ pub fn prefill_entry_for(name: &str) -> Option<&'static str> {
         (PrefillPath::Dot2, "prefill_q8_0") => "prefill_q8_0_h",
         (PrefillPath::Dot2, "prefill_halfw") => "prefill_halfw_h",
         (PrefillPath::Wmma, "prefill_q4_k") if w2 => "prefill_q4_k_w2",
+        (PrefillPath::Wmma, "prefill_q5_k") if w2 => "prefill_q5_k_w2",
         (PrefillPath::Wmma, "prefill_q6_k") if w2 => "prefill_q6_k_w2",
         (PrefillPath::Wmma, "prefill_q8_0") if w2 => "prefill_q8_0_w2",
         (PrefillPath::Wmma, "prefill_halfw") if w2 => "prefill_halfw_w2",

@@ -92,6 +92,15 @@ They are required by the forward pass, so `quant::dequant_q5_k` was added
 (port of `dequantize_row_q5_K`, ggml-quants.c:1741). This is the one place the
 reference reads a format that was declared out of scope.
 
+An Unsloth UD dynamic quant uses Q5_K far more widely (115 tensors in
+`Qwen3.8-27B-UD-Q6_K.gguf`), so the format also has a dequant-in-shared prefill
+GEMM: `prefill_q5_k.hip` dequantises a 64-row weight tile once for a 256-token
+block (`prefill_q5_k`), with the WMMA occupancy shape in `prefill_wmma2.hip`
+(`prefill_q5_k_w2`, `prefill_q5_k_w2h`, `prefill_q5_k_w2h_sk`). The tile
+expression is Q4_K's `y = d*scale*q - dmin*min` with `q = qs_nibble + 16*bit`
+from `qh`, where the bit for value `j` is `1 << 2g` for `j % 64 < 32` and
+`2 << 2g` for the high half of the 64-value group `g`.
+
 ## Tokenizer
 
 `tokenizer.ggml.model = "gpt2"`, `tokenizer.ggml.pre = "qwen35"`, no BOS.

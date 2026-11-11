@@ -119,6 +119,7 @@ mod imp {
             Ok(match self.kind {
                 Kind::Q4K => "prefill_q4_k",
                 Kind::Q6K => "prefill_q6_k",
+                Kind::Q5K => "prefill_q5_k",
                 Kind::Q8_0 => "prefill_q8_0",
                 other => {
                     return Err(format!(
