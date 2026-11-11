@@ -76,6 +76,9 @@ The last scope is why a supervisor exists: `scripts/hipml-serve.ps1` restarts a
 crashed server with a 2 s → 60 s backoff that resets after a stable run. It
 restarts a crashed server, not a wedged one.
 
+A prompt longer than the slot context is refused at admission with a `500` that
+names the overflow, not a `400`, and it is on the known-gaps list.
+
 ```powershell
 $env:HIPML_GGUF     = "D:\models\Qwen3.8-27B-Q4_K_M.gguf"
 $env:HIPML_MTP_GGUF = "D:\models\mtp-Qwen3.8-27B-Q4_0.gguf"
