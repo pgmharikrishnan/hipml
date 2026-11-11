@@ -9,10 +9,12 @@
 //! trivial. Uploads happen once, synchronously, before `load` returns, so the
 //! residency figure is a settled number and not a queue depth.
 //!
-//! Quantized payloads are uploaded byte-for-byte (Q4_K, Q5_K, Q6_K, Q8_0) and
-//! stay in their on-disk block layout; `F32` is uploaded as raw little-endian
-//! f32. Q5_K has no numeric dequant yet, so its bytes are loaded and the tensor
-//! is marked `supported() == false` rather than failing the load.
+//! Quantized payloads are uploaded byte-for-byte (Q4_K, Q5_K, Q6_K, Q8_0, IQ4)
+//! and stay in their on-disk block layout; `F32` is uploaded as raw
+//! little-endian f32. Q3_K and IQ3_S have a host dequant but no device kernel,
+//! so those tensors are expanded to f32 during the upload: `ty()` reports the
+//! resident `F32`, `disk_ty()`/`disk_nbytes()` keep the file's type and size,
+//! and every consumer sees an ordinary F32 matrix.
 
 #[cfg(feature = "hip")]
 pub mod gpu;
@@ -25,7 +27,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use hipml_core::gguf::Gguf;
-use hipml_core::quant::{TensorType, QK_K};
+use hipml_core::quant::{dequant_iq3_s, dequant_q3_k, TensorType, QK_K};
 use hipml_hip::ByteBuffer;
 use hipml_kernels::Launcher;
 
@@ -38,8 +40,14 @@ pub const OUTPUT: &str = "output.weight";
 pub struct DeviceTensor {
     name: String,
     dims: Vec<u64>,
+    /// Resident type: what the uploaded bytes are.
     ty: TensorType,
+    /// Resident bytes.
     nbytes: u64,
+    /// Type in the GGUF; differs from `ty` only for host-expanded tensors.
+    disk_ty: TensorType,
+    /// Bytes the tensor occupies in the GGUF.
+    disk_nbytes: u64,
     supported: bool,
     buffer: ByteBuffer,
 }
@@ -63,8 +71,25 @@ impl DeviceTensor {
         self.ty
     }
 
+    /// The GGUF tensor type, before any load-time expansion.
+    pub fn disk_ty(&self) -> TensorType {
+        self.disk_ty
+    }
+
+    /// Resident bytes: 4 per value for an expanded tensor, the file size
+    /// otherwise.
     pub fn nbytes(&self) -> u64 {
         self.nbytes
+    }
+
+    /// Bytes this tensor occupies in the GGUF.
+    pub fn disk_nbytes(&self) -> u64 {
+        self.disk_nbytes
+    }
+
+    /// True when the loader dequantised this tensor to F32 on the host.
+    pub fn expanded(&self) -> bool {
+        self.disk_ty != self.ty
     }
 
     /// False for formats whose bytes load but have no numeric dequant yet.
@@ -102,23 +127,36 @@ impl DeviceTensor {
     }
 }
 
-/// Per-dtype residency total.
+/// Per-dtype residency total. `bytes` is the GGUF footprint and
+/// `resident_bytes` what the upload allocated (larger for expanded tensors).
 pub struct TypeTotal {
     pub ty: String,
     pub tensors: usize,
     pub bytes: u64,
+    pub resident_bytes: u64,
+}
+
+/// Load-time expansion of Q3_K / IQ3_S to F32.
+#[derive(Default)]
+pub struct ExpansionTotal {
+    pub tensors: usize,
+    pub disk_bytes: u64,
+    pub resident_bytes: u64,
 }
 
 /// What the load did, with the numbers the acceptance gate asks for.
 pub struct LoadReport {
     pub file_bytes: u64,
     pub tensor_count: usize,
+    /// Tensor bytes in the GGUF.
     pub tensor_bytes: u64,
     pub free_before: usize,
     pub free_after: usize,
+    /// Resident bytes allocated for the tensor table.
     pub total_device_bytes: usize,
     pub upload_secs: f64,
     pub per_type: Vec<TypeTotal>,
+    pub expansion: ExpansionTotal,
     /// `(name, dtype, bytes)` for tensors loaded but not numerically supported.
     pub unsupported: Vec<(String, String, u64)>,
 }
@@ -142,7 +180,8 @@ pub struct Model {
 fn supported(ty: TensorType) -> bool {
     // Q5_K has a decode GEMV (`gemv_q5_k`), a batched GEMV and an fp16-copy
     // prefill path; it is a fine-tune tensor type too (`blk.51/55.ffn_down`),
-    // so treating it as raw-only was wrong.
+    // so treating it as raw-only was wrong. Q3_K and IQ3_S arrive as F32 after
+    // the load-time expansion.
     matches!(
         ty,
         TensorType::F32
@@ -152,7 +191,36 @@ fn supported(ty: TensorType) -> bool {
             | TensorType::Q8_0
             | TensorType::IQ4XS
             | TensorType::IQ4NL
+            | TensorType::Q3K
+            | TensorType::IQ3S
     )
+}
+
+/// Host dequant to little-endian f32 for the formats no device kernel reads.
+/// The payload is still block-laid-out, so one call per 256-value block.
+fn expand_to_f32(ty: TensorType, raw: &[u8]) -> Result<Vec<u8>, String> {
+    let dequant: fn(&[u8], &mut [f32]) = match ty {
+        TensorType::Q3K => dequant_q3_k,
+        TensorType::IQ3S => dequant_iq3_s,
+        other => return Err(format!("{} is not expanded at load", other.name())),
+    };
+    let block_bytes = ty.block_bytes();
+    if block_bytes == 0 || raw.len() % block_bytes != 0 {
+        return Err(format!(
+            "{}: {} bytes is not a whole number of {block_bytes}-byte blocks",
+            ty.name(),
+            raw.len()
+        ));
+    }
+    let blocks = raw.len() / block_bytes;
+    let mut values = vec![0.0f32; blocks * QK_K];
+    for b in 0..blocks {
+        dequant(
+            &raw[b * block_bytes..(b + 1) * block_bytes],
+            &mut values[b * QK_K..(b + 1) * QK_K],
+        );
+    }
+    Ok(values.iter().flat_map(|v| v.to_le_bytes()).collect())
 }
 
 fn mem_info() -> Result<(usize, usize), String> {
@@ -181,7 +249,9 @@ impl Model {
         let infos = g.tensors.clone();
         let mut tensors = Vec::with_capacity(infos.len());
         let mut unsupported = Vec::new();
+        let mut file_tensor_bytes = 0u64;
         let mut total_bytes = 0u64;
+        let mut expansion = ExpansionTotal::default();
         let start = Instant::now();
 
         for info in &infos {
@@ -196,19 +266,37 @@ impl Model {
                     info.nbytes
                 ));
             }
-            let buffer = ByteBuffer::from_host(&raw).map_err(|e| {
-                format!("{}: upload of {} bytes failed: {e}", info.name, info.nbytes)
+            let disk_ty = info.ty;
+            let (ty, payload) = if matches!(disk_ty, TensorType::Q3K | TensorType::IQ3S) {
+                (TensorType::F32, expand_to_f32(disk_ty, &raw)?)
+            } else {
+                (disk_ty, raw)
+            };
+            let resident_bytes = payload.len() as u64;
+            let buffer = ByteBuffer::from_host(&payload).map_err(|e| {
+                format!(
+                    "{}: upload of {} bytes failed: {e}",
+                    info.name, resident_bytes
+                )
             })?;
-            let ok = supported(info.ty);
-            if !ok {
-                unsupported.push((info.name.clone(), info.ty.name(), info.nbytes));
+            if ty != disk_ty {
+                expansion.tensors += 1;
+                expansion.disk_bytes += info.nbytes;
+                expansion.resident_bytes += resident_bytes;
             }
-            total_bytes += info.nbytes;
+            let ok = supported(disk_ty);
+            if !ok {
+                unsupported.push((info.name.clone(), disk_ty.name(), info.nbytes));
+            }
+            file_tensor_bytes += info.nbytes;
+            total_bytes += resident_bytes;
             tensors.push(DeviceTensor {
                 name: info.name.clone(),
                 dims: info.dims.clone(),
-                ty: info.ty,
-                nbytes: info.nbytes,
+                ty,
+                nbytes: resident_bytes,
+                disk_ty,
+                disk_nbytes: info.nbytes,
                 supported: ok,
                 buffer,
             });
@@ -229,10 +317,12 @@ impl Model {
         ] {
             let mut n = 0usize;
             let mut bytes = 0u64;
+            let mut resident_bytes = 0u64;
             for t in &tensors {
-                if t.ty.name() == name {
+                if t.disk_ty.name() == name {
                     n += 1;
-                    bytes += t.nbytes;
+                    bytes += t.disk_nbytes;
+                    resident_bytes += t.nbytes;
                 }
             }
             if n > 0 {
@@ -240,6 +330,7 @@ impl Model {
                     ty: name.to_string(),
                     tensors: n,
                     bytes,
+                    resident_bytes,
                 });
             }
         }
@@ -247,12 +338,13 @@ impl Model {
         let report = LoadReport {
             file_bytes,
             tensor_count: tensors.len(),
-            tensor_bytes: total_bytes,
+            tensor_bytes: file_tensor_bytes,
             free_before,
             free_after,
             total_device_bytes: total_bytes as usize,
             upload_secs,
             per_type,
+            expansion,
             unsupported,
         };
         Ok((
@@ -296,18 +388,30 @@ impl Model {
                     info.nbytes
                 ));
             }
-            let buffer = ByteBuffer::from_host(&raw).map_err(|e| {
-                format!("{}: upload of {} bytes failed: {e}", info.name, info.nbytes)
+            let disk_ty = info.ty;
+            let (ty, payload) = if matches!(disk_ty, TensorType::Q3K | TensorType::IQ3S) {
+                (TensorType::F32, expand_to_f32(disk_ty, &raw)?)
+            } else {
+                (disk_ty, raw)
+            };
+            let resident_bytes = payload.len() as u64;
+            let buffer = ByteBuffer::from_host(&payload).map_err(|e| {
+                format!(
+                    "{}: upload of {} bytes failed: {e}",
+                    info.name, resident_bytes
+                )
             })?;
-            let ok = supported(info.ty);
-            self.total_bytes += info.nbytes;
-            added += info.nbytes;
+            let ok = supported(disk_ty);
+            self.total_bytes += resident_bytes;
+            added += resident_bytes;
             self.index.insert(info.name.clone(), self.tensors.len());
             self.tensors.push(DeviceTensor {
                 name: info.name.clone(),
                 dims: info.dims.clone(),
-                ty: info.ty,
-                nbytes: info.nbytes,
+                ty,
+                nbytes: resident_bytes,
+                disk_ty,
+                disk_nbytes: info.nbytes,
                 supported: ok,
                 buffer,
             });

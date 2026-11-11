@@ -61,7 +61,9 @@ pub fn batch_kind_for(kind: hipml_core::mat::Kind) -> Option<i32> {
         Kind::Q6K => launch::GEMV_B_Q6K,
         Kind::Q5K => launch::GEMV_B_Q5K,
         Kind::Q8_0 => launch::GEMV_B_Q80,
-        Kind::F32 => return None,
+        Kind::IQ4XS => launch::GEMV_B_IQ4XS,
+        Kind::IQ4NL => launch::GEMV_B_IQ4NL,
+        Kind::F32 | Kind::Q3K | Kind::IQ3S => return None,
     })
 }
 

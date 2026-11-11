@@ -85,6 +85,52 @@ impl Launcher {
         if batch == 0 || batch > 128 {
             return Err(format!("batched GEMV: batch {batch} outside 1..=128"));
         }
+        self.gemv_batched_at(
+            kind,
+            w,
+            x.as_ptr() as *mut u8,
+            y.as_ptr() as *mut u8,
+            m,
+            k,
+            batch,
+        )
+    }
+
+    /// `gemv_batched` over any row count: one weight pass per 128-row window.
+    /// A prefill tile of a format with no tiled GEMM can be 2048 rows, and the
+    /// `_b` launch stops at 128.
+    pub fn gemv_batched_rows(
+        &self,
+        kind: i32,
+        w: &ByteBuffer,
+        x: &Buffer,
+        y: &Buffer,
+        m: usize,
+        k: usize,
+        rows: usize,
+    ) -> Result<(), String> {
+        let mut base = 0usize;
+        while base < rows {
+            let r = (rows - base).min(128);
+            let px = unsafe { (x.as_ptr() as *mut u8).add(base * k * 4) };
+            let py = unsafe { (y.as_ptr() as *mut u8).add(base * m * 4) };
+            self.gemv_batched_at(kind, w, px, py, m, k, r)?;
+            base += r;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gemv_batched_at(
+        &self,
+        kind: i32,
+        w: &ByteBuffer,
+        px: *mut u8,
+        py: *mut u8,
+        m: usize,
+        k: usize,
+        batch: usize,
+    ) -> Result<(), String> {
         // Opt-in only. The exact `_b` kernels keep each row's accumulation
         // order identical to the single-sequence GEMV, so the default batched
         // path is bit-identical (gemv-check, column-check). The WMMA tile is
@@ -104,8 +150,8 @@ impl Launcher {
                     if std::env::var_os("HIPML_BATCH_SKINNY_TRACE").is_some() {
                         eprintln!("[skinny] {entry} m={m} k={k} r={r} row0={base}");
                     }
-                    let px = unsafe { (x.as_ptr() as *mut u8).add(base * k * 4) as *const _ };
-                    let py = unsafe { (y.as_ptr() as *mut u8).add(base * m * 4) as *const _ };
+                    let px = unsafe { px.add(base * k * 4) } as *const _;
+                    let py = unsafe { py.add(base * m * 4) } as *const _;
                     super::skinny_launch::skinny_resident_rows(
                         &self.module,
                         &self.stream,
@@ -149,8 +195,8 @@ impl Launcher {
             };
             let shared = r * tile * 4;
             let mut p_w = w.as_ptr();
-            let mut p_x = unsafe { (x.as_ptr() as *mut u8).add(base * k * 4) as *mut c_void };
-            let mut p_y = unsafe { (y.as_ptr() as *mut u8).add(base * m * 4) as *mut c_void };
+            let mut p_x = unsafe { px.add(base * k * 4) } as *mut c_void;
+            let mut p_y = unsafe { py.add(base * m * 4) } as *mut c_void;
             let mut v_m = m as i32;
             let mut v_k = k as i32;
             let mut v_b = r as i32;

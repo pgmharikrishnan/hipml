@@ -61,6 +61,9 @@ fn prefill_entry(gemv: &str) -> Result<&'static str, String> {
         "gemv_q8_0" => "prefill_q8_0",
         "gemv_iq4_xs" => "prefill_iq4_xs",
         "gemv_iq4_nl" => "prefill_iq4_nl",
+        // A tensor the loader expanded to F32 (Q3_K / IQ3_S) prefill through
+        // the raw-f32 tile; there is no fp16-activation sibling for it.
+        "gemv_f32" => "prefill_f32",
         other => return Err(format!("{other}: no tiled prefill kernel")),
     })
 }
@@ -82,8 +85,17 @@ pub(crate) fn mat_kind(ty: TensorType) -> Result<Kind, String> {
     Ok(match ty {
         TensorType::F32 => Kind::F32,
         TensorType::Q4K => Kind::Q4K,
+        TensorType::Q5K => Kind::Q5K,
         TensorType::Q6K => Kind::Q6K,
         TensorType::Q8_0 => Kind::Q8_0,
+        TensorType::IQ4XS => Kind::IQ4XS,
+        TensorType::IQ4NL => Kind::IQ4NL,
+        TensorType::Q3K | TensorType::IQ3S => {
+            return Err(format!(
+                "{} is expanded to F32 at load and has no block kind",
+                ty.name()
+            ))
+        }
         other => return Err(format!("{} is not a supported mat kind", other.name())),
     })
 }
@@ -298,6 +310,13 @@ impl<'a> Proj<'a> {
 
     pub(crate) fn bytes(&self) -> usize {
         self.w.len() + self.q5_half.as_ref().map_or(0, |b| b.len())
+    }
+
+    /// Whether [`Proj::gemm_half`] can serve this format. F32 weights (the
+    /// loader's expansion of Q3_K / IQ3_S) have no fp16-activation tile, so
+    /// the caller passes the f32 activation to [`Proj::gemm`] instead.
+    pub(crate) fn has_half(&self) -> bool {
+        self.q5_half.is_some() || prefill_entry_half(self.entry).is_ok()
     }
 }
 

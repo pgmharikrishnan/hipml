@@ -11,7 +11,8 @@ use std::fs::File;
 use hipml_core::gguf::Gguf;
 use hipml_core::parity::quant_bench_cases;
 use hipml_core::quant::{
-    dequant_iq4_nl, dequant_iq4_xs, dequant_q4_k, dequant_q6_k, dequant_q8_0, TensorType,
+    dequant_iq3_s, dequant_iq4_nl, dequant_iq4_xs, dequant_q3_k, dequant_q4_k, dequant_q6_k,
+    dequant_q8_0, TensorType,
 };
 use hipml_kernels::Launcher;
 
@@ -151,6 +152,16 @@ fn read_one(g: &mut Gguf<File>, name: &str) -> i32 {
             println!("first 8 values: {vals:?}");
         }
         TensorType::Q5K => println!("Q5_K read OK (no dequant preview)"),
+        TensorType::Q3K => {
+            let mut out = [0.0f32; 256];
+            dequant_q3_k(&raw[..110], &mut out);
+            println!("first 8 dequantised: {:?}", &out[..8]);
+        }
+        TensorType::IQ3S => {
+            let mut out = [0.0f32; 256];
+            dequant_iq3_s(&raw[..110], &mut out);
+            println!("first 8 dequantised: {:?}", &out[..8]);
+        }
         TensorType::IQ4XS => {
             let mut out = [0.0f32; 256];
             dequant_iq4_xs(&raw[..136], &mut out);

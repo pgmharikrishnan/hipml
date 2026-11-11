@@ -8,9 +8,10 @@
 
 use hipml_core::ops;
 use hipml_core::quant::{
-    dequant_iq4_nl, dequant_iq4_xs, dequant_q4_k, dequant_q6_k, dequant_q8_0, f16_to_f32,
-    gemv_iq4_nl, gemv_iq4_xs, gemv_q4_k, gemv_q6_k, TensorType, IQ4_NL_BYTES, IQ4_NL_VALUES,
-    IQ4_XS_BYTES, Q4_K_BYTES, Q6_K_BYTES, Q8_0_BYTES, QK_K,
+    dequant_iq3_s, dequant_iq4_nl, dequant_iq4_xs, dequant_q3_k, dequant_q4_k, dequant_q6_k,
+    dequant_q8_0, f16_to_f32, gemv_iq3_s, gemv_iq4_nl, gemv_iq4_xs, gemv_q3_k, gemv_q4_k,
+    gemv_q6_k, TensorType, IQ3S_GRID, IQ3_S_BYTES, IQ4_NL_BYTES, IQ4_NL_VALUES, IQ4_XS_BYTES,
+    Q3_K_BYTES, Q4_K_BYTES, Q6_K_BYTES, Q8_0_BYTES, QK_K,
 };
 
 #[test]
@@ -338,6 +339,226 @@ fn iq4_gemv_reduces_the_dequantised_block() {
     assert_eq!(gemv_iq4_xs(&xs, &hot, 1, QK_K), vec![xs_out[150]]);
 }
 
+/// Q3_K super-block built by hand.
+///
+///   d      = 0.5 (fp16 0x3800)
+///   scales = 12 bytes that unpack to the 16 six-bit scales
+///            [32, 35, 28, 40, 16, 48, 0, 63, 33, 2, 61, 20, 44, 7, 55, 30]
+///   hmask  = (i*7+3) & 0xff
+///   qs     = (i*5+1) & 0xff
+///
+/// so `scale - 32` is [0, 3, -4, 8, -16, 16, -32, 31, 1, -30, 29, -12, 12,
+/// -25, 23, -2]: zero, negative and positive scales in one block. The two
+/// 128-value halves take `hmask` bits 1..8, so both halves and both the
+/// `-4` and the signed-quant branch are exercised. Expected bytes come from an
+/// independent Python transcription of `dequantize_row_q3_K`
+/// (docs/reference/ggml-quants.c:1315).
+fn q3_k_hand_block() -> [u8; Q3_K_BYTES] {
+    let mut b = [0u8; Q3_K_BYTES];
+    for i in 0..32 {
+        b[i] = ((i as u16 * 7 + 3) & 0xFF) as u8;
+    }
+    for i in 0..64 {
+        b[32 + i] = ((i as u16 * 5 + 1) & 0xFF) as u8;
+    }
+    b[96..108].copy_from_slice(&[16, 35, 220, 72, 192, 112, 112, 239, 166, 14, 241, 94]);
+    b[108..110].copy_from_slice(&0x3800u16.to_le_bytes()); // d = 0.5
+    b
+}
+
+#[test]
+fn q3_k_hand_computed_vector() {
+    let expected: [u32; QK_K] = [
+        0x00000000, 0x80000000, 0x00000000, 0x80000000, 0x00000000, 0x80000000, 0x00000000,
+        0x80000000, 0x00000000, 0x80000000, 0x00000000, 0x80000000, 0x00000000, 0x80000000,
+        0x00000000, 0x80000000, 0x3FC00000, 0xC0400000, 0x40900000, 0xC0C00000, 0x3FC00000,
+        0xC0400000, 0x40900000, 0xC0C00000, 0x3FC00000, 0xC0400000, 0x40900000, 0xC0C00000,
+        0x3FC00000, 0xC0400000, 0x40900000, 0xC0C00000, 0x80000000, 0xC0000000, 0x40800000,
+        0x41000000, 0xC0000000, 0xC0800000, 0x40000000, 0x40C00000, 0xC0800000, 0xC0C00000,
+        0x41000000, 0x40800000, 0xC0C00000, 0x80000000, 0x40C00000, 0x40000000, 0x00000000,
+        0x40800000, 0xC1000000, 0xC1800000, 0x40800000, 0x41000000, 0xC0800000, 0xC1400000,
+        0x41000000, 0x41400000, 0xC1800000, 0xC1000000, 0x41400000, 0x00000000, 0xC1400000,
+        0xC0800000, 0x42000000, 0x42000000, 0x42000000, 0x41C00000, 0xC1000000, 0xC1000000,
+        0xC1000000, 0xC1800000, 0x41800000, 0x41800000, 0x41000000, 0x41000000, 0xC1C00000,
+        0x80000000, 0x80000000, 0x80000000, 0xC1C00000, 0xC1C00000, 0xC1C00000, 0xC1800000,
+        0x41800000, 0x41800000, 0x41800000, 0x41C00000, 0xC1000000, 0xC1000000, 0xC2000000,
+        0xC2000000, 0x00000000, 0x41000000, 0x41000000, 0x41000000, 0x42800000, 0x80000000,
+        0x42800000, 0x80000000, 0x80000000, 0x42800000, 0x80000000, 0x42800000, 0x80000000,
+        0x42800000, 0x80000000, 0x42800000, 0x42800000, 0xC1800000, 0x42400000, 0xC1800000,
+        0xC23A0000, 0x41780000, 0xC23A0000, 0x41780000, 0x41780000, 0xC23A0000, 0x41780000,
+        0xC23A0000, 0x41780000, 0xC23A0000, 0x41F80000, 0xC1F80000, 0xC1F80000, 0x41F80000,
+        0xC1F80000, 0x41F80000, 0xBFC00000, 0xBF800000, 0x3FC00000, 0x00000000, 0x3F000000,
+        0xBF800000, 0xBF000000, 0x00000000, 0x3F000000, 0xBF800000, 0xBF000000, 0x00000000,
+        0x3F000000, 0x3F800000, 0xBF000000, 0xC0000000, 0xC1700000, 0xC1F00000, 0x41700000,
+        0x42700000, 0x42340000, 0xC1F00000, 0xC2340000, 0x42700000, 0x42340000, 0xC1F00000,
+        0xC2340000, 0x42700000, 0x42340000, 0x41F00000, 0xC2340000, 0x80000000, 0xC2680000,
+        0xC22E0000, 0xC1E80000, 0xC2680000, 0xC22E0000, 0x41E80000, 0x422E0000, 0x41680000,
+        0x41E80000, 0xC1680000, 0xC2680000, 0xC1E80000, 0xC1680000, 0xC2680000, 0x41680000,
+        0x422E0000, 0x80000000, 0xC0C00000, 0x41400000, 0x41C00000, 0x41900000, 0x41400000,
+        0x40C00000, 0xC0C00000, 0xC1400000, 0xC1900000, 0x80000000, 0x41400000, 0x40C00000,
+        0x41C00000, 0x41900000, 0x40C00000, 0xC1400000, 0xC1400000, 0xC1400000, 0xC0C00000,
+        0xC0C00000, 0xC0C00000, 0xC0C00000, 0xC1C00000, 0xC1C00000, 0x00000000, 0x40C00000,
+        0x40C00000, 0x40C00000, 0x41400000, 0x41400000, 0x41400000, 0xC2160000, 0xC2160000,
+        0x41480000, 0x42480000, 0x42480000, 0x42480000, 0x42480000, 0x42160000, 0x42160000,
+        0x42160000, 0x41C80000, 0xC1C80000, 0xC1C80000, 0xC2160000, 0xC2160000, 0xC2160000,
+        0xC1B80000, 0xC1B80000, 0xC1B80000, 0xC1B80000, 0xC1B80000, 0xC1B80000, 0xC1B80000,
+        0xC1380000, 0xC1380000, 0xC1380000, 0xC1380000, 0xC1380000, 0xC1380000, 0xC1380000,
+        0xC1380000, 0xC1380000, 0x3F800000, 0x3F800000, 0xC0400000, 0x80000000, 0x80000000,
+        0x80000000, 0x80000000, 0x80000000, 0x80000000, 0x80000000, 0x80000000, 0x80000000,
+        0x80000000, 0x80000000, 0x80000000, 0x80000000,
+    ];
+    let mut out = [0.0f32; QK_K];
+    dequant_q3_k(&q3_k_hand_block(), &mut out);
+    for j in 0..QK_K {
+        assert_eq!(
+            out[j].to_bits(),
+            expected[j],
+            "value {j}: got {}, want {}",
+            out[j],
+            f32::from_bits(expected[j])
+        );
+    }
+    // The first 16 values are the zero-scale sub-block, signs included.
+    assert!(out[..16].iter().all(|v| *v == 0.0));
+    assert!(out.iter().any(|v| *v < 0.0) && out.iter().any(|v| *v > 0.0));
+}
+
+/// IQ3_S super-block built by hand:
+///   d      = 0.5 (fp16 0x3800)
+///   qs     = (i*13+5) & 0xff          (grid index low 8 bits)
+///   qh     = [0xA5, 0x3C, 0xFF, 0x01, 0x80, 0x55, 0x0F, 0xF0]  (ninth bit)
+///   signs  = (i*37+11) & 0xff         (one bit per value)
+///   scales = [0x3A, 0xC5, 0x71, 0x0D] (low/high nibble per 32-value pair)
+///
+/// Every `l` takes its first four values from grid entry `qs[2l]` and its last
+/// four from `qs[2l+1]` — both halves of each byte pair — and every value's
+/// sign comes from a different bit of `signs`. Expected bytes come from an
+/// independent Python transcription of `dequantize_row_iq3_s`
+/// (docs/reference/ggml-quants.c:2623) and the `iq3s_grid` table.
+fn iq3_s_hand_block() -> [u8; IQ3_S_BYTES] {
+    let mut b = [0u8; IQ3_S_BYTES];
+    b[0..2].copy_from_slice(&0x3800u16.to_le_bytes()); // d = 0.5
+    for i in 0..64 {
+        b[2 + i] = ((i as u16 * 13 + 5) & 0xFF) as u8;
+    }
+    b[66..74].copy_from_slice(&[0xA5, 0x3C, 0xFF, 0x01, 0x80, 0x55, 0x0F, 0xF0]);
+    for i in 0..32 {
+        b[74 + i] = ((i as u16 * 37 + 11) & 0xFF) as u8;
+    }
+    b[106..110].copy_from_slice(&[0x3A, 0xC5, 0x71, 0x0D]);
+    b
+}
+
+#[test]
+fn iq3_s_hand_computed_vector() {
+    let expected: [u32; QK_K] = [
+        0xC2E70000, 0xC31D8000, 0x42BD0000, 0xC2520000, 0x41FC0000, 0x42E70000, 0x41280000,
+        0x41280000, 0x41FC0000, 0x42930000, 0x41280000, 0x42930000, 0xC31D8000, 0xC1280000,
+        0x42520000, 0x41280000, 0xC1280000, 0x431D8000, 0xC2520000, 0x41280000, 0xC3088000,
+        0x41FC0000, 0xC2BD0000, 0x42930000, 0x42520000, 0xC1280000, 0x42E70000, 0xC1280000,
+        0xC31D8000, 0xC2520000, 0xC1280000, 0x42BD0000, 0xC0600000, 0xC0600000, 0xC0600000,
+        0xC1280000, 0xC2360000, 0x41C40000, 0x40600000, 0xC1280000, 0x42520000, 0x40600000,
+        0xC21A0000, 0x41FC0000, 0x41FC0000, 0x41280000, 0xC0600000, 0xC21A0000, 0xC18C0000,
+        0x41C40000, 0x41280000, 0xC21A0000, 0x41280000, 0xC21A0000, 0xC1C40000, 0xC21A0000,
+        0x41280000, 0xC0600000, 0xC2520000, 0xC1280000, 0x42520000, 0x40600000, 0x40600000,
+        0x418C0000, 0xC0B00000, 0xC0B00000, 0x42720000, 0x428F0000, 0xC28F0000, 0xC21A0000,
+        0x40B00000, 0x42A50000, 0x41840000, 0x41DC0000, 0x41DC0000, 0xC2A50000, 0xC1DC0000,
+        0x42460000, 0xC2720000, 0x42A50000, 0xC2A50000, 0x421A0000, 0xC2720000, 0xC1DC0000,
+        0xC0B00000, 0xC21A0000, 0xC2A50000, 0x41DC0000, 0x42460000, 0xC2460000, 0x40B00000,
+        0x421A0000, 0x41DC0000, 0xC2A50000, 0x41840000, 0xC21A0000, 0xC33B8000, 0xC27A0000,
+        0xC2AF0000, 0x42AF0000, 0x42AF0000, 0x42160000, 0xC2E10000, 0xC1480000, 0x43228000,
+        0x427A0000, 0xC3098000, 0xC1480000, 0x41480000, 0xC1480000, 0xC33B8000, 0xC1480000,
+        0xC1480000, 0x42160000, 0x41480000, 0x42160000, 0xC27A0000, 0x433B8000, 0x41480000,
+        0x42160000, 0x41480000, 0xC33B8000, 0xC2160000, 0x42160000, 0xC27A0000, 0xC33B8000,
+        0x427A0000, 0x42160000, 0xC1280000, 0xBFC00000, 0x41580000, 0xC0900000, 0xC0900000,
+        0x40F00000, 0xC1840000, 0x40900000, 0x40900000, 0x40F00000, 0x41B40000, 0x40900000,
+        0x419C0000, 0x40900000, 0x3FC00000, 0xC0F00000, 0xC1280000, 0x41B40000, 0xBFC00000,
+        0x40F00000, 0x40900000, 0xBFC00000, 0x40F00000, 0xC0F00000, 0x40F00000, 0xBFC00000,
+        0x41280000, 0xC0F00000, 0x41280000, 0x40F00000, 0xC1580000, 0xC0F00000, 0xC0F00000,
+        0xC0F00000, 0xC2C30000, 0xC2160000, 0x41B40000, 0xC0F00000, 0xC1B40000, 0xC0F00000,
+        0x41B40000, 0x42E10000, 0xC0F00000, 0x42520000, 0xC2160000, 0x42870000, 0x42160000,
+        0x40F00000, 0xC2E10000, 0x42870000, 0x42520000, 0xC2520000, 0xC2160000, 0xC2520000,
+        0x42870000, 0x40F00000, 0x40F00000, 0xC0F00000, 0xC0F00000, 0xC2870000, 0xC2160000,
+        0x42160000, 0xC2E10000, 0x40F00000, 0xC1580000, 0xC2F30000, 0x42870000, 0x42F30000,
+        0x42F30000, 0x42870000, 0x42F30000, 0xC2F30000, 0x41580000, 0x42BD0000, 0x434A8000,
+        0xC2F30000, 0x42220000, 0xC1580000, 0x42220000, 0xC3148000, 0xC2220000, 0x42BD0000,
+        0xC2F30000, 0xC2220000, 0x41580000, 0x42870000, 0xC32F8000, 0xC2220000, 0x41580000,
+        0xC34A8000, 0x434A8000, 0x42220000, 0xC1580000, 0xC2BD0000, 0xC1580000, 0xC2870000,
+        0xBF000000, 0xBFC00000, 0xBFC00000, 0x40200000, 0xC0600000, 0x40200000, 0x40200000,
+        0x40200000, 0x40900000, 0x40200000, 0xC0600000, 0xC0200000, 0xC0F00000, 0xBF000000,
+        0x3F000000, 0x3F000000, 0xC0B00000, 0x40B00000, 0x40D00000, 0x40200000, 0x40200000,
+        0xC0200000, 0xBF000000, 0x40600000, 0x40900000, 0xBFC00000, 0xBFC00000, 0x40600000,
+        0x3FC00000, 0x3F000000, 0x40600000, 0xC0600000,
+    ];
+    let mut out = [0.0f32; QK_K];
+    dequant_iq3_s(&iq3_s_hand_block(), &mut out);
+    for j in 0..QK_K {
+        assert_eq!(
+            out[j].to_bits(),
+            expected[j],
+            "value {j}: got {}, want {}",
+            out[j],
+            f32::from_bits(expected[j])
+        );
+    }
+    assert!(out.iter().any(|v| *v < 0.0) && out.iter().any(|v| *v > 0.0));
+    // A sign bit flips exactly one value: bit 0 of signs[0] is value 0.
+    let mut flipped = iq3_s_hand_block();
+    flipped[74] ^= 1;
+    let mut other = [0.0f32; QK_K];
+    dequant_iq3_s(&flipped, &mut other);
+    assert_eq!(other[0], -out[0]);
+    for j in 1..QK_K {
+        assert_eq!(other[j].to_bits(), out[j].to_bits(), "value {j} moved");
+    }
+}
+
+#[test]
+fn iq3_s_grid_table_matches_the_vendored_c() {
+    // Spot values from ggml-common.h `iq3s_grid`, plus the fact that every
+    // entry is four 1..15 bytes: a truncated or reordered table cannot pass
+    // both.
+    assert_eq!(IQ3S_GRID[0], 0x0101_0101);
+    assert_eq!(IQ3S_GRID[1], 0x0101_0103);
+    assert_eq!(IQ3S_GRID[255], 0x0509_0501);
+    assert_eq!(IQ3S_GRID[256], 0x0509_0507);
+    assert_eq!(IQ3S_GRID[511], 0x0F0F_0101);
+    assert!(IQ3S_GRID
+        .iter()
+        .all(|g| g.to_le_bytes().iter().all(|b| (1..=15).contains(b))));
+}
+
+#[test]
+fn q3_iq3_gemv_reduces_the_dequantised_block() {
+    let q3 = q3_k_hand_block();
+    let mut q3_out = [0.0f32; QK_K];
+    dequant_q3_k(&q3, &mut q3_out);
+    let y = gemv_q3_k(&q3, &vec![1.0f32; QK_K], 1, QK_K);
+    let want: f32 = q3_out.iter().sum();
+    assert!(
+        (y[0] - want).abs() <= want.abs() * 1e-6,
+        "got {} want {want}",
+        y[0]
+    );
+    let mut hot = vec![0.0f32; QK_K];
+    hot[200] = 1.0;
+    assert_eq!(gemv_q3_k(&q3, &hot, 1, QK_K), vec![q3_out[200]]);
+
+    let iq3 = iq3_s_hand_block();
+    let mut iq3_out = [0.0f32; QK_K];
+    dequant_iq3_s(&iq3, &mut iq3_out);
+    let y = gemv_iq3_s(&iq3, &vec![1.0f32; QK_K], 1, QK_K);
+    let want: f32 = iq3_out.iter().sum();
+    assert!(
+        (y[0] - want).abs() <= want.abs() * 1e-6,
+        "got {} want {want}",
+        y[0]
+    );
+    let mut hot = vec![0.0f32; QK_K];
+    hot[77] = 1.0;
+    assert_eq!(gemv_iq3_s(&iq3, &hot, 1, QK_K), vec![iq3_out[77]]);
+}
+
 #[test]
 fn tensor_type_sizes_match_the_ggml_blocks() {
     assert_eq!(TensorType::Q4K.nbytes(256), Some(144));
@@ -347,11 +568,18 @@ fn tensor_type_sizes_match_the_ggml_blocks() {
     assert_eq!(TensorType::IQ4NL.nbytes(32), Some(18));
     assert_eq!(TensorType::IQ4XS.nbytes(256), Some(136));
     assert_eq!(TensorType::IQ4XS.nbytes(5120 * 17408), Some(47_349_760));
+    assert_eq!(TensorType::Q3K.nbytes(256), Some(110));
+    assert_eq!(TensorType::IQ3S.nbytes(256), Some(110));
+    assert_eq!(TensorType::Q3K.nbytes(5120 * 17408), Some(38_297_600));
+    assert_eq!(TensorType::IQ3S.nbytes(5120 * 17408), Some(38_297_600));
     assert_eq!(TensorType::F32.nbytes(10), Some(40));
     assert_eq!(TensorType::Q4K.nbytes(255), None);
     assert_eq!(TensorType::Unsupported(99).nbytes(256), None);
     assert_eq!(TensorType::from_id(12), TensorType::Q4K);
     assert_eq!(TensorType::from_id(14), TensorType::Q6K);
+    assert_eq!(TensorType::from_id(11), TensorType::Q3K);
+    assert_eq!(TensorType::from_id(21), TensorType::IQ3S);
+    assert_eq!(TensorType::IQ3S.id(), 21);
 }
 
 #[test]

@@ -233,6 +233,19 @@ pub fn prefill_xhalf(
 pub fn prefill_entry_for_half(name: &str) -> Option<&'static str> {
     let name = crate::prefill_entry_for(name).unwrap_or(name);
     Some(match name {
+        // The IQ4 family has no `_w2` shape of its own: the base entry is the
+        // 64-row f32-tile kernel and `_w2h` is the 128-row fp16-tile one, so
+        // the mapping only exists on the v2 wmma path that stages `xh`.
+        "prefill_iq4_xs"
+            if crate::prefill_path() == crate::PrefillPath::Wmma && crate::prefill_v2() =>
+        {
+            "prefill_iq4_xs_w2h"
+        }
+        "prefill_iq4_nl"
+            if crate::prefill_path() == crate::PrefillPath::Wmma && crate::prefill_v2() =>
+        {
+            "prefill_iq4_nl_w2h"
+        }
         "prefill_q4_k_w2" => "prefill_q4_k_w2h",
         "prefill_q6_k_w2" => "prefill_q6_k_w2h",
         "prefill_q8_0_w2" => "prefill_q8_0_w2h",

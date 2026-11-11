@@ -9,10 +9,65 @@
 use std::path::Path;
 
 use hipml_core::gguf::Gguf;
-use hipml_core::quant::{dequant_q4_k, TensorType, QK_K};
+use hipml_core::quant::{
+    dequant_iq3_s, dequant_iq4_nl, dequant_iq4_xs, dequant_q3_k, dequant_q4_k, dequant_q5_k,
+    dequant_q6_k, dequant_q8_0, TensorType,
+};
 use hipml_core::Rng;
 
 use crate::{Model, TOKEN_EMBD};
+
+/// Host dequant of a whole block tensor, `blocks * block_values` f32.
+fn dequant_all(ty: TensorType, raw: &[u8]) -> Result<Vec<f32>, String> {
+    if ty == TensorType::F32 {
+        return Ok(raw
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect());
+    }
+    let dequant: fn(&[u8], &mut [f32]) = match ty {
+        TensorType::Q4K => dequant_q4_k,
+        TensorType::Q5K => dequant_q5_k,
+        TensorType::Q6K => dequant_q6_k,
+        TensorType::Q8_0 => dequant_q8_0,
+        TensorType::Q3K => dequant_q3_k,
+        TensorType::IQ3S => dequant_iq3_s,
+        TensorType::IQ4NL => dequant_iq4_nl,
+        TensorType::IQ4XS => dequant_iq4_xs,
+        other => return Err(format!("{}: no host dequant", other.name())),
+    };
+    let (values, bytes) = (ty.block_values(), ty.block_bytes());
+    if bytes == 0 || raw.len() % bytes != 0 {
+        return Err(format!(
+            "{}: {} bytes is not a whole number of {bytes}-byte blocks",
+            ty.name(),
+            raw.len()
+        ));
+    }
+    let blocks = raw.len() / bytes;
+    let mut out = vec![0.0f32; blocks * values];
+    for b in 0..blocks {
+        dequant(
+            &raw[b * bytes..(b + 1) * bytes],
+            &mut out[b * values..(b + 1) * values],
+        );
+    }
+    Ok(out)
+}
+
+/// Host dequant of one row of a block format, `cols` values wide.
+fn dequant_row(ty: TensorType, raw: &[u8], cols: usize) -> Result<Vec<f32>, String> {
+    let out = dequant_all(ty, raw)?;
+    if out.len() != cols {
+        return Err(format!(
+            "{}: {} bytes dequantises to {} values, row is {cols}",
+            ty.name(),
+            raw.len(),
+            out.len()
+        ));
+    }
+    Ok(out)
+}
 
 /// One tensor compared after upload.
 pub struct RoundTrip {
@@ -64,11 +119,20 @@ pub fn round_trip(
             .read_tensor(t.name())
             .map_err(|e| format!("{}: {e}", t.name()))?;
         let device = t.read_back()?;
-        let matched = file.len() == device.len() && file == device;
+        // An expanded tensor holds f32 values the loader computed on the host,
+        // so the comparison is against the same host dequant of the file row
+        // set, not against the block bytes.
+        let expected = if t.expanded() {
+            let values = dequant_all(t.disk_ty(), &file)?;
+            values.iter().flat_map(|v| v.to_le_bytes()).collect()
+        } else {
+            file
+        };
+        let matched = expected.len() == device.len() && expected == device;
         out.push(RoundTrip {
             name: t.name().to_string(),
             bytes: t.nbytes(),
-            file_hash: fnv1a(&file),
+            file_hash: fnv1a(&expected),
             device_hash: fnv1a(&device),
             matched,
         });
@@ -126,42 +190,31 @@ pub fn compare_rows(device: &[f32], cpu: &[f32]) -> Option<RowCompare> {
 }
 
 /// Dequantise one `token_embd.weight` row straight from the file with the CPU
-/// reference (`dequant_q4_k`), the number the device row is compared against.
+/// reference, the number the device row is compared against.
 pub fn cpu_embedding_row(path: &Path, token: u32) -> Result<Vec<f32>, String> {
     let mut g = Gguf::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let info = g
         .tensor(TOKEN_EMBD)
         .cloned()
         .ok_or_else(|| format!("no tensor {TOKEN_EMBD}"))?;
-    if info.ty != TensorType::Q4K {
-        return Err(format!(
-            "{TOKEN_EMBD}: expected Q4_K, found {}",
-            info.ty.name()
-        ));
-    }
     let k = info.ne0() as usize;
     let rows = info.rows();
-    if k % QK_K != 0 {
-        return Err(format!("{TOKEN_EMBD}: ne0 {k} is not a multiple of {QK_K}"));
+    if k % info.ty.block_values() != 0 {
+        return Err(format!(
+            "{TOKEN_EMBD}: ne0 {k} is not a multiple of {}",
+            info.ty.block_values()
+        ));
     }
     if token as u64 >= rows {
         return Err(format!(
             "{TOKEN_EMBD}: token {token} out of range (rows {rows})"
         ));
     }
-    let blocks = k / QK_K;
     let row_bytes = info.nbytes / rows;
     let mut raw = vec![0u8; row_bytes as usize];
     g.read_tensor_range(TOKEN_EMBD, token as u64 * row_bytes, raw.len(), &mut raw)
         .map_err(|e| format!("{TOKEN_EMBD}: {e}"))?;
-
-    let mut out = vec![0.0f32; k];
-    let mut tmp = [0.0f32; QK_K];
-    for b in 0..blocks {
-        dequant_q4_k(&raw[b * 144..(b + 1) * 144], &mut tmp);
-        out[b * QK_K..(b + 1) * QK_K].copy_from_slice(&tmp);
-    }
-    Ok(out)
+    dequant_row(info.ty, &raw, k)
 }
 
 /// Fixed lm_head probe vector: small zero-mean values, seeded so the top-5 is
