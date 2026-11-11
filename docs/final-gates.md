@@ -111,8 +111,9 @@ the release command).
   the ... token slot`), which surfaces as **500** on a non-streamed request and
   as a 200 SSE with an `error` event when streaming. No doc contradicts this;
   the status is simply unspecified.
-- `release-run.md` cites `bench/release/gates/gateE.out`, which is not in the
-  tree. The stock-model spec-bench evidence is now `gates2/spec-bench.out`.
+- The earlier `release-run.md` draft cited `bench/release/gates/gateE.out`,
+  which is not in the tree. The stock-model spec-bench evidence is
+  `gates2/spec-bench.out`.
 - With `--mtp`, the startup banner prints `0.00 GiB drafter` although MTP ran
   (`hipml_mtp_requests_total 5`). Reporting only; decode was token-exact.
 
@@ -128,7 +129,7 @@ the release command).
 
 ## GPU lock
 
-`wp57`, status checked before every acquire, released between windows and FREE
+The GPU lock, status checked before every acquire, released between windows and FREE
 at the end. Holds: 23:49:18-00:09:31Z (20m13s, 13 s over the 20-minute target
 because the oracle and both deep-parity passes ran in one window), 00:09:42-
 00:13:36Z (3m54s), 00:14:11-00:21:54Z (7m43s), and a sub-minute probe window.
