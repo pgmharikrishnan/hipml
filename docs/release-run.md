@@ -332,7 +332,8 @@ banner that points here.
 
 The engineering logs under [`notes/`](notes/) record that generation of numbers
 on purpose; each carries the "engineering log" banner and none is release copy.
-`docs/integrate.md`, `docs/mtp-batch.md` and `docs/wp52.md` are gate logs (which
-model each gate ran on is stated there and above). Everything in this file is
+[`notes/integrate.md`](notes/integrate.md), [`notes/mtp-batch.md`](notes/mtp-batch.md)
+and [`notes/wp52.md`](notes/wp52.md) are gate logs (which model each gate ran on
+is stated there and above). Everything in this file is
 superseded by this file for release copy; the older notes remain useful as
 engineering history and are labelled as such, not deleted.
