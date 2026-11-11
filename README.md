@@ -61,6 +61,9 @@ restores 2,048 tokens in 1.8 ms versus 1,614.2 ms cold.
   `n` must be 1, or the request is refused. It binds `127.0.0.1` by
   default, has no authentication, and has been stress-tested for minutes, not
   hours. Do not expose it to the public internet.
+- **An oversize prompt is a 500, not a 400.** A prompt longer than the slot
+  context is refused at admission with a `500` that names the overflow, and it
+  is on the known-gaps list.
 - **One card, one OS, one driver.** Every number here is one cold run on
   gfx1201, Windows 11 build 26200, driver 32.0.32015.7029. No other GPU, OS or
   driver has been measured.
