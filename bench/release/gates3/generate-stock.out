@@ -1,0 +1,83 @@
+prompt ids: [760, 6511, 314, 9338, 369]
+resident: 15.65 GiB in 866 tensors on AMD Radeon AI PRO R9700 (upload 4.9s)
+prefill:    chunked, 2048-token tiles
+graph: 64 layers, 15818569728 streamed bytes/token (14.73 GiB), f32 KV 9.6 MiB at ctx 77
+load: 8.6s total (resident upload + graph build)
+  [0] 11751
+  [1] 13
+  [2] 198
+  [3] 760
+  [4] 6511
+  [5] 314
+  [6] 9564
+  [7] 369
+  [8] 19241
+  [9] 13
+  [10] 198
+  [11] 760
+  [12] 6511
+  [13] 314
+  [14] 14898
+  [15] 369
+  [16] 21047
+  [17] 13
+  [18] 198
+  [19] 760
+  [20] 6511
+  [21] 314
+  [22] 17163
+  [23] 369
+  [24] 23327
+  [25] 13
+  [26] 198
+  [27] 760
+  [28] 6511
+  [29] 314
+  [30] 32208
+  [31] 369
+  [32] 77916
+  [33] 13
+  [34] 198
+  [35] 760
+  [36] 6511
+  [37] 314
+  [38] 23655
+  [39] 369
+  [40] 44299
+  [41] 13
+  [42] 198
+  [43] 760
+  [44] 6511
+  [45] 314
+  [46] 279
+  [47] 3516
+  [48] 14634
+  [49] 369
+  [50] 6924
+  [51] 13
+  [52] 198
+  [53] 760
+  [54] 6511
+  [55] 314
+  [56] 14227
+  [57] 369
+  [58] 31785
+  [59] 13
+  [60] 198
+  [61] 760
+  [62] 6511
+  [63] 314
+rep 0: prefill 31.83 tok/s (5 tokens in 157.1 ms), decode 29.75 tok/s (63 steps in 2117.7 ms, stopped=false)
+gen ids:    [11751, 13, 198, 760, 6511, 314, 9564, 369, 19241, 13, 198, 760, 6511, 314, 14898, 369, 21047, 13, 198, 760, 6511, 314, 17163, 369, 23327, 13, 198, 760, 6511, 314, 32208, 369, 77916, 13, 198, 760, 6511, 314, 23655, 369, 44299, 13, 198, 760, 6511, 314, 279, 3516, 14634, 369, 6924, 13, 198, 760, 6511, 314, 14227, 369, 31785, 13, 198, 760, 6511, 314]
+prefill:    31.83 tok/s (5 prompt tokens in 157.1 ms)
+decode:     29.75 tok/s (63 steps in 2117.7 ms, 33.61 ms/token, stopped=false)
+text:        Paris.
+The capital of Germany is Berlin.
+The capital of Italy is Rome.
+The capital of Spain is Madrid.
+The capital of Portugal is Lisbon.
+The capital of Greece is Athens.
+The capital of the United Kingdom is London.
+The capital of Ireland is Dublin.
+The capital of
+exit=0

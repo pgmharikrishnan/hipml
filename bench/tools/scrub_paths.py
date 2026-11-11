@@ -48,6 +48,7 @@ DEFAULT_FILES = [
     "bench/serve/results/**/*.json",
     "bench/integrate/*.json",
     "bench/release/gates2/*.out",
+    "bench/release/gates3/*.out",
 ]
 
 JSON_SUFFIXES = (".json", ".jsonl")
