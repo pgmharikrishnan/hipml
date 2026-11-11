@@ -1,0 +1,144 @@
+# HELP hipml_requests_total Requests admitted
+# TYPE hipml_requests_total counter
+hipml_requests_total 9
+# HELP hipml_requests_done_total Requests completed
+# TYPE hipml_requests_done_total counter
+hipml_requests_done_total 8
+# HELP hipml_requests_cancelled_total Requests ended early (client gone or stop string)
+# TYPE hipml_requests_cancelled_total counter
+hipml_requests_cancelled_total 0
+# HELP hipml_requests_failed_total Requests ended with an error
+# TYPE hipml_requests_failed_total counter
+hipml_requests_failed_total 1
+# HELP hipml_active_slots Requests prefilling or decoding (batch slots, a lone MTP request, the prefill)
+# TYPE hipml_active_slots gauge
+hipml_active_slots 0
+# HELP hipml_queue_depth Requests waiting for admission
+# TYPE hipml_queue_depth gauge
+hipml_queue_depth 0
+# HELP hipml_prompt_tokens_total Prompt tokens processed
+# TYPE hipml_prompt_tokens_total counter
+hipml_prompt_tokens_total 17222
+# HELP hipml_generated_tokens_total Tokens generated
+# TYPE hipml_generated_tokens_total counter
+hipml_generated_tokens_total 64
+# HELP hipml_decode_steps_total Scheduler decode steps
+# TYPE hipml_decode_steps_total counter
+hipml_decode_steps_total 13
+# HELP hipml_batch_steps_total Batched forward passes
+# TYPE hipml_batch_steps_total counter
+hipml_batch_steps_total 13
+# HELP hipml_batch_requests_total Requests decoded through the batch engine
+# TYPE hipml_batch_requests_total counter
+hipml_batch_requests_total 3
+# HELP hipml_mtp_requests_total Requests decoded with MTP speculation
+# TYPE hipml_mtp_requests_total counter
+hipml_mtp_requests_total 5
+# HELP hipml_spec_steps_total MTP draft+verify steps
+# TYPE hipml_spec_steps_total counter
+hipml_spec_steps_total 24
+# HELP hipml_spec_drafted_total Draft tokens proposed
+# TYPE hipml_spec_drafted_total counter
+hipml_spec_drafted_total 24
+# HELP hipml_spec_accepted_total Draft tokens accepted
+# TYPE hipml_spec_accepted_total counter
+hipml_spec_accepted_total 20
+# HELP hipml_prefix_lookups_total Prefix-cache lookups
+# TYPE hipml_prefix_lookups_total counter
+hipml_prefix_lookups_total 3
+# HELP hipml_prefix_hits_total Prefix-cache hits (any length)
+# TYPE hipml_prefix_hits_total counter
+hipml_prefix_hits_total 3
+# HELP hipml_prefix_misses_total Prefix-cache misses
+# TYPE hipml_prefix_misses_total counter
+hipml_prefix_misses_total 5
+# HELP hipml_prefix_hit_tokens_total Prompt tokens restored from cache
+# TYPE hipml_prefix_hit_tokens_total counter
+hipml_prefix_hit_tokens_total 7443
+# HELP hipml_prefix_hit_rate Fixture hit rate over lookups
+# TYPE hipml_prefix_hit_rate gauge
+hipml_prefix_hit_rate 1.000000
+# HELP hipml_prefix_restore_seconds_total Device time restoring a prefix
+# TYPE hipml_prefix_restore_seconds_total counter
+hipml_prefix_restore_seconds_total 0.024983
+# HELP hipml_prefix_captures_total Prefix snapshots taken
+# TYPE hipml_prefix_captures_total counter
+hipml_prefix_captures_total 3
+# HELP hipml_prefix_refused_total Prefix snapshots refused because one entry exceeded the cache bound
+# TYPE hipml_prefix_refused_total counter
+hipml_prefix_refused_total 0
+# HELP hipml_prefix_capture_seconds_total Device time capturing a prefix
+# TYPE hipml_prefix_capture_seconds_total counter
+hipml_prefix_capture_seconds_total 0.027147
+# HELP hipml_prefill_chunks_total Prefill tiles run by the scheduler
+# TYPE hipml_prefill_chunks_total counter
+hipml_prefill_chunks_total 43
+# HELP hipml_prefill_seconds_total Wall time in prefill tiles
+# TYPE hipml_prefill_seconds_total counter
+hipml_prefill_seconds_total 9.937501
+# HELP hipml_prefill_interleaved_total Prefill tiles run while a batch was decoding
+# TYPE hipml_prefill_interleaved_total counter
+hipml_prefill_interleaved_total 0
+# HELP hipml_interleave_stall_seconds_total Decode stall charged to interleaved prefill
+# TYPE hipml_interleave_stall_seconds_total counter
+hipml_interleave_stall_seconds_total 0.000000
+# HELP hipml_interleave_stall_seconds_max Longest single interleaved prefill tile
+# TYPE hipml_interleave_stall_seconds_max gauge
+hipml_interleave_stall_seconds_max 0.000000
+# HELP hipml_tail_row_blocks_total Row-block tail prefills run
+# TYPE hipml_tail_row_blocks_total counter
+hipml_tail_row_blocks_total 1
+# HELP hipml_tail_rows_total Prompt tail rows served by row blocks
+# TYPE hipml_tail_rows_total counter
+hipml_tail_rows_total 11
+# HELP hipml_tail_rows_seconds_total Wall time in row-block tail prefill
+# TYPE hipml_tail_rows_seconds_total counter
+hipml_tail_rows_seconds_total 0.162679
+# HELP hipml_requests_rejected_busy_total Requests answered 503 because slots and queue were full
+# TYPE hipml_requests_rejected_busy_total counter
+hipml_requests_rejected_busy_total 0
+# HELP hipml_connections_rejected_total Connections refused past the connection bound
+# TYPE hipml_connections_rejected_total counter
+hipml_connections_rejected_total 0
+# HELP hipml_inflight Generation requests admitted but not yet finished
+# TYPE hipml_inflight gauge
+hipml_inflight 0
+# HELP hipml_inflight_max Admission bound (slots + queue bound)
+# TYPE hipml_inflight_max gauge
+hipml_inflight_max 24
+# HELP hipml_connections Open connection threads
+# TYPE hipml_connections gauge
+hipml_connections 1
+# HELP hipml_connections_max Connection thread bound
+# TYPE hipml_connections_max gauge
+hipml_connections_max 64
+# HELP hipml_queue_max Admission bound minus slots (the queue bound)
+# TYPE hipml_queue_max gauge
+hipml_queue_max 16
+# HELP hipml_job_errors_total Jobs that failed alone; the engine kept serving
+# TYPE hipml_job_errors_total counter
+hipml_job_errors_total 1
+# HELP hipml_slot_faults_total Decode steps failed for one slot only
+# TYPE hipml_slot_faults_total counter
+hipml_slot_faults_total 0
+# HELP hipml_batch_resets_total Whole-batch resets after an unpinnable step failure
+# TYPE hipml_batch_resets_total counter
+hipml_batch_resets_total 0
+# HELP hipml_prefix_invalidated_total Prefix-cache entries dropped because a job failed
+# TYPE hipml_prefix_invalidated_total counter
+hipml_prefix_invalidated_total 0
+# HELP hipml_batch_exact_path 1 when batched decode is bit-exact at every B, 0 when B>=4 uses the WMMA tile
+# TYPE hipml_batch_exact_path gauge
+hipml_batch_exact_path 0
+# HELP hipml_tile_steps_total Batched decode steps that used the non-exact WMMA tile (B>=4)
+# TYPE hipml_tile_steps_total counter
+hipml_tile_steps_total 0
+# HELP hipml_warmup_seconds Load-time warm-up wall time
+# TYPE hipml_warmup_seconds gauge
+hipml_warmup_seconds 0.280139
+# HELP hipml_vram_free_bytes Device free memory
+# TYPE hipml_vram_free_bytes gauge
+hipml_vram_free_bytes 7761231872
+# HELP hipml_vram_total_bytes Device total memory
+# TYPE hipml_vram_total_bytes gauge
+hipml_vram_total_bytes 34208743424

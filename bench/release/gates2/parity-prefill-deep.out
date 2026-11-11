@@ -1,0 +1,12 @@
+device: AMD Radeon AI PRO R9700
+
+case                 result  detail
+prefill_q4_k 64x512 t=4      PASS    max_abs 4.45e-3  max_rel 1.02e-1
+prefill_q6_k 64x512 t=4      PASS    max_abs 3.15e-2  max_rel 4.44e-2
+prefill_q8_0 64x512 t=4      PASS    max_abs 1.24e-3  max_rel 7.23e-2
+prefill_q4_k 64x512 t=40     PASS    max_abs 5.73e-3  max_rel 4.51e-1
+prefill_q6_k 64x512 t=40     PASS    max_abs 3.09e-2  max_rel 1.28e-1
+prefill_q6_k 17408x5120 t=2  PASS    max_abs 1.12e-1  max_rel 2.38e1
+
+6 passed, 0 failed, 0 skipped
+exit=0

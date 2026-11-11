@@ -1,0 +1,4 @@
+first TIME=3.576614
+{"content":"\n\nIt appears you","stop":false,"tokens":[271, 2064, 7701, 488],"timings":{"prompt_n":3002,"prompt_ms":3027.634,"prompt_per_second":991.533,"predicted_n":4,"predicted_ms":92.725,"predicted_per_second":43.138,"ttft_ms":3477.550,"prefix_hit_tokens":0}}
+second TIME=0.795017
+{"content":"\n\nIt appears you","stop":false,"tokens":[271, 2064, 7701, 488],"timings":{"prompt_n":3002,"prompt_ms":671.466,"prompt_per_second":4470.813,"predicted_n":4,"predicted_ms":107.746,"predicted_per_second":37.124,"ttft_ms":681.262,"prefix_hit_tokens":2400}}
