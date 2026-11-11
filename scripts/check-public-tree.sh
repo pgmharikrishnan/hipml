@@ -11,7 +11,6 @@
 # It also fails on the private fine-tune's name, which must not be published.
 #
 # Deliberate exclusions:
-#   docs/internal-notes.md   the internal internal notes, never published;
 #   docs/reference/        upstream reference material quoted verbatim;
 #   temp/                  scratch material deleted before publication;
 #   this script            it has to contain the patterns it looks for.
@@ -23,7 +22,6 @@ set -u
 cd "$(git rev-parse --show-toplevel)" || exit 2
 
 EXCLUDES=(
-    ':!docs/internal-notes.md'
     ':!docs/reference'
     ':!temp'
     ':!scripts/check-public-tree.sh'
