@@ -48,7 +48,7 @@ pub use launch::{
     q5_tile_prefill_enabled, set_prefill_half, set_prefill_path, PrefillPath,
 };
 #[cfg(feature = "hip")]
-pub use launch::{GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
+pub use launch::{GEMV_B_IQ4NL, GEMV_B_IQ4XS, GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
 #[cfg(feature = "hip")]
 pub use launch::{GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80};
 
@@ -61,7 +61,9 @@ pub fn batch_kind_for(kind: hipml_core::mat::Kind) -> Option<i32> {
         Kind::Q6K => launch::GEMV_B_Q6K,
         Kind::Q5K => launch::GEMV_B_Q5K,
         Kind::Q8_0 => launch::GEMV_B_Q80,
-        Kind::F32 => return None,
+        Kind::IQ4XS => launch::GEMV_B_IQ4XS,
+        Kind::IQ4NL => launch::GEMV_B_IQ4NL,
+        Kind::F32 | Kind::Q3K | Kind::IQ3S => return None,
     })
 }
 
@@ -74,12 +76,14 @@ pub fn batch_kind_for(_kind: hipml_core::mat::Kind) -> Option<i32> {
 /// The batched-GEMV kind for a resident GEMV entry name.
 #[cfg(feature = "hip")]
 pub fn batch_kind_entry(entry: &str) -> Option<i32> {
-    use launch::{GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
+    use launch::{GEMV_B_IQ4NL, GEMV_B_IQ4XS, GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
     Some(match entry {
         "gemv_q4_k" => GEMV_B_Q4K,
         "gemv_q6_k" => GEMV_B_Q6K,
         "gemv_q5_k" => GEMV_B_Q5K,
         "gemv_q8_0" => GEMV_B_Q80,
+        "gemv_iq4_xs" => GEMV_B_IQ4XS,
+        "gemv_iq4_nl" => GEMV_B_IQ4NL,
         _ => return None,
     })
 }
@@ -254,6 +258,25 @@ pub const KERNELS: &[KernelSpec] = &[
         entry: "gemv_q8_0",
         kind: KernelKind::PerRow { block: 256 },
     },
+    KernelSpec {
+        name: "gemv_iq4_xs",
+        entry: "gemv_iq4_xs",
+        // Same geometry as gemv_q4_k: two rows per warp, 16 rows per block,
+        // 16-value lanes, K_TILE 2048 in shared.
+        kind: KernelKind::RowTile {
+            rows: 16,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "gemv_iq4_nl",
+        entry: "gemv_iq4_nl",
+        // Q8_0-style 32-value blocks with the same row tile.
+        kind: KernelKind::RowTile {
+            rows: 16,
+            block: 256,
+        },
+    },
     // WP33 WMMA skinny GEMM: `R <= 16` activation rows in one weights pass.
     // `rows` must equal the kernel's PWS_RT (32), block its PWS_THREADS (128);
     // a mismatch silently halves the grid.
@@ -339,6 +362,24 @@ pub const KERNELS: &[KernelSpec] = &[
     KernelSpec {
         name: "prefill_q8_0",
         entry: "prefill_q8_0",
+        kind: KernelKind::Prefill {
+            rows: 64,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_iq4_xs",
+        entry: "prefill_iq4_xs",
+        kind: KernelKind::Prefill {
+            rows: 64,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_iq4_nl",
+        entry: "prefill_iq4_nl",
         kind: KernelKind::Prefill {
             rows: 64,
             tokens: 256,
@@ -507,6 +548,24 @@ pub const KERNELS: &[KernelSpec] = &[
         },
     },
     KernelSpec {
+        name: "prefill_iq4_xs_w2h",
+        entry: "prefill_iq4_xs_w2h",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_iq4_nl_w2h",
+        entry: "prefill_iq4_nl_w2h",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
         name: "prefill_halfw_w2h",
         entry: "prefill_halfw_w2h",
         kind: KernelKind::Prefill {
@@ -548,6 +607,24 @@ pub const KERNELS: &[KernelSpec] = &[
     KernelSpec {
         name: "prefill_q5_k_w2h_sk",
         entry: "prefill_q5_k_w2h_sk",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_iq4_xs_w2h_sk",
+        entry: "prefill_iq4_xs_w2h_sk",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_iq4_nl_w2h_sk",
+        entry: "prefill_iq4_nl_w2h_sk",
         kind: KernelKind::Prefill {
             rows: 128,
             tokens: 256,

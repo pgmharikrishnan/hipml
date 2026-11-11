@@ -195,8 +195,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\hipml-serve.ps1 `
   6,912 strings and 18 of 18 template cases.
 - **Loader.** The GGUF is mapped read-only and its tensors are validated and
   uploaded once; the decode loop does no allocation.
-- **Quant kernels.** Q4_K, Q5_K, Q6_K and Q8_0 weights stay quantized in VRAM and
-  are dequantized inside the GEMV that consumes them.
+- **Quant kernels.** Q4_K, Q5_K, Q6_K, Q8_0 and the two IQ4 types stay
+  quantized in VRAM and are dequantized inside the GEMV that consumes them; the
+  Q3_K/IQ3_S tensors a dynamic-quant file mixes in are expanded to F32 at load.
 - **WMMA prefill.** Prompt tokens are cut into 2,048-token tiles. Each tile runs
   the whole model in one graph, with WMMA tiles over the quantized weights.
 - **Attention and SSM.** Full-attention layers run split-K attention over the

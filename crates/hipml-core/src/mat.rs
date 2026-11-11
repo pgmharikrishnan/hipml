@@ -15,30 +15,42 @@ use std::sync::Arc;
 use crate::gguf::Gguf;
 use crate::mmap::Map;
 use crate::quant::{
-    dequant_q4_k, dequant_q5_k, dequant_q6_k, dequant_q8_0, TensorType, Q4_K_BYTES, Q5_K_BYTES,
-    Q6_K_BYTES, Q8_0_BYTES, QK_K,
+    dequant_iq3_s, dequant_iq4_nl, dequant_iq4_xs, dequant_q3_k, dequant_q4_k, dequant_q5_k,
+    dequant_q6_k, dequant_q8_0, TensorType, IQ3_S_BYTES, IQ4_NL_BYTES, IQ4_XS_BYTES, Q3_K_BYTES,
+    Q4_K_BYTES, Q5_K_BYTES, Q6_K_BYTES, Q8_0_BYTES, QK_K,
 };
 
 /// Storage of one matrix, matching the GGUF tensor type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     F32,
+    Q3K,
     Q4K,
     Q5K,
     Q6K,
     Q8_0,
+    IQ4NL,
+    IQ4XS,
+    IQ3S,
 }
 
 impl Kind {
-    fn of(ty: TensorType) -> io::Result<Kind> {
+    /// The CPU reference reads every block format the model files store. On
+    /// the device the Q3_K/IQ3_S tensors are expanded to F32 at load, so those
+    /// two kinds exist only for this path.
+    pub fn of(ty: TensorType) -> io::Result<Kind> {
         Ok(match ty {
             TensorType::F32 => Kind::F32,
+            TensorType::Q3K => Kind::Q3K,
             TensorType::Q4K => Kind::Q4K,
             // Q5_K was out of scope, but Qwen3.8-27B stores blk.51/55.ffn_down
             // as Q5_K, so the reference has to read it.
             TensorType::Q5K => Kind::Q5K,
             TensorType::Q6K => Kind::Q6K,
             TensorType::Q8_0 => Kind::Q8_0,
+            TensorType::IQ4NL => Kind::IQ4NL,
+            TensorType::IQ4XS => Kind::IQ4XS,
+            TensorType::IQ3S => Kind::IQ3S,
             TensorType::Unsupported(id) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -52,9 +64,13 @@ impl Kind {
         match self {
             Kind::F32 => cols * 4,
             Kind::Q8_0 => cols / 32 * Q8_0_BYTES,
+            Kind::IQ4NL => cols / 32 * IQ4_NL_BYTES,
+            Kind::Q3K => cols / QK_K * Q3_K_BYTES,
             Kind::Q4K => cols / QK_K * Q4_K_BYTES,
             Kind::Q5K => cols / QK_K * Q5_K_BYTES,
             Kind::Q6K => cols / QK_K * Q6_K_BYTES,
+            Kind::IQ4XS => cols / QK_K * IQ4_XS_BYTES,
+            Kind::IQ3S => cols / QK_K * IQ3_S_BYTES,
         }
     }
 }
@@ -234,19 +250,33 @@ pub fn dequant_row(kind: Kind, bytes: &[u8], out: &mut [f32]) {
                 chunk.copy_from_slice(&tmp);
             }
         }
-        Kind::Q4K | Kind::Q5K | Kind::Q6K => {
+        Kind::IQ4NL => {
+            for (b, chunk) in out.chunks_mut(32).enumerate() {
+                let blk = &bytes[b * IQ4_NL_BYTES..(b + 1) * IQ4_NL_BYTES];
+                let mut tmp = [0.0f32; 32];
+                dequant_iq4_nl(blk, &mut tmp);
+                chunk.copy_from_slice(&tmp);
+            }
+        }
+        Kind::Q3K | Kind::Q4K | Kind::Q5K | Kind::Q6K | Kind::IQ4XS | Kind::IQ3S => {
             let bb = match kind {
+                Kind::Q3K => Q3_K_BYTES,
                 Kind::Q4K => Q4_K_BYTES,
                 Kind::Q5K => Q5_K_BYTES,
-                _ => Q6_K_BYTES,
+                Kind::Q6K => Q6_K_BYTES,
+                Kind::IQ4XS => IQ4_XS_BYTES,
+                _ => IQ3_S_BYTES,
             };
             let mut tmp = [0.0f32; QK_K];
             for (b, chunk) in out.chunks_mut(QK_K).enumerate() {
                 let blk = &bytes[b * bb..(b + 1) * bb];
                 match kind {
+                    Kind::Q3K => dequant_q3_k(blk, &mut tmp),
                     Kind::Q4K => dequant_q4_k(blk, &mut tmp),
                     Kind::Q5K => dequant_q5_k(blk, &mut tmp),
-                    _ => dequant_q6_k(blk, &mut tmp),
+                    Kind::Q6K => dequant_q6_k(blk, &mut tmp),
+                    Kind::IQ4XS => dequant_iq4_xs(blk, &mut tmp),
+                    _ => dequant_iq3_s(blk, &mut tmp),
                 }
                 chunk.copy_from_slice(&tmp);
             }
@@ -283,20 +313,38 @@ fn dot_row(kind: Kind, bytes: &[u8], cols: usize, x: &[f32]) -> f32 {
             }
             acc
         }
-        Kind::Q4K | Kind::Q5K | Kind::Q6K => {
+        Kind::IQ4NL => {
+            let mut acc = 0.0f32;
+            let mut tmp = [0.0f32; 32];
+            for b in 0..cols / 32 {
+                let blk = &bytes[b * IQ4_NL_BYTES..(b + 1) * IQ4_NL_BYTES];
+                dequant_iq4_nl(blk, &mut tmp);
+                for (l, w) in tmp.iter().enumerate() {
+                    acc += w * x[b * 32 + l];
+                }
+            }
+            acc
+        }
+        Kind::Q3K | Kind::Q4K | Kind::Q5K | Kind::Q6K | Kind::IQ4XS | Kind::IQ3S => {
             let bb = match kind {
+                Kind::Q3K => Q3_K_BYTES,
                 Kind::Q4K => Q4_K_BYTES,
                 Kind::Q5K => Q5_K_BYTES,
-                _ => Q6_K_BYTES,
+                Kind::Q6K => Q6_K_BYTES,
+                Kind::IQ4XS => IQ4_XS_BYTES,
+                _ => IQ3_S_BYTES,
             };
             let mut acc = 0.0f32;
             let mut tmp = [0.0f32; QK_K];
             for b in 0..cols / QK_K {
                 let blk = &bytes[b * bb..(b + 1) * bb];
                 match kind {
+                    Kind::Q3K => dequant_q3_k(blk, &mut tmp),
                     Kind::Q4K => dequant_q4_k(blk, &mut tmp),
                     Kind::Q5K => dequant_q5_k(blk, &mut tmp),
-                    _ => dequant_q6_k(blk, &mut tmp),
+                    Kind::Q6K => dequant_q6_k(blk, &mut tmp),
+                    Kind::IQ4XS => dequant_iq4_xs(blk, &mut tmp),
+                    _ => dequant_iq3_s(blk, &mut tmp),
                 }
                 let xb = &x[b * QK_K..(b + 1) * QK_K];
                 for (l, w) in tmp.iter().enumerate() {

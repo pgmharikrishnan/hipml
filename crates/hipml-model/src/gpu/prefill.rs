@@ -29,7 +29,7 @@ use hipml_hip::Buffer;
 use hipml_kernels::ssm::SsmChunk;
 use std::time::Instant;
 
-use crate::gpu_weights::gemv_entry;
+use crate::gpu_weights::{gemv_entry, Proj};
 use crate::OUTPUT;
 
 /// Where a chunk's wall time went, measured with one stream sync per stage.
@@ -440,10 +440,8 @@ impl<'a> GpuEngine<'a> {
                     &c.xh,
                     n_tok * cfg.n_embd,
                 )?;
-                block
-                    .gate
-                    .gemm_half(l, &c.xh, &c.t, &c.gate, &c.sk, n_tok)?;
-                block.up.gemm_half(l, &c.xh, &c.t, &c.up, &c.sk, n_tok)?;
+                gemm_v2(l, &block.gate, &c.t, &c.xh, &c.gate, &c.sk, n_tok)?;
+                gemm_v2(l, &block.up, &c.t, &c.xh, &c.up, &c.sk, n_tok)?;
                 l.silu_mul_buf(&c.gate, &c.up, &c.act, n_tok * cfg.n_ff)?;
                 ::hipml_kernels::prefill_xhalf(
                     l.module(),
@@ -452,9 +450,7 @@ impl<'a> GpuEngine<'a> {
                     &c.xh,
                     n_tok * cfg.n_ff,
                 )?;
-                block
-                    .down
-                    .gemm_half(l, &c.xh, &c.act, &c.down, &c.sk, n_tok)?;
+                gemm_v2(l, &block.down, &c.act, &c.xh, &c.down, &c.sk, n_tok)?;
             } else {
                 block.gate.gemm(l, &c.t, &c.gate, n_tok)?;
                 block.up.gemm(l, &c.t, &c.up, n_tok)?;
@@ -559,5 +555,25 @@ impl<'a> GpuEngine<'a> {
             Ok(()) => self.chunk.as_ref().map(|(_, c)| c.bytes()).unwrap_or(0),
             Err(_) => 0,
         }
+    }
+}
+
+/// One v2-path ffn projection: the fp16-activation GEMM when the format has a
+/// converted-tile kernel, else the raw-f32 tile. The F32 case is the loader's
+/// expansion of a Q3_K / IQ3_S tensor, and `xf` is the same activation `xh`
+/// was converted from.
+fn gemm_v2(
+    l: &Launcher,
+    proj: &Proj<'_>,
+    xf: &Buffer,
+    xh: &Buffer,
+    y: &Buffer,
+    scratch: &Buffer,
+    tokens: usize,
+) -> Result<(), String> {
+    if proj.has_half() {
+        proj.gemm_half(l, xh, xf, y, scratch, tokens)
+    } else {
+        proj.gemm(l, xf, y, tokens)
     }
 }

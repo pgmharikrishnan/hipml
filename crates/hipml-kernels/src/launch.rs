@@ -55,8 +55,8 @@ pub(crate) mod device {
     #[path = "graph_launch.rs"]
     mod graph_launch;
     pub use graph_launch::{
-        gemv_job_tiles, GemvJob, GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80, GEMV_JOB_Q4K,
-        GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80,
+        gemv_job_tiles, GemvJob, GEMV_B_IQ4NL, GEMV_B_IQ4XS, GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K,
+        GEMV_B_Q80, GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80,
     };
     #[path = "prefill_launch.rs"]
     mod prefill_launch;
@@ -614,7 +614,7 @@ pub use device::{
     prefill_should_split, prefill_split_scratch_cap,
 };
 #[cfg(feature = "hip")]
-pub use device::{GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
+pub use device::{GEMV_B_IQ4NL, GEMV_B_IQ4XS, GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
 #[cfg(feature = "hip")]
 pub use device::{GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80};
 

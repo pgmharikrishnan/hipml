@@ -89,8 +89,9 @@ Line numbers are from the files saved under `docs/reference/` (tag `b12126`).
 
 Two tensors are Q5_K: `blk.51.ffn_down.weight` and `blk.55.ffn_down.weight`.
 They are required by the forward pass, so `quant::dequant_q5_k` was added
-(port of `dequantize_row_q5_K`, ggml-quants.c:1741). This is the one place the
-reference reads a format that was declared out of scope.
+(port of `dequantize_row_q5_K`, ggml-quants.c:1741). The reference also reads
+the IQ4_XS, IQ4_NL, Q3_K and IQ3_S formats an Unsloth UD file mixes in, each
+against a hand-computed block in `hipml-core/tests/quant_reference.rs`.
 
 An Unsloth UD dynamic quant uses Q5_K far more widely (115 tensors in
 `Qwen3.8-27B-UD-Q6_K.gguf`), so the format also has a dequant-in-shared prefill

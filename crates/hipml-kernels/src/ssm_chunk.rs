@@ -399,6 +399,8 @@ fn prefill_entry(gemv: &str) -> Result<&'static str, String> {
         "gemv_q6_k" => Ok("prefill_q6_k"),
         "gemv_q5_k" => Ok("prefill_q5_k"),
         "gemv_q8_0" => Ok("prefill_q8_0"),
+        "gemv_iq4_xs" => Ok("prefill_iq4_xs"),
+        "gemv_iq4_nl" => Ok("prefill_iq4_nl"),
         other => Err(format!("{other}: no tiled prefill kernel")),
     }
 }
