@@ -13,7 +13,7 @@ Quote only that file.
 The table and per-feature rows below are the **historical** pre-release
 matrix: hipml binary `5713f143…`, commit `cef7657`, on a Radeon AI PRO R9700
 (gfx1201), Windows 11, ROCm 7.2.1, against llama.cpp build 11820 (commit
-`d7725699`). They predate the WP42 projection-path correctness fix and name a
+`d7725699`). They predate the projection-path correctness fix and name a
 model that is not the release model, so they are kept only as engineering
 history.
 
