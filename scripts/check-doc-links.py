@@ -10,7 +10,6 @@ Scope, by default:
 Two areas are excluded on purpose:
 
     docs/reference/     verbatim llama.cpp sources, whose README links upstream
-    docs/publish-plan.md  the internal publication plan, never published
 
 Every link target is resolved from the directory of the file that holds it.
 Links to `http:`, `https:`, `mailto:` and absolute paths are skipped; the
@@ -38,7 +37,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 # Directories and files the check does not walk. See the module docstring.
-SKIP_PREFIXES = ("docs/reference/", "docs/publish-plan.md", "target/")
+SKIP_PREFIXES = ("docs/reference/", "target/")
 
 # An inline link or image: [text](target) / ![alt](target "title") / [a](<a b>).
 INLINE = re.compile(r"(!?\[[^\]\n]*\]\()(<[^>\n]+>|[^)\s]+)((?:\s+\"[^\"]*\")?\))")
