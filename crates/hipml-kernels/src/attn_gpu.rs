@@ -104,9 +104,17 @@ mod imp {
                 Kind::Q4K => "gemv_q4_k",
                 Kind::Q6K => "gemv_q6_k",
                 Kind::Q8_0 => "gemv_q8_0",
-                // Unsloth's UD dynamic quants store the attention projections
-                // as Q5_K; the GEMV entry has been there all along.
+                // Unsloth's UD dynamic quants store some attention projections
+                // as Q5_K / IQ4; the GEMV entries read those blocks.
                 Kind::Q5K => "gemv_q5_k",
+                Kind::IQ4XS => "gemv_iq4_xs",
+                Kind::IQ4NL => "gemv_iq4_nl",
+                Kind::Q3K | Kind::IQ3S => {
+                    return Err(format!(
+                        "attention weight {:?} is expanded to F32 at load",
+                        self.kind
+                    ))
+                }
             }))
         }
 
@@ -121,6 +129,8 @@ mod imp {
                 Kind::Q6K => "prefill_q6_k",
                 Kind::Q5K => "prefill_q5_k",
                 Kind::Q8_0 => "prefill_q8_0",
+                Kind::IQ4XS => "prefill_iq4_xs",
+                Kind::IQ4NL => "prefill_iq4_nl",
                 other => {
                     return Err(format!(
                         "attention weight {other:?}: no tiled prefill kernel"

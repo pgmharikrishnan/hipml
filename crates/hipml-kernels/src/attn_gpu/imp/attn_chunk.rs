@@ -81,6 +81,12 @@ impl AttnLayer<'_> {
                 }
                 continue;
             }
+            // A tensor the loader expanded to F32 (Q3_K / IQ3_S) has no tiled
+            // kernel either; its rows are small enough for the per-row GEMV.
+            if w.kind == Kind::F32 {
+                self.gemv_rows(l, w, x, y, tokens)?;
+                continue;
+            }
             if half {
                 crate::prefill_resident_half(
                     l.module(),
@@ -373,6 +379,9 @@ impl AttnLayer<'_> {
                 d.n_head * d.head_dim,
                 tokens,
             );
+        }
+        if self.wo.kind == Kind::F32 {
+            return self.gemv_rows(l, &self.wo, out, y, tokens);
         }
         crate::prefill_resident(
             l.module(),

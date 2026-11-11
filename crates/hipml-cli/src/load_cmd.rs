@@ -183,8 +183,8 @@ fn print_report(model: &Model, r: &LoadReport, path: &Path) {
             t.ty,
             t.tensors,
             commas(t.bytes),
-            commas(t.bytes),
-            gib(t.bytes),
+            commas(t.resident_bytes),
+            gib(t.resident_bytes),
             status
         );
     }
@@ -193,9 +193,19 @@ fn print_report(model: &Model, r: &LoadReport, path: &Path) {
         "total",
         r.tensor_count,
         commas(r.tensor_bytes),
-        commas(r.tensor_bytes),
-        gib(r.tensor_bytes)
+        commas(r.total_device_bytes as u64),
+        gib(r.total_device_bytes as u64)
     );
+
+    if r.expansion.tensors > 0 {
+        println!(
+            "\nexpanded at load: {} tensors, {} B on disk -> {} B resident (+{} B), host dequant of Q3_K/IQ3_S",
+            r.expansion.tensors,
+            commas(r.expansion.disk_bytes),
+            commas(r.expansion.resident_bytes),
+            commas(r.expansion.resident_bytes - r.expansion.disk_bytes)
+        );
+    }
 
     if r.unsupported.is_empty() {
         println!("\nunsupported: none");

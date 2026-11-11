@@ -3,10 +3,10 @@
 `feat/native-qwen`, base `6a1207f` (`feat/release`). Every earlier hipml
 measurement used a private fine-tune with the same geometry. This package
 points the engine at the **stock** model family and removes the fine-tune
-constants that made it work only there. It records why the Unsloth dynamic
-quantisations do not run, and what the release does instead: it runs
-`Qwen3.8-27B-Q4_K_M.gguf`, the file
-[`release-run.md`](release-run.md) measured, which contains no IQ or Q3_K type.
+constants that made it work only there. The release model is
+`Qwen3.8-27B-Q4_K_M.gguf`, the file [`release-run.md`](release-run.md)
+measured; the Unsloth dynamic-quant (UD) variants of the same model load and
+generate as well — see [Status of the UD types](#status-of-the-ud-types).
 
 | file | bytes | tensors |
 | --- | ---: | ---: |
@@ -18,19 +18,40 @@ quantisations do not run, and what the release does instead: it runs
 Both stock files carry the MTP (`nextn`) block **inline** as `blk.64.*`;
 `block_count` is 65 and `nextn_predict_layers` is 1.
 
-## Bottom line
+## Status of the UD types
 
-- The Q4_K_XL file **loads completely** into VRAM (all 866 tensors, 16.34 GiB,
-  byte-identical readback, embedding and lm_head checks pass) but **cannot
-  generate**: its Unsloth dynamic quant mixes in four GGML types with no
-  dequant path (`IQ4_XS`, `IQ4_NL`, `Q3_K`, `IQ3_S`, 80 tensors / 3.31 GiB).
-  The first failure is `generate: graph: type_23 has no GEMV kernel`.
-- The Q6_K_XL file avoids every IQ type, loads 23.55 GiB, and stops at its
-  Q6_K embedding (`token_embd.weight: expected Q4_K, found Q6_K`). Its next
-  blocker is three Q5_K attention projections.
-- Implementing IQ4_XS is out of scope: v0.1.0 adds no new quant format.
-  Q6_K_XL needs no new *format* — it needs a Q6_K embedding-row kernel and a
-  Q5_K attention path — but neither was added here. See "If this is unblocked".
+A Unsloth UD build mixes nine tensor types into one file. hipml now reads all
+nine; what differs is *how*, and that is the whole of the cost:
+
+| type | GGUF id | how hipml serves it | resident cost |
+| --- | ---: | --- | --- |
+| Q4_K | 12 | block form: `gemv_q4_k`, batched `_b`, `prefill_q4_k(_w2h)` tile | 1:1 |
+| Q5_K | 13 | block form: `gemv_q5_k`, batched `_b`, `prefill_q5_k(_w2h)` tile | 1:1 |
+| Q6_K | 14 | block form: `gemv_q6_k` (+ batched), `prefill_q6_k(_w2h)`, `embed_q6_k_row` | 1:1 |
+| Q8_0 | 8 | block form: `gemv_q8_0`, batched `_b`, `prefill_q8_0(_w2h)` | 1:1 |
+| IQ4_XS | 23 | block form: `gemv_iq4_xs` (+ `_b`), `prefill_iq4_xs(_w2h)` | 1:1 |
+| IQ4_NL | 20 | block form: `gemv_iq4_nl` (+ `_b`), `prefill_iq4_nl(_w2h)` | 1:1 |
+| F32 | 0 | as stored (`gemv_f32`, `prefill_f32`) | 1:1 |
+| Q3_K | 11 | **expanded to F32 at load** (host `dequant_q3_k`), then the F32 path | 9.31× |
+| IQ3_S | 21 | **expanded to F32 at load** (host `dequant_iq3_s`), then the F32 path | 9.31× |
+
+- The six block types stay in their GGUF blocks in VRAM; the dequant happens
+  inside the GEMV or the dequant-in-shared prefill tile, never into a resident
+  copy.
+- Q3_K and IQ3_S are the exception: there is no block-form decode kernel for
+  them, so the loader dequantises those rows on the host once at load and
+  uploads F32. A 110-byte 256-value block becomes 1,024 bytes, so they cost
+  9.31× their file size — the largest expansion in the format mix.
+- Both UD files load with `unsupported: none` and round-trip 866/866
+  byte-identical. In both, the same **4 tensors, 153,190,400 B on disk →
+  1,426,063,360 B resident (+1,272,872,960 B, +1.19 GiB)**:
+  `UD-Q4_K_M` finishes at 17,826,136,064 B (16.60 GiB) resident, `UD-Q4_K_XL`
+  at 18,821,054,464 B (17.53 GiB).
+- Still unmeasured: Q3_K and IQ3_S never run in block form (by design — the
+  row count is small enough that expansion is the cheap choice), the 64-row
+  f32-tile `prefill_iq4_*` entries are wired but the default WMMA path selects
+  `_w2h` instead, and nothing beyond 8,192 tokens, batching, MTP or the cache
+  gates has been run on a UD file.
 
 ## Architecture config (read from the GGUF by `hipml load`)
 
@@ -78,20 +99,35 @@ the same.
 
 ## Tensor type histogram
 
-`Qwen3.8-27B-UD-Q4_K_XL.gguf`:
+`Qwen3.8-27B-UD-Q4_K_M.gguf` — the UD target, measured in this tree:
 
-| type | tensors | bytes | GiB | engine |
-| --- | ---: | ---: | ---: | --- |
-| Q5_K | 191 | 7,926,251,520 | 7.38 | supported |
-| IQ4_XS (23) | 70 | 3,125,084,160 | 2.91 | **no dequant** |
-| Q4_K | 69 | 3,059,712,000 | 2.85 | supported |
-| Q6_K | 56 | 2,862,182,400 | 2.67 | supported |
-| IQ4_NL (20) | 6 | 280,166,400 | 0.26 | **no dequant** |
-| Q8_0 | 110 | 130,908,160 | 0.12 | supported |
-| Q3_K (11) | 3 | 114,892,800 | 0.11 | **no dequant** |
-| IQ3_S (21) | 1 | 38,297,600 | 0.04 | **no dequant** |
-| F32 | 360 | 10,686,464 | 0.01 | supported |
-| total | 866 | 17,548,181,504 | 16.34 | |
+| type | tensors | bytes | GiB | resident | engine |
+| --- | ---: | ---: | ---: | ---: | --- |
+| IQ4_XS (23) | 142 | 5,695,897,600 | 5.30 | 5.30 | block form |
+| Q5_K | 142 | 5,230,100,480 | 4.87 | 4.87 | block form |
+| Q4_K | 74 | 3,142,287,360 | 2.93 | 2.93 | block form |
+| Q6_K | 28 | 1,804,185,600 | 1.68 | 1.68 | block form |
+| IQ4_NL (20) | 9 | 430,571,520 | 0.40 | 0.40 | block form |
+| Q8_0 | 107 | 86,343,680 | 0.08 | 0.08 | block form |
+| Q3_K (11) | 2 | 76,595,200 | 0.07 | 0.66 | expanded to F32 |
+| IQ3_S (21) | 2 | 76,595,200 | 0.07 | 0.66 | expanded to F32 |
+| F32 | 360 | 10,686,464 | 0.01 | 0.01 | as stored |
+| total | 866 | 16,553,263,104 | 15.42 | **16.60** | |
+
+`Qwen3.8-27B-UD-Q4_K_XL.gguf`, measured in this tree:
+
+| type | tensors | bytes | GiB | resident | engine |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Q5_K | 191 | 7,926,251,520 | 7.38 | 7.38 | block form |
+| IQ4_XS (23) | 70 | 3,125,084,160 | 2.91 | 2.91 | block form |
+| Q4_K | 69 | 3,059,712,000 | 2.85 | 2.85 | block form |
+| Q6_K | 56 | 2,862,182,400 | 2.67 | 2.67 | block form |
+| IQ4_NL (20) | 6 | 280,166,400 | 0.26 | 0.26 | block form |
+| Q8_0 | 110 | 130,908,160 | 0.12 | 0.12 | block form |
+| Q3_K (11) | 3 | 114,892,800 | 0.11 | 1.00 | expanded to F32 |
+| IQ3_S (21) | 1 | 38,297,600 | 0.04 | 0.33 | expanded to F32 |
+| F32 | 360 | 10,686,464 | 0.01 | 0.01 | as stored |
+| total | 866 | 17,548,181,504 | 16.34 | **17.53** | |
 
 `Qwen3.8-27B-UD-Q6_K_XL.gguf`:
 
@@ -107,52 +143,69 @@ the same.
 The fine-tune, for comparison: Q4_K 257 / 10.66 GiB, Q6_K 79 / 3.84, Q8_0 64 / 1.30,
 Q5_K 2 / 0.11, F32 449 / 0.10; 851 tensors, 16.01 GiB.
 
-So Q6_K_XL **does** avoid every IQ/Q3 type; its only Q5_K tensors are 27
-mixtures, and Q5_K already has decode, batched and prefill kernels in this
-tree. Q4_K_XL cannot be made to run without IQ4_XS (2.91 GiB), which is
-explicitly out of scope.
+Every type in all three UD-relevant files is now served, so the mix no longer
+decides whether a file runs — only how its Q3_K/IQ3_S share is stored.
 
 ## Load result
 
 ```
-Q4_K_XL: 866 tensors  17,548,181,504 B (16.34 GiB)  read+upload 10.42 s (1.68 GB/s)
-         hipMemGetInfo free 34,023,604,224 -> 16,448,159,744 B
-         resident delta 17,575,444,480 B (16.37 GiB)
-         4/4 round-trip tensors byte-identical
-         embedding rows 0/1/1234/100000/248319: 5120/5120 exact, max_abs 0
-         lm_head Q6_K 248,320 logits in 2.419 ms (431.2 GB/s)
+UD-Q4_K_M: 866 tensors  16,553,263,104 B (15.42 GiB)  read+upload 5.51 s (3.01 GB/s)
+           hipMemGetInfo free 34,023,604,224 -> 16,194,994,176 B
+           resident delta 17,828,610,048 B (16.60 GiB)
+           expanded at load: 4 tensors, 153,190,400 B -> 1,426,063,360 B (+1.19 GiB)
+           unsupported: none
+           round-trip 866/866 byte-identical
+           embedding rows 0/1/1234/100000/248319: 5120/5120 exact, max_abs 0
+           lm_head Q6_K 248,320 logits in 5.002 ms (208.5 GB/s)
+Q4_K_XL: 866 tensors  17,548,181,504 B (16.34 GiB)  read+upload 11.25 s (1.56 GB/s)
+         hipMemGetInfo free 34,023,604,224 -> 15,175,450,624 B
+         resident delta 18,848,153,600 B (17.55 GiB)
+         expanded at load: 4 tensors, 153,190,400 B -> 1,426,063,360 B (+1.19 GiB)
+         unsupported: none
+         round-trip 866/866 byte-identical
 Q6_K_XL: 866 tensors  25,288,065,024 B (23.55 GiB)  read+upload 16.55 s (1.53 GB/s)
          resident delta 25,263,079,424 B (23.53 GiB); 8.76 GB free after
 ```
 
-## Generation blocker
+## Generation and speed, `UD-Q4_K_M`
+
+The file that used to stop at `type_23 has no GEMV kernel` now runs end to end.
+169-token fixture, chunk 2048, q8 KV, against the CPU f32 reference:
 
 ```
-$ hipml generate --device --gguf <HIPML_GGUF> \
-    --ids 1,2,3 --tokens 2 --ctx 64 --kv q8
-prompt ids: [1, 2, 3]
-resident: 16.34 GiB in 866 tensors on AMD Radeon AI PRO R9700 (upload 5.9s)
-prefill:    chunked, 2048-token tiles
-generate: graph: type_23 has no GEMV kernel
+prefill logits: max |gpu - cpu| = 0.1019 at 29832 (gpu argmax 248068 / cpu argmax 248068)
+PASS: 20 ids identical
 ```
 
-`type_23` is IQ4_XS; the first one the layer loop reaches is
-`blk.0.ffn_down.weight`. The full unsupported set is 80 tensors / 3.31 GiB:
-IQ4_XS 70, IQ4_NL 6, Q3_K 3, IQ3_S 1.
+Greedy, `--device --chunk 2048 --kv q8`, two prompts, each run twice:
+`The capital of France is` → `` Paris.\nThe capital of Germany is Berlin.\n…``
+(24 ids, identical on rerun); `Explain in one sentence why the sky is blue.`
+→ "The sky appears blue because the Earth's atmosphere scatters shorter
+wavelengths…" (32 ids, identical on rerun).
 
-`Qwen3.8-27B-UD-Q6_K_XL.gguf` gets one step further and fails at
-`token_embd.weight: expected Q4_K, found Q6_K` (the only embedding-row kernel
-is `embed_row_q4_k_dev`). Behind that, three attention projections are Q5_K
-(`blk.3.attn_v`, `blk.7.attn_k`, `blk.11.attn_output`) and `AttnLayer` has no
-Q5_K GEMV/prefill entry.
+```
+resident: 15.42 GiB in 866 tensors; 15.61 GiB streamed/token; q8 KV 0.266 GiB at 8,192
+                          prefill tok/s            decode tok/s
+depth 0                    880.45 (373 tok)         27.84
+depth 8,192              1,104.00 (8,192 tok)       27.07
 
-### If this is unblocked
+with HIPML_Q5K_COPY_GB=0 (no Q5_K tile kernel, batched GEMV instead):
+depth 0                    289.76                   27.62
+depth 8,192                297.68                   26.92
+```
 
-- Q4_K_XL: requires IQ4_XS/IQ4_NL/Q3_K/IQ3_S dequant + GEMV. Ruled out.
-- Q6_K_XL: requires (a) a Q6_K embedding-row dequant kernel (the format is
-  already supported everywhere else), (b) Q5_K entries in `AttnLayer`
-  (decode entry `gemv_q5_k`; prefill `prefill_q5_k`, or `prefill_q5_k_w2h`
-  on the WMMA path). Until then it loads but does not generate.
+The Q5_K dequant-in-shared tile kernel is the whole prefill difference on this
+file: 3.0× / 3.7× over the batched-GEMV fallback, with the same last id at both
+depths (220 and 292).
+
+The stock `Qwen3.8-27B-Q4_K_M.gguf` is unchanged by all of this — same oracle
+gate (`PASS 20/20`, `max |gpu - cpu| = 0.1481 at 34114`, the published value)
+and prefill 1,000.31 / 1,235.14 tok/s with decode 30.06 / 29.21 tok/s at depths
+0 and 8,192.
+
+`Qwen3.8-27B-UD-Q6_K_XL.gguf` is not measured in this tree, but needs no format
+of its own: Q6_K embedding rows and the Q5_K attention/prefill entries it was
+missing both exist now.
 
 ## Hard-coded fine-tune values replaced
 
@@ -219,10 +272,11 @@ Only mismatch found: two leading system turns. hipml rejects
              {"role":"user","content":"hi"}]}
 ```
 
-## Native-model speed (llama.cpp only; hipml is blocked)
+## Native-model speed
 
 Same fixture and harness as `bench/` (`job.py`, 3 cold reps, 33 generated
-tokens, q8/q8_0 KV, no cache reuse), **stock Q4_K_XL**, `prose_explanation`:
+tokens, q8/q8_0 KV, no cache reuse), **stock Q4_K_XL**, `prose_explanation`,
+llama.cpp only:
 
 | depth | prompt | prefill tok/s (median) | decode tok/s (median) | TTFT (median) | peak VRAM |
 | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -233,10 +287,9 @@ Reps: prefill 870.4 / 1,006.6 / 1,029.3 and 1,284.7 / 1,287.7 / 1,279.2;
 decode 29.71 / 30.21 / 30.20 and 29.44 / 29.57 / 29.50.
 llama.cpp build `11820`, commit `d7725699`, `-ngl 99`.
 
-There are **no hipml prefill/decode numbers for the stock model**: it does not
-reach a token. The 128-token greedy comparison and the depth-0/8K timing table
-cannot be produced until a stock file runs, and no such number is published
-here.
+hipml's own stock numbers are in
+[`benchmarks.md`](benchmarks.md) (1,198 / 1,252 tok/s prefill, 29.2 / 28.8
+decode); the UD files are measured above.
 
 ## Commands
 
@@ -251,7 +304,7 @@ ssh gpu-host "cd <REPO> && set HIP_PATH=<ROCM>& \
 # config + residency + type table + unsupported list
 target\release\hipml.exe load --gguf <HIPML_GGUF> --roundtrip 4
 
-# the blocker
+# greedy generation over the chunked prefill graph
 target\release\hipml.exe generate --device --gguf <HIPML_GGUF> \
   --ids 1,2,3 --tokens 2 --ctx 64 --kv q8
 
@@ -268,8 +321,11 @@ python bench/job.py --engine llama --prompt prose_explanation --depth 0 --reps 3
 | `cargo check --workspace --features hip` | clean |
 | `hipml parity --deep` | 56 passed, 0 failed, 1 skipped |
 | `hipml oracle-gate` (fine-tune, 169 ids, chunk 2048) | PASS, 20/20 ids identical |
+| `hipml oracle-gate` (stock Q4_K_M, 169 ids, chunk 2048) | PASS, 20/20, max abs 0.1481 at 34114 |
+| `hipml oracle-gate` (UD-Q4_K_M, 169 ids, chunk 2048) | PASS, 20/20, max abs 0.1019 at 29832 |
 | Fine-tune generation after the config change | 64 layers, 8 tokens emitted |
-| Q4_K_XL load checks | 4/4 byte-identical, embeddings 5120/5120 exact |
+| Q4_K_XL load checks | 866/866 byte-identical, embeddings 5120/5120 exact |
+| UD-Q4_K_M load checks | 866/866 byte-identical, embeddings 5120/5120 exact |
 | tokenizer, 20 strings × 2 modes | 40/40 ids identical |
 | template, 3 single-turn cases | text and ids identical |
 
@@ -278,9 +334,11 @@ The fine-tune still reports 64 layers and generates, so subtracting
 
 ## Unverified
 
-- hipml prefill/decode, 128-token greedy parity and logit margins on any stock
-  file: blocked above.
-- Q6_K_XL generation: two named blockers, not exercised past the embedding.
+- 128-token greedy parity and logit margins on a stock file: the 20-step
+  oracle gate above is the only published logit comparison.
+- `UD-Q6_K_XL` end to end; it needs no new format, but it was not run here.
+- Anything past 8,192 tokens on a UD file: batching, MTP, prefix cache and the
+  KV/SSM cache gates are measured on the stock model only.
 - Chat-template branches specific to the stock template: developer-role
   messages, merged multi-system turns (one reproducer above), and the stricter
   tool-argument mapping rule. The committed template fixture passes, but these
