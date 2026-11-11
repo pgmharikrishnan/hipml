@@ -1,0 +1,84 @@
+hipml 0.1.0
+
+usage: hipml <command>
+
+commands:
+  probe     show the HIP device and how this binary was built
+  kernels   list the kernel manifest
+  vram      hipMemGetInfo now; --need BYTES also reports whether a cache fits
+  parity    run every parity case (reference vs device); optional name filter
+            --deep adds the 100K-context cases (slow host reference)
+  bench     time each kernel launch and report effective bandwidth
+  gguf      list the tensors in a GGUF file; `gguf <file> read <tensor>`
+  decode-bench  stream every Q4_K/Q6_K/Q8_0 tensor through GEMV once
+  generate  --gguf PATH --text "prompt" --tokens 20   greedy decode
+            --device uses the chunked prefill graph (--chunk N, default 2048);
+            --chunk 0 keeps the token loop; --compare-cpu compares the
+            production chunk path (or --chunk 0) with the CPU oracle;
+            --topk K prints the top-K log-probs at every sampled position
+  load      load every tensor into VRAM and verify residency
+  logits    run lm_head on a 5120-value f32 vector file
+  prefill-bench  tiled prefill GEMM, Qwen3.8, M=512/2048
+  prefill-model prefill the whole model cold, then warm from a KV prefix
+  cache-bench cold / warm-exact / warm-shared TTFT on SSM+KV snapshots
+  cache-gate  undersized-cap admission: refuse, miss, ids stay exact
+  ssm       gated-delta-net parity (small + real layer) and layer timing
+  attn-parity --gguf PATH   GPU full-attention block vs CPU reference
+  attn-bench  --gguf PATH   per-layer time at depths 0/8192/100000
+  gpu-bench --gguf PATH [--prefill N] [--depth D --kv q8]
+  oracle-gate --gguf PATH --ids-file F --steps N  CPU oracle vs the
+            production chunked path, step by step (exit 1 on a real split)
+  splitk-gate --gguf PATH [--chunk 2048 --tails 40]  split-K ffn
+            scratch vs HIPML_SPLITK=0 at every chunk tail
+  gpu-profile --gguf PATH  launch cost, host round-trips, graph token
+  bench-kv  quantized-KV decode attention: depth x q8/q4 x 1 head / 16 layers
+            --depths 1024,8192,32768,100000 --reps 3
+  rows-check --gguf PATH [--slots N --prefix P --tail T --decode D]
+            multi-row tail prefill vs the single-sequence path
+  serve     HTTP server: continuous batching, MTP, prefix cache
+
+build with `--features hip` on a machine with the ROCm/HIP runtime.
+--- version
+hipml 0.1.0
+
+usage: hipml <command>
+
+commands:
+  probe     show the HIP device and how this binary was built
+  kernels   list the kernel manifest
+  vram      hipMemGetInfo now; --need BYTES also reports whether a cache fits
+  parity    run every parity case (reference vs device); optional name filter
+            --deep adds the 100K-context cases (slow host reference)
+  bench     time each kernel launch and report effective bandwidth
+  gguf      list the tensors in a GGUF file; `gguf <file> read <tensor>`
+  decode-bench  stream every Q4_K/Q6_K/Q8_0 tensor through GEMV once
+  generate  --gguf PATH --text "prompt" --tokens 20   greedy decode
+            --device uses the chunked prefill graph (--chunk N, default 2048);
+            --chunk 0 keeps the token loop; --compare-cpu compares the
+            production chunk path (or --chunk 0) with the CPU oracle;
+            --topk K prints the top-K log-probs at every sampled position
+  load      load every tensor into VRAM and verify residency
+  logits    run lm_head on a 5120-value f32 vector file
+  prefill-bench  tiled prefill GEMM, Qwen3.8, M=512/2048
+  prefill-model prefill the whole model cold, then warm from a KV prefix
+  cache-bench cold / warm-exact / warm-shared TTFT on SSM+KV snapshots
+  cache-gate  undersized-cap admission: refuse, miss, ids stay exact
+  ssm       gated-delta-net parity (small + real layer) and layer timing
+  attn-parity --gguf PATH   GPU full-attention block vs CPU reference
+  attn-bench  --gguf PATH   per-layer time at depths 0/8192/100000
+  gpu-bench --gguf PATH [--prefill N] [--depth D --kv q8]
+  oracle-gate --gguf PATH --ids-file F --steps N  CPU oracle vs the
+            production chunked path, step by step (exit 1 on a real split)
+  splitk-gate --gguf PATH [--chunk 2048 --tails 40]  split-K ffn
+            scratch vs HIPML_SPLITK=0 at every chunk tail
+  gpu-profile --gguf PATH  launch cost, host round-trips, graph token
+  bench-kv  quantized-KV decode attention: depth x q8/q4 x 1 head / 16 layers
+            --depths 1024,8192,32768,100000 --reps 3
+  rows-check --gguf PATH [--slots N --prefix P --tail T --decode D]
+            multi-row tail prefill vs the single-sequence path
+  serve     HTTP server: continuous batching, MTP, prefix cache
+
+build with `--features hip` on a machine with the ROCm/HIP runtime.
+unknown command: --version
+
+exit=2

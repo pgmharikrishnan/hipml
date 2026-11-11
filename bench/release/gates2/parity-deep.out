@@ -1,0 +1,63 @@
+device: AMD Radeon AI PRO R9700
+
+case                 result  detail
+gemv_f32             PASS    max_abs 5.96e-7  max_rel 4.77e-6
+gemm_f32             PASS    max_abs 8.34e-7  max_rel 1.08e-4
+rmsnorm_f32          PASS    max_abs 9.54e-7  max_rel 4.08e-7
+rope_neox_f32        PASS    max_abs 2.38e-7  max_rel 9.58e-6
+silu_mul_f32         PASS    max_abs 5.96e-8  max_rel 2.02e-7
+softmax_f32          PASS    max_abs 8.94e-8  max_rel 5.01e-7
+residual_add_f32     PASS    max_abs 0.00e0  max_rel 0.00e0
+attn_decode_f32      PASS    max_abs 1.34e-7  max_rel 8.41e-5
+ssm_conv1d_f32       PASS    max_abs 5.96e-8  max_rel 4.42e-6
+gdn_ar_f32           PASS    max_abs 1.79e-7  max_rel 5.05e-6
+ssm_l2norm_f32       PASS    max_abs 5.96e-8  max_rel 1.17e-7
+ssm_gate_norm_f32    PASS    max_abs 1.49e-8  max_rel 6.63e-8
+ssm_layer_f32        PASS    max_abs 4.47e-8  max_rel 8.84e-6
+sample_top_p_f32     SKIP    nucleus walk is one token per step; the sort lands on device at M2
+argmax_f32           PASS    max_abs 0.00e0  max_rel 0.00e0
+kv_encode_q8         PASS    max_abs 0.00e0  max_rel 0.00e0
+kv_encode_q4         PASS    max_abs 0.00e0  max_rel 0.00e0
+qg_split_f32         PASS    max_abs 0.00e0  max_rel 0.00e0
+head_rmsnorm_f32     PASS    max_abs 3.58e-7  max_rel 2.97e-7
+mrope_f32            PASS    max_abs 2.38e-7  max_rel 4.28e-7
+q_gate_f32           PASS    max_abs 2.98e-8  max_rel 1.10e-7
+kv_append_f32        PASS    max_abs 0.00e0  max_rel 0.00e0
+attn_decode_pm_f32   PASS    max_abs 1.34e-7  max_rel 1.01e-4
+attn_decode_split_f32 PASS    max_abs 1.49e-7  max_rel 2.58e-5
+attn_decode_kv_q8_hd256_s1 PASS    max_abs 0.00e0  max_rel 0.00e0
+attn_decode_kv_q8_hd256_s37 PASS    max_abs 2.38e-7  max_rel 3.42e-4
+attn_decode_kv_q8_hd256_s1000 PASS    max_abs 1.27e-7  max_rel 2.77e-3
+attn_decode_kv_q8_hd256_s4096 PASS    max_abs 1.68e-7  max_rel 6.11e-4
+attn_decode_kv_q4_hd256_s1 PASS    max_abs 0.00e0  max_rel 0.00e0
+attn_decode_kv_q4_hd256_s37 PASS    max_abs 1.49e-7  max_rel 6.54e-4
+attn_decode_kv_q4_hd256_s1000 PASS    max_abs 1.49e-7  max_rel 8.52e-2
+attn_decode_kv_q4_hd256_s4096 PASS    max_abs 1.23e-7  max_rel 5.01e-2
+attn_decode_kv_q8_hd64_s37 PASS    max_abs 8.94e-8  max_rel 2.41e-5
+attn_decode_kv_q8_hd64_s1000 PASS    max_abs 1.64e-7  max_rel 1.29e-4
+attn_decode_kv_q4_hd64_s37 PASS    max_abs 1.19e-7  max_rel 1.16e-5
+attn_decode_kv_q4_hd64_s1000 PASS    max_abs 7.45e-8  max_rel 2.37e-4
+attn_decode_kv_q8_hd256_s100000 PASS    max_abs 7.22e-8  max_rel 9.64e-4
+attn_decode_kv_q4_hd256_s100000 PASS    max_abs 1.22e-7  max_rel 1.32e-4
+gemv_q4_k 64x512             PASS    max_abs 5.48e-6  max_rel 3.49e-5
+gemv_q6_k 64x512             PASS    max_abs 4.20e-5  max_rel 1.44e-5
+gemv_q8_0 64x512             PASS    max_abs 2.38e-6  max_rel 4.27e-6
+gemv_q4_k 17408x5120         PASS    max_abs 1.37e-4  max_rel 9.20e-3
+gemv_q6_k 17408x5120         PASS    max_abs 1.10e-3  max_rel 5.40e-2
+prefill_q4_k 64x512 t=4      PASS    max_abs 4.45e-3  max_rel 1.02e-1
+prefill_q6_k 64x512 t=4      PASS    max_abs 3.15e-2  max_rel 4.44e-2
+prefill_q8_0 64x512 t=4      PASS    max_abs 1.24e-3  max_rel 7.23e-2
+prefill_q4_k 64x512 t=40     PASS    max_abs 5.73e-3  max_rel 4.51e-1
+prefill_q6_k 64x512 t=40     PASS    max_abs 3.09e-2  max_rel 1.28e-1
+prefill_q6_k 17408x5120 t=2  PASS    max_abs 1.12e-1  max_rel 2.38e1
+skinny_q4_k 200x512 r=1      PASS    max_abs 4.16e-3  max_rel 2.63e-2
+skinny_q4_k 200x512 r=3      PASS    max_abs 3.84e-3  max_rel 6.13e-2
+skinny_q4_k 200x512 r=16     PASS    max_abs 6.61e-3  max_rel 1.16e-1
+skinny_q6_k 200x512 r=2      PASS    max_abs 2.09e-2  max_rel 4.09e-2
+skinny_q6_k 200x512 r=16     PASS    max_abs 2.57e-2  max_rel 3.29e-1
+skinny_q8_0 200x512 r=4      PASS    max_abs 1.12e-3  max_rel 8.81e-2
+skinny_q8_0 200x512 r=16     PASS    max_abs 1.21e-3  max_rel 8.81e-2
+skinny_q4_k 5120x5120 r=4    PASS    max_abs 1.59e-2  max_rel 8.97e0
+
+56 passed, 0 failed, 1 skipped
+exit=0

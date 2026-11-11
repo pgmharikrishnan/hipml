@@ -1,0 +1,8 @@
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+Content-Length: 169
+Connection: close
+
+
+TIME=0.000776
+{"error":{"message":"temperature 0.7 is not supported: this server is greedy-only (temperature must be 0 or absent). Sampling is refused rather than silently ignored."}}

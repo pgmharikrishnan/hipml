@@ -1,0 +1,8 @@
+HTTP/1.1 500 Internal Server Error
+Content-Type: application/json
+Content-Length: 83
+Connection: close
+
+
+TIME=0.048445
+{"error":{"message":"admit: prompt 20059 + 1 tokens exceeds the 16384 token slot"}}

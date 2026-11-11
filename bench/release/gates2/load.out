@@ -1,0 +1,59 @@
+device:  AMD Radeon AI PRO R9700
+gguf:    C:\models\Qwen3.8-27B-Q4_K_M.gguf  16,810,714,336 B (15.66 GiB)
+tensors: 866  data 16,799,719,424 B (15.65 GiB)  read+upload 5.05 s (3.33 GB/s)
+hipMemGetInfo free: 34,023,604,224 B before, 17,171,677,184 B after; resident delta 16,851,927,040 B (15.69 GiB)
+
+dtype     tensors            bytes         resident       GiB  status
+F32           360       10,686,464       10,686,464      0.01  supported
+Q6_K           67    4,526,592,000    4,526,592,000      4.22  supported
+Q4_K          439   12,262,440,960   12,262,440,960     11.42  supported
+total         866   16,799,719,424   16,799,719,424     15.65
+
+unsupported: none
+
+config (qwen35): 65 blocks (64 decoder + 1 nextn), hidden 5120, ffn 17408, heads 24 / kv 4, head_dim 256, vocab 248320, eps 1e-6, rope base 1e7 rot 64 sections [11, 11, 10, 0], ctx 262144
+  ssm: conv 4, state 128, groups 16, dt_rank 48, inner 6144 (head_v 128)
+  full-attention layers (16): [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 51, 55, 59, 63]
+
+round-trip (20 tensors, seed 0x9E3779B97F4A7C15):
+  tensor                                                    bytes         file fnv1a       device fnv1a  result
+  blk.2.ssm_alpha.weight                                  138,240 0x90C88B6EF115BD63 0x90C88B6EF115BD63  MATCH
+  blk.2.ssm_beta.weight                                   138,240 0x64272D11F35288F4 0x64272D11F35288F4  MATCH
+  blk.4.ffn_down.weight                                73,113,600 0x66277992C9F24319 0x66277992C9F24319  MATCH
+  blk.9.attn_norm.weight                                   20,480 0x0205352FFA73BC21 0x0205352FFA73BC21  MATCH
+  blk.21.ssm_out.weight                                17,694,720 0x866E9EEAEAFD3AF2 0x866E9EEAEAFD3AF2  MATCH
+  blk.22.ssm_conv1d.weight                                163,840 0xC77475C780059931 0xC77475C780059931  MATCH
+  blk.27.attn_q.weight                                 35,389,440 0xBF13E85EED8BF819 0xBF13E85EED8BF819  MATCH
+  blk.28.ffn_up.weight                                 50,135,040 0x677CC500E0AB4F0E 0x677CC500E0AB4F0E  MATCH
+  blk.29.attn_gate.weight                              17,694,720 0x19512ED92CA4FA18 0x19512ED92CA4FA18  MATCH
+  blk.30.attn_norm.weight                                  20,480 0xE315EB76E53AC7D6 0xE315EB76E53AC7D6  MATCH
+  blk.32.ssm_alpha.weight                                 138,240 0x49CDAE58CD3AC456 0x49CDAE58CD3AC456  MATCH
+  blk.40.attn_norm.weight                                  20,480 0xE2FAE91266D3DC24 0xE2FAE91266D3DC24  MATCH
+  blk.40.ssm_conv1d.weight                                163,840 0xD9C6BEFD4E3E6B06 0xD9C6BEFD4E3E6B06  MATCH
+  blk.42.post_attention_norm.weight                        20,480 0xD10E0017D7908DEE 0xD10E0017D7908DEE  MATCH
+  blk.44.ssm_a                                                192 0x7ECFD34D4A34DA01 0x7ECFD34D4A34DA01  MATCH
+  blk.53.ssm_norm.weight                                      512 0x1441C601AD9574AB 0x1441C601AD9574AB  MATCH
+  blk.57.ssm_alpha.weight                                 138,240 0xD554E9C19EBE5034 0xD554E9C19EBE5034  MATCH
+  blk.57.ssm_dt.bias                                          192 0x35C8B8E4516122F9 0x35C8B8E4516122F9  MATCH
+  blk.62.ffn_gate.weight                               50,135,040 0x9D971DF56A824EBC 0x9D971DF56A824EBC  MATCH
+  blk.63.attn_q.weight                                 35,389,440 0xE4E10FA5925B9B3E 0xE4E10FA5925B9B3E  MATCH
+  checksum matches: 20/20  byte-identical: 20/20
+
+embedding rows (token_embd.weight [248320, 5120] Q4_K; device dequant vs CPU dequant):
+  token        exact/values      max_abs      max_rel
+  0               5120/5120      0.000e0      0.000e0
+  1               5120/5120      0.000e0      0.000e0
+  1234            5120/5120      0.000e0      0.000e0
+  100000          5120/5120      0.000e0      0.000e0
+  248319          5120/5120      0.000e0      0.000e0
+  tolerance: max_abs <= 1e-6 (f32 arithmetic order differs only by fma)
+
+lm_head output.weight [248320, 5120] Q6_K against 5120 f32:
+  248,320 logits in 4.836 ms (215.7 GB/s over 1,042,944,000 B)
+  top-5:
+    1. token  12771  logit     0.098567
+    2. token 113470  logit     0.096732
+    3. token  32625  logit     0.095631
+    4. token 173544  logit     0.095195
+    5. token  41011  logit     0.092445
+exit=0

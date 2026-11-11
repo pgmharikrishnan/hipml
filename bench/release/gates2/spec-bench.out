@@ -1,0 +1,40 @@
+=== spec-bench stock drafts=0
+resident: 15.65 GiB in 866 tensors + sidecar 0.00 GiB; drafter 251.02 MiB, drafter KV 2.4 MiB
+
+drafts     ms/step    tokens/step       tok/s   vs plain      accept     exact  prefill/draft
+     0       33.95          1.000       29.46       1.00x           -         -  215.7/0.0 ms
+drafter: 251.02 MiB weights + 2.4 MiB KV at ctx 313; load+run wall 15.2 s
+exit=0
+=== spec-bench stock drafts=1
+resident: 15.65 GiB in 866 tensors + sidecar 0.00 GiB; drafter 251.02 MiB, drafter KV 2.4 MiB
+
+drafts     ms/step    tokens/step       tok/s   vs plain      accept     exact  prefill/draft
+     0       33.99          1.000       29.42       1.00x           -         -  217.2/0.0 ms
+     1       42.04          1.954       46.47       1.58x       0.969   128/128  217.7/24.2 ms
+drafts 1: no-accept 1.24x a plain step (23.8 tok/s); step 42.04 ms = draft 2.56 + verify 39.30 + rollback 0.18
+drafter: 251.02 MiB weights + 2.4 MiB KV at ctx 313; load+run wall 19.2 s
+exit=0
+=== spec-bench stock drafts=2
+resident: 15.65 GiB in 866 tensors + sidecar 0.00 GiB; drafter 251.02 MiB, drafter KV 2.4 MiB
+
+drafts     ms/step    tokens/step       tok/s   vs plain      accept     exact  prefill/draft
+     0       34.02          1.000       29.39       1.00x           -         -  220.2/0.0 ms
+     1       42.12          1.954       46.38       1.58x       0.969   128/128  220.5/24.3 ms
+     2       50.82          2.822       55.54       1.89x  0.978,0.864   128/128  221.9/24.2 ms
+drafts 1: no-accept 1.24x a plain step (23.7 tok/s); step 42.12 ms = draft 2.56 + verify 39.38 + rollback 0.18
+drafts 2: no-accept 1.49x a plain step (19.7 tok/s); step 50.82 ms = draft 5.09 + verify 45.30 + rollback 0.42
+drafter: 251.02 MiB weights + 2.4 MiB KV at ctx 313; load+run wall 23.0 s
+exit=0
+=== spec-bench stock drafts=3
+resident: 15.65 GiB in 866 tensors + sidecar 0.00 GiB; drafter 251.02 MiB, drafter KV 2.4 MiB
+
+drafts     ms/step    tokens/step       tok/s   vs plain      accept     exact  prefill/draft
+     0       34.07          1.000       29.35       1.00x           -         -  223.0/0.0 ms
+     1       42.17          1.954       46.33       1.58x       0.969   128/128  223.9/24.5 ms
+     2       50.88          2.822       55.47       1.89x  0.978,0.864   128/128  224.3/24.5 ms
+     3       61.26          3.432       56.03       1.91x  0.946,0.829,0.931   128/128  225.1/24.7 ms
+drafts 1: no-accept 1.24x a plain step (23.7 tok/s); step 42.17 ms = draft 2.57 + verify 39.42 + rollback 0.18
+drafts 2: no-accept 1.49x a plain step (19.7 tok/s); step 50.88 ms = draft 5.09 + verify 45.38 + rollback 0.42
+drafts 3: no-accept 1.80x a plain step (16.3 tok/s); step 61.26 ms = draft 7.64 + verify 53.04 + rollback 0.58
+drafter: 251.02 MiB weights + 2.4 MiB KV at ctx 313; load+run wall 26.8 s
+exit=0

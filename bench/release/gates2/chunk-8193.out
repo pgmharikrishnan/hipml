@@ -1,0 +1,5 @@
+resident: 15.65 GiB in 866 tensors on AMD Radeon AI PRO R9700 (upload 5.3s)
+graph: 64 layers, 14.73 GiB streamed/token, f32 KV 1.002 GiB at depth 8193
+build: 8.3s
+prefill: 8193 tokens in 6.77s (1210.20 tok/s, 0.83 ms/token) [chunk 2048, 1691.0 MiB scratch, last id 293]
+exit=0

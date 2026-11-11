@@ -1,0 +1,17 @@
+cargo :    Compiling hipml-core v0.1.0 (C:\hipml-final3\crates\hipml-core)
+At line:1 char:209
++ ... pml-final3; cargo test -p hipml-core --test tokenizer_fixture 2>&1 |  ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling hi...tes\hipml-core):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+running 2 tests
+test multilingual_corpus_matches_llama_ids ... ok
+test tool_call_and_preserve_thinking_templates_match_llama_ids ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.68s
+
+exit=0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.35s
+     Running tests\tokenizer_fixture.rs (target\debug\deps\tokenizer_fixture-85895dc10cb59f1d.exe)

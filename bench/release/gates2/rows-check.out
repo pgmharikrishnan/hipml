@@ -1,0 +1,20 @@
+resident: 15.65 GiB in 866 tensors on AMD Radeon AI PRO R9700 (upload 5.4s)
+row block: 16 tails, 287 rows, 381.64 ms (23.853 ms/tail, 0.75 row/ms)
+slot 0 (tail 17): first id 198, SSM state differs at word Some(817152), 38402938 words, max |d| 1.1149764e-2
+slot 1 (tail 18): first id 1430, SSM state differs at word Some(817152), 38402738 words, max |d| 1.6211092e-2
+slot 2 (tail 19): first id 72, SSM state differs at word Some(817152), 38402735 words, max |d| 1.427269e-2
+slot 3 (tail 17): first id 271, SSM state differs at word Some(817152), 38403347 words, max |d| 1.4129937e-2
+slot 4 (tail 18): first id 198, SSM state differs at word Some(817152), 38402715 words, max |d| 1.5267778e-2
+slot 5 (tail 19): first id 198, SSM state differs at word Some(817152), 38403116 words, max |d| 9.671807e-3
+slot 6 (tail 17): first id 482, SSM state differs at word Some(817152), 38402670 words, max |d| 1.6342163e-2
+slot 7 (tail 18): first id 287, SSM state differs at word Some(817152), 38402844 words, max |d| 7.511139e-3
+slot 8 (tail 19): first id 198, SSM state differs at word Some(817152), 38402582 words, max |d| 7.2193146e-3
+slot 9 (tail 17): first id 26, SSM state differs at word Some(817152), 38403341 words, max |d| 2.102995e-2
+slot 10 (tail 18): first id 198, SSM state differs at word Some(817152), 38402776 words, max |d| 1.0614872e-2
+slot 11 (tail 19): first id 2586, SSM state differs at word Some(817152), 38402686 words, max |d| 1.0635376e-2
+slot 12 (tail 17): first id 62, SSM state differs at word Some(817152), 38403055 words, max |d| 1.346755e-2
+slot 13 (tail 18): first id 198, SSM state differs at word Some(817152), 38402322 words, max |d| 2.3344696e-2
+slot 14 (tail 19): first id 3966, SSM state differs at word Some(817152), 38402994 words, max |d| 1.16119385e-2
+slot 15 (tail 17): first id 340, SSM state differs at word Some(817152), 38402860 words, max |d| 1.4930725e-2
+rows-check: 16 tails, 112 decode ids, all match the single-sequence path (SSM state last bits moved by the wider GEMM tile)
+exit=0

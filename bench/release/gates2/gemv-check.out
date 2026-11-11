@@ -1,0 +1,24 @@
+blk.0.ffn_gate.weight: 1 columns, 17408 values, 0 differ, max |d| 0.000e0
+exit=0
+blk.0.ffn_gate.weight: 2 columns, 34816 values, 0 differ, max |d| 0.000e0
+exit=0
+blk.0.ffn_gate.weight: 4 columns, 69632 values, 0 differ, max |d| 0.000e0
+exit=0
+blk.0.attn_qkv.weight: 1 columns, 10240 values, 0 differ, max |d| 0.000e0
+exit=0
+blk.0.attn_qkv.weight: 2 columns, 20480 values, 0 differ, max |d| 0.000e0
+exit=0
+blk.0.attn_qkv.weight: 4 columns, 40960 values, 0 differ, max |d| 0.000e0
+exit=0
+blk.0.ffn_down.weight: 1 columns, 5120 values, 0 differ, max |d| 0.000e0
+exit=0
+blk.0.ffn_down.weight: 2 columns, 10240 values, 0 differ, max |d| 0.000e0
+exit=0
+blk.0.ffn_down.weight: 4 columns, 20480 values, 0 differ, max |d| 0.000e0
+exit=0
+output.weight: 1 columns, 248320 values, 0 differ, max |d| 0.000e0
+exit=0
+output.weight: 2 columns, 496640 values, 0 differ, max |d| 0.000e0
+exit=0
+output.weight: 4 columns, 993280 values, 0 differ, max |d| 0.000e0
+exit=0

@@ -1,0 +1,10 @@
+FREE
+ACQUIRED wp57 at 2026-11-11T00:22:32.5161235Z
+hipml 0.1.0
+built with hip feature: true
+kernel arch:            gfx1201
+code object:            C:\hipml-final3\target\release\build\hipml-kernels-160419d27f91508e\out\hipml.co
+device 0: AMD Radeon AI PRO R9700 (12.0, 31.9 GiB)
+device 1: AMD Radeon AI PRO R9700 (12.0, 31.9 GiB)
+RELEASED wp57
+FREE
