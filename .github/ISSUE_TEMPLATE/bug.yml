@@ -97,6 +97,6 @@ body:
     id: commit
     attributes:
       label: hipml version or commit
-      description: Output of `hipml --version`, or the commit you built.
+      description: Output of `hipml --help`, or the commit you built.
     validations:
       required: false
