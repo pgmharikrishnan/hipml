@@ -47,7 +47,7 @@ config (qwen35): 65 blocks (64 decoder + 1 nextn), hidden 5120, ffn 17408,
   full-attention layers (16): [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 51, 55, 59, 63]
 ```
 
-Identical to what P9 recorded in [`native-qwen.md`](native-qwen.md). Residency
+Identical to the stock-model audit in [`native-qwen.md`](native-qwen.md). Residency
 checks on the stock file: 4/4 round-trip tensors byte-identical; embedding rows
 0/1/1234/100000/248319 exact (5,120/5,120, max_abs 0); lm_head 248,320 logits in
 5.150 ms (202.5 GB/s). Full output in `bench/release/gates/gateStock.out`.
@@ -246,7 +246,7 @@ KV+SSM buffers are no longer allocated); at 4 GiB it fell from 22,553.5 to
 
 ## Tokenizer and chat template
 
-- `bench/tokenizer/diff.py` on the full WP48 corpus: **6,912 strings, 0
+- `bench/tokenizer/diff.py` on the full tokenizer corpus: **6,912 strings, 0
   mismatches**, 0 llama errors.
 - `bench/tokenizer/template_diff.py`: **18/18 cases pass** — tool schemas,
   tool-call argument escaping, `preserve_thinking`, `enable_thinking`,
@@ -278,10 +278,10 @@ unexplained large-margin divergence.
 
 ## Gates on the merged tree
 
-Merged `feat/integrate` (WP53) then `feat/native-qwen` (P9) onto `2661314`.
-Both merges were clean; the anticipated conflicts in `prefill.rs`, the config
-loader and the docs index did not materialise as text conflicts. The merged
-tree keeps WP52's split-K scratch sizing and WP53's `splitk-gate`.
+The final tree merges the integration work and the stock-model work onto
+`2661314`. Both merges were clean; the anticipated conflicts in `prefill.rs`,
+the config loader and the docs index did not materialise as text conflicts. The
+merged tree keeps the split-K scratch sizing and the `splitk-gate`.
 
 | gate | result |
 | --- | --- |
@@ -326,7 +326,7 @@ chunk-boundary prefill) were run before the switch to the stock model. The
 ## Still citing pre-fix numbers
 
 The pre-fix benchmark tables were measured at `cef7657`, on an earlier model,
-and predate the WP42 correctness fix. `bench/results.json` and `bench/RESULTS.md`
+and predate the projection-path correctness fix. `bench/results.json` and `bench/RESULTS.md`
 have been removed, and `docs/benchmarks.md` now opens with a "superseded"
 banner that points here.
 
