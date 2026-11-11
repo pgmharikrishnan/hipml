@@ -44,6 +44,43 @@ impl AttnLayer<'_> {
             if w.rows != m {
                 return Err(format!("prefill qkv: {} rows, launch says {m}", w.rows));
             }
+            // Q5_K streams its blocks through the tile kernel; the batched GEMV
+            // is still the `HIPML_Q5K_COPY_GB=0` fallback. Its fp16-activation
+            // entry only exists in the v2 shape, so a path without it reads the
+            // f32 tile instead of passing halfs to an f32 kernel.
+            if w.kind == Kind::Q5K {
+                if !crate::q5_tile_prefill_enabled() {
+                    self.proj_rows(l, w, x, y, tokens)?;
+                    continue;
+                }
+                let e = w.prefill_entry()?;
+                if half && crate::prefill_entry_for_half(e).is_some() {
+                    crate::prefill_resident_half(
+                        l.module(),
+                        l.stream(),
+                        e,
+                        &w.data_bytes(),
+                        xh,
+                        y,
+                        m,
+                        w.cols,
+                        tokens,
+                    )?;
+                } else {
+                    crate::prefill_resident(
+                        l.module(),
+                        l.stream(),
+                        e,
+                        &w.data_bytes(),
+                        x,
+                        y,
+                        m,
+                        w.cols,
+                        tokens,
+                    )?;
+                }
+                continue;
+            }
             if half {
                 crate::prefill_resident_half(
                     l.module(),
@@ -319,6 +356,24 @@ impl AttnLayer<'_> {
             &mut v_n as *mut _ as *mut c_void,
         ];
         g.launch(LaunchConfig::linear(n, 256), &l.stream, &mut params)?;
+        // Q5_K: the tile kernel over the f32 rows (see `project_chunk`; the
+        // fp16-activation entry has no tile for this buffer).
+        if self.wo.kind == Kind::Q5K {
+            if !crate::q5_tile_prefill_enabled() {
+                return self.proj_rows(l, &self.wo, out, y, tokens);
+            }
+            return crate::prefill_resident(
+                l.module(),
+                l.stream(),
+                self.wo.prefill_entry()?,
+                &self.wo.data_bytes(),
+                out,
+                y,
+                d.n_embd,
+                d.n_head * d.head_dim,
+                tokens,
+            );
+        }
         crate::prefill_resident(
             l.module(),
             l.stream(),

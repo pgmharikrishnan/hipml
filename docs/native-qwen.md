@@ -151,8 +151,8 @@ Q5_K GEMV/prefill entry.
 - Q4_K_XL: requires IQ4_XS/IQ4_NL/Q3_K/IQ3_S dequant + GEMV. Ruled out.
 - Q6_K_XL: requires (a) a Q6_K embedding-row dequant kernel (the format is
   already supported everywhere else), (b) Q5_K entries in `AttnLayer`
-  (decode entry exists as `gemv_q5_k`; prefill needs the fp16-copy path `Proj`
-  already uses). Until then it loads but does not generate.
+  (decode entry `gemv_q5_k`; prefill `prefill_q5_k`, or `prefill_q5_k_w2h`
+  on the WMMA path). Until then it loads but does not generate.
 
 ## Hard-coded fine-tune values replaced
 

@@ -71,34 +71,7 @@ impl<'a> SsmGpuLayer<'a> {
                         tokens,
                     )?,
                 },
-                SsmWeight::Quant(b, e) => {
-                    let entry = prefill_entry(e)?;
-                    if half {
-                        crate::prefill_resident_half(
-                            l.module(),
-                            l.stream(),
-                            entry,
-                            b,
-                            xh,
-                            y,
-                            m,
-                            d.n_embd,
-                            tokens,
-                        )?
-                    } else {
-                        crate::prefill_resident(
-                            l.module(),
-                            l.stream(),
-                            entry,
-                            b,
-                            x,
-                            y,
-                            m,
-                            d.n_embd,
-                            tokens,
-                        )?
-                    }
-                }
+                SsmWeight::Quant(b, e) => chunk_gemm(l, b, e, x, xh, y, m, d.n_embd, tokens, half)?,
                 SsmWeight::F32(_) => return Err("prefill chunk needs resident weights".to_string()),
             }
         }
@@ -345,12 +318,10 @@ impl<'a> SsmGpuLayer<'a> {
         tokens: usize,
     ) -> Result<(), String> {
         let d = &self.dims;
-        let entry = match &self.wout {
-            SsmWeight::Quant(_, "gemv_f32") => None,
-            SsmWeight::Quant(_, e) => Some(prefill_entry(e)?),
-            SsmWeight::F32(_) => None,
-        };
-        let half = entry.is_some() && crate::prefill_has_xhalf();
+        let half = !matches!(
+            &self.wout,
+            SsmWeight::Quant(_, "gemv_f32") | SsmWeight::F32(_)
+        ) && crate::prefill_has_xhalf();
         if half {
             crate::prefill_xhalf(l.module(), l.stream(), &c.gated, xh, tokens * d.inner())?;
         }
@@ -366,36 +337,57 @@ impl<'a> SsmGpuLayer<'a> {
                 d.inner(),
                 tokens,
             ),
-            SsmWeight::Quant(b, _) => {
-                let e = entry.expect("checked above");
-                if half {
-                    crate::prefill_resident_half(
-                        l.module(),
-                        l.stream(),
-                        e,
-                        b,
-                        xh,
-                        &c.out,
-                        d.n_embd,
-                        d.inner(),
-                        tokens,
-                    )
-                } else {
-                    crate::prefill_resident(
-                        l.module(),
-                        l.stream(),
-                        e,
-                        b,
-                        &c.gated,
-                        &c.out,
-                        d.n_embd,
-                        d.inner(),
-                        tokens,
-                    )
-                }
-            }
+            SsmWeight::Quant(b, e) => chunk_gemm(
+                l,
+                b,
+                e,
+                &c.gated,
+                xh,
+                &c.out,
+                d.n_embd,
+                d.inner(),
+                tokens,
+                half,
+            ),
             SsmWeight::F32(_) => Err("prefill chunk needs resident weights".to_string()),
         }
+    }
+}
+
+/// One projection over the chunk: the tiled GEMM when the format has one, else
+/// the batched GEMV, one weight pass per 128 rows. Q5_K (a UD dynamic quant's
+/// attention/SSM projections) streams its blocks through `prefill_q5_k`; the
+/// batched GEMV stays as the `HIPML_Q5K_COPY_GB=0` fallback.
+#[allow(clippy::too_many_arguments)]
+fn chunk_gemm(
+    l: &Launcher,
+    w: &hipml_hip::ByteBuffer,
+    entry: &str,
+    x: &Buffer,
+    xh: &Buffer,
+    y: &Buffer,
+    m: usize,
+    k: usize,
+    tokens: usize,
+    half: bool,
+) -> Result<(), String> {
+    if entry == "gemv_q5_k" {
+        if !crate::q5_tile_prefill_enabled() {
+            return l.gemv_batched_rows(crate::GEMV_B_Q5K, w, x, y, m, k, tokens);
+        }
+        // The Q5_K fp16-activation entry exists only in the v2 shape; other
+        // paths read the f32 tile rather than feeding halfs to an f32 kernel.
+        let e = prefill_entry(entry)?;
+        if half && crate::prefill_entry_for_half(e).is_some() {
+            return crate::prefill_resident_half(l.module(), l.stream(), e, w, xh, y, m, k, tokens);
+        }
+        return crate::prefill_resident(l.module(), l.stream(), e, w, x, y, m, k, tokens);
+    }
+    let e = prefill_entry(entry)?;
+    if half {
+        crate::prefill_resident_half(l.module(), l.stream(), e, w, xh, y, m, k, tokens)
+    } else {
+        crate::prefill_resident(l.module(), l.stream(), e, w, x, y, m, k, tokens)
     }
 }
 
@@ -405,6 +397,7 @@ fn prefill_entry(gemv: &str) -> Result<&'static str, String> {
     match gemv {
         "gemv_q4_k" => Ok("prefill_q4_k"),
         "gemv_q6_k" => Ok("prefill_q6_k"),
+        "gemv_q5_k" => Ok("prefill_q5_k"),
         "gemv_q8_0" => Ok("prefill_q8_0"),
         other => Err(format!("{other}: no tiled prefill kernel")),
     }

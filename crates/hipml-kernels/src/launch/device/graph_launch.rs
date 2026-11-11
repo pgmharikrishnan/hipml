@@ -36,6 +36,25 @@ pub fn gemv_job_tiles(kind: i32, m: usize) -> usize {
     }
 }
 
+/// The embedding-row kernel for a resident block format: the same decoder as
+/// the dequant entry, reading the row index from the step buffer.
+fn embed_row_entry(ty: hipml_core::quant::TensorType) -> Result<&'static str, String> {
+    Ok(match ty {
+        hipml_core::quant::TensorType::Q4K => "embed_q4_k_row",
+        hipml_core::quant::TensorType::Q6K => "embed_q6_k_row",
+        other => return Err(format!("{}: no embedding-row kernel", other.name())),
+    })
+}
+
+/// The dequant kernel for one resident row of a block format.
+fn dequant_row_entry(ty: hipml_core::quant::TensorType) -> Result<&'static str, String> {
+    Ok(match ty {
+        hipml_core::quant::TensorType::Q4K => "dequant_q4_k_f32",
+        hipml_core::quant::TensorType::Q6K => "dequant_q6_k_f32",
+        other => return Err(format!("{}: no dequant kernel", other.name())),
+    })
+}
+
 /// Batched-GEMV kind ids: the four resident weight formats whose decode
 /// kernels have a `_b` entry (B x rows, one weight pass).
 pub const GEMV_B_Q4K: i32 = 0;
@@ -83,6 +102,52 @@ impl Launcher {
         if batch == 0 || batch > 128 {
             return Err(format!("batched GEMV: batch {batch} outside 1..=128"));
         }
+        self.gemv_batched_at(
+            kind,
+            w,
+            x.as_ptr() as *mut u8,
+            y.as_ptr() as *mut u8,
+            m,
+            k,
+            batch,
+        )
+    }
+
+    /// `gemv_batched` over any row count: one weight pass per 128-row window.
+    /// A prefill tile of a format with no tiled GEMM (Q5_K) can be 2048 rows,
+    /// and the `_b` launch stops at 128.
+    pub fn gemv_batched_rows(
+        &self,
+        kind: i32,
+        w: &ByteBuffer,
+        x: &Buffer,
+        y: &Buffer,
+        m: usize,
+        k: usize,
+        rows: usize,
+    ) -> Result<(), String> {
+        let mut base = 0usize;
+        while base < rows {
+            let r = (rows - base).min(128);
+            let px = unsafe { (x.as_ptr() as *mut u8).add(base * k * 4) };
+            let py = unsafe { (y.as_ptr() as *mut u8).add(base * m * 4) };
+            self.gemv_batched_at(kind, w, px, py, m, k, r)?;
+            base += r;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gemv_batched_at(
+        &self,
+        kind: i32,
+        w: &ByteBuffer,
+        px: *mut u8,
+        py: *mut u8,
+        m: usize,
+        k: usize,
+        batch: usize,
+    ) -> Result<(), String> {
         // Opt-in only. The exact `_b` kernels keep each row's accumulation
         // order identical to the single-sequence GEMV, so the default batched
         // path is bit-identical (gemv-check, column-check). The WMMA tile is
@@ -102,8 +167,8 @@ impl Launcher {
                     if std::env::var_os("HIPML_BATCH_SKINNY_TRACE").is_some() {
                         eprintln!("[skinny] {entry} m={m} k={k} r={r} row0={base}");
                     }
-                    let px = unsafe { (x.as_ptr() as *mut u8).add(base * k * 4) as *const _ };
-                    let py = unsafe { (y.as_ptr() as *mut u8).add(base * m * 4) as *const _ };
+                    let px = unsafe { px.add(base * k * 4) } as *const _;
+                    let py = unsafe { py.add(base * m * 4) } as *const _;
                     super::skinny_launch::skinny_resident_rows(
                         &self.module,
                         &self.stream,
@@ -145,8 +210,8 @@ impl Launcher {
             };
             let shared = r * tile * 4;
             let mut p_w = w.as_ptr();
-            let mut p_x = unsafe { (x.as_ptr() as *mut u8).add(base * k * 4) as *mut c_void };
-            let mut p_y = unsafe { (y.as_ptr() as *mut u8).add(base * m * 4) as *mut c_void };
+            let mut p_x = unsafe { px.add(base * k * 4) } as *mut c_void;
+            let mut p_y = unsafe { py.add(base * m * 4) } as *mut c_void;
             let mut v_m = m as i32;
             let mut v_k = k as i32;
             let mut v_b = r as i32;
@@ -479,16 +544,17 @@ impl Launcher {
 
     /// Dequantise the embedding row named by `step[2]` into `out`: the step's
     /// token id, so a captured graph is replayed for a new token without
-    /// re-capturing.
-    pub fn embed_row_q4_k_dev(
+    /// re-capturing. `ty` selects the block decoder (Q4_K or Q6_K).
+    pub fn embed_row_dev(
         &self,
+        ty: hipml_core::quant::TensorType,
         w: &ByteBuffer,
         row_bytes: usize,
         out: &Buffer,
         n_embd: usize,
     ) -> Result<(), String> {
         let nblocks = n_embd / hipml_core::quant::QK_K;
-        let kernel = self.module.kernel("embed_q4_k_row")?;
+        let kernel = self.module.kernel(embed_row_entry(ty)?)?;
         let mut p_w = w.as_ptr();
         let mut p_out = out.as_ptr();
         let mut v_blocks = nblocks as i32;
@@ -508,25 +574,27 @@ impl Launcher {
         )
     }
 
-    /// Dequantise one embedding row of a resident Q4_K tensor into `out`, on the
+    /// Dequantise one embedding row of a resident tensor into `out`, on the
     /// device: the graph's `embed` step, with no host round-trip.
     ///
     /// `row_bytes` is the tensor's own row stride, so this works for any
     /// `n_embd` that is a multiple of 256.
-    pub fn embed_row_q4_k(
+    pub fn embed_row(
         &self,
+        ty: hipml_core::quant::TensorType,
         w: &ByteBuffer,
         row: usize,
         row_bytes: usize,
         out: &Buffer,
     ) -> Result<(), String> {
-        self.embed_row_q4_k_at(w, row, row_bytes, out, 0, out.len())
+        self.embed_row_at(ty, w, row, row_bytes, out, 0, out.len())
     }
 
     /// Same, writing the dequantized row at float offset `dst` of `out`: the
     /// chunked prefill embeds a whole tile into one `[tokens][n_embd]` buffer.
-    pub fn embed_row_q4_k_at(
+    pub fn embed_row_at(
         &self,
+        ty: hipml_core::quant::TensorType,
         w: &ByteBuffer,
         row: usize,
         row_bytes: usize,
@@ -535,7 +603,7 @@ impl Launcher {
         n_embd: usize,
     ) -> Result<(), String> {
         let nblocks = n_embd / hipml_core::quant::QK_K;
-        let kernel = self.module.kernel("dequant_q4_k_f32")?;
+        let kernel = self.module.kernel(dequant_row_entry(ty)?)?;
         let mut p_w = unsafe { (w.as_ptr() as *mut u8).add(row * row_bytes) } as *mut c_void;
         let mut p_out = unsafe { (out.as_ptr() as *mut u8).add(dst * 4) } as *mut c_void;
         let mut v_blocks = nblocks as i32;

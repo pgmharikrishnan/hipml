@@ -156,9 +156,10 @@ pub struct GpuEngine<'a> {
     down: Buffer,
     final_h: Buffer,
     logits: Buffer,
-    /// The embedding tensor's resident payload plus its row stride, so a token
-    /// id becomes a device row lookup instead of a host round-trip.
-    embed: (&'a ByteBuffer, usize),
+    /// The embedding tensor's resident payload, its row stride and its block
+    /// format, so a token id becomes a device row lookup instead of a host
+    /// round-trip.
+    embed: (&'a ByteBuffer, usize, hipml_core::quant::TensorType),
     /// Argmax scratch: `parts` partial values, `parts` partial indices, one out.
     arg_v: Buffer,
     arg_i: Buffer,
@@ -203,14 +204,20 @@ impl<'a> GpuEngine<'a> {
         let embed = model
             .tensor(crate::TOKEN_EMBD)
             .ok_or_else(|| "model has no token_embd.weight".to_string())?;
-        if embed.ty() != hipml_core::quant::TensorType::Q4K {
+        if embed.ty() != hipml_core::quant::TensorType::Q4K
+            && embed.ty() != hipml_core::quant::TensorType::Q6K
+        {
             return Err(format!(
-                "{}: expected Q4_K, found {}",
+                "{}: expected Q4_K or Q6_K, found {}",
                 crate::TOKEN_EMBD,
                 embed.ty().name()
             ));
         }
-        let embed = (embed.buffer(), (embed.nbytes() / embed.rows()) as usize);
+        let embed = (
+            embed.buffer(),
+            (embed.nbytes() / embed.rows()) as usize,
+            embed.ty(),
+        );
 
         let mut layers = Vec::with_capacity(cfg.n_layer);
         for i in 0..cfg.n_layer {
@@ -354,7 +361,13 @@ impl<'a> GpuEngine<'a> {
             l.set_step(pos, pos + 1, token as usize)?;
         }
 
-        l.embed_row_q4_k_dev(self.embed.0, self.embed.1, &self.x, cfg.n_embd)?;
+        l.embed_row_dev(
+            self.embed.2,
+            self.embed.0,
+            self.embed.1,
+            &self.x,
+            cfg.n_embd,
+        )?;
         mark(&mut self.trace, l, "embed")?;
 
         for i in 0..layer_limit(self.layers.len()) {

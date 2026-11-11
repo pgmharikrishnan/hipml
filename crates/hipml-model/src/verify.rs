@@ -126,16 +126,18 @@ pub fn compare_rows(device: &[f32], cpu: &[f32]) -> Option<RowCompare> {
 }
 
 /// Dequantise one `token_embd.weight` row straight from the file with the CPU
-/// reference (`dequant_q4_k`), the number the device row is compared against.
+/// reference (`dequant_q4_k` / `dequant_q6_k`), the number the device row is
+/// compared against.
 pub fn cpu_embedding_row(path: &Path, token: u32) -> Result<Vec<f32>, String> {
+    use hipml_core::quant::{dequant_q6_k, Q4_K_BYTES, Q6_K_BYTES};
     let mut g = Gguf::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let info = g
         .tensor(TOKEN_EMBD)
         .cloned()
         .ok_or_else(|| format!("no tensor {TOKEN_EMBD}"))?;
-    if info.ty != TensorType::Q4K {
+    if info.ty != TensorType::Q4K && info.ty != TensorType::Q6K {
         return Err(format!(
-            "{TOKEN_EMBD}: expected Q4_K, found {}",
+            "{TOKEN_EMBD}: expected Q4_K or Q6_K, found {}",
             info.ty.name()
         ));
     }
@@ -151,6 +153,11 @@ pub fn cpu_embedding_row(path: &Path, token: u32) -> Result<Vec<f32>, String> {
     }
     let blocks = k / QK_K;
     let row_bytes = info.nbytes / rows;
+    let block_bytes = if info.ty == TensorType::Q6K {
+        Q6_K_BYTES
+    } else {
+        Q4_K_BYTES
+    };
     let mut raw = vec![0u8; row_bytes as usize];
     g.read_tensor_range(TOKEN_EMBD, token as u64 * row_bytes, raw.len(), &mut raw)
         .map_err(|e| format!("{TOKEN_EMBD}: {e}"))?;
@@ -158,7 +165,12 @@ pub fn cpu_embedding_row(path: &Path, token: u32) -> Result<Vec<f32>, String> {
     let mut out = vec![0.0f32; k];
     let mut tmp = [0.0f32; QK_K];
     for b in 0..blocks {
-        dequant_q4_k(&raw[b * 144..(b + 1) * 144], &mut tmp);
+        let src = &raw[b * block_bytes..(b + 1) * block_bytes];
+        if info.ty == TensorType::Q6K {
+            dequant_q6_k(src, &mut tmp);
+        } else {
+            dequant_q4_k(src, &mut tmp);
+        }
         out[b * QK_K..(b + 1) * QK_K].copy_from_slice(&tmp);
     }
     Ok(out)

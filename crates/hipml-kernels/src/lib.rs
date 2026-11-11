@@ -44,8 +44,8 @@ pub use launch::{
 #[cfg(feature = "hip")]
 pub use launch::{gemv_job_tiles, GemvJob, ReadJob};
 pub use launch::{
-    prefill_entry_for, prefill_half, prefill_path, prefill_slices, prefill_v2, set_prefill_half,
-    set_prefill_path, PrefillPath,
+    prefill_entry_for, prefill_half, prefill_path, prefill_slices, prefill_v2,
+    q5_tile_prefill_enabled, set_prefill_half, set_prefill_path, PrefillPath,
 };
 #[cfg(feature = "hip")]
 pub use launch::{GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
@@ -288,6 +288,12 @@ pub const KERNELS: &[KernelSpec] = &[
         kind: KernelKind::Linear { block: 256 },
     },
     KernelSpec {
+        name: "dequant_q6_k_f32",
+        entry: "dequant_q6_k_f32",
+        // Same geometry for the Q6_K embedding rows of a UD dynamic quant.
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
         name: "prefill_f32",
         entry: "prefill_f32",
         // Raw-f32 sibling of prefill_q4_k (the SSM alpha/beta projections):
@@ -314,6 +320,16 @@ pub const KERNELS: &[KernelSpec] = &[
         name: "prefill_q6_k",
         entry: "prefill_q6_k",
         // Same 256-token tile as Q4_K: 8x8 microtile, 32-value k-tiles.
+        kind: KernelKind::Prefill {
+            rows: 64,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_q5_k",
+        entry: "prefill_q5_k",
+        // Same 256-token tile as Q4_K, whose scale/min packing Q5_K shares.
         kind: KernelKind::Prefill {
             rows: 64,
             tokens: 256,
@@ -437,6 +453,15 @@ pub const KERNELS: &[KernelSpec] = &[
         },
     },
     KernelSpec {
+        name: "prefill_q5_k_w2",
+        entry: "prefill_q5_k_w2",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
         name: "prefill_halfw_w2",
         entry: "prefill_halfw_w2",
         kind: KernelKind::Prefill {
@@ -466,6 +491,15 @@ pub const KERNELS: &[KernelSpec] = &[
     KernelSpec {
         name: "prefill_q8_0_w2h",
         entry: "prefill_q8_0_w2h",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_q5_k_w2h",
+        entry: "prefill_q5_k_w2h",
         kind: KernelKind::Prefill {
             rows: 128,
             tokens: 256,
@@ -505,6 +539,15 @@ pub const KERNELS: &[KernelSpec] = &[
     KernelSpec {
         name: "prefill_q8_0_w2h_sk",
         entry: "prefill_q8_0_w2h_sk",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "prefill_q5_k_w2h_sk",
+        entry: "prefill_q5_k_w2h_sk",
         kind: KernelKind::Prefill {
             rows: 128,
             tokens: 256,

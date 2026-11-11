@@ -285,7 +285,15 @@ impl<'a> BatchEngine<'a> {
         for (r, col) in cols.iter().enumerate() {
             for (c, &id) in col.iter().enumerate() {
                 let row = base[r] + c;
-                l.embed_row_q4_k_at(self.embed.0, id as usize, self.embed.1, &s.x, row * n, n)?;
+                l.embed_row_at(
+                    self.embed.2,
+                    self.embed.0,
+                    id as usize,
+                    self.embed.1,
+                    &s.x,
+                    row * n,
+                    n,
+                )?;
             }
         }
 

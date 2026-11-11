@@ -394,6 +394,8 @@ fn fill_random(rng: &mut Rng, out: &mut [u8]) {
 // range a real Q4_K_M tensor has.
 const D_Q4K: [u8; 2] = 0x1400u16.to_le_bytes();
 const DMIN_Q4K: [u8; 2] = 0x1000u16.to_le_bytes();
+const D_Q5K: [u8; 2] = 0x1400u16.to_le_bytes();
+const DMIN_Q5K: [u8; 2] = 0x1000u16.to_le_bytes();
 const D_Q6K: [u8; 2] = 0x1400u16.to_le_bytes();
 const D_Q8_0: [u8; 2] = 0x1400u16.to_le_bytes();
 
@@ -405,6 +407,18 @@ pub fn random_q4_k_bytes(rng: &mut Rng, nblocks: usize) -> Vec<u8> {
         fill_random(rng, b);
         b[0..2].copy_from_slice(&D_Q4K);
         b[2..4].copy_from_slice(&DMIN_Q4K);
+    }
+    out
+}
+
+/// Deterministic Q5_K block bytes: same scale range as Q4_K, random 6-bit
+/// headers, `qh` bits and quants.
+pub fn random_q5_k_bytes(rng: &mut Rng, nblocks: usize) -> Vec<u8> {
+    let mut out = vec![0u8; nblocks * Q5_K_BYTES];
+    for b in out.chunks_mut(Q5_K_BYTES) {
+        fill_random(rng, b);
+        b[0..2].copy_from_slice(&D_Q5K);
+        b[2..4].copy_from_slice(&DMIN_Q5K);
     }
     out
 }
