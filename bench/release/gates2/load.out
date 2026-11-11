@@ -1,5 +1,5 @@
 device:  AMD Radeon AI PRO R9700
-gguf:    C:\models\Qwen3.8-27B-Q4_K_M.gguf  16,810,714,336 B (15.66 GiB)
+gguf:    <HIPML_GGUF>  16,810,714,336 B (15.66 GiB)
 tensors: 866  data 16,799,719,424 B (15.65 GiB)  read+upload 5.05 s (3.33 GB/s)
 hipMemGetInfo free: 34,023,604,224 B before, 17,171,677,184 B after; resident delta 16,851,927,040 B (15.69 GiB)
 

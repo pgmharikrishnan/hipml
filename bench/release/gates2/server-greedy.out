@@ -7,4 +7,4 @@ Connection: close
 
 
 TIME=0.544741
-{"id":"chatcmpl-6","object":"chat.completion","created":1794356477,"model":"C:\\models\\Qwen3.8-27B-Q4_K_M.gguf","choices":[{"index":0,"message":{"role":"assistant","content":"User said \"Hello\". Need respond friendly. Need final concise.\n\n\n"},"finish_reason":"length"}],"usage":{"prompt_tokens":53,"completion_tokens":16,"total_tokens":69},"timings":{"prompt_n":53,"prompt_ms":178.453,"prompt_per_second":296.997,"predicted_n":16,"predicted_ms":357.160,"predicted_per_second":44.798,"ttft_ms":186.280,"prefix_hit_tokens":0}}
+{"id":"chatcmpl-6","object":"chat.completion","created":1794356477,"model":"<HIPML_GGUF>","choices":[{"index":0,"message":{"role":"assistant","content":"User said \"Hello\". Need respond friendly. Need final concise.\n\n\n"},"finish_reason":"length"}],"usage":{"prompt_tokens":53,"completion_tokens":16,"total_tokens":69},"timings":{"prompt_n":53,"prompt_ms":178.453,"prompt_per_second":296.997,"predicted_n":16,"predicted_ms":357.160,"predicted_per_second":44.798,"ttft_ms":186.280,"prefix_hit_tokens":0}}
