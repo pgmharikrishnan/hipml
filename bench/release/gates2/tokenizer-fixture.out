@@ -1,4 +1,4 @@
-cargo :    Compiling hipml-core v0.1.0 (C:\hipml-final3\crates\hipml-core)
+cargo :    Compiling hipml-core v0.1.0 (<REPO>\crates\hipml-core)
 At line:1 char:209
 + ... pml-final3; cargo test -p hipml-core --test tokenizer_fixture 2>&1 |  ...
 +                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

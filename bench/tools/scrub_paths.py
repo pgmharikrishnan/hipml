@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 
-"""Normalise machine paths in committed result JSON, without touching a number.
+"""Normalise machine paths in committed results and gate logs, without touching a number.
 
 Results are measurement records: this script rewrites only path strings and the
 recorded host name. It is idempotent, so it can run after every re-measure, and
@@ -11,6 +11,9 @@ recorded host name. It is idempotent, so it can run after every re-measure, and
     python bench/tools/scrub_paths.py --check    # exit 1 if a file needs it
     python bench/tools/scrub_paths.py FILE...    # explicit files
 
+JSON is rewritten value by value; plain-text logs (`.out`, `.txt`, `.log`) are
+rewritten in place, path string by path string, and are otherwise byte-for-byte.
+
 What it does:
   * a key named `host` becomes `gpu-host`;
   * a Windows or macOS absolute path becomes a placeholder or a basename:
@@ -18,11 +21,16 @@ What it does:
       llama-server[.exe]     -> <LLAMA_SERVER>
       hipml[.exe]            -> <HIPML_EXE>
       gpu-lock.ps1           -> <HIPML_GPU_LOCK>
+      C:\\hipml-*\\...        -> <REPO>\\<relative>
+      C:\\rocm-sdk\\...       -> <ROCM>\\<relative>
+      C:\\models\\...         -> <MODELS>\\<relative>
+      C:\\Users\\<name>\\...  -> <HOME>\\<relative>
       anything else          -> <REPO>\\<relative> or the basename
   * every other value, and every number, is left byte-identical.
 
 Indentation, key order, non-ASCII escaping and the trailing newline of each
-file are preserved.
+file are preserved. A path that is already backslash-escaped inside a quoted
+JSON fragment in a log keeps its doubled separators.
 """
 
 import argparse
@@ -38,7 +46,12 @@ DEFAULT_FILES = [
     "bench/fixtures/prompts.json",
     "bench/sensitivity/*.json",
     "bench/serve/results/**/*.json",
+    "bench/integrate/*.json",
+    "bench/release/gates2/*.out",
 ]
+
+JSON_SUFFIXES = (".json", ".jsonl")
+TEXT_SUFFIXES = (".out", ".txt", ".log")
 
 WIN_PATH = re.compile(r"[A-Za-z]:\\[^\s\"']*")
 POSIX_PATH = re.compile(r"/Users/[^/\s\"']+/[^\s\"']*")
@@ -52,10 +65,17 @@ def _gguf_placeholder(basename):
     return "<HIPML_MTP_GGUF>" if "mtp" in basename.lower() else "<HIPML_GGUF>"
 
 
+def _join(prefix, parts, sep="\\"):
+    return prefix + sep + sep.join(parts) if parts else prefix
+
+
 def _scrub_windows(match):
     raw = match.group(0)
+    # A path quoted inside a JSON fragment in a log has doubled separators;
+    # keep that spelling so the fragment stays valid JSON.
+    sep = "\\\\" if "\\\\" in raw else "\\"
     rest = raw[3:]  # drop "C:\"
-    parts = [p for p in rest.split("\\") if p]
+    parts = [p for p in rest.replace("\\\\", "\\").split("\\") if p]
     if not parts:
         return "<PATH>"
     base = parts[-1]
@@ -71,7 +91,13 @@ def _scrub_windows(match):
     head = parts[0].lower()
     if head.startswith("hipml-") or head == "src":
         tail = parts[1:] if head.startswith("hipml-") else parts[2:]
-        return "<REPO>\\" + "\\".join(tail) if tail else "<REPO>"
+        return _join("<REPO>", tail, sep)
+    if head == "rocm-sdk":
+        return _join("<ROCM>", parts[1:], sep)
+    if head == "models":
+        return _join("<MODELS>", parts[1:], sep)
+    if head == "users":
+        return _join("<HOME>", parts[2:], sep)
     return base
 
 
@@ -120,15 +146,18 @@ def read_shape(text):
 def rewrite(path, check=False):
     with open(path, "r", encoding="utf-8", newline="") as f:
         text = f.read()
-    data = json.loads(text)
-    shape = read_shape(text)
-    clean = scrub(data)
-    body = json.dumps(clean, indent=shape["indent"],
-                      ensure_ascii=shape["ensure_ascii"])
-    if shape["newline"]:
-        body += "\n"
-    if shape["crlf"]:
-        body = body.replace("\n", "\r\n")
+    if path.lower().endswith(TEXT_SUFFIXES):
+        body = POSIX_PATH.sub(_scrub_posix, WIN_PATH.sub(_scrub_windows, text))
+    else:
+        data = json.loads(text)
+        shape = read_shape(text)
+        clean = scrub(data)
+        body = json.dumps(clean, indent=shape["indent"],
+                          ensure_ascii=shape["ensure_ascii"])
+        if shape["newline"]:
+            body += "\n"
+        if shape["crlf"]:
+            body = body.replace("\n", "\r\n")
     if body == text:
         return False
     if not check:
