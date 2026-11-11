@@ -222,6 +222,14 @@ TOKENS DIFFER`) and must be quoted as approximate, not exact.
 Hit latency (lookup + restore + argmax, no compute): 1.89 ms at 2,048 tokens,
 4.59 ms at 8,192.
 
+The default-cap 8,192-token rows above are a second run of the same cell
+recorded in
+[`cache_8192_default_cap_fixed.txt`](../bench/release/cache/cache_8192_default_cap_fixed.txt)
+(6,691.7 ms cold, 6,766.2 ms refused); the 4 GiB rows match
+[`cache_8192_4gib_fixed.txt`](../bench/release/cache/cache_8192_4gib_fixed.txt).
+Article 05 quotes the `_fixed.txt` pair. These are two runs of one cell, not an
+average.
+
 **The default-cap defect is fixed.** At 1 GiB the 8,192-token snapshot needs
 1,174.6 MiB, so it is **refused at capture time** (counted in `refused`, never
 truncated) and the exact repeat falls back to a full prefill: the ids are
