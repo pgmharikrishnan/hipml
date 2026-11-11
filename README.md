@@ -232,14 +232,12 @@ hardware is welcome as new data, never as a replacement for the R9700 rows.
 
 ## Articles
 
-Published articles link to their hosted page; the draft below links to its file in this repository.
-
 1. [Beating llama.cpp at prefill: 11 cells of 12, and a 6% decode bill](https://www.probackend.com/developer-platforms-tooling/beating-llama-cpp-at-prefill) — what the 2,048-token tile buys, and what the decode path pays for it.
 2. [The bug that survived every parity gate: 40 of 48 heads running on zeros](https://www.probackend.com/developer-platforms-tooling/the-bug-that-survived-the-parity-gates) — a launch bug that passed kernel parity, and the oracle gate that caught it.
 3. [Speculative decoding that is exact: 1.53× to 2.00× from the model's own draft head](https://www.probackend.com/developer-platforms-tooling/mtp-speculative-decoding-exact) — the MTP drafter, the verify pass, and why the output never changes.
 4. [Roofline first: why neither engine can decode faster on a 640 GB/s card](https://www.probackend.com/developer-platforms-tooling/roofline-first) — the bandwidth budget behind the ~30 tok/s decode cell.
 5. [Serving eight sessions on one 32 GB card](https://www.probackend.com/developer-platforms-tooling/serving-eight-agents-on-one-card) — continuous batching, its 16-slot tie, and the prefix-cache defect the release run found and fixed.
-6. [What is inside a dynamic quant: nine tensor types in one Q4_K_M file](docs/articles/06-whats-inside-unsloth-dynamic-quants.md) — the per-tensor format mix in a UD build, and what an engine has to implement to read one.
+6. [What is inside a dynamic quant: nine tensor types in one Q4_K_M file](https://www.probackend.com/developer-platforms-tooling/whats-inside-unsloth-dynamic-quants) — the per-tensor format mix in a UD build, and what an engine has to implement to read one.
 
 ## License
 
