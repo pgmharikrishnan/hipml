@@ -104,7 +104,9 @@ mod imp {
                 Kind::Q4K => "gemv_q4_k",
                 Kind::Q6K => "gemv_q6_k",
                 Kind::Q8_0 => "gemv_q8_0",
-                Kind::Q5K => return Err("attention weight is Q5_K: no GEMV kernel".to_string()),
+                // Unsloth's UD dynamic quants store the attention projections
+                // as Q5_K; the GEMV entry has been there all along.
+                Kind::Q5K => "gemv_q5_k",
             }))
         }
 
@@ -849,6 +851,21 @@ mod imp {
                 )?;
             }
             Ok(())
+        }
+
+        /// One projection over a prefill tile whose block format has no tiled
+        /// GEMM: the `_b` GEMV, one weight pass per 128 rows.
+        fn proj_rows(
+            &self,
+            l: &Launcher,
+            w: &ResidentMat,
+            x: &Buffer,
+            y: &Buffer,
+            rows: usize,
+        ) -> Result<(), String> {
+            let kind = crate::batch_kind_for(w.kind)
+                .ok_or_else(|| format!("attention weight {:?}: no batched GEMV", w.kind))?;
+            l.gemv_batched_rows(kind, w.data.bytes(), x, y, w.rows, w.cols, rows)
         }
 
         /// Causal attention for this token. Uses the split-K kernel when the

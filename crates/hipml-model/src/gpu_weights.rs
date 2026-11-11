@@ -6,6 +6,12 @@
 //! reads its blocks directly: Q4_K, Q6_K, Q8_0 and Q5_K. Q5_K keeps a half copy
 //! as well: the GEMV reads the blocks, but the tiled prefill GEMM needs an
 //! fp16 operand and there is no Q5_K dequant-in-shared tile kernel.
+//!
+//! Those copies are budgeted (`HIPML_Q5K_COPY_GB`, default 2 GiB): a file whose
+//! Q5_K tensors would need more than that keeps the blocks only and prefill
+//! falls back to the batched GEMV, one weight pass per 128 rows, because fp16 is
+//! 2.4x the Q5_K bytes and the copies do not fit beside the weights and a real
+//! KV cache on a 32 GiB card.
 
 use hipml_core::mat::Kind;
 use hipml_core::quant::TensorType;
@@ -73,6 +79,9 @@ pub(crate) fn mat_kind(ty: TensorType) -> Result<Kind, String> {
         TensorType::Q4K => Kind::Q4K,
         TensorType::Q6K => Kind::Q6K,
         TensorType::Q8_0 => Kind::Q8_0,
+        // UD dynamic quants: the attention projections are Q5_K, which the
+        // GEMV and batched GEMV read directly.
+        TensorType::Q5K => Kind::Q5K,
         other => return Err(format!("{} is not a supported mat kind", other.name())),
     })
 }
@@ -82,12 +91,44 @@ pub(crate) fn mat_kind(ty: TensorType) -> Result<Kind, String> {
 pub struct Proj<'a> {
     w: &'a ByteBuffer,
     entry: &'static str,
-    /// Q5_K only: the fp16 copy the tiled prefill GEMM streams. One per tensor,
-    /// 0.12 GB for Qwen3.8-27B's two `ffn_down` tensors; the decode GEMV
-    /// still reads the original blocks.
+    /// Q5_K only: the fp16 copy the tiled prefill GEMM streams. One per tensor
+    /// (0.12 GiB for the fine-tune's two `ffn_down`); the decode GEMV still
+    /// reads the original blocks. `None` when the file's total copy bytes
+    /// exceed the budget, and then prefill uses the batched GEMV.
     q5_half: Option<ByteBuffer>,
     pub rows: usize,
     pub cols: usize,
+}
+
+/// Default cap on the fp16 prefill copies, in GiB. A couple of Q5_K tensors (the
+/// fine-tune's two `ffn_down`, 0.12 GiB) stay under it, so today's behaviour is
+/// unchanged -- the stock Q4_K_M has no Q5_K tensor at all. An Unsloth UD dynamic
+/// quant has 115 of them and would need 12.5 GiB.
+const Q5_COPY_BUDGET_GIB: f64 = 2.0;
+
+/// `HIPML_Q5K_COPY_GB`, in GiB. `0` forces the batched-GEMV fallback, which is
+/// how that path's prefill penalty is measured.
+fn q5_copy_budget_bytes() -> usize {
+    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        let gib = std::env::var("HIPML_Q5K_COPY_GB")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(Q5_COPY_BUDGET_GIB);
+        (gib * (1u64 << 30) as f64) as usize
+    })
+}
+
+/// Bytes of fp16 copies the resident loader would add for every Q5_K matrix in
+/// `model`: 256 values of the file become 512 bytes.
+fn q5_copy_bytes(model: &Model) -> usize {
+    use hipml_core::quant::{Q5_K_BYTES, QK_K};
+    model
+        .tensors()
+        .iter()
+        .filter(|t| t.ty() == TensorType::Q5K)
+        .map(|t| (t.nbytes() / Q5_K_BYTES as u64) as usize * QK_K * 2)
+        .sum()
 }
 
 impl<'a> Proj<'a> {
@@ -101,7 +142,7 @@ impl<'a> Proj<'a> {
         }
         let (rows, cols) = (shape[0] as usize, shape[1] as usize);
         let entry = gemv_entry(t.ty())?;
-        let q5_half = if entry == "gemv_q5_k" {
+        let q5_half = if entry == "gemv_q5_k" && q5_copy_bytes(model) <= q5_copy_budget_bytes() {
             let v = dequant_q5_k(t, rows, cols)?;
             let mut half = Vec::with_capacity(v.len() * 2);
             for &x in &v {
@@ -220,13 +261,20 @@ impl<'a> Proj<'a> {
                 tokens,
             );
         }
+        // The copies were over budget (or `HIPML_Q5K_COPY_GB=0`): keep the
+        // blocks and pay the batched GEMV, one weight pass per 128 rows.
+        if self.entry == "gemv_q5_k" {
+            let kind = batch_kind(self.entry).expect("Q5_K has a batched GEMV");
+            return l.gemv_batched_rows(kind, self.w, x, y, self.rows, self.cols, tokens);
+        }
         let e = prefill_entry(self.entry)?;
         l.run_prefill_resident(e, self.w, x, y, self.rows, self.cols, tokens)
     }
 
     /// The same projection, reading an fp16 copy of the activation tile that the
     /// caller has already converted (`prefill_xhalf`). Only the `_w2h` entries
-    /// exist for it, so this requires the v2 prefill kernels.
+    /// exist for it, so this requires the v2 prefill kernels. `xf` is the f32
+    /// tile `xh` was converted from; only the Q5_K fallback reads it.
     ///
     /// `scratch` holds the worst split-K tile the ffn shapes can select for any
     /// tile up to the chunk (see `prefill_split_scratch_cap`); only a
@@ -235,6 +283,7 @@ impl<'a> Proj<'a> {
         &self,
         l: &Launcher,
         xh: &Buffer,
+        xf: &Buffer,
         y: &Buffer,
         scratch: &Buffer,
         tokens: usize,
@@ -266,6 +315,11 @@ impl<'a> Proj<'a> {
                 self.cols,
                 tokens,
             );
+        }
+        if self.entry == "gemv_q5_k" {
+            // No fp16 copy and no `_w2h` kernel for these blocks: the f32 tile
+            // goes through `gemm`, which runs the batched GEMV.
+            return self.gemm(l, xf, y, tokens);
         }
         let e = prefill_entry_half(self.entry)?;
         if hipml_kernels::prefill_should_split(self.rows, self.cols, tokens) {

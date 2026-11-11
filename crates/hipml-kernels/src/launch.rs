@@ -716,6 +716,15 @@ impl Launcher {
         Err("hipml was built without the `hip` feature".to_string())
     }
 
+    pub fn dequant_q6_k(
+        &self,
+        _w: &hipml_hip::ByteBuffer,
+        _byte_offset: u64,
+        _nblocks: usize,
+    ) -> Result<Vec<f32>, String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn run_prefill_time(
         &self,

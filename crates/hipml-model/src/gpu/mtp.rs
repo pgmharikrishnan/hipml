@@ -61,7 +61,7 @@ pub struct MtpGpu<'a> {
     arg_out: Buffer,
     head: &'a ByteBuffer,
     head_ty: hipml_core::quant::TensorType,
-    embed: (&'a ByteBuffer, usize),
+    embed: (&'a ByteBuffer, usize, hipml_core::quant::TensorType),
     launcher: &'a Launcher,
 }
 
@@ -107,7 +107,11 @@ impl<'a> MtpGpu<'a> {
         let embed = model
             .tensor(crate::TOKEN_EMBD)
             .ok_or_else(|| "model has no token_embd.weight".to_string())?;
-        let embed = (embed.buffer(), (embed.nbytes() / embed.rows()) as usize);
+        let embed = (
+            embed.buffer(),
+            (embed.nbytes() / embed.rows()) as usize,
+            embed.ty(),
+        );
         let head_t = model
             .tensor(OUTPUT)
             .ok_or_else(|| "model has no output.weight".to_string())?;
@@ -181,7 +185,15 @@ impl<'a> MtpGpu<'a> {
         let l = self.attn_launcher();
         let cfg = &self.cfg;
         let n = cfg.n_embd;
-        l.embed_row_q4_k_at(self.embed.0, token as usize, self.embed.1, &self.emb, 0, n)?;
+        l.embed_row_at(
+            self.embed.2,
+            self.embed.0,
+            token as usize,
+            self.embed.1,
+            &self.emb,
+            0,
+            n,
+        )?;
         l.rmsnorm_buf(&self.emb, &self.enorm, &self.cat, n, cfg.eps)?;
         let dst = unsafe { (self.cat.as_ptr() as *mut u8).add(n * 4) as *mut std::ffi::c_void };
         l.rmsnorm_ptr(self.hnext.as_ptr(), &self.hnorm, dst, n, cfg.eps, 1)?;

@@ -288,6 +288,12 @@ pub const KERNELS: &[KernelSpec] = &[
         kind: KernelKind::Linear { block: 256 },
     },
     KernelSpec {
+        name: "dequant_q6_k_f32",
+        entry: "dequant_q6_k_f32",
+        // Same geometry for the Q6_K embedding rows of a UD dynamic quant.
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
         name: "prefill_f32",
         entry: "prefill_f32",
         // Raw-f32 sibling of prefill_q4_k (the SSM alpha/beta projections):

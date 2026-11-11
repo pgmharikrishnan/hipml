@@ -375,13 +375,15 @@ impl Model {
     /// Dequantise one vocabulary row (`token_embd.weight[token, :]`) on device.
     ///
     /// One Q4_K super-block is 144 bytes / 256 values, so a k=5120 row is 20
-    /// blocks and 2880 bytes; only those bytes are read from VRAM.
+    /// blocks and 2880 bytes; only those bytes are read from VRAM. A UD dynamic
+    /// quant stores the table as Q6_K (210 bytes per super-block).
     pub fn embedding_row(&self, token: u32) -> Result<Vec<f32>, String> {
         let t = self.require(TOKEN_EMBD)?;
-        if t.ty() != TensorType::Q4K {
+        let ty = t.ty();
+        if ty != TensorType::Q4K && ty != TensorType::Q6K {
             return Err(format!(
-                "{TOKEN_EMBD}: expected Q4_K, found {}",
-                t.ty().name()
+                "{TOKEN_EMBD}: expected Q4_K or Q6_K, found {}",
+                ty.name()
             ));
         }
         let k = t.ne0();
@@ -396,8 +398,11 @@ impl Model {
         }
         let blocks = k as usize / QK_K;
         let row_bytes = t.nbytes / rows;
-        self.launcher
-            .dequant_q4_k(&t.buffer, token as u64 * row_bytes, blocks)
+        let offset = token as u64 * row_bytes;
+        match ty {
+            TensorType::Q6K => self.launcher.dequant_q6_k(&t.buffer, offset, blocks),
+            _ => self.launcher.dequant_q4_k(&t.buffer, offset, blocks),
+        }
     }
 
     /// `logits = output.weight @ x` on device, with the weights already resident.

@@ -364,7 +364,7 @@ impl<'a> GpuEngine<'a> {
             r.start();
         }
         for (t, &id) in tokens.iter().enumerate() {
-            l.embed_row_q4_k_at(embed.0, id as usize, embed.1, &c.x, t * n, n)?;
+            l.embed_row_at(embed.2, embed.0, id as usize, embed.1, &c.x, t * n, n)?;
         }
         if let Some(r) = rep.as_mut() {
             r.lap(l, |r| &mut r.embed_ms);
@@ -440,8 +440,10 @@ impl<'a> GpuEngine<'a> {
                     &c.xh,
                     n_tok * cfg.n_embd,
                 )?;
-                block.gate.gemm_half(l, &c.xh, &c.gate, &c.sk, n_tok)?;
-                block.up.gemm_half(l, &c.xh, &c.up, &c.sk, n_tok)?;
+                block
+                    .gate
+                    .gemm_half(l, &c.xh, &c.t, &c.gate, &c.sk, n_tok)?;
+                block.up.gemm_half(l, &c.xh, &c.t, &c.up, &c.sk, n_tok)?;
                 l.silu_mul_buf(&c.gate, &c.up, &c.act, n_tok * cfg.n_ff)?;
                 ::hipml_kernels::prefill_xhalf(
                     l.module(),
@@ -450,7 +452,9 @@ impl<'a> GpuEngine<'a> {
                     &c.xh,
                     n_tok * cfg.n_ff,
                 )?;
-                block.down.gemm_half(l, &c.xh, &c.down, &c.sk, n_tok)?;
+                block
+                    .down
+                    .gemm_half(l, &c.xh, &c.act, &c.down, &c.sk, n_tok)?;
             } else {
                 block.gate.gemm(l, &c.t, &c.gate, n_tok)?;
                 block.up.gemm(l, &c.t, &c.up, n_tok)?;

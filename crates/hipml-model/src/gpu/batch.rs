@@ -140,7 +140,7 @@ pub struct BatchEngine<'a> {
     down: Buffer,
     final_h: Buffer,
     logits: Buffer,
-    embed: (&'a ByteBuffer, usize),
+    embed: (&'a ByteBuffer, usize, hipml_core::quant::TensorType),
     arg_v: Buffer,
     arg_i: Buffer,
     arg_out: Buffer,
@@ -188,10 +188,16 @@ impl<'a> BatchEngine<'a> {
         let embed = model
             .tensor(crate::TOKEN_EMBD)
             .ok_or_else(|| "model has no token_embd.weight".to_string())?;
-        if embed.ty() != hipml_core::quant::TensorType::Q4K {
-            return Err(format!("{}: expected Q4_K", crate::TOKEN_EMBD));
+        if embed.ty() != hipml_core::quant::TensorType::Q4K
+            && embed.ty() != hipml_core::quant::TensorType::Q6K
+        {
+            return Err(format!("{}: expected Q4_K or Q6_K", crate::TOKEN_EMBD));
         }
-        let embed = (embed.buffer(), (embed.nbytes() / embed.rows()) as usize);
+        let embed = (
+            embed.buffer(),
+            (embed.nbytes() / embed.rows()) as usize,
+            embed.ty(),
+        );
         let zeros = |count: usize| Buffer::alloc(count);
         let mut layers = Vec::with_capacity(cfg.n_layer);
         for i in 0..cfg.n_layer {

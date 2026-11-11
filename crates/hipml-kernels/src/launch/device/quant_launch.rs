@@ -301,8 +301,28 @@ impl Launcher {
         byte_offset: u64,
         nblocks: usize,
     ) -> Result<Vec<f32>, String> {
+        self.dequant_row("dequant_q4_k_f32", w, byte_offset, nblocks)
+    }
+
+    /// The same for Q6_K blocks (a UD dynamic quant's `token_embd.weight`).
+    pub fn dequant_q6_k(
+        &self,
+        w: &ByteBuffer,
+        byte_offset: u64,
+        nblocks: usize,
+    ) -> Result<Vec<f32>, String> {
+        self.dequant_row("dequant_q6_k_f32", w, byte_offset, nblocks)
+    }
+
+    fn dequant_row(
+        &self,
+        entry: &str,
+        w: &ByteBuffer,
+        byte_offset: u64,
+        nblocks: usize,
+    ) -> Result<Vec<f32>, String> {
         let out = Buffer::alloc(nblocks * hipml_core::quant::QK_K)?;
-        let kernel = self.module.kernel("dequant_q4_k_f32")?;
+        let kernel = self.module.kernel(entry)?;
         let offset = usize::try_from(byte_offset)
             .map_err(|_| "tensor offset does not fit in usize".to_string())?;
         let mut p_w = unsafe { (w.as_ptr() as *mut u8).add(offset) } as *mut c_void;

@@ -282,7 +282,7 @@ impl<'a> BatchEngine<'a> {
         let mut row = 0usize;
         for (_, tok) in tails {
             for &id in tok.iter() {
-                l.embed_row_q4_k_at(embed.0, id as usize, embed.1, &r.x, row * n, n)?;
+                l.embed_row_at(embed.2, embed.0, id as usize, embed.1, &r.x, row * n, n)?;
                 row += 1;
             }
         }
@@ -415,8 +415,8 @@ impl<'a> BatchEngine<'a> {
             l.rmsnorm_rows(&r.x1, &block.post_norm, &r.t, n, cfg.eps, m)?;
             if ::hipml_kernels::prefill_v2() {
                 ::hipml_kernels::prefill_xhalf(l.module(), l.stream(), &r.t, &r.xh, m * n)?;
-                block.gate.gemm_half(l, &r.xh, &r.gate, &r.sk, m)?;
-                block.up.gemm_half(l, &r.xh, &r.up, &r.sk, m)?;
+                block.gate.gemm_half(l, &r.xh, &r.t, &r.gate, &r.sk, m)?;
+                block.up.gemm_half(l, &r.xh, &r.t, &r.up, &r.sk, m)?;
                 l.silu_mul_buf(&r.gate, &r.up, &r.act, m * cfg.n_ff)?;
                 ::hipml_kernels::prefill_xhalf(
                     l.module(),
@@ -425,7 +425,7 @@ impl<'a> BatchEngine<'a> {
                     &r.xh,
                     m * cfg.n_ff,
                 )?;
-                block.down.gemm_half(l, &r.xh, &r.down, &r.sk, m)?;
+                block.down.gemm_half(l, &r.xh, &r.act, &r.down, &r.sk, m)?;
             } else {
                 block.gate.gemm(l, &r.t, &r.gate, m)?;
                 block.up.gemm(l, &r.t, &r.up, m)?;

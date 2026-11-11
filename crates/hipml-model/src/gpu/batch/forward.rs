@@ -59,7 +59,15 @@ impl<'a> BatchEngine<'a> {
         }
         stage!(0);
         for (bi, &tok) in tokens.iter().enumerate() {
-            l.embed_row_q4_k_at(self.embed.0, tok as usize, self.embed.1, &self.x, bi * n, n)?;
+            l.embed_row_at(
+                self.embed.2,
+                self.embed.0,
+                tok as usize,
+                self.embed.1,
+                &self.x,
+                bi * n,
+                n,
+            )?;
         }
         stage!(1);
 

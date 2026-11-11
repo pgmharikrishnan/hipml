@@ -57,7 +57,7 @@ pub struct MtpBatch<'a> {
     pos: Buffer,
     launcher: &'a Launcher,
     head: (&'a ByteBuffer, hipml_core::quant::TensorType),
-    embed: (&'a ByteBuffer, usize),
+    embed: (&'a ByteBuffer, usize, hipml_core::quant::TensorType),
     weight_bytes: usize,
 }
 
@@ -110,6 +110,7 @@ impl<'a> MtpBatch<'a> {
         let embed = (
             embed_t.buffer(),
             (embed_t.nbytes() / embed_t.rows()) as usize,
+            embed_t.ty(),
         );
         let head_t = model
             .tensor(crate::OUTPUT)
@@ -226,7 +227,8 @@ impl<'a> MtpBatch<'a> {
         self.pos.upload_bytes_async(0, &pos_bytes, l.stream())?;
 
         for (i, &tok) in tokens.iter().enumerate() {
-            l.embed_row_q4_k_at(
+            l.embed_row_at(
+                self.embed.2,
                 self.embed.0,
                 tok as usize,
                 self.embed.1,
@@ -364,7 +366,8 @@ impl<'a> MtpBatch<'a> {
         let n = cfg.n_embd;
         let l = self.attn_launcher();
         for (i, &tok) in tokens.iter().enumerate() {
-            l.embed_row_q4_k_at(
+            l.embed_row_at(
+                self.embed.2,
                 self.embed.0,
                 tok as usize,
                 self.embed.1,

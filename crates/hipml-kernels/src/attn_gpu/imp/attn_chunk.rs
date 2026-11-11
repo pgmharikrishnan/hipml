@@ -44,6 +44,12 @@ impl AttnLayer<'_> {
             if w.rows != m {
                 return Err(format!("prefill qkv: {} rows, launch says {m}", w.rows));
             }
+            // Q5_K has no dequant-in-shared tile kernel, so its tile runs as one
+            // batched GEMV pass over the f32 activation (not the fp16 copy).
+            if w.kind == Kind::Q5K {
+                self.proj_rows(l, w, x, y, tokens)?;
+                continue;
+            }
             if half {
                 crate::prefill_resident_half(
                     l.module(),
@@ -319,6 +325,10 @@ impl AttnLayer<'_> {
             &mut v_n as *mut _ as *mut c_void,
         ];
         g.launch(LaunchConfig::linear(n, 256), &l.stream, &mut params)?;
+        // Q5_K: no tiled prefill kernel, so one batched GEMV pass over the rows.
+        if self.wo.kind == Kind::Q5K {
+            return self.proj_rows(l, &self.wo, out, y, tokens);
+        }
         crate::prefill_resident(
             l.module(),
             l.stream(),

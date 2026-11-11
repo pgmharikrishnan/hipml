@@ -227,7 +227,7 @@ impl<'a> GpuEngine<'a> {
         }
 
         for (i, &id) in tokens.iter().enumerate() {
-            l.embed_row_q4_k_at(embed.0, id as usize, embed.1, &c.x, i * n, n)?;
+            l.embed_row_at(embed.2, embed.0, id as usize, embed.1, &c.x, i * n, n)?;
         }
         super::trace::mark(&mut self.trace, l, "embed")?;
 
