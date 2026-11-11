@@ -145,7 +145,13 @@ fn supported(ty: TensorType) -> bool {
     // so treating it as raw-only was wrong.
     matches!(
         ty,
-        TensorType::F32 | TensorType::Q4K | TensorType::Q5K | TensorType::Q6K | TensorType::Q8_0
+        TensorType::F32
+            | TensorType::Q4K
+            | TensorType::Q5K
+            | TensorType::Q6K
+            | TensorType::Q8_0
+            | TensorType::IQ4XS
+            | TensorType::IQ4NL
     )
 }
 

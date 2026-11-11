@@ -17,6 +17,13 @@
 #define PF_Q4K_BLOCK_BYTES 144
 #define PF_Q6K_BLOCK_BYTES 210
 #define PF_Q8_0_BLOCK_BYTES 34
+#define PF_IQ4_XS_BLOCK_BYTES 136
+#define PF_IQ4_NL_BLOCK_BYTES 18
+
+// ggml-common.h `kvalues_iq4nl`, shared by the two IQ4 kinds.
+static __device__ __constant__ const signed char PF_IQ4NL_KV[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113
+};
 
 // Weight bytes are streamed once per prompt tile and must not evict the
 // activation working set, so they can be loaded non-temporally (gfx12:
@@ -58,7 +65,8 @@ static __device__ __forceinline__ void pf_scale_min(int j, const unsigned char* 
 }
 
 // Dequantise 8 contiguous values of one row, starting at value index `v`
-// (a multiple of 8). KIND: 0 Q4_K, 1 Q6_K, 2 Q8_0, 3 already-half.
+// (a multiple of 8). KIND: 0 Q4_K, 1 Q6_K, 2 Q8_0, 3 already-half,
+// 4 IQ4_XS, 5 IQ4_NL.
 template <int KIND>
 static __device__ __forceinline__ void pf_dequant8(const unsigned char* __restrict__ rp,
                                                    int v, float* out)
@@ -106,7 +114,7 @@ static __device__ __forceinline__ void pf_dequant8(const unsigned char* __restri
             const int nib = high ? (qb >> 4) : (qb & 0xF);
             out[i] = scale * (float)((nib | (hb << 4)) - 32);
         }
-    } else {
+    } else if (KIND == 2) {
         const int blk = v >> 5;
         const int part = (v & 31) >> 3;
         const unsigned char* b = rp + (size_t)blk * PF_Q8_0_BLOCK_BYTES;
@@ -114,6 +122,37 @@ static __device__ __forceinline__ void pf_dequant8(const unsigned char* __restri
         const signed char* qs = reinterpret_cast<const signed char*>(b + 2 + part * 8);
 #pragma unroll
         for (int i = 0; i < 8; ++i) out[i] = d * (float)qs[i];
+    } else if (KIND == 4) {
+        const int blk = v >> 8;
+        const int within = v & 255;
+        const int sub = within >> 5;
+        const int part = (within & 31) >> 3;
+        const unsigned char* b = rp + (size_t)blk * PF_IQ4_XS_BLOCK_BYTES;
+        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
+        const unsigned short scales_h =
+            *reinterpret_cast<const unsigned short*>(b + 2);
+        const int ls = ((b[4 + (sub >> 1)] >> (4 * (sub & 1))) & 0xF) |
+                       (((scales_h >> (2 * sub)) & 3) << 4);
+        const float dl = d * (float)(ls - 32);
+        const bool high = part >= 2;
+        const unsigned char* qp = b + 8 + sub * 16 + (part & 1) * 8;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int q = high ? (pf_ld8(qp + i) >> 4) : (pf_ld8(qp + i) & 0xF);
+            out[i] = dl * (float)PF_IQ4NL_KV[q];
+        }
+    } else {
+        const int blk = v >> 5;
+        const int part = (v & 31) >> 3;
+        const unsigned char* b = rp + (size_t)blk * PF_IQ4_NL_BLOCK_BYTES;
+        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
+        const bool high = part >= 2;
+        const unsigned char* qp = b + 2 + (part & 1) * 8;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int q = high ? (pf_ld8(qp + i) >> 4) : (pf_ld8(qp + i) & 0xF);
+            out[i] = d * (float)PF_IQ4NL_KV[q];
+        }
     }
 }
 
@@ -124,7 +163,9 @@ static __device__ __forceinline__ size_t pf_row_bytes(int k, int kind)
     return kind == 3 ? (size_t)k * 2
          : kind == 0 ? (size_t)(k / 256) * PF_Q4K_BLOCK_BYTES
          : kind == 1 ? (size_t)(k / 256) * PF_Q6K_BLOCK_BYTES
-                     : (size_t)(k / 32) * PF_Q8_0_BLOCK_BYTES;
+         : kind == 2 ? (size_t)(k / 32) * PF_Q8_0_BLOCK_BYTES
+         : kind == 4 ? (size_t)(k / 256) * PF_IQ4_XS_BLOCK_BYTES
+                     : (size_t)(k / 32) * PF_IQ4_NL_BLOCK_BYTES;
 }
 
 #endif // PF_PREFILL_COMMON_INC

@@ -31,6 +31,19 @@ pub const Q6_K_BYTES: usize = 210;
 pub const Q8_0_VALUES: usize = 32;
 /// Bytes per Q8_0 block: d(2) + qs(32).
 pub const Q8_0_BYTES: usize = 34;
+/// Values per IQ4_NL block.
+pub const IQ4_NL_VALUES: usize = 32;
+/// Bytes per IQ4_NL block: d(2) + qs(16).
+pub const IQ4_NL_BYTES: usize = 18;
+/// Bytes per IQ4_XS super-block: d(2) + scales_h(2) + scales_l(4) + qs(128).
+pub const IQ4_XS_BYTES: usize = 136;
+
+/// The 16-entry signed codebook both IQ4 formats index, from ggml-common.h
+/// (`kvalues_iq4nl`). It is not in `docs/reference/`; taken verbatim from
+/// upstream llama.cpp `ggml/src/ggml-common.h`.
+pub const KVALUES_IQ4NL: [i8; 16] = [
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+];
 
 /// Convert an IEEE-754 binary16 bit pattern to f32, exactly.
 ///
@@ -72,6 +85,8 @@ pub enum TensorType {
     Q4K,
     Q5K,
     Q6K,
+    IQ4NL,
+    IQ4XS,
     /// Anything else: the reader can list it but not size it.
     Unsupported(u32),
 }
@@ -84,6 +99,8 @@ impl TensorType {
             12 => TensorType::Q4K,
             13 => TensorType::Q5K,
             14 => TensorType::Q6K,
+            20 => TensorType::IQ4NL,
+            23 => TensorType::IQ4XS,
             other => TensorType::Unsupported(other),
         }
     }
@@ -95,6 +112,8 @@ impl TensorType {
             TensorType::Q4K => 12,
             TensorType::Q5K => 13,
             TensorType::Q6K => 14,
+            TensorType::IQ4NL => 20,
+            TensorType::IQ4XS => 23,
             TensorType::Unsupported(id) => id,
         }
     }
@@ -106,6 +125,8 @@ impl TensorType {
             TensorType::Q4K => "Q4_K".to_string(),
             TensorType::Q5K => "Q5_K".to_string(),
             TensorType::Q6K => "Q6_K".to_string(),
+            TensorType::IQ4NL => "IQ4_NL".to_string(),
+            TensorType::IQ4XS => "IQ4_XS".to_string(),
             TensorType::Unsupported(id) => format!("type_{id}"),
         }
     }
@@ -115,7 +136,8 @@ impl TensorType {
         match self {
             TensorType::F32 => 1,
             TensorType::Q8_0 => Q8_0_VALUES,
-            TensorType::Q4K | TensorType::Q5K | TensorType::Q6K => QK_K,
+            TensorType::Q4K | TensorType::Q5K | TensorType::Q6K | TensorType::IQ4XS => QK_K,
+            TensorType::IQ4NL => IQ4_NL_VALUES,
             TensorType::Unsupported(id) => size_only(id).0,
         }
     }
@@ -128,6 +150,8 @@ impl TensorType {
             TensorType::Q4K => Q4_K_BYTES,
             TensorType::Q5K => Q5_K_BYTES,
             TensorType::Q6K => Q6_K_BYTES,
+            TensorType::IQ4NL => IQ4_NL_BYTES,
+            TensorType::IQ4XS => IQ4_XS_BYTES,
             TensorType::Unsupported(id) => size_only(id).1,
         }
     }
@@ -146,10 +170,10 @@ impl TensorType {
 
 /// `(values, bytes)` per block for GGML types that are sized but never
 /// dequantised here, so a file that carries one still loads and the load
-/// report can name it: F16, Q4_0, Q2_K, Q3_K, IQ4_NL, IQ3_S, IQ4_XS.
+/// report can name it: F16, Q4_0, Q2_K, Q3_K, IQ3_S.
 ///
-/// The IQ entries matter because Unsloth's "UD" dynamic quants mix tensor
-/// types per layer; sizing them is metadata only, not a dequant path.
+/// The remaining IQ entries matter because Unsloth's "UD" dynamic quants mix
+/// tensor types per layer; sizing them is metadata only, not a dequant path.
 /// `(0, 0)` for anything else.
 fn size_only(id: u32) -> (usize, usize) {
     match id {
@@ -157,9 +181,7 @@ fn size_only(id: u32) -> (usize, usize) {
         2 => (32, 18),
         10 => (QK_K, 84),
         11 => (QK_K, 110),
-        20 => (32, 18),    // IQ4_NL
         21 => (QK_K, 110), // IQ3_S
-        23 => (QK_K, 136), // IQ4_XS
         _ => (0, 0),
     }
 }
@@ -301,6 +323,53 @@ pub fn dequant_q8_0(block: &[u8], out: &mut [f32]) {
     }
 }
 
+/// Dequantise one IQ4_NL block (18 bytes -> 32 values).
+///
+/// Port of `dequantize_row_iq4_nl` (ggml-quants.c:2741). Both halves index the
+/// same 16-entry signed codebook: the low nibble of `qs[j]` is value `j`, the
+/// high nibble is value `j + 16`.
+pub fn dequant_iq4_nl(block: &[u8], out: &mut [f32]) {
+    assert_eq!(block.len(), IQ4_NL_BYTES, "IQ4_NL block must be 18 bytes");
+    assert_eq!(
+        out.len(),
+        IQ4_NL_VALUES,
+        "IQ4_NL block must produce 32 values"
+    );
+    let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    let qs = &block[2..18];
+    for j in 0..16 {
+        out[j] = d * KVALUES_IQ4NL[(qs[j] & 0xF) as usize] as f32;
+        out[j + 16] = d * KVALUES_IQ4NL[(qs[j] >> 4) as usize] as f32;
+    }
+}
+
+/// Dequantise one IQ4_XS super-block (136 bytes -> 256 values).
+///
+/// Port of `dequantize_row_iq4_xs` (ggml-quants.c:2759). Eight 32-value
+/// sub-blocks; each has a 6-bit signed scale assembled from the low nibble in
+/// `scales_l` and two bits in `scales_h`, and `dl = d * (ls - 32)` is negative
+/// for `ls < 32`. The 16 `qs` bytes of a sub-block produce values 0..15 from
+/// their low nibbles and 16..31 from their high nibbles.
+pub fn dequant_iq4_xs(block: &[u8], out: &mut [f32]) {
+    assert_eq!(block.len(), IQ4_XS_BYTES, "IQ4_XS block must be 136 bytes");
+    assert_eq!(out.len(), QK_K, "IQ4_XS block must produce 256 values");
+    let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    let scales_h = u16::from_le_bytes([block[2], block[3]]);
+    let scales_l = &block[4..8];
+    let qs = &block[8..136];
+
+    for ib in 0..8 {
+        let ls = ((scales_l[ib / 2] >> (4 * (ib % 2))) & 0xF) as i32
+            | ((((scales_h >> (2 * ib)) & 3) as i32) << 4);
+        let dl = d * (ls - 32) as f32;
+        let q = &qs[ib * 16..ib * 16 + 16];
+        for j in 0..16 {
+            out[ib * 32 + j] = dl * KVALUES_IQ4NL[(q[j] & 0xF) as usize] as f32;
+            out[ib * 32 + 16 + j] = dl * KVALUES_IQ4NL[(q[j] >> 4) as usize] as f32;
+        }
+    }
+}
+
 /// `y[m] = W[m,k] · x[k]` with `W` stored as Q4_K blocks, row-major.
 pub fn gemv_q4_k(w: &[u8], x: &[f32], m: usize, k: usize) -> Vec<f32> {
     assert_eq!(k % QK_K, 0, "k must be a multiple of 256");
@@ -367,6 +436,62 @@ pub fn gemv_q8_0(w: &[u8], x: &[f32], m: usize, k: usize) -> Vec<f32> {
             dequant_q8_0(&row_data[b * Q8_0_BYTES..(b + 1) * Q8_0_BYTES], &mut tmp);
             let xb = &x[b * Q8_0_VALUES..(b + 1) * Q8_0_VALUES];
             for l in 0..Q8_0_VALUES {
+                acc += tmp[l] * xb[l];
+            }
+        }
+        *out = acc;
+    }
+    y
+}
+
+/// `y[m] = W[m,k] · x[k]` with `W` stored as IQ4_XS blocks, row-major.
+pub fn gemv_iq4_xs(w: &[u8], x: &[f32], m: usize, k: usize) -> Vec<f32> {
+    assert_eq!(k % QK_K, 0, "k must be a multiple of 256");
+    let blocks_per_row = k / QK_K;
+    let row_bytes = blocks_per_row * IQ4_XS_BYTES;
+    assert_eq!(w.len(), m * row_bytes, "W must be m * k/256 * 136 bytes");
+    assert_eq!(x.len(), k, "x must be k");
+
+    let mut y = vec![0.0f32; m];
+    let mut tmp = [0.0f32; QK_K];
+    for (row, out) in y.iter_mut().enumerate() {
+        let row_data = &w[row * row_bytes..(row + 1) * row_bytes];
+        let mut acc = 0.0f32;
+        for b in 0..blocks_per_row {
+            dequant_iq4_xs(
+                &row_data[b * IQ4_XS_BYTES..(b + 1) * IQ4_XS_BYTES],
+                &mut tmp,
+            );
+            let xb = &x[b * QK_K..(b + 1) * QK_K];
+            for l in 0..QK_K {
+                acc += tmp[l] * xb[l];
+            }
+        }
+        *out = acc;
+    }
+    y
+}
+
+/// `y[m] = W[m,k] · x[k]` with `W` stored as IQ4_NL blocks, row-major.
+pub fn gemv_iq4_nl(w: &[u8], x: &[f32], m: usize, k: usize) -> Vec<f32> {
+    assert_eq!(k % IQ4_NL_VALUES, 0, "k must be a multiple of 32");
+    let blocks_per_row = k / IQ4_NL_VALUES;
+    let row_bytes = blocks_per_row * IQ4_NL_BYTES;
+    assert_eq!(w.len(), m * row_bytes, "W must be m * k/32 * 18 bytes");
+    assert_eq!(x.len(), k, "x must be k");
+
+    let mut y = vec![0.0f32; m];
+    let mut tmp = [0.0f32; IQ4_NL_VALUES];
+    for (row, out) in y.iter_mut().enumerate() {
+        let row_data = &w[row * row_bytes..(row + 1) * row_bytes];
+        let mut acc = 0.0f32;
+        for b in 0..blocks_per_row {
+            dequant_iq4_nl(
+                &row_data[b * IQ4_NL_BYTES..(b + 1) * IQ4_NL_BYTES],
+                &mut tmp,
+            );
+            let xb = &x[b * IQ4_NL_VALUES..(b + 1) * IQ4_NL_VALUES];
+            for l in 0..IQ4_NL_VALUES {
                 acc += tmp[l] * xb[l];
             }
         }

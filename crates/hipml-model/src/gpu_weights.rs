@@ -3,9 +3,10 @@
 //!
 //! A `Proj` points at a loader `ByteBuffer` in its GGUF block form and carries
 //! the GEMV entry that reads it. Every format the model uses has a kernel that
-//! reads its blocks directly: Q4_K, Q6_K, Q8_0 and Q5_K. Q5_K keeps a half copy
-//! as well: the GEMV reads the blocks, but the tiled prefill GEMM needs an
-//! fp16 operand and there is no Q5_K dequant-in-shared tile kernel.
+//! reads its blocks directly: Q4_K, Q6_K, Q8_0, Q5_K and the IQ4 family.
+//! Q5_K keeps a half copy as well: the GEMV reads the blocks, but the tiled
+//! prefill GEMM needs an fp16 operand and there is no Q5_K dequant-in-shared
+//! tile kernel.
 
 use hipml_core::mat::Kind;
 use hipml_core::quant::TensorType;
@@ -22,20 +23,26 @@ pub fn gemv_entry(ty: TensorType) -> Result<&'static str, String> {
         TensorType::Q6K => "gemv_q6_k",
         TensorType::Q8_0 => "gemv_q8_0",
         TensorType::Q5K => "gemv_q5_k",
+        TensorType::IQ4XS => "gemv_iq4_xs",
+        TensorType::IQ4NL => "gemv_iq4_nl",
         other => return Err(format!("{} has no GEMV kernel", other.name())),
     })
 }
 
-/// The batched-GEMV kind for a resident GEMV entry. Only the four block
-/// formats with a `_b` kernel are batchable; F32 projections are small and stay
+/// The batched-GEMV kind for a resident GEMV entry. Only the block formats
+/// with a `_b` kernel are batchable; F32 projections are small and stay
 /// per-slot.
 pub(crate) fn batch_kind(entry: &str) -> Option<i32> {
-    use hipml_kernels::{GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
+    use hipml_kernels::{
+        GEMV_B_IQ4NL, GEMV_B_IQ4XS, GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80,
+    };
     Some(match entry {
         "gemv_q4_k" => GEMV_B_Q4K,
         "gemv_q6_k" => GEMV_B_Q6K,
         "gemv_q5_k" => GEMV_B_Q5K,
         "gemv_q8_0" => GEMV_B_Q80,
+        "gemv_iq4_xs" => GEMV_B_IQ4XS,
+        "gemv_iq4_nl" => GEMV_B_IQ4NL,
         _ => return None,
     })
 }
@@ -52,6 +59,8 @@ fn prefill_entry(gemv: &str) -> Result<&'static str, String> {
         "gemv_q4_k" => "prefill_q4_k",
         "gemv_q6_k" => "prefill_q6_k",
         "gemv_q8_0" => "prefill_q8_0",
+        "gemv_iq4_xs" => "prefill_iq4_xs",
+        "gemv_iq4_nl" => "prefill_iq4_nl",
         other => return Err(format!("{other}: no tiled prefill kernel")),
     })
 }
@@ -63,6 +72,8 @@ fn prefill_entry_half(gemv: &str) -> Result<&'static str, String> {
         "gemv_q4_k" => "prefill_q4_k_w2h",
         "gemv_q6_k" => "prefill_q6_k_w2h",
         "gemv_q8_0" => "prefill_q8_0_w2h",
+        "gemv_iq4_xs" => "prefill_iq4_xs_w2h",
+        "gemv_iq4_nl" => "prefill_iq4_nl_w2h",
         other => return Err(format!("{other}: no fp16-activation prefill kernel")),
     })
 }

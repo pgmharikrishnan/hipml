@@ -39,6 +39,14 @@ impl Kind {
             TensorType::Q5K => Kind::Q5K,
             TensorType::Q6K => Kind::Q6K,
             TensorType::Q8_0 => Kind::Q8_0,
+            // The CPU reference path stays Q4_K/Q5_K/Q6_K/Q8_0; the IQ4 family
+            // is read by the GPU kernels only.
+            TensorType::IQ4NL | TensorType::IQ4XS => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{} has no CPU matrix path", ty.name()),
+                ))
+            }
             TensorType::Unsupported(id) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

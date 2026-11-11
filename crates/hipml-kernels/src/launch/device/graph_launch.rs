@@ -36,12 +36,14 @@ pub fn gemv_job_tiles(kind: i32, m: usize) -> usize {
     }
 }
 
-/// Batched-GEMV kind ids: the four resident weight formats whose decode
-/// kernels have a `_b` entry (B x rows, one weight pass).
+/// Batched-GEMV kind ids: the resident weight formats whose decode kernels
+/// have a `_b` entry (B x rows, one weight pass).
 pub const GEMV_B_Q4K: i32 = 0;
 pub const GEMV_B_Q6K: i32 = 1;
 pub const GEMV_B_Q5K: i32 = 2;
 pub const GEMV_B_Q80: i32 = 3;
+pub const GEMV_B_IQ4XS: i32 = 4;
+pub const GEMV_B_IQ4NL: i32 = 5;
 
 impl Launcher {
     /// The skinny-GEMM entry for a batched kind, when the format has one.
@@ -125,6 +127,8 @@ impl Launcher {
             GEMV_B_Q6K => ("gemv_q6_k_b", 16, 1024, 256),
             GEMV_B_Q5K => ("gemv_q5_k_b", 16, 1024, 256),
             GEMV_B_Q80 => ("gemv_q8_0_b", 1, 0, 256),
+            GEMV_B_IQ4XS => ("gemv_iq4_xs_b", 16, 1024, 256),
+            GEMV_B_IQ4NL => ("gemv_iq4_nl_b", 16, 1024, 256),
             other => return Err(format!("unknown batched GEMV kind {other}")),
         };
         let kernel = self.module.kernel(entry)?;

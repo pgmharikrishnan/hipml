@@ -146,8 +146,16 @@ static __device__ __forceinline__ pww2_u4 pww2_loadraw(const unsigned char* __re
     } else if (KIND == 2) {
         const int blk = v >> 5, part = (v & 31) >> 3;
         pww2_ld8b(rp + (size_t)blk * PF_Q8_0_BLOCK_BYTES + 2 + part * 8, r, 1);
-    } else {
+    } else if (KIND == 3) {
         __builtin_memcpy(&r, rp + (size_t)v * 2, 16);
+    } else if (KIND == 4) {
+        const int blk = v >> 8, within = v & 255, sub = within >> 5;
+        const int part = (within & 31) >> 3;
+        pww2_ld8b(rp + (size_t)blk * PF_IQ4_XS_BLOCK_BYTES + 8 + sub * 16 +
+                      (part & 1) * 8, r, 1);
+    } else {
+        const int blk = v >> 5, part = (v & 31) >> 3;
+        pww2_ld8b(rp + (size_t)blk * PF_IQ4_NL_BLOCK_BYTES + 2 + (part & 1) * 8, r, 1);
     }
     return r;
 }
@@ -196,9 +204,35 @@ static __device__ __forceinline__ void pww2_dequant8(const pww2_u4& r,
         const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
 #pragma unroll
         for (int i = 0; i < 8; ++i) out[i] = d * (float)(signed char)pww2_b(r.x, r.y, i);
-    } else {
+    } else if (KIND == 3) {
 #pragma unroll
         for (int i = 0; i < 8; ++i) out[i] = __half2float(pww2_h(r, i));
+    } else if (KIND == 4) {
+        const int blk = v >> 8, within = v & 255, sub = within >> 5;
+        const int part = (within & 31) >> 3;
+        const unsigned char* b = rp + (size_t)blk * PF_IQ4_XS_BLOCK_BYTES;
+        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
+        const unsigned short scales_h =
+            *reinterpret_cast<const unsigned short*>(b + 2);
+        const int ls = ((b[4 + (sub >> 1)] >> (4 * (sub & 1))) & 0xF) |
+                       (((scales_h >> (2 * sub)) & 3) << 4);
+        const float dl = d * (float)(ls - 32);
+        const bool high = part >= 2;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int q = pww2_b(r.x, r.y, i);
+            out[i] = dl * (float)PF_IQ4NL_KV[high ? (q >> 4) : (q & 0xF)];
+        }
+    } else {
+        const int blk = v >> 5, part = (v & 31) >> 3;
+        const unsigned char* b = rp + (size_t)blk * PF_IQ4_NL_BLOCK_BYTES;
+        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
+        const bool high = part >= 2;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int q = pww2_b(r.x, r.y, i);
+            out[i] = d * (float)PF_IQ4NL_KV[high ? (q >> 4) : (q & 0xF)];
+        }
     }
 }
 
@@ -570,6 +604,21 @@ extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) pref
     pww2_body<3, true>(w, x, y, m, k, tokens);
 }
 
+// IQ4 family: same tile, the IQ4_XS/IQ4_NL decode lives in prefill_common.inc.
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_iq4_xs_w2h(const unsigned char* __restrict__ w,
+                                             const void* __restrict__ x,
+                                             float* __restrict__ y, int m, int k, int tokens)
+{
+    pww2_body<4, true>(w, x, y, m, k, tokens);
+}
+
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_iq4_nl_w2h(const unsigned char* __restrict__ w,
+                                             const void* __restrict__ x,
+                                             float* __restrict__ y, int m, int k, int tokens)
+{
+    pww2_body<5, true>(w, x, y, m, k, tokens);
+}
+
 // Split-K variants: same body over a k slice. The launcher runs [0,ks) with
 // accumulate 0 and [ks,k) with accumulate 1, so the second launch adds its
 // partial to the first. Launches on one stream are ordered, so no atomics and
@@ -604,6 +653,22 @@ extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) pref
                                                 int ks)
 {
     pww2_body_split<3, true>(w, x, y, scratch, m, k, tokens, ks);
+}
+
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_iq4_xs_w2h_sk(const unsigned char* __restrict__ w,
+                                                const void* __restrict__ x,
+                                                float* __restrict__ y, float* __restrict__ scratch, int m, int k, int tokens,
+                                                int ks)
+{
+    pww2_body_split<4, true>(w, x, y, scratch, m, k, tokens, ks);
+}
+
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_iq4_nl_w2h_sk(const unsigned char* __restrict__ w,
+                                                const void* __restrict__ x,
+                                                float* __restrict__ y, float* __restrict__ scratch, int m, int k, int tokens,
+                                                int ks)
+{
+    pww2_body_split<5, true>(w, x, y, scratch, m, k, tokens, ks);
 }
 
 // n equal k slices in one launch: `blockIdx.z` selects the slice, `ks` is its

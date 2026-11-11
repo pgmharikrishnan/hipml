@@ -274,6 +274,8 @@ fn split_entry(name: &str) -> Option<&'static str> {
         "prefill_q6_k_w2h" => "prefill_q6_k_w2h_sk",
         "prefill_q8_0_w2h" => "prefill_q8_0_w2h_sk",
         "prefill_halfw_w2h" => "prefill_halfw_w2h_sk",
+        "prefill_iq4_xs_w2h" => "prefill_iq4_xs_w2h_sk",
+        "prefill_iq4_nl_w2h" => "prefill_iq4_nl_w2h_sk",
         _ => return None,
     })
 }
