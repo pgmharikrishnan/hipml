@@ -190,14 +190,14 @@ pub fn bench(args: &[String]) -> i32 {
             eprintln!("column-bench: prefill: {e}");
             return 1;
         }
-        let mut snaps = match engine.alloc_snapshots(2) {
+        let mut snaps = match engine.alloc_snapshots(a.cols) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("column-bench: snapshots: {e}");
                 return 1;
             }
         };
-        let ids = vec![1u32; 2];
+        let ids = vec![1u32; a.cols];
         let n = 3;
         engine.trace = Some(hipml_model::gpu::Trace::default());
         for _ in 0..n {
@@ -226,7 +226,10 @@ pub fn bench(args: &[String]) -> i32 {
             }
         };
         let total: f64 = spans.iter().map(|(_, u)| u).sum();
-        println!("\ntrace, 2 columns ({n} passes, ranked by GPU time):");
+        println!(
+            "\ntrace, {} columns ({n} passes, ranked by GPU time):",
+            a.cols
+        );
         for (name, us) in &spans {
             let b = attr(name);
             let ms = us / 1e3 / n as f64;

@@ -122,8 +122,9 @@ so the floor is `ms/step / plain ms/step`:
 | 3 | 64.9 | 1.89x | draft 7.7 + verify 56.5 + rollback 0.6 |
 
 This is down from 1.46x/1.84x/2.28x in WP30 but still misses the 1.12x target:
-the verify pass, not the drafter, is the cost. One extra column is 1.11x the
-one-column pass; two extra are 1.29x; three extra 1.54x.
+the verify pass, not the drafter, is the cost. One extra column was 1.11x the
+one-column pass; two extra were 1.29x; three extra 1.54x (measured before the
+row-scaling fix below).
 
 ### 8K context
 
@@ -175,9 +176,76 @@ The KV append is 0.007 ms. The remaining per-column cost is the GDN chain
 (`ssm_rec` 3.88 + part of `ssm_proj`), which is sequential in token order and
 cannot be weight-batched.
 
+### Row scaling of the batched GEMV (2026-11-12)
+
+The `_b` kernels already dequantised each weight block once and applied it to
+all `B` rows, so the k loop was never per row. The growth with `B` came from
+the x side: every k-tile staged all `B` x-rows through shared memory and then
+read them back as scalar shared loads, so each block wrote `B * TILE` floats
+per tile and the read-back cost scaled with `B` while the weight bytes did not.
+Three smaller costs sat on top: IQ4_XS/IQ4_NL resolved the codebook through
+`__constant__`, which is a global load per value on this target; Q5_K's
+batched dequant used a per-value nibble plus fifth-bit select where the
+single-row kernel uses one packed dword extraction; and Q8_0 read x as 32
+scalar loads.
+
+The fix reads each row's x straight from global (four 128-bit loads per lane;
+`x` is at most `B * k` floats, so it stays in L2), drops the staging loop and
+its two `__syncthreads()`, keeps the IQ4 codebook in 16 floats of shared, gives
+Q5_K the single-row packed extraction, and vectorises Q8_0's x reads. Nothing
+in the accumulation order changed: `gemv-check` reports 0 differing values at 2
+and 4 columns for every kind it touches, and `column-check` reports 0
+differing logits/hidden/residual at q8 and f32.
+
+One real tensor per format, `gemv-bench --rows 16 --reps 20`, ms of the batched
+pass with the ratio against the same kernel at `B=1`:
+
+| tensor (kind) | B=1 | B=2 | B=4 | B=8 | B=16 |
+| --- | --- | --- | --- | --- | --- |
+| blk.22.ffn_up (Q5_K) before | 0.115 | 0.161 (1.40x) | 0.185 (1.61x) | 0.253 (2.20x) | 0.474 (4.12x) |
+| blk.22.ffn_up (Q5_K) after | 0.114 | 0.118 (1.04x) | 0.153 (1.34x) | 0.209 (1.83x) | 0.384 (3.37x) |
+| blk.0.ffn_gate (IQ4_XS) before | 0.091 | 0.165 (1.81x) | 0.158 (1.74x) | 0.305 (3.35x) | 0.559 (6.14x) |
+| blk.0.ffn_gate (IQ4_XS) after | 0.096 | 0.104 (1.08x) | 0.133 (1.39x) | 0.298 (3.10x) | 0.556 (5.79x) |
+| output (Q6_K) before | 1.696 | 1.856 (1.09x) | 2.378 (1.40x) | 3.557 (2.10x) | 7.021 (4.14x) |
+| output (Q6_K) after | 1.695 | 1.885 (1.11x) | 2.179 (1.29x) | 2.943 (1.74x) | 5.838 (3.44x) |
+
+Two rows now cost one weight pass plus 4-11%, four rows 1.3-1.4x. Above four
+rows the per-row x traffic is no longer free (the same kernel covers `B` up to
+8 and 16 with a smaller k-tile), but the verify never asks for more than 4.
+
+End to end on the UD `Q4_K_M` model (`p2_math_169`, 169-token context), the
+same two binaries, one session:
+
+| measure | before | after |
+| --- | --- | --- |
+| `column-bench` q8, 1/2/3/4 cols (ms/pass) | 36.08 / 53.87 / 55.55 / 61.75 | 35.95 / 41.25 / 49.59 / 56.35 |
+| `--vs 1 col` q8 | 1.00x / 1.49x / 1.54x / 1.71x | 1.00x / 1.15x / 1.38x / 1.57x |
+| `column-bench` f32, 1/2/3/4 cols | 33.31 / 49.89 / 51.28 / 56.56 | 33.37 / 37.68 / 45.19 / 51.03 |
+| `--vs 1 col` f32 | 1.00x / 1.50x / 1.54x / 1.70x | 1.00x / 1.13x / 1.35x / 1.53x |
+| `spec-bench` q8, drafts 0/1/2/3 (tok/s) | 30.44 / 33.90 / 45.71 / 48.34 | 30.38 / 43.98 / 50.29 / 52.35 |
+| `spec-bench` f32, drafts 0/1/2/3 | 30.45 / 36.01 / 48.90 / 51.99 | 30.37 / 47.24 / 55.08 / 57.24 |
+
+All eight speculative rows stay 128/128 exact against plain greedy. On this
+measurement a two-row verify is 1.15x (q8) / 1.13x (f32) a one-row pass, under
+the 1.2x target; four rows are 1.57x / 1.53x and still miss it. What is left at
+four rows is not the GEMV: at q8 KV the per-column attention arm launches
+`attn_decode_kv_w2` once per column (a dozen-odd blocks at short context) where
+f32 runs one `attn_decode_cols_f32` for all columns, and the GDN chain stays
+sequential in token order. The batched q8 attention kernel
+(`attn_decode_kv_q8_b`) is not the same kernel the plain path runs, so
+swapping it in would break the bit-identity this table relies on.
+
+Measured and reverted: hoisting all `B` rows' x above the dequant (regressed
+`B=4`), packed IQ4_XS nibble extraction (0.109 -> 0.179 ms at `B=2`), and
+raising `ROWS_PER_WARP` from 2 to 4 (regressed `B=4`). IQ4_XS keeps the
+per-`B` preload only up to `B=4`; above that it reads one row at a time, because
+keeping all rows live spilled and made the wide batch slower than the staged
+version it replaced.
+
 ## What is not verified / not done
 
-* The prose ≥48 / JSON ≥53 tok/s targets are **not met** (42.6 / 50.1). copy
+* The prose ≥48 / JSON ≥53 tok/s targets are **not met** (42.6 / 50.1, before
+  the row-scaling fix; the four-prompt table was not re-run afterwards). copy
   reaches 61.1 (target 65) and code 51.4. The gap is the verify pass, not
   acceptance.
 * The 8K path is measured with `--kv q8` only; `--kv f32` at 8K was not run.

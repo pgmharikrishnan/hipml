@@ -210,7 +210,6 @@ static __device__ __forceinline__ void q5k_load(const unsigned char* __restrict_
     q5k_scale_min(sub, b + 4, &sc, &mn);
     const float scale = d * (float)sc;
     const float minv = dmin * (float)mn;
-    const unsigned int bit = high ? (2u << (2 * g)) : (1u << (2 * g));
 
     const unsigned int* qsp = reinterpret_cast<const unsigned int*>(b + 48 + g * 32 + (within & 31));
     const unsigned int* qhp = reinterpret_cast<const unsigned int*>(b + 16 + (within & 31));
@@ -227,12 +226,22 @@ static __device__ __forceinline__ void q5k_load(const unsigned char* __restrict_
     qh.w[2] = qhp[2];
     qh.w[3] = qhp[3];
 
+    // Same packed extraction the single-row `q5k_acc` uses: byte j of `qb[k]`
+    // holds value 4k+j in bits 0..4, so a value is one bit-field extract
+    // instead of a nibble, a fifth-bit test and a select. The scale/min
+    // multiply and subtract are unchanged, so `wv[i]` is bit-identical.
+    const unsigned int qsh = (unsigned int)(2 * g + (high ? 1 : 0));
+    const unsigned int nsh = high ? 4u : 0u;
+    unsigned int qb[4];
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+        const unsigned int b4 = ((qh.w[k] >> qsh) << 4) & 0x10101010u;
+        qb[k] = ((qs.w[k] >> nsh) & 0x0F0F0F0Fu) | b4;
+    }
 #pragma unroll
     for (int i = 0; i < Q5K_VPL; ++i) {
-        const unsigned int byte = qs.b[i];
-        const unsigned int nib = high ? (byte >> 4) : (byte & 0xF);
-        const float q = (float)nib + ((qh.b[i] & bit) ? 16.0f : 0.0f);
-        wv[i] = scale * q - minv;
+        const unsigned int q = (qb[i >> 2] >> (8 * (i & 3))) & 0x1Fu;
+        wv[i] = scale * (float)q - minv;
     }
 }
 
@@ -267,27 +276,24 @@ static __device__ __forceinline__ void q5k_tile_b(
 
     for (int base = 0; base < k; base += TILE) {
         const int n = min(TILE, k - base);
-        const int nchunks = n / Q5K_VPL;
-        for (int j = tid; j < nchunks; j += Q5K_BLOCK) {
-#pragma unroll
-            for (int bi = 0; bi < B; ++bi)
-                q5k_stage_group(x + (size_t)bi * k, sx + bi * TILE, base, j);
-        }
-        __syncthreads();
 
         for (int c = lane * Q5K_VPL; c < n; c += Q5K_GROUP) {
-            const int g = c / Q5K_GROUP;
-            const int s = g * Q5K_GROUP + lane;
             const int p = base + c;
             float wv[RPW][Q5K_VPL];
 #pragma unroll
             for (int rr = 0; rr < RPW; ++rr) q5k_load(rp[rr], p, wv[rr]);
 #pragma unroll
             for (int bi = 0; bi < B; ++bi) {
-                const float* src = sx + bi * TILE + s;
-                float xv[Q5K_VPL];
-#pragma unroll
-                for (int i = 0; i < Q5K_VPL; ++i) xv[i] = src[i * 32];
+                const float4* xp =
+                    reinterpret_cast<const float4*>(x + (size_t)bi * k + p);
+                const float4 v0 = xp[0];
+                const float4 v1 = xp[1];
+                const float4 v2 = xp[2];
+                const float4 v3 = xp[3];
+                const float xv[Q5K_VPL] = {
+                    v0.x, v0.y, v0.z, v0.w, v1.x, v1.y, v1.z, v1.w,
+                    v2.x, v2.y, v2.z, v2.w, v3.x, v3.y, v3.z, v3.w,
+                };
 #pragma unroll
                 for (int rr = 0; rr < RPW; ++rr) {
                     float a = acc[rr][bi];
@@ -297,7 +303,6 @@ static __device__ __forceinline__ void q5k_tile_b(
                 }
             }
         }
-        __syncthreads();
     }
 
 #pragma unroll

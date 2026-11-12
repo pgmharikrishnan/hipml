@@ -41,6 +41,7 @@ PORT_HIPML = 8093
 PORT_LLAMA = 8092
 MODEL = None
 MTP = None
+DRAFTS = 1
 HIPML = None
 LLAMA = None
 
@@ -141,7 +142,7 @@ def start_hipml(cell, out_dir):
         cmd += ["--mtp", MTP]
     cmd += ["--port", str(PORT_HIPML),
             "--ctx", str(cell["ctx"]), "--slots", str(cell["slots"]),
-            "--chunk", "256", "--drafts", "1",
+            "--chunk", "256", "--drafts", str(DRAFTS),
             "--prefix-entries", "16", "--prefix-mb", "2048"]
     log = open(os.path.join(out_dir, "server.log"), "w", encoding="utf-8")
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
@@ -155,6 +156,9 @@ def start_llama(cell, out_dir):
     cmd = [LLAMA, "-m", MODEL, "--host", "127.0.0.1", "--port", str(PORT_LLAMA),
            "-ngl", "99", "-c", str(total_ctx), "--parallel", str(cell["slots"]),
            "-ctk", "q8_0", "-ctv", "q8_0", "--no-webui", "--no-cache-idle-slots"]
+    # Extra llama-server flags for an A/B (e.g. "--spec-type draft-mtp -md
+    # <drafter.gguf>"). Empty by default so the baseline command stands.
+    cmd += os.environ.get("HIPML_BENCH_LLAMA_EXTRA", "").split()
     log = open(os.path.join(out_dir, "server.log"), "w", encoding="utf-8")
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
     return proc, log, cmd, PORT_LLAMA
@@ -339,6 +343,8 @@ def main():
         description="Serve-loop benchmark. Paths come from HIPML_GGUF, "
                     "HIPML_MTP_GGUF, LLAMA_SERVER and HIPML_EXE.")
     ap.add_argument("--engine", required=True, choices=["hipml", "llama"])
+    ap.add_argument("--drafts", type=int, default=1,
+                    help="hipml serve --drafts (1..3); ignored for llama")
     ap.add_argument("--cell", required=True, choices=sorted(CELLS))
     ap.add_argument("--tokens", type=int, default=64)
     ap.add_argument("--reps", type=int, default=0, help="override the cell's wave count")
@@ -358,6 +364,8 @@ def main():
     ap.add_argument("--request-timeout", type=int, default=900)
     args = ap.parse_args()
 
+    global DRAFTS
+    DRAFTS = args.drafts
     MODEL = _paths.model(args.model)
     MTP = _paths.mtp_model(args.mtp)
     HIPML = _paths.hipml_exe(args.hipml)
