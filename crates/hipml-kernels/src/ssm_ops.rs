@@ -423,21 +423,9 @@ fn offset(p: *mut c_void, floats: usize) -> *mut c_void {
 // matrix), driven by `recurrent_at` over row `b` of the shared scratch.
 // ---------------------------------------------------------------------------
 
-/// The batched-GEMV kind for a resident projection entry.
-pub(crate) fn batch_kind_for_entry(entry: &str) -> Option<i32> {
-    use crate::launch::{GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80};
-    Some(match entry {
-        "gemv_q4_k" => GEMV_B_Q4K,
-        "gemv_q6_k" => GEMV_B_Q6K,
-        "gemv_q5_k" => GEMV_B_Q5K,
-        "gemv_q8_0" => GEMV_B_Q80,
-        _ => return None,
-    })
-}
-
 impl<'a> SsmGpuLayer<'a> {
-    /// The four input projections for `rows` x-vectors: Q8_0/Q6_K/Q5_K/Q4_K
-    /// run one batched pass, the tiny F32 alpha/beta run per slot.
+    /// The four input projections for `rows` x-vectors: any format with a
+    /// batched kernel runs one pass, the tiny F32 alpha/beta run per slot.
     #[allow(clippy::too_many_arguments)]
     pub fn gemvs_batched(
         &self,
@@ -489,7 +477,7 @@ impl<'a> SsmGpuLayer<'a> {
                 self.f32_rows(b.as_ptr(), x, y, m, k, rows, l)
             }
             SsmWeight::Quant(b, entry) => {
-                let kind = batch_kind_for_entry(entry)
+                let kind = crate::batch_kind_entry(entry)
                     .ok_or_else(|| format!("{entry}: no batched GEMV"))?;
                 l.gemv_batched(kind, b, x, y, m, k, rows)
             }
