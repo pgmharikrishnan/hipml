@@ -159,7 +159,7 @@ impl<'a> SsmGpuLayer<'a> {
                 &mut v_rows as *mut _ as *mut c_void,
             ];
             let cfg = LaunchConfig {
-                grid: (nv as u32, 1, 1),
+                grid: (nv as u32, super::ssm_cols::j_split(d.head_v) as u32, 1),
                 block: (128, 1, 1),
                 shared_mem_bytes: 0,
             };

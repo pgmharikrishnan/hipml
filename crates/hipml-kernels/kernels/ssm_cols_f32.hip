@@ -25,6 +25,7 @@
 #define SC_L2_BLOCK 256
 #define SC_MAXV 4
 #define SC_LANES 32
+#define SC_MAX_TOK 8
 
 __device__ __forceinline__ float sc_wave_sum(float v)
 {
@@ -146,6 +147,13 @@ extern "C" __global__ void l2norm_cols_f32(
 // are `[rows][n_v]`. A lane group owns one value row and keeps its `sd/32`
 // components in registers across the chunk, so the state is read once and
 // written once per head, and the snapshot rows are written between tokens.
+//
+// `gridDim.y` splits the `sd` state rows of one head over several blocks. The
+// rows are independent chains, so the split changes no arithmetic — it only
+// spreads one head's serial walk over more blocks, which is what a two-to-four
+// column verify needs: at one block per head the card is three-quarters idle and
+// the chain's shuffle latency is the whole cost. `gridDim.x` stays the value
+// head.
 extern "C" __global__ void gdn_cols_f32(
     float* __restrict__ s,
     const float* __restrict__ qkv,
@@ -168,10 +176,30 @@ extern "C" __global__ void gdn_cols_f32(
     const int hk = h % n_k;
     const float scale = rsqrtf((float)sd);
 
+    // The gate pair depends on (token, head), not on the state row, so it is
+    // computed once per block instead of once per (row, token). The values and
+    // their `expf`/load are unchanged, so the recurrence sees the same bits.
+    __shared__ float sh_decay[SC_MAX_TOK];
+    __shared__ float sh_beta[SC_MAX_TOK];
+    const bool pre = rows <= SC_MAX_TOK;
+    if (pre && threadIdx.x == 0) {
+        for (int tok = 0; tok < rows; ++tok) {
+            sh_decay[tok] = expf(g[(size_t)tok * n_v + h]);
+            sh_beta[tok] = beta[(size_t)tok * n_v + h];
+        }
+    }
+    __syncthreads();
+
+    // This block's slice of the head's state rows.
+    const int njs = gridDim.y;
+    const int jlen = (sd + njs - 1) / njs;
+    const int j0 = blockIdx.y * jlen;
+    const int j1 = (j0 + jlen < sd) ? j0 + jlen : sd;
+
     float* head = s + (size_t)h * sd * sd;
     const size_t head_len = (size_t)sd * sd;
 
-    for (int j = wave; j < sd; j += nwave) {
+    for (int j = j0 + wave; j < j1; j += nwave) {
         float* row = head + (size_t)j * sd;
         float r[SC_MAXV];
         #pragma unroll
@@ -181,12 +209,14 @@ extern "C" __global__ void gdn_cols_f32(
         }
 
         for (int tok = 0; tok < rows; ++tok) {
+            const float decay = pre ? sh_decay[tok]
+                                    : expf(g[(size_t)tok * n_v + h]);
+            const float b = pre ? sh_beta[tok]
+                                : beta[(size_t)tok * n_v + h];
             const float* qh = qkv + (size_t)tok * qkv_stride + (size_t)hk * sd;
             const float* kh = qh + key_dim;
             const float* vh = qkv + (size_t)tok * qkv_stride +
                               2 * (size_t)key_dim + (size_t)h * sd;
-            const float decay = expf(g[(size_t)tok * n_v + h]);
-            const float b = beta[(size_t)tok * n_v + h];
 
             float dot = 0.0f;
             #pragma unroll
