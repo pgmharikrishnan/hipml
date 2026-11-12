@@ -337,3 +337,105 @@ exact defect the review-4 audit fixed; the exact route must stay.
   and only at r=4 does it reach parity (prose verify 55.3 vs 56.5 ms). It does
   not reach the 65-80 tok/s class. Keep the exact path default.
 * No graph capture on the verify path; launch overhead is inside every number.
+
+## The four-row batched GEMV: measured, and why the row-scaling levers fail
+
+> R9700 (`gfx1201`), `Qwen3.8-27B-UD-Q4_K_M.gguf`, GPU lock held, best of two
+> passes, one launch per tensor. Base tree `eb08bc9`.
+
+`gemv-entries --batch N` streams one whole resident format through
+`Launcher::gemv_batched` at `N` token rows — the call `forward_columns` makes —
+and checks every row bit-for-bit against the one-row entry. The weight bytes are
+identical at every `N`, so GB/s against the one-row number is exactly the
+row-scaling cost of the batched GEMV. `b=1` is the dispatch's own choice: it
+routes to the single-sequence entry (`gemv_q4_k_r1`, `gemv_q6_k_r1`), which is
+what a one-column pass actually runs.
+
+| format | GB | b=1 | b=2 | b=3 | b=4 | b=8 | b=16 | `w4` read |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Q4_K | 2.427 | 578.7 | 515.7 | 448.0 | 403.3 | 240.9 | 121.9 | 625.5 |
+| Q5_K | 5.230 | 569.8 | 567.6 | 477.4 | 431.2 | 295.4 | 153.4 | 593.1 |
+| Q6_K | 1.804 | 600.7 | 595.3 | 586.3 | 525.5 | 382.0 | 185.4 | 609.3 |
+| IQ4_XS | 5.696 | 603.9 | 548.0 | 421.9 | 388.3 | 158.5 | 85.0 | 615.0 |
+| IQ4_NL | 0.431 | 558.9 | 458.1 | 428.0 | 370.2 | 174.2 | 87.6 | 591.2 |
+| Q3_K | 0.077 | 310.5 | 252.0 | 234.5 | 223.7 | 155.6 | 81.9 | 588.8 |
+| IQ3_S | 0.077 | 326.4 | 278.4 | 251.0 | 229.2 | 144.7 | 72.2 | 587.4 |
+| **all** | **15.74** | **581.6** | 545.4 | 455.0 | **413.1** | 218.8 | 114.3 | **608.1** |
+
+The `w4` column is the same bytes read by the GEMV's own access pattern with no
+arithmetic, from `stream-shape` in the same session (608.1 GB/s over 15.80 GB);
+the per-type numbers are [`decode-roofline.md`](decode-roofline.md)'s. `b=16` is
+two 8-row groups — two weight passes — so its rate is not comparable; `b<=8` is
+one pass.
+
+**At four rows the kernel is at 63–86% of the read ceiling, so it is not
+bandwidth-bound** and the residue is in the batched kernel, not the weight
+bytes. The cost is not occupancy either: the register footprint, read out of the
+compiled ISA (`.amdhsa_next_free_vgpr`, one kernel per `(format, B, rows/warp)`
+so the numbers are per instantiation rather than the union the shipped entry's
+`switch` produces), is the same order at 1 and 4 rows.
+
+| B | q4_k r2 | q5_k r2 | q6_k r2 | iq4_xs r2 | q4_k r1 | q4_k r4 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 67 | 63 | 68 | 92 | 38 | 112 |
+| 2 | 83 | 81 | 78 | 88 | 55 | 119 |
+| 3 | 80 | 71 | 88 | 108 | 74 | 118 |
+| 4 | 76 | 73 | 81 | 100 | 93 | 146 |
+| 8 | 84 | 81 | 99 | 86 | 75 | 138 |
+
+Shipped entries (the union over the `switch (batch)`): `gemv_q4_k_b` 83,
+`gemv_q5_k_b` 82, `gemv_q6_k_b` 133, `gemv_iq4_xs_b` 127; the one-row entries
+are 47/48/92. No kernel has a private segment, so nothing spills. At 4 rows
+`gemv_iq4_xs_b` needs 100 VGPRs against the one-row kernel's 92 — 20 waves/CU
+against 22 — while running 1.56x slower, and `gemv_q6_k_b` runs at 133 VGPRs
+(15 waves) and only 1.14x slower than its one-row entry. Occupancy does not
+order the numbers; the per-value instruction count does: the batched tile issues
+`B` FMAs per weight value where the one-row kernel issues one, plus `B/RPW` x
+reads, and the formats whose dequant is cheapest per value (Q6_K) lose least.
+
+What was tried against that, and measured at `b=2/3/4` on the same probe:
+
+| lever | b=4 result | verdict |
+| --- | --- | --- |
+| rows/warp 4 (half the blocks, half the x reads per weight value) | Q4_K 403→350, Q5_K 431→415, IQ4_XS 388→361; b=2 also −22% on Q4_K | delete: the 146-VGPR tile costs more than the reuse returns |
+| rows/warp 1 (double the blocks, half the accumulators) | Q4_K 403→336, Q5_K 431→406, IQ4_XS 388→280 | delete: more x reads per weight value, same arithmetic |
+| nibble select → four dword shifts in `q4k_load` / `iq4x_load_b` | Q4_K 403→389, IQ4_XS 388→352, b=2 IQ4_XS 548→394 | delete: the compiler's `cndmask` form is cheaper than a predicated 4-shift block |
+| weight reads with `sc1` (evict-first) | not adopted | at b=1 the wide load splits into four dwords and loses 11% ([`decode-roofline.md`](decode-roofline.md)); the load path is per block and does not depend on `B`, so it was not carried to four rows |
+
+Rows/warp 2 — what ships — is the optimum of the three tilings at every `B`.
+The remaining lever is not a tuning constant: at `b=4` the kernel must issue four
+FMAs per weight value where the one-row kernel issues one, and that arithmetic
+is 4x the memory term's headroom only if the dequant chain is short. Q6_K, whose
+dequant is the shortest, is at 86% of the ceiling; the four-bit formats are at
+63–64%.
+
+### On the real path
+
+`column-bench --cols 4 --tokens 32` on the same model, two passes per tree, mean
+of the two; `base` is `eb08bc9` and the branch adds only the probe, so the two
+columns should agree and do:
+
+| KV | tree | 1 col | 2 cols | 3 cols | 4 cols | 4 col / 1 col |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| q8 | base | 35.00 | 35.49 | 42.17 | 46.62 | 1.33 |
+| q8 | branch | 34.79 | 35.57 | 42.40 | 46.81 | 1.35 |
+| f32 | base | 32.19 | 35.56 | 42.45 | 47.37 | 1.47 |
+| f32 | branch | 32.19 | 35.59 | 42.55 | 47.39 | 1.47 |
+
+Milliseconds per pass. The four-row pass costs 1.33–1.35x the one-row pass at
+q8 and 1.47x at f32, and the batched GEMV is the bulk of that excess rather than
+a side effect: the measured GEMV set reads in 38.1 ms at `b=4` against 27.1 ms
+at `b=1`, an excess of 11.0 ms, where the four-column pass adds 11.6 ms over the
+one-column pass. If the batched GEMV cost the same per weight value at four rows
+as at one, the pass would be 35.0 ms and — the four-column verify is 46.3 of a
+55.1 ms drafts-3 step — that step about 43 ms, 79 tok/s against 62. No measured
+lever came within reach of it, so no kernel change ships and the 1.20x target is
+not met.
+
+`spec-bench --drafts 3 --tokens 128` in the same window, 128/128 exact on both
+KV modes and both trees: q8 62.01 → 61.75 tok/s, f32 61.31 → 61.15. The branch
+reads 0.3–0.4% lower, inside the 0.8% spread between two passes of the one
+binary, and the kernels are byte-identical. Serve cell a — one request at a
+time, 32K context, 5 conversations, 15 requests — lands at 51.84 tok/s p50 with
+0 errors and a 3.12 s TTFT, against 51.91 for the tree it is based on.
+
