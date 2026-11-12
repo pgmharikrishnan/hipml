@@ -413,9 +413,10 @@ pub fn check_batched_gemv(
         let px = unsafe { (xb.as_ptr() as *mut u8).add(r * k * 4) };
         let py = unsafe { (ys.as_ptr() as *mut u8).add(r * m * 4) };
         l.run_quant_resident_ptr(
-            // The row-tile entry the plain decode path launches, not the `_r1`
-            // streaming variant: exactness is against what `run_token` runs.
-            proj.entry,
+            // The entry the plain decode path actually launches, which is the
+            // `_r1` streaming variant when one exists: exactness has to follow
+            // the routing, not the manifest name.
+            hipml_kernels::stream_entry(proj.entry),
             proj.w,
             px as *mut std::ffi::c_void,
             py as *mut std::ffi::c_void,
