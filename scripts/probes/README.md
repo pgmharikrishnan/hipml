@@ -9,7 +9,7 @@ hipcc -O3 --offload-arch=$env:HIPML_ARCH probe_wmma_gemm.cpp -o probe_wmma_gemm.
 .\probe_wmma_gemm.exe
 ```
 
-They contain no machine paths and are cited by `docs/notes/review-levers.md`.
+They contain no machine paths and are cited by the notes in `docs/notes/`.
 
 | file | what it measures |
 |---|---|
@@ -17,4 +17,5 @@ They contain no machine paths and are cited by `docs/notes/review-levers.md`.
 | `probe_wmma_ceiling.cpp` | the achievable WMMA ceiling at one shape, to compare a kernel against |
 | `probe_wmma_cmp.cpp` | the same GEMM through WMMA and through plain `v_mfma`/FMA paths |
 | `probe_wmma_gemm.cpp` | a full quantized GEMV/GEMM tile through WMMA, end to end |
+| `probe_prefill_tiles.cpp` | the shipped prefill tile per format at the real ffn shapes, and its staging split through `PWW2_PROBE_*` |
 | `probe_wmma_layout.cpp` | fragment layout and bank-conflict behaviour of the WMMA load/store |
