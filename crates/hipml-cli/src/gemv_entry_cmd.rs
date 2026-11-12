@@ -7,6 +7,13 @@
 //! comparable with the production table. The first entry named is the
 //! reference; every other entry must produce the same output bits on every
 //! tensor of the kind or it is reported as differing.
+//!
+//! `--batch N` measures the *batched* path instead: the same whole-type stream
+//! through `Launcher::gemv_batched` with `N` token rows, which is what the
+//! verify's `R`-column pass launches, and checks every row against the
+//! single-sequence entry bit for bit. The weight bytes do not change with `N`,
+//! so the GB/s column read at `N` against the one-row number is the row-scaling
+//! cost of the batched GEMV.
 
 use std::time::Instant;
 
@@ -20,6 +27,17 @@ struct Args {
     entries: Vec<String>,
     reps: usize,
     check: bool,
+    /// 0 = the single-sequence entries named in `--entries`; `n > 0` = the
+    /// batched path at `n` rows.
+    batch: usize,
+}
+
+/// One resident 2-D quantized tensor of the measured kind.
+struct Item<'a> {
+    buf: &'a hipml_hip::ByteBuffer,
+    m: usize,
+    k: usize,
+    bytes: usize,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -29,6 +47,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         entries: Vec::new(),
         reps: 3,
         check: true,
+        batch: 0,
     };
     let mut i = 0;
     while i < args.len() {
@@ -58,11 +77,15 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 a.check = false;
                 i += 1;
             }
+            "--batch" => {
+                a.batch = need(i)?.parse().map_err(|e| format!("bad --batch: {e}"))?;
+                i += 2;
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    if a.gguf.is_empty() || a.kind.is_empty() || a.entries.is_empty() {
-        return Err("--gguf, --kind and --entries are required".to_string());
+    if a.gguf.is_empty() || a.kind.is_empty() || (a.entries.is_empty() && a.batch == 0) {
+        return Err("--gguf, --kind and --entries (or --batch) are required".to_string());
     }
     Ok(a)
 }
@@ -98,12 +121,6 @@ pub fn run(args: &[String]) -> i32 {
     };
     let l = model.launcher();
 
-    struct Item<'a> {
-        buf: &'a hipml_hip::ByteBuffer,
-        m: usize,
-        k: usize,
-        bytes: usize,
-    }
     let mut items: Vec<Item<'_>> = Vec::new();
     for t in model.tensors() {
         if t.ty() != ty {
@@ -131,6 +148,9 @@ pub fn run(args: &[String]) -> i32 {
     let total: usize = items.iter().map(|i| i.bytes).sum();
     let m_max = items.iter().map(|i| i.m).max().unwrap_or(1);
     let k_max = items.iter().map(|i| i.k).max().unwrap_or(1);
+    if a.batch > 0 {
+        return run_batched(&a, &model, &items, total, ty);
+    }
     let mut xs: std::collections::HashMap<usize, Buffer> = std::collections::HashMap::new();
     for k in items.iter().map(|i| i.k) {
         if xs.contains_key(&k) {
@@ -314,6 +334,237 @@ pub fn run(args: &[String]) -> i32 {
             );
         }
         let _ = Instant::now();
+    }
+    0
+}
+
+/// The batched path at `a.batch` token rows: one launch per tensor of the kind
+/// with `B` x rows and one weight pass, exactly as the verify issues it.
+fn run_batched(a: &Args, model: &Model, items: &[Item<'_>], total: usize, ty: TensorType) -> i32 {
+    let l = model.launcher();
+    let b = a.batch;
+    let name = match hipml_model::gpu_weights::gemv_entry(ty) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("gemv-entries: {e}");
+            return 2;
+        }
+    };
+    let kind = match hipml_kernels::batch_kind_entry(name) {
+        Some(k) => k,
+        None => {
+            eprintln!("gemv-entries: {name} has no batched GEMV");
+            return 1;
+        }
+    };
+    // What the `R = 1` verify launches, so the exactness contract is "the
+    // batched row equals the single-sequence entry", not "equals its sibling".
+    let single = hipml_kernels::stream_entry(name);
+
+    let val = |i: usize, bi: usize| ((i * 37 + bi * 11) % 101) as f32 * 0.01 - 0.5;
+
+    let mut xs: std::collections::HashMap<usize, Vec<Buffer>> = std::collections::HashMap::new();
+    let mut xall: std::collections::HashMap<usize, Buffer> = std::collections::HashMap::new();
+    for &k in items.iter().map(|i| i.k).collect::<Vec<_>>().iter() {
+        if xall.contains_key(&k) {
+            continue;
+        }
+        let mut all = Vec::with_capacity(b * k);
+        for bi in 0..b {
+            for i in 0..k {
+                all.push(val(i, bi));
+            }
+        }
+        let mut rows = Vec::with_capacity(b);
+        for bi in 0..b {
+            match Buffer::from_host(&all[bi * k..(bi + 1) * k]) {
+                Ok(x) => rows.push(x),
+                Err(e) => {
+                    eprintln!("gemv-entries: x: {e}");
+                    return 1;
+                }
+            }
+        }
+        match Buffer::from_host(&all) {
+            Ok(x) => {
+                xall.insert(k, x);
+            }
+            Err(e) => {
+                eprintln!("gemv-entries: x: {e}");
+                return 1;
+            }
+        }
+        xs.insert(k, rows);
+    }
+    let mut ys: std::collections::HashMap<usize, (Buffer, Vec<Buffer>)> =
+        std::collections::HashMap::new();
+    for &m in items.iter().map(|i| i.m).collect::<Vec<_>>().iter() {
+        if ys.contains_key(&m) {
+            continue;
+        }
+        let mut rows = Vec::with_capacity(b);
+        for _ in 0..b {
+            match Buffer::alloc(m) {
+                Ok(y) => rows.push(y),
+                Err(e) => {
+                    eprintln!("gemv-entries: y: {e}");
+                    return 1;
+                }
+            }
+        }
+        match Buffer::alloc(b * m) {
+            Ok(y) => {
+                ys.insert(m, (y, rows));
+            }
+            Err(e) => {
+                eprintln!("gemv-entries: y: {e}");
+                return 1;
+            }
+        }
+    }
+
+    println!(
+        "{} b={}: {} tensors, {:.3} GB, m<= {}, k<= {}",
+        a.kind,
+        b,
+        items.len(),
+        total as f64 / 1e9,
+        items.iter().map(|i| i.m).max().unwrap_or(1),
+        items.iter().map(|i| i.k).max().unwrap_or(1)
+    );
+
+    // Exactness: every batched row against the single-sequence entry on the
+    // same x row.
+    if a.check {
+        let mut bad = 0usize;
+        for it in items {
+            let (yb, _) = &ys[&it.m];
+            if let Err(e) = l.gemv_batched(kind, it.buf, &xall[&it.k], yb, it.m, it.k, b) {
+                eprintln!("gemv-entries: b={b}: {e}");
+                return 1;
+            }
+            if let Err(e) = l.synchronize() {
+                eprintln!("gemv-entries: {e}");
+                return 1;
+            }
+            let got = match yb.download_bytes(0, b * it.m * 4) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("gemv-entries: {e}");
+                    return 1;
+                }
+            };
+            for bi in 0..b {
+                let (_, yr) = &ys[&it.m];
+                if let Err(e) =
+                    l.run_quant_resident(single, it.buf, &xs[&it.k][bi], &yr[bi], it.m, it.k)
+                {
+                    eprintln!("gemv-entries: {single}: {e}");
+                    return 1;
+                }
+                if let Err(e) = l.synchronize() {
+                    eprintln!("gemv-entries: {e}");
+                    return 1;
+                }
+                let want = match yr[bi].download_bytes(0, it.m * 4) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("gemv-entries: {e}");
+                        return 1;
+                    }
+                };
+                if got[bi * it.m * 4..(bi + 1) * it.m * 4] != want[..] {
+                    bad += 1;
+                }
+            }
+        }
+        println!("  rows: {}/{} differ from {single}", bad, b * items.len());
+    }
+
+    for it in items {
+        if let Err(e) = l.gemv_batched(kind, it.buf, &xall[&it.k], &ys[&it.m].0, it.m, it.k, b) {
+            eprintln!("gemv-entries: b={b}: {e}");
+            return 1;
+        }
+    }
+    if let Err(e) = l.synchronize() {
+        eprintln!("gemv-entries: {e}");
+        return 1;
+    }
+    let mut marks = Vec::with_capacity(items.len());
+    for _ in 0..items.len() {
+        match (Event::new(), Event::new()) {
+            (Ok(x), Ok(y)) => marks.push((x, y)),
+            _ => {
+                eprintln!("gemv-entries: events");
+                return 1;
+            }
+        }
+    }
+    let mut best = f64::MAX;
+    let mut best_rows: Vec<(usize, usize, f64)> = Vec::new();
+    for _ in 0..a.reps {
+        for (idx, it) in items.iter().enumerate() {
+            if let Err(e) = marks[idx].0.record(l.stream()) {
+                eprintln!("gemv-entries: {e}");
+                return 1;
+            }
+            if let Err(e) = l.gemv_batched(kind, it.buf, &xall[&it.k], &ys[&it.m].0, it.m, it.k, b)
+            {
+                eprintln!("gemv-entries: b={b}: {e}");
+                return 1;
+            }
+            if let Err(e) = marks[idx].1.record(l.stream()) {
+                eprintln!("gemv-entries: {e}");
+                return 1;
+            }
+        }
+        if let Err(e) = l.synchronize() {
+            eprintln!("gemv-entries: {e}");
+            return 1;
+        }
+        let mut rows = Vec::with_capacity(items.len());
+        let mut sum = 0.0f64;
+        for (idx, it) in items.iter().enumerate() {
+            let ms = match marks[idx].0.since(&marks[idx].1) {
+                Ok(v) => v as f64,
+                Err(e) => {
+                    eprintln!("gemv-entries: {e}");
+                    return 1;
+                }
+            };
+            sum += ms;
+            rows.push((it.m, it.bytes, ms));
+        }
+        if sum < best {
+            best = sum;
+            best_rows = rows;
+        }
+    }
+    println!(
+        "\n{name}_b b={b}: {:.3} ms, {:.1} GB/s",
+        best,
+        total as f64 / (best / 1e3) / 1e9
+    );
+    // Same 16-row block the `_b` kernels use, so the grid column is the real one.
+    let mut agg: std::collections::BTreeMap<usize, (usize, f64, usize)> =
+        std::collections::BTreeMap::new();
+    for (m, bytes, ms) in best_rows {
+        let e = agg.entry(m).or_insert((0, 0.0, 0));
+        e.0 += bytes;
+        e.1 += ms;
+        e.2 += 1;
+    }
+    for (m, (bytes, ms, n)) in agg {
+        println!(
+            "  m={:<7} {:3} tensors {:6.3} GB {:8.3} ms {:6.1} GB/s  ({} blocks)",
+            m,
+            n,
+            bytes as f64 / 1e9,
+            ms,
+            bytes as f64 / (ms / 1e3) / 1e9,
+            m.div_ceil(16)
+        );
     }
     0
 }
