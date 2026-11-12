@@ -442,7 +442,7 @@ pub fn generate(args: &[String]) -> i32 {
         }
 
         if a.graph {
-            match engine.build_token_graph() {
+            match engine.build_token_graph(st.pos) {
                 Ok(()) => {
                     if !a.json && rep == 0 {
                         println!("decode graph: captured (one hipGraphLaunch per token)");

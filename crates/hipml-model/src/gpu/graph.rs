@@ -37,9 +37,15 @@ impl GpuEngine<'_> {
     /// step buffer, so the graph is launched once per token and the host only
     /// writes 32 bytes and reads 4 back. The position and token id are therefore
     /// *not* baked: `graph_token` supplies them.
-    pub fn build_token_graph(&mut self) -> Result<(), String> {
+    ///
+    /// `pos` is the position of the first token the graph will replay. It has
+    /// to be passed because a launch *shape* can depend on the position: the
+    /// quantized decode attention divides the key range into one split per 64
+    /// cached positions, and a graph bakes its grid. Capturing at 0 and then
+    /// replaying at 8K would run the mono kernel over the whole cache.
+    pub fn build_token_graph(&mut self, pos: usize) -> Result<(), String> {
         let l = self.model.launcher();
-        let mut work = GpuState { pos: 0 };
+        let mut work = GpuState { pos };
         // No warm-up token here: running one would append to every layer's KV
         // cache at the current position and change the tokens. Capture records
         // launches without executing them, so the first real launch both warms
@@ -124,7 +130,7 @@ impl GpuEngine<'_> {
         l.synchronize()?;
         let eager_s = t.elapsed().as_secs_f64();
 
-        self.build_token_graph()?;
+        self.build_token_graph(work.pos)?;
         let mut submit_g = 0.0f64;
         let graph = self.graph.as_ref().expect("just captured");
         let t = std::time::Instant::now();
