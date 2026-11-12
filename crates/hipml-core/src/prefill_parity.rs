@@ -9,8 +9,9 @@
 use crate::ops;
 use crate::parity::Tol;
 use crate::quant::{
-    random_q4_k_bytes, random_q5_k_bytes, random_q6_k_bytes, random_q8_0_bytes, Q4_K_BYTES,
-    Q5_K_BYTES, Q6_K_BYTES, Q8_0_BYTES, QK_K,
+    random_iq3_s_bytes, random_q3_k_bytes, random_q4_k_bytes, random_q5_k_bytes, random_q6_k_bytes,
+    random_q8_0_bytes, IQ3_S_BYTES, Q3_K_BYTES, Q4_K_BYTES, Q5_K_BYTES, Q6_K_BYTES, Q8_0_BYTES,
+    QK_K,
 };
 use crate::rng::Rng;
 
@@ -50,6 +51,8 @@ impl PrefillCase {
             "prefill_q5_k" | "gemm_skinny_q5_k" => self.k / QK_K * Q5_K_BYTES,
             "prefill_q6_k" | "gemm_skinny_q6_k" => self.k / QK_K * Q6_K_BYTES,
             "prefill_q8_0" | "gemm_skinny_q8_0" => self.k / 32 * Q8_0_BYTES,
+            "prefill_q3_k" | "gemm_skinny_q3_k" => self.k / QK_K * Q3_K_BYTES,
+            "prefill_iq3_s" | "gemm_skinny_iq3_s" => self.k / QK_K * IQ3_S_BYTES,
             _ => 0,
         }
     }
@@ -108,6 +111,32 @@ fn inputs_q6_k(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f3
 fn inputs_q8_0(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f32>) {
     let mut rng = Rng::new(seed);
     let w = random_q8_0_bytes(&mut rng, m * k / 32);
+    let x: Vec<f32> = (0..tokens * k).map(|_| rng.normal()).collect();
+    (w, x)
+}
+
+fn build_q3_k(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
+    let (w, x) = inputs_q3_k(seed, m, k, tokens);
+    let y = ops::gemm_q3_k(&w, &x, tokens, m, k);
+    (w, x, y)
+}
+
+fn build_iq3_s(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
+    let (w, x) = inputs_iq3_s(seed, m, k, tokens);
+    let y = ops::gemm_iq3_s(&w, &x, tokens, m, k);
+    (w, x, y)
+}
+
+fn inputs_q3_k(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f32>) {
+    let mut rng = Rng::new(seed);
+    let w = random_q3_k_bytes(&mut rng, m * k / QK_K);
+    let x: Vec<f32> = (0..tokens * k).map(|_| rng.normal()).collect();
+    (w, x)
+}
+
+fn inputs_iq3_s(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f32>) {
+    let mut rng = Rng::new(seed);
+    let w = random_iq3_s_bytes(&mut rng, m * k / QK_K);
     let x: Vec<f32> = (0..tokens * k).map(|_| rng.normal()).collect();
     (w, x)
 }
@@ -202,6 +231,52 @@ pub fn prefill_cases() -> Vec<PrefillCase> {
             tokens: 2,
             build: build_q6_k,
             inputs: inputs_q6_k,
+        },
+        PrefillCase {
+            name: "prefill_q3_k",
+            label: "prefill_q3_k 64x512 t=4",
+            tol: Tol::DEFAULT,
+            seed: 0x9F11_0009,
+            m: 64,
+            k: 512,
+            tokens: 4,
+            build: build_q3_k,
+            inputs: inputs_q3_k,
+        },
+        PrefillCase {
+            name: "prefill_iq3_s",
+            label: "prefill_iq3_s 64x512 t=4",
+            tol: Tol::DEFAULT,
+            seed: 0x9F11_000A,
+            m: 64,
+            k: 512,
+            tokens: 4,
+            build: build_iq3_s,
+            inputs: inputs_iq3_s,
+        },
+        // Two k-tiles at a production-ish k: also exercises the split-K path,
+        // which `prefill_should_split` enables from `blocks >= 32` up.
+        PrefillCase {
+            name: "prefill_q3_k",
+            label: "prefill_q3_k 64x4096 t=4",
+            tol: LARGE_TOL,
+            seed: 0x9F11_000B,
+            m: 64,
+            k: 4096,
+            tokens: 4,
+            build: build_q3_k,
+            inputs: inputs_q3_k,
+        },
+        PrefillCase {
+            name: "prefill_iq3_s",
+            label: "prefill_iq3_s 64x4096 t=4",
+            tol: LARGE_TOL,
+            seed: 0x9F11_000C,
+            m: 64,
+            k: 4096,
+            tokens: 4,
+            build: build_iq3_s,
+            inputs: inputs_iq3_s,
         },
     ]
 }

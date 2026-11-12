@@ -32,26 +32,25 @@ nine; what differs is *how*, and that is the whole of the cost:
 | IQ4_XS | 23 | block form: `gemv_iq4_xs` (+ `_b`), `prefill_iq4_xs(_w2h)` | 1:1 |
 | IQ4_NL | 20 | block form: `gemv_iq4_nl` (+ `_b`), `prefill_iq4_nl(_w2h)` | 1:1 |
 | F32 | 0 | as stored (`gemv_f32`, `prefill_f32`) | 1:1 |
-| Q3_K | 11 | **expanded to F32 at load** (host `dequant_q3_k`), then the F32 path | 9.31× |
-| IQ3_S | 21 | **expanded to F32 at load** (host `dequant_iq3_s`), then the F32 path | 9.31× |
+| Q3_K | 11 | block form: `gemv_q3_k` (+ `_b`), `prefill_q3_k(_w2h)` tile | 1:1 |
+| IQ3_S | 21 | block form: `gemv_iq3_s` (+ `_b`), `prefill_iq3_s(_w2h)` tile | 1:1 |
 
-- The six block types stay in their GGUF blocks in VRAM; the dequant happens
+- The eight block types stay in their GGUF blocks in VRAM; the dequant happens
   inside the GEMV or the dequant-in-shared prefill tile, never into a resident
-  copy.
-- Q3_K and IQ3_S are the exception: there is no block-form decode kernel for
-  them, so the loader dequantises those rows on the host once at load and
-  uploads F32. A 110-byte 256-value block becomes 1,024 bytes, so they cost
-  9.31× their file size — the largest expansion in the format mix.
+  copy. Q3_K and IQ3_S used to be the exception (host dequant at load, F32
+  resident, 9.31× their file size); both now have a decode GEMV, a batched GEMV
+  and a prefill tile, so a 110-byte 256-value block stays 110 bytes.
+- `HIPML_EXPAND_SMALL_QUANTS=1` restores the old host expansion for those two
+  types. It is a debug fallback, off by default; set it to compare against the
+  pre-kernel path, not to run the model.
 - Both UD files load with `unsupported: none` and round-trip 866/866
-  byte-identical. In both, the same **4 tensors, 153,190,400 B on disk →
-  1,426,063,360 B resident (+1,272,872,960 B, +1.19 GiB)**:
-  `UD-Q4_K_M` finishes at 17,826,136,064 B (16.60 GiB) resident, `UD-Q4_K_XL`
-  at 18,821,054,464 B (17.53 GiB).
-- Still unmeasured: Q3_K and IQ3_S never run in block form (by design — the
-  row count is small enough that expansion is the cheap choice), the 64-row
-  f32-tile `prefill_iq4_*` entries are wired but the default WMMA path selects
-  `_w2h` instead, and nothing beyond 8,192 tokens, batching, MTP or the cache
-  gates has been run on a UD file.
+  byte-identical. `UD-Q4_K_M` now holds 16,553,263,104 B (15.42 GiB) resident
+  (was 17,826,136,064 B / 16.60 GiB, the difference being the 1.19 GiB the two
+  Q3_K and two IQ3_S tensors used to gain), and `UD-Q4_K_XL` 17,548,181,504 B
+  (16.34 GiB, was 17.53 GiB).
+- Still unmeasured: nothing beyond 8,192 tokens, batching, MTP or the cache
+  gates has been run on a UD file; the 64-row f32-tile `prefill_iq4_*` entries
+  are wired but the default WMMA path selects `_w2h` instead.
 
 ## Architecture config (read from the GGUF by `hipml load`)
 
@@ -109,10 +108,10 @@ the same.
 | Q6_K | 28 | 1,804,185,600 | 1.68 | 1.68 | block form |
 | IQ4_NL (20) | 9 | 430,571,520 | 0.40 | 0.40 | block form |
 | Q8_0 | 107 | 86,343,680 | 0.08 | 0.08 | block form |
-| Q3_K (11) | 2 | 76,595,200 | 0.07 | 0.66 | expanded to F32 |
-| IQ3_S (21) | 2 | 76,595,200 | 0.07 | 0.66 | expanded to F32 |
+| Q3_K (11) | 2 | 76,595,200 | 0.07 | 0.07 | block form |
+| IQ3_S (21) | 2 | 76,595,200 | 0.07 | 0.07 | block form |
 | F32 | 360 | 10,686,464 | 0.01 | 0.01 | as stored |
-| total | 866 | 16,553,263,104 | 15.42 | **16.60** | |
+| total | 866 | 16,553,263,104 | 15.42 | **15.42** | |
 
 `Qwen3.8-27B-UD-Q4_K_XL.gguf`, measured in this tree:
 
@@ -124,10 +123,10 @@ the same.
 | Q6_K | 56 | 2,862,182,400 | 2.67 | 2.67 | block form |
 | IQ4_NL (20) | 6 | 280,166,400 | 0.26 | 0.26 | block form |
 | Q8_0 | 110 | 130,908,160 | 0.12 | 0.12 | block form |
-| Q3_K (11) | 3 | 114,892,800 | 0.11 | 1.00 | expanded to F32 |
-| IQ3_S (21) | 1 | 38,297,600 | 0.04 | 0.33 | expanded to F32 |
+| Q3_K (11) | 3 | 114,892,800 | 0.11 | 0.11 | block form |
+| IQ3_S (21) | 1 | 38,297,600 | 0.04 | 0.04 | block form |
 | F32 | 360 | 10,686,464 | 0.01 | 0.01 | as stored |
-| total | 866 | 17,548,181,504 | 16.34 | **17.53** | |
+| total | 866 | 17,548,181,504 | 16.34 | **16.34** | |
 
 `Qwen3.8-27B-UD-Q6_K_XL.gguf`:
 
@@ -143,27 +142,27 @@ the same.
 The fine-tune, for comparison: Q4_K 257 / 10.66 GiB, Q6_K 79 / 3.84, Q8_0 64 / 1.30,
 Q5_K 2 / 0.11, F32 449 / 0.10; 851 tensors, 16.01 GiB.
 
-Every type in all three UD-relevant files is now served, so the mix no longer
-decides whether a file runs — only how its Q3_K/IQ3_S share is stored.
+Every type in all three UD-relevant files is now served in block form, so the
+mix no longer decides whether a file runs, and Q3_K/IQ3_S no longer cost more
+resident bytes than their share of the file.
 
 ## Load result
 
 ```
-UD-Q4_K_M: 866 tensors  16,553,263,104 B (15.42 GiB)  read+upload 5.51 s (3.01 GB/s)
-           hipMemGetInfo free 34,023,604,224 -> 16,194,994,176 B
-           resident delta 17,828,610,048 B (16.60 GiB)
-           expanded at load: 4 tensors, 153,190,400 B -> 1,426,063,360 B (+1.19 GiB)
+UD-Q4_K_M: 866 tensors  16,553,263,104 B (15.42 GiB)  read+upload 8.90 s (1.86 GB/s)
+           hipMemGetInfo free 34,023,604,224 -> 17,467,703,296 B
+           resident delta 16,555,900,928 B (15.42 GiB)
+           expanded at load: 4 tensors, 153,190,400 B -> 1,426,063,360 B (+1.19 GiB)   [HIPML_EXPAND_SMALL_QUANTS=1 only]
            unsupported: none
            round-trip 866/866 byte-identical
            embedding rows 0/1/1234/100000/248319: 5120/5120 exact, max_abs 0
-           lm_head Q6_K 248,320 logits in 5.002 ms (208.5 GB/s)
-Q4_K_XL: 866 tensors  17,548,181,504 B (16.34 GiB)  read+upload 11.25 s (1.56 GB/s)
-         hipMemGetInfo free 34,023,604,224 -> 15,175,450,624 B
-         resident delta 18,848,153,600 B (17.55 GiB)
-         expanded at load: 4 tensors, 153,190,400 B -> 1,426,063,360 B (+1.19 GiB)
+           lm_head Q6_K 248,320 logits in 5.782 ms (180.4 GB/s)
+Q4_K_XL: 866 tensors  17,548,181,504 B (16.34 GiB)  read+upload 10.83 s (1.62 GB/s)
+         hipMemGetInfo free 34,023,604,224 -> 16,448,159,744 B
+         resident delta 17,575,444,480 B (16.37 GiB)
          unsupported: none
          round-trip 866/866 byte-identical
-Q6_K_XL: 866 tensors  25,288,065,024 B (23.55 GiB)  read+upload 16.55 s (1.53 GB/s)
+Q6_K_XL: 866 tensors  25,288,065,024 B (23.55 GiB)
          resident delta 25,263,079,424 B (23.53 GiB); 8.76 GB free after
 ```
 
@@ -173,7 +172,7 @@ The file that used to stop at `type_23 has no GEMV kernel` now runs end to end.
 169-token fixture, chunk 2048, q8 KV, against the CPU f32 reference:
 
 ```
-prefill logits: max |gpu - cpu| = 0.1019 at 29832 (gpu argmax 248068 / cpu argmax 248068)
+prefill logits: max |gpu - cpu| = 0.1086 at 101748 (gpu argmax 248068 / cpu argmax 248068)
 PASS: 20 ids identical
 ```
 
@@ -184,15 +183,26 @@ Greedy, `--device --chunk 2048 --kv q8`, two prompts, each run twice:
 wavelengths…" (32 ids, identical on rerun).
 
 ```
-resident: 15.42 GiB in 866 tensors; 15.61 GiB streamed/token; q8 KV 0.266 GiB at 8,192
+resident: 15.42 GiB in 866 tensors; 14.42 GiB streamed/token; q8 KV 0.268 GiB at 8,192
                           prefill tok/s            decode tok/s
-depth 0                    880.45 (373 tok)         27.84
-depth 8,192              1,104.00 (8,192 tok)       27.07
+depth 0 (--prefill 512)     1,186.27 (512 tok)       29.20
+depth 8,192                 1,207.27 (8,192 tok)     28.43
+
+with HIPML_EXPAND_SMALL_QUANTS=1 (the old F32 expansion):
+depth 0 (--prefill 512)     1,059.21                 27.58
+depth 8,192                 1,086.31                 26.93
 
 with HIPML_Q5K_COPY_GB=0 (no Q5_K tile kernel, batched GEMV instead):
-depth 0                    289.76                   27.62
-depth 8,192                297.68                   26.92
+depth 0                       289.76                  27.62
+depth 8,192                   297.68                  26.92
 ```
+
+Serving Q3_K and IQ3_S in block form is worth 1.19 GiB of residency and a few
+percent on both axes: the four tensors stream 9.31× fewer bytes per token, and
+the decode GEMV reads 110-byte blocks at 237–263 GB/s against 390 GB/s for the
+Q4_K-sized `gemv_iq4_xs`. The prefill tile is at parity with the other K-quants
+(95.6 TFLOPS for Q3_K, 89.5 for IQ3_S, 95.5 for Q6_K at 17408x5120, 2,048
+tokens).
 
 The Q5_K dequant-in-shared tile kernel is the whole prefill difference on this
 file: 3.0× / 3.7× over the batched-GEMV fallback, with the same last id at both
@@ -202,7 +212,6 @@ The stock `Qwen3.8-27B-Q4_K_M.gguf` is unchanged by all of this — same oracle
 gate (`PASS 20/20`, `max |gpu - cpu| = 0.1481 at 34114`, the published value)
 and prefill 1,000.31 / 1,235.14 tok/s with decode 30.06 / 29.21 tok/s at depths
 0 and 8,192.
-
 `Qwen3.8-27B-UD-Q6_K_XL.gguf` is not measured in this tree, but needs no format
 of its own: Q6_K embedding rows and the Q5_K attention/prefill entries it was
 missing both exist now.

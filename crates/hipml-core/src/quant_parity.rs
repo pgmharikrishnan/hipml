@@ -11,8 +11,9 @@
 
 use crate::parity::Tol;
 use crate::quant::{
-    gemv_q4_k, gemv_q6_k, gemv_q8_0, random_q4_k_bytes, random_q6_k_bytes, random_q8_0_bytes,
-    Q4_K_BYTES, Q6_K_BYTES, Q8_0_BYTES, QK_K,
+    gemv_iq3_s, gemv_q3_k, gemv_q4_k, gemv_q6_k, gemv_q8_0, random_iq3_s_bytes, random_q3_k_bytes,
+    random_q4_k_bytes, random_q6_k_bytes, random_q8_0_bytes, IQ3_S_BYTES, Q3_K_BYTES, Q4_K_BYTES,
+    Q6_K_BYTES, Q8_0_BYTES, QK_K,
 };
 use crate::rng::Rng;
 
@@ -48,6 +49,8 @@ impl QuantCase {
             "gemv_q4_k" => self.k / QK_K * Q4_K_BYTES,
             "gemv_q6_k" => self.k / QK_K * Q6_K_BYTES,
             "gemv_q8_0" => self.k / 32 * Q8_0_BYTES,
+            "gemv_q3_k" => self.k / QK_K * Q3_K_BYTES,
+            "gemv_iq3_s" => self.k / QK_K * IQ3_S_BYTES,
             _ => 0,
         }
     }
@@ -82,6 +85,22 @@ fn build_q8_0(seed: u64, m: usize, k: usize) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
     (w, x, y)
 }
 
+fn build_q3_k(seed: u64, m: usize, k: usize) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
+    let mut rng = Rng::new(seed);
+    let w = random_q3_k_bytes(&mut rng, m * k / QK_K);
+    let x: Vec<f32> = (0..k).map(|_| rng.normal()).collect();
+    let y = gemv_q3_k(&w, &x, m, k);
+    (w, x, y)
+}
+
+fn build_iq3_s(seed: u64, m: usize, k: usize) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
+    let mut rng = Rng::new(seed);
+    let w = random_iq3_s_bytes(&mut rng, m * k / QK_K);
+    let x: Vec<f32> = (0..k).map(|_| rng.normal()).collect();
+    let y = gemv_iq3_s(&w, &x, m, k);
+    (w, x, y)
+}
+
 /// Parity: the small shapes that run fast, plus the real ffn shape.
 pub fn quant_cases() -> Vec<QuantCase> {
     vec![
@@ -111,6 +130,44 @@ pub fn quant_cases() -> Vec<QuantCase> {
             m: 64,
             k: 512,
             build: build_q8_0,
+        },
+        QuantCase {
+            name: "gemv_q3_k",
+            label: "gemv_q3_k 64x512",
+            tol: Tol::DEFAULT,
+            seed: 0x4B51_0009,
+            m: 64,
+            k: 512,
+            build: build_q3_k,
+        },
+        QuantCase {
+            name: "gemv_iq3_s",
+            label: "gemv_iq3_s 64x512",
+            tol: Tol::DEFAULT,
+            seed: 0x4B51_000A,
+            m: 64,
+            k: 512,
+            build: build_iq3_s,
+        },
+        // Two 2048-value k-tiles: the tile boundary and the block stride, which
+        // a 512-column case never crosses.
+        QuantCase {
+            name: "gemv_q3_k",
+            label: "gemv_q3_k 64x4096",
+            tol: Tol::DEFAULT,
+            seed: 0x4B51_000B,
+            m: 64,
+            k: 4096,
+            build: build_q3_k,
+        },
+        QuantCase {
+            name: "gemv_iq3_s",
+            label: "gemv_iq3_s 64x4096",
+            tol: Tol::DEFAULT,
+            seed: 0x4B51_000C,
+            m: 64,
+            k: 4096,
+            build: build_iq3_s,
         },
         QuantCase {
             name: "gemv_q4_k",

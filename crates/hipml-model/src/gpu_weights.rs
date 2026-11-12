@@ -3,9 +3,10 @@
 //!
 //! A `Proj` points at a loader `ByteBuffer` in its GGUF block form and carries
 //! the GEMV entry that reads it. Every format the model uses has a kernel that
-//! reads its blocks directly: Q4_K, Q6_K, Q8_0, Q5_K and the IQ4 family. Each
-//! of them also has a tiled prefill GEMM that dequantises the weight tile into
-//! shared memory once per prompt block, so prefill never needs an fp16 copy.
+//! reads its blocks directly: Q4_K, Q6_K, Q8_0, Q5_K, Q3_K, IQ3_S and the IQ4
+//! family. Each of them also has a tiled prefill GEMM that dequantises the
+//! weight tile into shared memory once per prompt block, so prefill never needs
+//! an fp16 copy.
 //!
 //! Q5_K still keeps an optional fp16 copy (`HIPML_Q5K_COPY_GB`): unset, the
 //! tile kernel streams the blocks and nothing is copied; set to a budget in
@@ -31,6 +32,8 @@ pub fn gemv_entry(ty: TensorType) -> Result<&'static str, String> {
         TensorType::Q5K => "gemv_q5_k",
         TensorType::IQ4XS => "gemv_iq4_xs",
         TensorType::IQ4NL => "gemv_iq4_nl",
+        TensorType::Q3K => "gemv_q3_k",
+        TensorType::IQ3S => "gemv_iq3_s",
         other => return Err(format!("{} has no GEMV kernel", other.name())),
     })
 }
@@ -40,7 +43,8 @@ pub fn gemv_entry(ty: TensorType) -> Result<&'static str, String> {
 /// per-slot.
 pub(crate) fn batch_kind(entry: &str) -> Option<i32> {
     use hipml_kernels::{
-        GEMV_B_IQ4NL, GEMV_B_IQ4XS, GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80,
+        GEMV_B_IQ3S, GEMV_B_IQ4NL, GEMV_B_IQ4XS, GEMV_B_Q3K, GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K,
+        GEMV_B_Q80,
     };
     Some(match entry {
         "gemv_q4_k" => GEMV_B_Q4K,
@@ -49,6 +53,8 @@ pub(crate) fn batch_kind(entry: &str) -> Option<i32> {
         "gemv_q8_0" => GEMV_B_Q80,
         "gemv_iq4_xs" => GEMV_B_IQ4XS,
         "gemv_iq4_nl" => GEMV_B_IQ4NL,
+        "gemv_q3_k" => GEMV_B_Q3K,
+        "gemv_iq3_s" => GEMV_B_IQ3S,
         _ => return None,
     })
 }
@@ -68,8 +74,10 @@ fn prefill_entry(gemv: &str) -> Result<&'static str, String> {
         "gemv_q8_0" => "prefill_q8_0",
         "gemv_iq4_xs" => "prefill_iq4_xs",
         "gemv_iq4_nl" => "prefill_iq4_nl",
-        // A tensor the loader expanded to F32 (Q3_K / IQ3_S) prefill through
-        // the raw-f32 tile; there is no fp16-activation sibling for it.
+        "gemv_q3_k" => "prefill_q3_k",
+        "gemv_iq3_s" => "prefill_iq3_s",
+        // A tensor the loader expanded to F32 (`HIPML_EXPAND_SMALL_QUANTS=1`)
+        // prefills through the raw-f32 tile.
         "gemv_f32" => "prefill_f32",
         other => return Err(format!("{other}: no tiled prefill kernel")),
     })
@@ -85,6 +93,8 @@ fn prefill_entry_half(gemv: &str) -> Result<&'static str, String> {
         "gemv_q8_0" => "prefill_q8_0_w2h",
         "gemv_iq4_xs" => "prefill_iq4_xs_w2h",
         "gemv_iq4_nl" => "prefill_iq4_nl_w2h",
+        "gemv_q3_k" => "prefill_q3_k_w2h",
+        "gemv_iq3_s" => "prefill_iq3_s_w2h",
         other => return Err(format!("{other}: no fp16-activation prefill kernel")),
     })
 }
@@ -98,12 +108,8 @@ pub(crate) fn mat_kind(ty: TensorType) -> Result<Kind, String> {
         TensorType::Q8_0 => Kind::Q8_0,
         TensorType::IQ4XS => Kind::IQ4XS,
         TensorType::IQ4NL => Kind::IQ4NL,
-        TensorType::Q3K | TensorType::IQ3S => {
-            return Err(format!(
-                "{} is expanded to F32 at load and has no block kind",
-                ty.name()
-            ))
-        }
+        TensorType::Q3K => Kind::Q3K,
+        TensorType::IQ3S => Kind::IQ3S,
         other => return Err(format!("{} is not a supported mat kind", other.name())),
     })
 }
@@ -365,9 +371,9 @@ impl<'a> Proj<'a> {
         self.w.len() + self.q5_half.as_ref().map_or(0, |b| b.len())
     }
 
-    /// Whether [`Proj::gemm_half`] can serve this format. F32 weights (the
-    /// loader's expansion of Q3_K / IQ3_S) have no fp16-activation tile, so
-    /// the caller passes the f32 activation to [`Proj::gemm`] instead.
+    /// Whether [`Proj::gemm_half`] can serve this format. F32 weights (from
+    /// `HIPML_EXPAND_SMALL_QUANTS=1`) have no fp16-activation tile, so the
+    /// caller passes the f32 activation to [`Proj::gemm`] instead.
     pub(crate) fn has_half(&self) -> bool {
         self.q5_half.is_some() || prefill_entry_half(self.entry).is_ok()
     }

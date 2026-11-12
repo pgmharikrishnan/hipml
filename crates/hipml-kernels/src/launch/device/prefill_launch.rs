@@ -111,20 +111,27 @@ impl Launcher {
         if let Some(half_name) = half {
             if prefill_should_split(m, k, tokens) {
                 let scratch = Buffer::alloc(tokens * m)?;
+                let entry = split_entry(half_name)
+                    .ok_or_else(|| format!("{half_name}: no split-K entry"))?;
                 let start = std::time::Instant::now();
-                prefill_split(
-                    &self.module,
-                    &self.stream,
-                    split_entry(half_name)
-                        .ok_or_else(|| format!("{half_name}: no split-K entry"))?,
-                    &wb,
-                    xhalf.as_ref().expect("half entry implies a converted tile"),
-                    &y,
-                    &scratch,
-                    m,
-                    k,
-                    tokens,
-                )?;
+                // `reps` must be honoured here too: callers divide the elapsed
+                // time by it, so a single launch at reps=5 reported 5x the
+                // TFLOPS. The split path is two launches (the GEMM pair and the
+                // residual add), and both repeat.
+                for _ in 0..reps {
+                    prefill_split(
+                        &self.module,
+                        &self.stream,
+                        entry,
+                        &wb,
+                        xhalf.as_ref().expect("half entry implies a converted tile"),
+                        &y,
+                        &scratch,
+                        m,
+                        k,
+                        tokens,
+                    )?;
+                }
                 self.stream.synchronize()?;
                 let secs = start.elapsed().as_secs_f64();
                 return Ok((if download { y.to_host()? } else { Vec::new() }, secs));
@@ -246,6 +253,16 @@ pub fn prefill_entry_for_half(name: &str) -> Option<&'static str> {
         {
             "prefill_iq4_nl_w2h"
         }
+        "prefill_q3_k"
+            if crate::prefill_path() == crate::PrefillPath::Wmma && crate::prefill_v2() =>
+        {
+            "prefill_q3_k_w2h"
+        }
+        "prefill_iq3_s"
+            if crate::prefill_path() == crate::PrefillPath::Wmma && crate::prefill_v2() =>
+        {
+            "prefill_iq3_s_w2h"
+        }
         "prefill_q4_k_w2" => "prefill_q4_k_w2h",
         "prefill_q5_k_w2" => "prefill_q5_k_w2h",
         "prefill_q6_k_w2" => "prefill_q6_k_w2h",
@@ -291,6 +308,8 @@ fn split_entry(name: &str) -> Option<&'static str> {
         "prefill_halfw_w2h" => "prefill_halfw_w2h_sk",
         "prefill_iq4_xs_w2h" => "prefill_iq4_xs_w2h_sk",
         "prefill_iq4_nl_w2h" => "prefill_iq4_nl_w2h_sk",
+        "prefill_q3_k_w2h" => "prefill_q3_k_w2h_sk",
+        "prefill_iq3_s_w2h" => "prefill_iq3_s_w2h_sk",
         _ => return None,
     })
 }

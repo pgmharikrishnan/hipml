@@ -160,6 +160,24 @@ static __device__ __forceinline__ pww2_u4 pww2_loadraw(const unsigned char* __re
         const int part = (within & 31) >> 3;
         pww2_ld8b(rp + (size_t)blk * PF_IQ4_XS_BLOCK_BYTES + 8 + sub * 16 +
                       (part & 1) * 8, r, 1);
+    } else if (KIND == 7) {
+        // Q3_K: 8 qs bytes (low) and the 8 hmask bytes that refine them (high).
+        const int blk = v >> 8, within = v & 255;
+        const int n = within >> 7, half = (within >> 4) & 1, l0 = within & 15;
+        const unsigned char* b = rp + (size_t)blk * PF_Q3K_BLOCK_BYTES;
+        pww2_ld8b(b + 32 + n * 32 + half * 16 + l0, r, 1);
+        pww2_ld8b(b + half * 16 + l0, r, 0);
+    } else if (KIND == 8) {
+        // IQ3_S: two qs bytes, one qh byte and one sign byte for 8 values.
+        const int blk = v >> 8, within = v & 255;
+        const int pair = within >> 6, half = (within >> 5) & 1;
+        const int l = (within & 31) >> 3;
+        const unsigned char* b = rp + (size_t)blk * PF_IQ3S_BLOCK_BYTES;
+        const unsigned char* qp = b + 2 + pair * 16 + half * 8 + 2 * l;
+        r.x = (unsigned)qp[0] | ((unsigned)qp[1] << 8) |
+              ((unsigned)b[66 + pair * 2 + half] << 16) |
+              ((unsigned)b[74 + pair * 8 + half * 4 + l] << 24);
+        r.y = r.z = r.w = 0u;
     } else {
         const int blk = v >> 5, part = (v & 31) >> 3;
         pww2_ld8b(rp + (size_t)blk * PF_IQ4_NL_BLOCK_BYTES + 2 + (part & 1) * 8, r, 1);
@@ -247,6 +265,42 @@ static __device__ __forceinline__ void pww2_dequant8(const pww2_u4& r,
         for (int i = 0; i < 8; ++i) {
             const int q = pww2_b(r.x, r.y, i);
             out[i] = dl * (float)PF_IQ4NL_KV[high ? (q >> 4) : (q & 0xF)];
+        }
+    } else if (KIND == 7) {
+        const int blk = v >> 8, within = v & 255;
+        const int n = within >> 7, j = (within >> 5) & 3, half = (within >> 4) & 1;
+        const unsigned char* b = rp + (size_t)blk * PF_Q3K_BLOCK_BYTES;
+        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b + 108)));
+        const float scale = d * (float)pf_q3k_scale(b, n * 8 + j * 2 + half);
+        const int shift = 2 * j;
+        const int bit = 1 << (n * 4 + j);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int q = (pww2_b(r.x, r.y, i) >> shift) & 3;
+            const int sub = (pww2_b(r.z, r.w, i) & bit) ? 0 : 4;
+            out[i] = scale * (float)(q - sub);
+        }
+    } else if (KIND == 8) {
+        const int blk = v >> 8, within = v & 255;
+        const int pair = within >> 6, half = (within >> 5) & 1;
+        const int l = (within & 31) >> 3;
+        const unsigned char* b = rp + (size_t)blk * PF_IQ3S_BLOCK_BYTES;
+        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
+        const unsigned int sc = pf_ld8(b + 106 + pair);
+        const int nib = half ? (int)(sc >> 4) : (int)(sc & 0xF);
+        const float db = d * (float)(1 + 2 * nib);
+        const unsigned int qh = (r.x >> 16) & 0xFFu;
+        const unsigned int sign = (r.x >> 24) & 0xFFu;
+        const int i1 = (int)(r.x & 0xFFu) | (int)((qh << (8 - 2 * l)) & 256u);
+        const int i2 = (int)((r.x >> 8) & 0xFFu) | (int)((qh << (7 - 2 * l)) & 256u);
+        const unsigned int g1 = PF_IQ3S_GRID[i1];
+        const unsigned int g2 = PF_IQ3S_GRID[i2];
+#pragma unroll
+        for (int t = 0; t < 4; ++t) {
+            const float s1 = (sign & (1u << t)) ? -1.0f : 1.0f;
+            const float s2 = (sign & (1u << (t + 4))) ? -1.0f : 1.0f;
+            out[t] = db * (float)((g1 >> (8 * t)) & 0xFFu) * s1;
+            out[4 + t] = db * (float)((g2 >> (8 * t)) & 0xFFu) * s2;
         }
     } else {
         const int blk = v >> 5, part = (v & 31) >> 3;
@@ -658,6 +712,21 @@ extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) pref
     pww2_body<6, true>(w, x, y, m, k, tokens);
 }
 
+// Q3_K / IQ3_S use the same tile; the decoders are KIND 7 and 8 above.
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q3_k_w2h(const unsigned char* __restrict__ w,
+                                            const void* __restrict__ x,
+                                            float* __restrict__ y, int m, int k, int tokens)
+{
+    pww2_body<7, true>(w, x, y, m, k, tokens);
+}
+
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_iq3_s_w2h(const unsigned char* __restrict__ w,
+                                              const void* __restrict__ x,
+                                              float* __restrict__ y, int m, int k, int tokens)
+{
+    pww2_body<8, true>(w, x, y, m, k, tokens);
+}
+
 // Split-K variants: same body over a k slice. The launcher runs [0,ks) with
 // accumulate 0 and [ks,k) with accumulate 1, so the second launch adds its
 // partial to the first. Launches on one stream are ordered, so no atomics and
@@ -716,6 +785,22 @@ extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) pref
                                                 int ks)
 {
     pww2_body_split<6, true>(w, x, y, scratch, m, k, tokens, ks);
+}
+
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q3_k_w2h_sk(const unsigned char* __restrict__ w,
+                                               const void* __restrict__ x,
+                                               float* __restrict__ y, float* __restrict__ scratch, int m, int k, int tokens,
+                                               int ks)
+{
+    pww2_body_split<7, true>(w, x, y, scratch, m, k, tokens, ks);
+}
+
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_iq3_s_w2h_sk(const unsigned char* __restrict__ w,
+                                                 const void* __restrict__ x,
+                                                 float* __restrict__ y, float* __restrict__ scratch, int m, int k, int tokens,
+                                                 int ks)
+{
+    pww2_body_split<8, true>(w, x, y, scratch, m, k, tokens, ks);
 }
 
 // n equal k slices in one launch: `blockIdx.z` selects the slice, `ks` is its

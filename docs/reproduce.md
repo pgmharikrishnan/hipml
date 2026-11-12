@@ -146,6 +146,15 @@ the harness copies the tree, runs both engines, and writes `bench/results.json`
 and `bench/RESULTS.md` with the GPU, driver, binary SHA-256 and llama.cpp version
 in the metadata.
 
+`bench/fixtures/prompts.json` records the model it was generated for (`bytes`
+and the tokenizer), but the harness reuses that file whenever it exists: it
+does not compare it against `HIPML_GGUF`. Benching a different GGUF (for
+example a UD-Q4_K_M mix) therefore needs `--refresh-fixture` in the same
+invocation, or every cell runs the default model's token ids and the numbers
+describe a different prompt set. `--refresh-fixture` rewrites the fixture;
+regenerate it against the default GGUF before committing results that belong to
+that model.
+
 Expected `code_edit` cells, prefill / decode / TTFT:
 
 | depth | hipml | llama.cpp |
