@@ -22,6 +22,7 @@ struct BenchArgs {
     split: bool,
     graph_probe: bool,
     graph: bool,
+    ids_out: Option<String>,
 }
 
 fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
@@ -36,6 +37,7 @@ fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
         split: false,
         graph_probe: false,
         graph: false,
+        ids_out: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -93,6 +95,10 @@ fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
             "--graph" => {
                 a.graph = true;
                 i += 1;
+            }
+            "--ids-out" => {
+                a.ids_out = Some(need(i)?.to_string());
+                i += 2;
             }
             other => return Err(format!("unknown argument {other}")),
         }
@@ -259,11 +265,48 @@ pub fn bench(args: &[String]) -> i32 {
     let n = a.tokens.max(2);
     let mut path = "eager";
     if a.graph {
-        if let Err(e) = engine.build_token_graph() {
+        if let Err(e) = engine.build_token_graph(st.pos) {
             eprintln!("gpu-bench: capture: {e}");
             return 1;
         }
         path = "graph";
+    }
+    if let Some(dest) = &a.ids_out {
+        // Greedy loop feeding each sampled id back, so two paths can be
+        // compared id-for-id over a long run (a stale captured buffer shows up
+        // here, not in the first token).
+        let mut ids = Vec::with_capacity(n);
+        let mut next = 1u32;
+        for _ in 0..n {
+            let got = if a.graph {
+                engine.graph_token(next, &mut st)
+            } else {
+                engine.forward_token_id(next, &mut st)
+            };
+            match got {
+                Ok(id) => {
+                    ids.push(id);
+                    next = id;
+                }
+                Err(e) => {
+                    eprintln!("gpu-bench: ids: {e}");
+                    return 1;
+                }
+            }
+        }
+        let text: Vec<String> = ids.iter().map(|v| v.to_string()).collect();
+        if let Err(e) = std::fs::write(dest, text.join("\n") + "\n") {
+            eprintln!("gpu-bench: ids out: {e}");
+            return 1;
+        }
+        println!(
+            "ids at {} [{path}]: {} tokens from {} written to {dest} [last {}]",
+            a.depth,
+            ids.len(),
+            ids.first().copied().unwrap_or(0),
+            ids.last().copied().unwrap_or(0)
+        );
+        return 0;
     }
     let t = Instant::now();
     for _ in 0..n {
