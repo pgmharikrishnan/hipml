@@ -5,7 +5,8 @@
 //! reference here is not a kernel hipml can use.
 
 use hipml_core::parity::{
-    bench_cases, cases, compare, deep_cases, prefill_cases, quant_cases, skinny_cases, OpCase,
+    bench_cases, cases, compare, deep_cases, gu_cases, prefill_cases, quant_cases, skinny_cases,
+    OpCase,
 };
 use hipml_core::tensor::Tensor;
 use hipml_kernels::{kernel_arch, kernel_dir, KernelKind, KERNELS};
@@ -477,6 +478,82 @@ fn parity(filter: Option<&str>, deep: bool) -> i32 {
                     },
                 }
             }
+        };
+        let (verdict, detail) = match outcome {
+            Outcome::Pass(d) => {
+                pass += 1;
+                ("PASS", d)
+            }
+            Outcome::Fail(d) => {
+                fail += 1;
+                ("FAIL", d)
+            }
+            Outcome::Skip(d) => {
+                skip += 1;
+                ("SKIP", d)
+            }
+        };
+        println!("{:<28} {:<7} {}", case.label, verdict, detail);
+    }
+
+    // Fused ffn gate+up: one launch, two weight matrices, the swiGLU in its
+    // epilogue. The activation it produces feeds the `down` projection, so a
+    // wrong epilogue moves the logits; this checks it against the two host GEMMs
+    // plus the elementwise kernel's expression.
+    for case in gu_cases() {
+        if let Some(f) = filter {
+            if !case.label.contains(f) {
+                continue;
+            }
+        }
+        let (wg, wu, x, expected) = case.reference();
+        let outcome = match launcher.as_ref() {
+            Err(e) => Outcome::Skip(e.clone()),
+            Ok(l) => match l.run_prefill_gu_reps(
+                hipml_core::prefill_parity::GuCase::entry(case.gate),
+                hipml_core::prefill_parity::GuCase::entry(case.up),
+                &wg,
+                &wu,
+                &x,
+                case.m,
+                case.k,
+                case.tokens,
+                1,
+            ) {
+                Err(e) => Outcome::Fail(format!("launch failed: {e}")),
+                Ok((act, acth, _)) => {
+                    // This case multiplies two reductions, so its values are
+                    // O(|gate| * |up|) rather than O(|gate|) and a fixed
+                    // absolute budget would not transfer from the single-GEMM
+                    // cases. Budget 5e-3 of the tile's largest value: fp16
+                    // operand rounding is ~1e-3, while a layout or epilogue bug
+                    // moves a value by its own magnitude, 200x the budget.
+                    let scale = expected.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                    let tol = hipml_core::parity::Tol::new((5e-3 * scale).max(1e-3), 5e-1);
+                    match compare(&expected, &act, tol) {
+                        Ok(stats) => {
+                            // The fp16 copy is what the `down` projection
+                            // reads; fp16 rounds by ~5e-4 relative.
+                            let htol = hipml_core::parity::Tol::new((5e-3 * scale).max(1e-3), 5e-1);
+                            match compare(&act, &acth, htol) {
+                                Ok(fp16) => Outcome::Pass(format!(
+                                    "max_abs {:.2e}  max_rel {:.2e}  fp16 max_abs {:.2e}  \
+                                     scale {:.1e}",
+                                    stats.max_abs, stats.max_rel, fp16.max_abs, scale
+                                )),
+                                Err(fp16) => Outcome::Fail(format!(
+                                    "fp16 copy: max_abs {:.2e}, max_rel {:.2e}, scale {:.1e}",
+                                    fp16.max_abs, fp16.max_rel, scale
+                                )),
+                            }
+                        }
+                        Err(stats) => Outcome::Fail(format!(
+                            "max_abs {:.2e} > {:.2e}, max_rel {:.2e} > {:.2e}",
+                            stats.max_abs, tol.abs, stats.max_rel, tol.rel
+                        )),
+                    }
+                }
+            },
         };
         let (verdict, detail) = match outcome {
             Outcome::Pass(d) => {

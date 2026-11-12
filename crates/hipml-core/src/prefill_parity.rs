@@ -517,6 +517,107 @@ pub fn qwen38_prefill_cases(tokens: usize) -> Vec<PrefillCase> {
     ]
 }
 
+/// Weight builder and host GEMM for a format, by case name.
+fn gu_format(
+    name: &str,
+) -> Option<(
+    fn(u64, usize, usize, usize) -> (Vec<u8>, Vec<f32>),
+    fn(&[u8], &[f32], usize, usize, usize) -> Vec<f32>,
+)> {
+    Some(match name {
+        "prefill_q4_k" => (inputs_q4_k, ops::gemm_q4_k),
+        "prefill_q5_k" => (inputs_q5_k, ops::gemm_q5_k),
+        "prefill_q6_k" => (inputs_q6_k, ops::gemm_q6_k),
+        "prefill_q8_0" => (inputs_q8_0, ops::gemm_q8_0),
+        "prefill_q3_k" => (inputs_q3_k, ops::gemm_q3_k),
+        "prefill_iq3_s" => (inputs_iq3_s, ops::gemm_iq3_s),
+        "prefill_iq4_xs" => (inputs_iq4_xs, ops::gemm_iq4_xs),
+        "prefill_iq4_nl" => (inputs_iq4_nl, ops::gemm_iq4_nl),
+        _ => return None,
+    })
+}
+
+/// A fused gate+up case: two weight matrices over one activation tile, and the
+/// swiGLU the fused epilogue has to reproduce.
+pub struct GuCase {
+    pub label: &'static str,
+    pub gate: &'static str,
+    pub up: &'static str,
+    pub seed: u64,
+    pub m: usize,
+    pub k: usize,
+    pub tokens: usize,
+}
+
+impl GuCase {
+    /// The converted-activation entry for one side of the pair.
+    pub fn entry(name: &str) -> &'static str {
+        match name {
+            "prefill_q4_k" => "prefill_q4_k_w2h",
+            "prefill_q5_k" => "prefill_q5_k_w2h",
+            "prefill_q6_k" => "prefill_q6_k_w2h",
+            "prefill_q8_0" => "prefill_q8_0_w2h",
+            "prefill_q3_k" => "prefill_q3_k_w2h",
+            "prefill_iq3_s" => "prefill_iq3_s_w2h",
+            "prefill_iq4_xs" => "prefill_iq4_xs_w2h",
+            "prefill_iq4_nl" => "prefill_iq4_nl_w2h",
+            other => panic!("{other}: no converted-activation entry"),
+        }
+    }
+
+    /// Weights for both matrices, the shared activation rows, and
+    /// `act = silu(gate) * up` on the host.
+    pub fn reference(&self) -> (Vec<u8>, Vec<u8>, Vec<f32>, Vec<f32>) {
+        let (gi, gg) = gu_format(self.gate).expect("gate format");
+        let (ui, ug) = gu_format(self.up).expect("up format");
+        let (wg, x) = gi(self.seed, self.m, self.k, self.tokens);
+        let (wu, _) = ui(self.seed + 1, self.m, self.k, self.tokens);
+        let yg = gg(&wg, &x, self.tokens, self.m, self.k);
+        let yu = ug(&wu, &x, self.tokens, self.m, self.k);
+        let act = yg
+            .iter()
+            .zip(&yu)
+            .map(|(g, u)| (g / (1.0 + (-g).exp())) * u)
+            .collect();
+        (wg, wu, x, act)
+    }
+}
+
+/// Fused gate+up parity: the two formats the UD mix pairs most often, plus the
+/// same-format pair the stock file uses, and a token count well inside one
+/// block so the epilogue's row mask is exercised.
+pub fn gu_cases() -> Vec<GuCase> {
+    vec![
+        GuCase {
+            label: "prefill_gu q4_k/q4_k 256x512 t=8",
+            gate: "prefill_q4_k",
+            up: "prefill_q4_k",
+            seed: 0x9F13_0001,
+            m: 256,
+            k: 512,
+            tokens: 8,
+        },
+        GuCase {
+            label: "prefill_gu q4_k/q5_k 256x512 t=8",
+            gate: "prefill_q4_k",
+            up: "prefill_q5_k",
+            seed: 0x9F13_0002,
+            m: 256,
+            k: 512,
+            tokens: 8,
+        },
+        GuCase {
+            label: "prefill_gu iq4_xs/iq4_xs 256x512 t=8",
+            gate: "prefill_iq4_xs",
+            up: "prefill_iq4_xs",
+            seed: 0x9F13_0003,
+            m: 256,
+            k: 512,
+            tokens: 8,
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,6 +645,17 @@ mod tests {
             assert_eq!(y.len(), case.tokens * case.m, "{}: y", case.label);
             let (w2, x2, y2) = case.reference();
             assert_eq!((w, x, y), (w2, x2, y2));
+        }
+    }
+
+    #[test]
+    fn gu_cases_are_deterministic_and_sized() {
+        for case in gu_cases() {
+            let (wg, wu, x, act) = case.reference();
+            assert_eq!(x.len(), case.tokens * case.k, "{}: x", case.label);
+            assert_eq!(act.len(), case.tokens * case.m, "{}: act", case.label);
+            assert!(!wg.is_empty() && !wu.is_empty(), "{}: w", case.label);
+            assert_eq!((wg, wu, x, act), case.reference());
         }
     }
 

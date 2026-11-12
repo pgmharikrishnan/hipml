@@ -37,9 +37,10 @@ pub mod launch_kv;
 pub use launch::Launcher;
 #[cfg(feature = "hip")]
 pub use launch::{
-    gemm_rows_f32, prefill_entry_for_half, prefill_has_silu, prefill_has_xhalf, prefill_resident,
-    prefill_resident_half, prefill_resident_silu, prefill_resident_slices,
-    prefill_resident_split_half, prefill_should_split, prefill_split_scratch_cap, prefill_xhalf,
+    gemm_rows_f32, prefill_entry_for_half, prefill_gu_entry, prefill_has_gu, prefill_has_silu,
+    prefill_has_xhalf, prefill_resident, prefill_resident_gu, prefill_resident_half,
+    prefill_resident_silu, prefill_resident_slices, prefill_resident_split_half,
+    prefill_should_split, prefill_split_scratch_cap, prefill_xhalf,
 };
 #[cfg(feature = "hip")]
 pub use launch::{gemv_job_tiles, GemvJob, ReadJob};
@@ -696,6 +697,18 @@ pub const KERNELS: &[KernelSpec] = &[
         entry: "prefill_halfw_w2h",
         kind: KernelKind::Prefill {
             rows: 128,
+            tokens: 256,
+            block: 256,
+        },
+    },
+    // The ffn's fused gate+up pass (`prefill_fuse.inc`): 256 tokens x 64 rows of
+    // each matrix per block, 256 threads, one entry per format pair. The entry
+    // field is one of them; the launcher picks the pair's own.
+    KernelSpec {
+        name: "prefill_gu_w2h",
+        entry: "prefill_gu_q4_k_q4_k",
+        kind: KernelKind::Prefill {
+            rows: 64,
             tokens: 256,
             block: 256,
         },
