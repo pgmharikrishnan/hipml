@@ -6,7 +6,7 @@
 //! bench/parity path.
 //!
 //! Contract: `y[r, :] = W @ x[r, :]`, `x` is `[r, k]` f32, `y` is `[r, n]` f32,
-//! `r <= 16`, `k` a multiple of 256 (Q4_K/Q6_K) or 32 (Q8_0). The 16-row
+//! `r <= 16`, `k` a multiple of 256 for every resident block format. The 16-row
 //! activation tile repeats the last real row when `r < 16` and discards the
 //! extra rows in the epilogue, so the cost is the tile, not `r`.
 
@@ -72,20 +72,22 @@ pub fn skinny_resident_rows(
         return Err(format!("{name}: k={k} must be a multiple of 32"));
     }
     // The staging loads are branch-free, so the contract is checked here. Q4_K
-    // rows are (k/256)*144 bytes, so a block header is 16-aligned whenever the
-    // resident weight is; Q6_K (210) and Q8_0 (34) rows are only 2-aligned and
-    // are read as u16 pairs.
+    // rows are (k/256)*144 bytes and its header is read as one 16-byte load, so
+    // the resident weight must be 16-aligned. Q5_K (176) and IQ4_XS (136) stage
+    // 8-byte runs, so 8 is the floor; everything else reads u16 pairs or bytes.
     if k % 256 != 0 {
         return Err(format!("{name}: k={k} must be a multiple of 256"));
     }
-    let q8 = name.contains("q8_0");
-    let q6 = name.contains("q6_k");
-    if (w.as_ptr() as usize) % 2 != 0 {
-        return Err(format!("{name}: resident weight is not 2-byte aligned"));
-    }
-    if !q8 && !q6 && (w.as_ptr() as usize) % 16 != 0 {
+    let need = if name.contains("q4_k") {
+        16
+    } else if name.contains("q5_k") || name.contains("iq4_xs") {
+        8
+    } else {
+        2
+    };
+    if (w.as_ptr() as usize) % need != 0 {
         return Err(format!(
-            "{name}: Q4_K resident weight is not 16-byte aligned"
+            "{name}: resident weight is not {need}-byte aligned"
         ));
     }
     let kernel = module.kernel(name)?;

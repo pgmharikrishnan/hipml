@@ -55,21 +55,43 @@ pub use launch::{
 #[cfg(feature = "hip")]
 pub use launch::{GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80};
 
+/// Every resident weight format the batched decode can serve: `_b` kind id,
+/// the GEMV entry that reads its blocks, and its matrix kind.
+///
+/// This is the one list. `batch_kind_for`, `batch_kind_entry`,
+/// `batch_kind_gemv` and the batched launch's own entry lookup are all derived
+/// from it, so a format is added here once and cannot half-exist.
+#[cfg(feature = "hip")]
+pub const BATCH_RESIDENT: [(i32, &str, hipml_core::mat::Kind); 8] = [
+    (launch::GEMV_B_Q4K, "gemv_q4_k", hipml_core::mat::Kind::Q4K),
+    (launch::GEMV_B_Q6K, "gemv_q6_k", hipml_core::mat::Kind::Q6K),
+    (launch::GEMV_B_Q5K, "gemv_q5_k", hipml_core::mat::Kind::Q5K),
+    (launch::GEMV_B_Q80, "gemv_q8_0", hipml_core::mat::Kind::Q8_0),
+    (
+        launch::GEMV_B_IQ4XS,
+        "gemv_iq4_xs",
+        hipml_core::mat::Kind::IQ4XS,
+    ),
+    (
+        launch::GEMV_B_IQ4NL,
+        "gemv_iq4_nl",
+        hipml_core::mat::Kind::IQ4NL,
+    ),
+    (launch::GEMV_B_Q3K, "gemv_q3_k", hipml_core::mat::Kind::Q3K),
+    (
+        launch::GEMV_B_IQ3S,
+        "gemv_iq3_s",
+        hipml_core::mat::Kind::IQ3S,
+    ),
+];
+
 /// The batched-GEMV kind for a resident matrix kind, when one exists.
 #[cfg(feature = "hip")]
 pub fn batch_kind_for(kind: hipml_core::mat::Kind) -> Option<i32> {
-    use hipml_core::mat::Kind;
-    Some(match kind {
-        Kind::Q4K => launch::GEMV_B_Q4K,
-        Kind::Q6K => launch::GEMV_B_Q6K,
-        Kind::Q5K => launch::GEMV_B_Q5K,
-        Kind::Q8_0 => launch::GEMV_B_Q80,
-        Kind::IQ4XS => launch::GEMV_B_IQ4XS,
-        Kind::IQ4NL => launch::GEMV_B_IQ4NL,
-        Kind::Q3K => launch::GEMV_B_Q3K,
-        Kind::IQ3S => launch::GEMV_B_IQ3S,
-        Kind::F32 => return None,
-    })
+    BATCH_RESIDENT
+        .iter()
+        .find(|(_, _, k)| *k == kind)
+        .map(|(id, _, _)| *id)
 }
 
 /// Without the `hip` feature no batched kernel exists.
@@ -81,27 +103,25 @@ pub fn batch_kind_for(_kind: hipml_core::mat::Kind) -> Option<i32> {
 /// The batched-GEMV kind for a resident GEMV entry name.
 #[cfg(feature = "hip")]
 pub fn batch_kind_entry(entry: &str) -> Option<i32> {
-    use launch::{
-        GEMV_B_IQ3S, GEMV_B_IQ4NL, GEMV_B_IQ4XS, GEMV_B_Q3K, GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K,
-        GEMV_B_Q80,
-    };
-    Some(match entry {
-        "gemv_q4_k" => GEMV_B_Q4K,
-        "gemv_q6_k" => GEMV_B_Q6K,
-        "gemv_q5_k" => GEMV_B_Q5K,
-        "gemv_q8_0" => GEMV_B_Q80,
-        "gemv_iq4_xs" => GEMV_B_IQ4XS,
-        "gemv_iq4_nl" => GEMV_B_IQ4NL,
-        "gemv_q3_k" => GEMV_B_Q3K,
-        "gemv_iq3_s" => GEMV_B_IQ3S,
-        _ => return None,
-    })
+    BATCH_RESIDENT
+        .iter()
+        .find(|(_, e, _)| *e == entry)
+        .map(|(id, _, _)| *id)
 }
 
 /// Without the `hip` feature no batched kernel exists.
 #[cfg(not(feature = "hip"))]
 pub fn batch_kind_entry(_entry: &str) -> Option<i32> {
     None
+}
+
+/// The resident GEMV entry a batched kind was built from.
+#[cfg(feature = "hip")]
+pub fn batch_kind_gemv(kind: i32) -> Option<&'static str> {
+    BATCH_RESIDENT
+        .iter()
+        .find(|(id, _, _)| *id == kind)
+        .map(|(_, e, _)| *e)
 }
 
 /// Whether the opt-in WMMA skinny verify path is on (`HIPML_SKINNY=1`).
@@ -327,6 +347,48 @@ pub const KERNELS: &[KernelSpec] = &[
     KernelSpec {
         name: "gemm_skinny_q8_0",
         entry: "gemm_skinny_q8_0",
+        kind: KernelKind::RowTile {
+            rows: 32,
+            block: 128,
+        },
+    },
+    // The dynamic-quant formats (Unsloth UD). Same tile and geometry; the
+    // weight staging goes through `pf_dequant8` for their block layouts.
+    KernelSpec {
+        name: "gemm_skinny_q5_k",
+        entry: "gemm_skinny_q5_k",
+        kind: KernelKind::RowTile {
+            rows: 32,
+            block: 128,
+        },
+    },
+    KernelSpec {
+        name: "gemm_skinny_iq4_xs",
+        entry: "gemm_skinny_iq4_xs",
+        kind: KernelKind::RowTile {
+            rows: 32,
+            block: 128,
+        },
+    },
+    KernelSpec {
+        name: "gemm_skinny_iq4_nl",
+        entry: "gemm_skinny_iq4_nl",
+        kind: KernelKind::RowTile {
+            rows: 32,
+            block: 128,
+        },
+    },
+    KernelSpec {
+        name: "gemm_skinny_q3_k",
+        entry: "gemm_skinny_q3_k",
+        kind: KernelKind::RowTile {
+            rows: 32,
+            block: 128,
+        },
+    },
+    KernelSpec {
+        name: "gemm_skinny_iq3_s",
+        entry: "gemm_skinny_iq3_s",
         kind: KernelKind::RowTile {
             rows: 32,
             block: 128,
@@ -1148,12 +1210,21 @@ pub fn stream_entry(name: &'static str) -> &'static str {
 }
 
 /// The skinny-GEMM entry for a resident block format (`None` for formats with
-/// no such kernel, e.g. Q5_K). `R <= 16` columns, `y[r, :] = W @ x[r, :]`.
+/// no such kernel). `R <= 16` columns, `y[r, :] = W @ x[r, :]`.
+///
+/// This is the one place a format opts into the tile: the batch launch asks
+/// `batch_kind_gemv` for the format and then this table, so adding a format is
+/// one entry here plus its kernel and manifest row.
 pub fn skinny_entry(name: &str) -> Option<&'static str> {
     Some(match name {
         "gemv_q4_k" | "gemm_skinny_q4_k" => "gemm_skinny_q4_k",
         "gemv_q6_k" | "gemm_skinny_q6_k" => "gemm_skinny_q6_k",
         "gemv_q8_0" | "gemm_skinny_q8_0" => "gemm_skinny_q8_0",
+        "gemv_q5_k" | "gemm_skinny_q5_k" => "gemm_skinny_q5_k",
+        "gemv_iq4_xs" | "gemm_skinny_iq4_xs" => "gemm_skinny_iq4_xs",
+        "gemv_iq4_nl" | "gemm_skinny_iq4_nl" => "gemm_skinny_iq4_nl",
+        "gemv_q3_k" | "gemm_skinny_q3_k" => "gemm_skinny_q3_k",
+        "gemv_iq3_s" | "gemm_skinny_iq3_s" => "gemm_skinny_iq3_s",
         _ => return None,
     })
 }

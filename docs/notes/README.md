@@ -35,3 +35,4 @@ the current numbers are in [`../release-run.md`](../release-run.md).
 | [`mtp-batch.md`](mtp-batch.md) | WP50 | 2026-11-10 | MTP drafting per slot inside one verify pass; the schedule is `R = floor(16/B) - 1` | B=8 R=1 166.5 tok/s aggregate, 1.13× plain, token-exact |
 | [`integrate.md`](integrate.md) | WP50–WP53 | 2026-11-11 | the split-K fix and MTP-over-batch merged onto the server tree | 20/20 oracle at step 19 = 41020; 8,193-token prefill 6.82 s |
 | [`prefill-tile-ceiling.md`](prefill-tile-ceiling.md) | PFT | 2026-11-12 | what bounds the prefill GEMM tile, per weight format; no shape or decoder change retained | IQ4_XS 106.6 TF against a 148 TF compute-only floor; staging is 25-34% of each GEMM |
+| [`serve-ud-batch.md`](serve-ud-batch.md) | SUD | 2026-11-12 | the 16-slot collapse on UD-Q4_K_M: the tile had no entry for five of its eight block types (Q5_K was 32% of the bytes) | cell c 97.42 → 201.59 tok/s; exact path unchanged at 96.87 |

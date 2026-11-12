@@ -9,9 +9,10 @@
 use crate::ops;
 use crate::parity::Tol;
 use crate::quant::{
-    random_iq3_s_bytes, random_q3_k_bytes, random_q4_k_bytes, random_q5_k_bytes, random_q6_k_bytes,
-    random_q8_0_bytes, IQ3_S_BYTES, Q3_K_BYTES, Q4_K_BYTES, Q5_K_BYTES, Q6_K_BYTES, Q8_0_BYTES,
-    QK_K,
+    random_iq3_s_bytes, random_iq4_nl_bytes, random_iq4_xs_bytes, random_q3_k_bytes,
+    random_q4_k_bytes, random_q5_k_bytes, random_q6_k_bytes, random_q8_0_bytes, IQ3_S_BYTES,
+    IQ4_NL_BYTES, IQ4_NL_VALUES, IQ4_XS_BYTES, Q3_K_BYTES, Q4_K_BYTES, Q5_K_BYTES, Q6_K_BYTES,
+    Q8_0_BYTES, QK_K,
 };
 use crate::rng::Rng;
 
@@ -53,6 +54,8 @@ impl PrefillCase {
             "prefill_q8_0" | "gemm_skinny_q8_0" => self.k / 32 * Q8_0_BYTES,
             "prefill_q3_k" | "gemm_skinny_q3_k" => self.k / QK_K * Q3_K_BYTES,
             "prefill_iq3_s" | "gemm_skinny_iq3_s" => self.k / QK_K * IQ3_S_BYTES,
+            "gemm_skinny_iq4_xs" => self.k / QK_K * IQ4_XS_BYTES,
+            "gemm_skinny_iq4_nl" => self.k / IQ4_NL_VALUES * IQ4_NL_BYTES,
             _ => 0,
         }
     }
@@ -127,6 +130,18 @@ fn build_iq3_s(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f3
     (w, x, y)
 }
 
+fn build_iq4_xs(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
+    let (w, x) = inputs_iq4_xs(seed, m, k, tokens);
+    let y = ops::gemm_iq4_xs(&w, &x, tokens, m, k);
+    (w, x, y)
+}
+
+fn build_iq4_nl(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
+    let (w, x) = inputs_iq4_nl(seed, m, k, tokens);
+    let y = ops::gemm_iq4_nl(&w, &x, tokens, m, k);
+    (w, x, y)
+}
+
 fn inputs_q3_k(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f32>) {
     let mut rng = Rng::new(seed);
     let w = random_q3_k_bytes(&mut rng, m * k / QK_K);
@@ -137,6 +152,20 @@ fn inputs_q3_k(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f3
 fn inputs_iq3_s(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f32>) {
     let mut rng = Rng::new(seed);
     let w = random_iq3_s_bytes(&mut rng, m * k / QK_K);
+    let x: Vec<f32> = (0..tokens * k).map(|_| rng.normal()).collect();
+    (w, x)
+}
+
+fn inputs_iq4_xs(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f32>) {
+    let mut rng = Rng::new(seed);
+    let w = random_iq4_xs_bytes(&mut rng, m * k / QK_K);
+    let x: Vec<f32> = (0..tokens * k).map(|_| rng.normal()).collect();
+    (w, x)
+}
+
+fn inputs_iq4_nl(seed: u64, m: usize, k: usize, tokens: usize) -> (Vec<u8>, Vec<f32>) {
+    let mut rng = Rng::new(seed);
+    let w = random_iq4_nl_bytes(&mut rng, m * k / IQ4_NL_VALUES);
     let x: Vec<f32> = (0..tokens * k).map(|_| rng.normal()).collect();
     (w, x)
 }
@@ -372,6 +401,64 @@ pub fn skinny_cases() -> Vec<PrefillCase> {
             tokens: 16,
             build: build_q8_0,
             inputs: inputs_q8_0,
+        },
+        // The dynamic-quant formats. Their weight staging goes through the
+        // prefill reader, so one case each at the full 16-row tile covers the
+        // shape the batched server actually launches.
+        PrefillCase {
+            name: "gemm_skinny_q5_k",
+            label: "skinny_q5_k 200x512 r=16",
+            tol: small,
+            seed: 0x5C11_0009,
+            m: 200,
+            k: 512,
+            tokens: 16,
+            build: build_q5_k,
+            inputs: inputs_q5_k,
+        },
+        PrefillCase {
+            name: "gemm_skinny_iq4_xs",
+            label: "skinny_iq4_xs 200x512 r=16",
+            tol: small,
+            seed: 0x5C11_000A,
+            m: 200,
+            k: 512,
+            tokens: 16,
+            build: build_iq4_xs,
+            inputs: inputs_iq4_xs,
+        },
+        PrefillCase {
+            name: "gemm_skinny_iq4_nl",
+            label: "skinny_iq4_nl 200x512 r=16",
+            tol: small,
+            seed: 0x5C11_000B,
+            m: 200,
+            k: 512,
+            tokens: 16,
+            build: build_iq4_nl,
+            inputs: inputs_iq4_nl,
+        },
+        PrefillCase {
+            name: "gemm_skinny_q3_k",
+            label: "skinny_q3_k 200x512 r=16",
+            tol: small,
+            seed: 0x5C11_000C,
+            m: 200,
+            k: 512,
+            tokens: 16,
+            build: build_q3_k,
+            inputs: inputs_q3_k,
+        },
+        PrefillCase {
+            name: "gemm_skinny_iq3_s",
+            label: "skinny_iq3_s 200x512 r=16",
+            tol: small,
+            seed: 0x5C11_000D,
+            m: 200,
+            k: 512,
+            tokens: 16,
+            build: build_iq3_s,
+            inputs: inputs_iq3_s,
         },
         // One production-size dot (5120 terms) so a k-tile or fragment-layout
         // bug that only shows at full k cannot pass on the small cases.

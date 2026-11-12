@@ -14,8 +14,9 @@
 
 use crate::kv::{self, KvDtype};
 use crate::quant::{
-    dequant_iq3_s, dequant_q3_k, dequant_q4_k, dequant_q5_k, dequant_q6_k, dequant_q8_0,
-    IQ3_S_BYTES, Q3_K_BYTES, Q4_K_BYTES, Q5_K_BYTES, Q6_K_BYTES, Q8_0_BYTES, Q8_0_VALUES, QK_K,
+    dequant_iq3_s, dequant_iq4_nl, dequant_iq4_xs, dequant_q3_k, dequant_q4_k, dequant_q5_k,
+    dequant_q6_k, dequant_q8_0, IQ3_S_BYTES, IQ4_NL_BYTES, IQ4_NL_VALUES, IQ4_XS_BYTES, Q3_K_BYTES,
+    Q4_K_BYTES, Q5_K_BYTES, Q6_K_BYTES, Q8_0_BYTES, Q8_0_VALUES, QK_K,
 };
 
 /// `y[m] = W[m,k] · x[k]`
@@ -110,6 +111,25 @@ pub fn gemm_q3_k(w: &[u8], x: &[f32], tokens: usize, m: usize, k: usize) -> Vec<
 /// `y[t,m] = W[m,k] · x[t,k]` with `W` stored as IQ3_S blocks, row-major.
 pub fn gemm_iq3_s(w: &[u8], x: &[f32], tokens: usize, m: usize, k: usize) -> Vec<f32> {
     gemm_quant_blocks(w, x, tokens, m, k, QK_K, IQ3_S_BYTES, dequant_iq3_s)
+}
+
+/// `y[t,m] = W[m,k] · x[t,k]` with `W` stored as IQ4_XS blocks, row-major.
+pub fn gemm_iq4_xs(w: &[u8], x: &[f32], tokens: usize, m: usize, k: usize) -> Vec<f32> {
+    gemm_quant_blocks(w, x, tokens, m, k, QK_K, IQ4_XS_BYTES, dequant_iq4_xs)
+}
+
+/// `y[t,m] = W[m,k] · x[t,k]` with `W` stored as IQ4_NL blocks, row-major.
+pub fn gemm_iq4_nl(w: &[u8], x: &[f32], tokens: usize, m: usize, k: usize) -> Vec<f32> {
+    gemm_quant_blocks(
+        w,
+        x,
+        tokens,
+        m,
+        k,
+        IQ4_NL_VALUES,
+        IQ4_NL_BYTES,
+        dequant_iq4_nl,
+    )
 }
 
 /// One dequantise-a-row-then-dot implementation for every block format.

@@ -134,6 +134,13 @@ $env:HIPML_SKINNY = "1"
 Remove-Item Env:\HIPML_SKINNY     # or start a fresh shell
 ```
 
+On the UD file the tile also covers Q5_K, IQ4_XS, IQ4_NL, Q3_K and IQ3_S, so
+`HIPML_SKINNY=1` is worth 1.42x at B=8 and 2.31x at B=16 there (the exact path is
+unchanged). Q5_K is a third of the file's bytes, so a missing Q5_K entry alone
+is enough to put the batch back on the exact GEMV: `HIPML_BATCH_TRACE=1` prints
+one `[batch] <entry> m=<rows> k=<k> b=<slots>` line per route, and is how that
+was caught. `hipml skinny-bench --ud` gives the per-format tile rate.
+
 ## 4. Head-to-head matrix
 
 ```powershell
