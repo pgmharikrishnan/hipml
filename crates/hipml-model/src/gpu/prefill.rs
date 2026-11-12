@@ -107,6 +107,10 @@ pub(crate) struct Chunk {
     /// `tokens * max(n_embd, n_ff, ssm inner)` halves, i.e. half that many
     /// 4-byte words.
     pub xh: Buffer,
+    /// fp16 activation the fused ffn epilogue writes: `tokens * n_ff` halves.
+    /// Separate from `xh` because the launch that writes it is still reading
+    /// `xh`, and the two tiles overlap.
+    pub acth: Buffer,
     /// Second k-partial for split-K ffn projections. Sized for the largest
     /// `tokens * rows` the split predicate can select at any tile length up to
     /// the chunk capacity (see `prefill_split_scratch_cap`), not for the chunk
@@ -168,6 +172,10 @@ impl Chunk {
             aout: zeros(tokens * qd)?,
             y: zeros(tokens * n)?,
             xh: zeros((tokens * wide + 1) / 2)?,
+            // The fused ffn epilogue writes its fp16 activation here rather
+            // than into `xh`, which is still the activation of the launch that
+            // produced it.
+            acth: zeros((tokens * ff + 1) / 2)?,
             sk: zeros(sk)?,
             apart: zeros(part_len(attn_splits).max(1))?,
             apart_ml: zeros((attn_splits * qslots * cfg.n_head * 2).max(2))?,
@@ -191,6 +199,7 @@ impl Chunk {
             + self.aout.len()
             + self.y.len()
             + self.xh.len()
+            + self.acth.len()
             + self.sk.len()
             + self.apart.len()
             + self.apart_ml.len())
@@ -441,16 +450,29 @@ impl<'a> GpuEngine<'a> {
                     n_tok * cfg.n_embd,
                 )?;
                 gemm_v2(l, &block.gate, &c.t, &c.xh, &c.gate, &c.sk, n_tok)?;
-                gemm_v2(l, &block.up, &c.t, &c.xh, &c.up, &c.sk, n_tok)?;
-                l.silu_mul_buf(&c.gate, &c.up, &c.act, n_tok * cfg.n_ff)?;
-                ::hipml_kernels::prefill_xhalf(
-                    l.module(),
-                    l.stream(),
-                    &c.act,
-                    &c.xh,
-                    n_tok * cfg.n_ff,
-                )?;
-                gemm_v2(l, &block.down, &c.act, &c.xh, &c.down, &c.sk, n_tok)?;
+                // The `up` projection writes the swiGLU activation and its fp16
+                // copy from its own epilogue, which is where the gate tile and
+                // the output rows already are. Falls back to the pair of
+                // elementwise passes when the tile cannot carry the epilogue
+                // (split-K, or a projection without an fp16 tile).
+                let acth = if block
+                    .up
+                    .gemm_half_silu(l, &c.xh, &c.gate, &c.act, &c.acth, n_tok)?
+                {
+                    &c.acth
+                } else {
+                    gemm_v2(l, &block.up, &c.t, &c.xh, &c.up, &c.sk, n_tok)?;
+                    l.silu_mul_buf(&c.gate, &c.up, &c.act, n_tok * cfg.n_ff)?;
+                    ::hipml_kernels::prefill_xhalf(
+                        l.module(),
+                        l.stream(),
+                        &c.act,
+                        &c.xh,
+                        n_tok * cfg.n_ff,
+                    )?;
+                    &c.xh
+                };
+                gemm_v2(l, &block.down, &c.act, acth, &c.down, &c.sk, n_tok)?;
             } else {
                 block.gate.gemm(l, &c.t, &c.gate, n_tok)?;
                 block.up.gemm(l, &c.t, &c.up, n_tok)?;

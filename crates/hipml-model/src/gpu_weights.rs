@@ -367,6 +367,50 @@ impl<'a> Proj<'a> {
         l.run_prefill_resident(e, self.w, xh, y, self.rows, self.cols, tokens)
     }
 
+    /// The `up` projection of the ffn, with the swiGLU applied in the epilogue:
+    /// `act = silu(gate) * (W @ xh)` and `acth` the fp16 copy of it.
+    ///
+    /// Returns `false` when this projection cannot use the fused launch (no
+    /// fp16 tile, or a tile that the split-K path owns), so the caller keeps the
+    /// three-launch sequence. The gate tile must already be complete: the `up`
+    /// launch runs after it on the same stream.
+    pub(crate) fn gemm_half_silu(
+        &self,
+        l: &Launcher,
+        xh: &Buffer,
+        gate: &Buffer,
+        act: &Buffer,
+        acth: &Buffer,
+        tokens: usize,
+    ) -> Result<bool, String> {
+        if self.q5_half.is_some()
+            || self.entry == "gemv_q5_k" && !hipml_kernels::q5_tile_prefill_enabled()
+            || hipml_kernels::prefill_should_split(self.rows, self.cols, tokens)
+        {
+            return Ok(false);
+        }
+        let Ok(e) = prefill_entry_half(self.entry) else {
+            return Ok(false);
+        };
+        if !hipml_kernels::prefill_has_silu(e) {
+            return Ok(false);
+        }
+        hipml_kernels::prefill_resident_silu(
+            l.module(),
+            l.stream(),
+            e,
+            self.w,
+            xh,
+            gate,
+            act,
+            acth,
+            self.rows,
+            self.cols,
+            tokens,
+        )?;
+        Ok(true)
+    }
+
     pub(crate) fn bytes(&self) -> usize {
         self.w.len() + self.q5_half.as_ref().map_or(0, |b| b.len())
     }

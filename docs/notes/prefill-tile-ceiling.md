@@ -11,6 +11,15 @@ second directory interleaved in the same hold. Nothing in the shipped kernel
 changed; sections 0-4, 6 and 7 are the earlier hold's numbers and are restated
 unchanged.
 
+Sections 2.1, 3, 5.2, 5.3, 6 and 7 were re-measured on `913550f`, branch
+`feat/pro-1491-prefill-instr`, under the `prefill-instr` lock, base `913550f`
+built in a second directory and run interleaved in the same hold. This branch
+does change the kernel: it shortens the staging phase at the instruction level
+(section 5.2) and moves the ffn's SwiGLU into the `up` projection's epilogue
+(section 5.3). Sections 2, 4 and 5 keep the earlier holds' numbers where they
+still describe the same mechanism; every number that moved says which hold it
+came from.
+
 The measuring tool is `scripts/probes/probe_prefill_tiles.cpp`. It compiles
 the shipped `prefill_wmma2.hip` (not a copy) and drives it with random bytes of
 the right block layout, so the numbers are the tile's own cost: the decoder
@@ -26,10 +35,17 @@ Answer: the tile is pinned at **one block per CU**, so its **serialised
 staging phase (worth 25-34% of every GEMM) cannot overlap the matrix work**.
 The compute-only floor is 147-149 TFLOPS on gate/up and 167 TFLOPS on down; the
 shipped tiles reach 97-114 TFLOPS. Nothing about the shape, the prefetch depth
-or the IQ4 decoders can be changed to recover the gap, so this branch keeps no
-kernel-behaviour change. The staging-free bound would be about 1,430 tok/s at
-8K, and even removing all non-tile overhead only reaches about 1,300, so the
-verdict is that tile tuning alone cannot beat 1,354.
+or the IQ4 decoders can be changed to recover the gap, and the staging-free
+bound is 1,410-1,460 tok/s at 8K (section 7).
+
+The phase cannot be *hidden*, but it can be made shorter, and that is what this
+branch does: the staging body is cut to about half its instructions (section
+5.2, staging 0.67-0.95 ms instead of 0.89-1.41 ms per GEMM) and the ffn's
+SwiGLU moves into the `up` projection's epilogue (section 5.3). The two
+together are **+9.9% end to end at 8K (1,186 -> 1,303 tok/s) and +11.6% at 512**,
+which is the largest prefill win this note has recorded, and it still lands
+**3.8% short of 1,354**: what is left is the compute-side gap above plus the
+launch/accounting inside the engine's ffn bucket, not the staging phase.
 
 ## 1. The tile
 
@@ -72,14 +88,54 @@ the same tile: the decoder costs less than the doubled weight stream. Second,
 the format spread is small (99-114 TFLOPS) while the *format-independent*
 floor is much higher, so the decoder is not the limiter.
 
+### 2.1 This branch, interleaved with `913550f`
+
+Same probe (`probe_prefill_tiles.exe 2048 3`), base `913550f` and the branch in
+one lock hold, 3 reps each. `now` is `-DPWW2_PROBE_NO_W=1`, which removes the
+weight staging and leaves the decoder: the gap to `now` is therefore the
+staging phase's wall clock, and it is the quantity sections 5.2/5.3 cut.
+
+| format | shape | `913550f` ms / TF | branch ms / TF | Δ | staging `913550f` | staging branch |
+|---|---|---:|---:|---:|---:|---:|
+| Q4_K | gate/up | 3.323 / 109.9 | 3.039 / 120.2 | -8.6% | 0.885 ms | 0.669 ms |
+| Q4_K | down | 3.437 / 106.2 | 3.097 / 117.9 | -9.9% | 0.958 ms | 0.665 ms |
+| Q5_K | gate/up | 3.775 / 96.7 | 3.339 / 109.3 | -11.5% | 1.312 ms | 0.949 ms |
+| Q5_K | down | 3.898 / 93.7 | 3.328 / 109.7 | -14.6% | 1.411 ms | 0.883 ms |
+| IQ4_XS | gate/up | 3.524 / 103.6 | 3.194 / 114.3 | -9.4% | 1.062 ms | 0.810 ms |
+| IQ4_XS | down | 3.622 / 100.8 | 3.260 / 112.0 | -10.0% | 1.141 ms | 0.832 ms |
+| IQ4_NL | gate/up | 3.672 / 99.4 | 2.916 / 125.2 | -20.6% | 1.205 ms | 0.538 ms |
+| IQ4_NL | down | 3.737 / 97.7 | 2.938 / 124.3 | -21.4% | 1.275 ms | 0.503 ms |
+| fp16 weights | gate/up | 4.440 / 82.2 | 4.481 / 81.5 | +0.9% | 1.972 ms | 2.099 ms |
+| fp16 weights | down | 3.905 / 93.5 | 3.912 / 93.3 | +0.2% | 1.434 ms | 1.467 ms |
+
+Everything this branch touches moved 8.6-21.4%; fp16 weights, which has no
+decoder and is not a path UD's ffn uses, did not move outside noise. This
+hold's absolute numbers are 3-4% slower than section 2's earlier hold on the
+same shipped kernel; the interleaved column is the one that compares code.
+
+The staging-free column also moved (Q4_K gate/up 2.438 -> 2.370 ms) because
+`now` still runs the decoder: the same instruction cut that shortens staging
+shortens the decoder.
+
 ## 3. The ceiling, per shape
 
 | configuration | gate/up | down |
 |---|---:|---:|
 | register-only WMMA issue (`probe_wmma_ceiling.cpp`) | 171-188 TF | 171-188 TF |
-| this tile, all staging removed | 2.46-2.49 ms = 147-149 TF | 2.185 ms = 167 TF |
-| this tile, shipped (IQ4_XS) | 3.424 ms = 106.6 TF | 3.543 ms = 103.0 TF |
-| this tile, fp16 weights | 3.687 ms = 99.0 TF | 3.718 ms = 98.2 TF |
+| this tile, all staging removed (`89d0d8d` hold) | 2.46-2.49 ms = 147-149 TF | 2.185 ms = 167 TF |
+| this tile, shipped (IQ4_XS), `89d0d8d` hold | 3.424 ms = 106.6 TF | 3.543 ms = 103.0 TF |
+| this tile, fp16 weights, `89d0d8d` hold | 3.687 ms = 99.0 TF | 3.718 ms = 98.2 TF |
+| this tile, all staging removed, `913550f` hold | 2.44-2.47 ms = 148-150 TF | 2.46-2.49 ms = 147-148 TF |
+| this tile, shipped (Q4_K), `913550f` hold | 3.323 ms = 109.9 TF | 3.437 ms = 106.2 TF |
+| this tile, shipped (Q4_K), this branch | 3.039 ms = 120.2 TF | 3.097 ms = 117.9 TF |
+| this tile, all staging removed, this branch | 2.37-2.39 ms = 153-154 TF | 2.43-2.45 ms = 149-150 TF |
+| this tile, shipped (IQ4_XS), this branch | 3.194 ms = 114.3 TF | 3.260 ms = 112.0 TF |
+
+The last five rows are the same hold as section 2.1, so they compare directly.
+The branch closes the staging gap from 0.89-1.41 ms per GEMM to 0.50-0.95 ms.
+What remains after that is the staging-free column itself, 149-154 TF against
+the register-only 171-188 TF, and that residual is what the verdict in section
+7 turns on.
 
 Gate/up runs 13-21% below the register-only ceiling even with staging removed;
 down, whose k is 17,408 rather than 5,120, reaches 89-97%. That is a property of
@@ -117,12 +173,13 @@ Attribution, as shares of the shipped time: weight staging 25-34%, the x copy
 larger *stream*, but the weight staging is the larger *phase* because it also
 converts and writes 128 rows per step against 256 tokens.
 
-## 5. What was tried and reverted
+## 5. What was tried
 
-Every experiment below was built and run interleaved with the shipped build in
-the same lock hold, then reverted. Probe noise is +-3-5% between holds
+Every experiment in this section was built and run interleaved with the
+shipped build in the same lock hold. Probe noise is +-3-5% between holds
 (thermal and clock drift), so a variant had to win outside that band to be
-kept; none did.
+kept. Section 5.1 is the mechanism that lost and was reverted; sections 5.2 and
+5.3 are the two that won and ship.
 
 | change | result |
 |---|---|
@@ -229,71 +286,159 @@ covered by fewer warps, which is the `RT>128` problem one level down, and the
 128x128 tile that makes it fit is the second row of this section's first table.
 
 
+### 5.2 The staging loop, cut at the instruction level (shipped)
+
+Section 5.1 asked whether the phase can be hidden. It cannot. This is the other
+direction: make it shorter. A k-tile stages 16 weight values per thread, and on
+Q4_K the staging body compiled to about 400 gfx1201 instructions of which 72
+were the decoder's own arithmetic - the rest was guards, per-value address
+math, header loads and waits. Five changes in `pww2_loadraw` /
+`pww2_dequant8`:
+
+1. **Out-of-range rows are clamped, not predicated.** A token row past the
+   prompt, or a weight row past `m`, is redirected onto the last valid row
+   instead of being skipped. The store loop already masks those
+   (`gt < tokens && r < m`), so the staged tile only has to be defined, not
+   correct: every exec-mask save/restore and guard branch leaves the k loop,
+   and no load can go out of bounds.
+2. **The block header arrives with the run.** Each run's load pulls its block's
+   header window in the fetch phase (16 B for Q4_K/Q5_K/Q3_K, 2-8 B for the
+   rest) and the decode reads registers. The old decoder loaded the scale, the
+   min and the two block scales one byte at a time *at decode time*, which put
+   three more dependent global loads inside the phase.
+3. **Byte-wise header arithmetic becomes one shift.** The Q4_K/Q5_K 6-bit
+   scale/min split, Q3_K's sixteen 6-bit scales and Q6_K's block scale are
+   register ops on the prefetched words.
+4. **Nibble and high-bit extracts use `v_ubfe`**, one scalar shift per value
+   instead of mask/compare/select; Q5_K's fifth bit becomes a 1-bit extract.
+5. **Per-thread row pointers and k offsets are hoisted** out of the k loop.
+
+The staging body's instruction count fell from 393 to 217 on Q4_K, 529 to 261 on
+Q5_K and 600 to 345 on Q3_K (blocks `clang -S` attributes to the k loop).
+Measured as wall clock through the `now` builds (section 2.1), the phase goes
+0.885 -> 0.669 ms on Q4_K gate/up and 1.275 -> 0.503 ms on IQ4_NL down: -24% to
+-61% of the phase depending on the format, and 8.6-21.4% of the whole GEMM.
+
+The two high-bit extracts are where this went wrong first: the per-byte offset
+was dropped, so values 1-3 and 5-7 of every run took the wrong fifth/high bits.
+`hipml parity prefill --deep` reported it as five q5_k/q6_k failures with
+absurd residuals while every other format passed, which is the argument for
+running the parity suite first on any decoder change: a single-format spot
+check of one value per run would have missed it.
+
+### 5.3 The ffn SwiGLU in the `up` projection's epilogue (shipped)
+
+The graph ran three launches between the ffn's `up` and `down` projections:
+`silu_mul` (read gate and up, write act), the fp16 copy of act, then `down`.
+The `up` projection already holds those rows when it stores them, so its
+epilogue applies the SwiGLU itself: `y = silu(gate) * acc` and `yh` the fp16
+copy - one extra read of gate and one fp16 write, instead of two full
+read-passes and two writes. The arithmetic is `silu_mul_f32`'s expression
+verbatim.
+
+It is a separate entry per format (`prefill_*_w2h_silu`) because only the store
+loop changes; the ffn call site keeps the three-launch sequence for every shape
+that cannot carry it (split-K, a projection with no fp16 tile, the q5 copy
+path).
+
+Measured on one binary with the fusion forced off by a temporary build, 8K,
+three reps, interleaved in the same hold: 1,269.5 tok/s off, 1,303.7 on,
+**+2.7%**, i.e. 169 ms of the 8K wall. A temporary per-launch trace showed 64
+fused launches per chunk against 64 layers, so the whole ffn is covered, not a
+subset.
+
+Correctness: `oracle-gate` on both the UD and the stock file against
+`bench/fixtures/p2_math_169.ids` passes with ids identical to the CPU
+reference, and the greedy run reproduces `[11751, 13, 198, 760, 6511, 314, 9564,
+369, 19241, 13, 198, 760]`.
+
 ## 6. End to end
 
-`hipml gpu-bench --gguf <UD> --prefill N`, chunk 2,048, f32 KV, three runs
-each, same box and lock:
+`hipml gpu-bench --gguf <UD> --prefill N`, chunk 2,048, f32 KV. `913550f` and
+this branch were built in separate trees and run alternately, three reps each,
+in one lock hold, in two separate processes (p1, p2) to catch a per-process
+offset:
 
-| prompt | `3401e1a`, earlier hold | final tree, this hold | interleaved: main / branch |
+| prompt | process | `913550f` tok/s (3 runs) | this branch tok/s (3 runs) | Δ |
+|---|---|---:|---:|---:|
+| 512 | p1 | 1,176.6 / 1,160.0 / 1,150.4 | 1,310.3 / 1,294.7 / 1,282.5 | +11.5% |
+| 512 | p2 | 1,141.3 / 1,133.1 / 1,133.3 | 1,272.4 / 1,268.0 / 1,266.9 | +11.7% |
+| 8,192 | p1 | 1,200.1 / 1,190.7 / 1,187.1 | 1,313.6 / 1,308.0 / 1,302.7 | +9.7% |
+| 8,192 | p2 | 1,181.9 / 1,180.2 / 1,177.7 | 1,297.8 / 1,296.7 / 1,293.8 | +9.8% |
+
+The p2 process read 2-3% below p1 on *both* trees, and both drift down across
+their three reps; the interleaved per-hold delta is the number that compares
+code, and it is +11.6% at 512 and +9.8% at 8,192. Absolute levels differ from
+the earlier holds in this note by up to 4% (this hold's `913550f` reads 1,186
+tok/s at 8K where the `89d0d8d` hold read 1,210), so cross-hold absolute
+numbers are not comparable.
+
+Of the 8K gain, the staging cut is +7.0% and the fused epilogue +2.7%,
+measured separately in one hold against the same tree (section 5.3).
+
+Stock Q4_K_M at 8K read 1,222.5 tok/s on the `89d0d8d` hold and was not
+re-measured here; hipml is format-blind between UD and stock, unlike llama.cpp
+(1,354 vs 1,170), which is why the UD file is the hard comparison.
+
+Stage split at 8K (UD), one run each, ms:
+
+| stage | `913550f` | this branch | share (branch) |
 |---|---:|---:|---:|
-| 512 | 1205.5 / 1206.2 / 1203.6 | 1190.8 / 1188.0 / 1188.7 | 1206.3 / 1210.8 |
-| 8,192 | 1229.3 / 1222.6 / 1215.7 | 1210.0 / 1203.4 / 1196.9 | 1219.8 / 1218.2 |
+| ffn GEMMs (gate, up, down x 64) | 3359.7 | 2847.8 | 44.3% |
+| GDN chunk recurrence | 1513.1 | 1507.0 | 23.4% |
+| attention (16 layers) | 894.8 | 855.6 | 13.3% |
+| GDN projection GEMMs | 831.2 | 756.1 | 11.8% |
+| attention projection GEMMs | 227.9 | 205.8 | 3.2% |
+| elementwise, embed, final | 211.8 | 218.3 | 3.4% |
+| stage sum | 7038.5 | 6390.6 | 99.4% |
+| wall, including the split's syncs | 7070 | 6430 | |
 
-The interleaved column is the one that compares code: `origin/main` and the
-branch were built in separate trees and run alternately, three times each, in
-one lock hold. The branch is +0.3% at 512 and -0.2% at 8,192, i.e. no
-regression at either length. The earlier hold read 1.4-1.6% higher than this
-one, and the interleaved run drifts about 1% downward across its six 8K cells:
-that is clock state, not the patch.
+The ffn bucket falls 15.2% (512 ms): 169 ms of that is the fused epilogue
+(section 5.3), the rest is the staging cut on the same three GEMMs. The
+projection buckets fall 9-10% for the same reason - those projections are IQ4
+and Q3_K, the formats that gained most in section 2.1. The recurrence and
+attention buckets are not GEMMs this branch touches; they read 0.4-4.4% lower,
+which is drift within a single-run comparison and is not attributed.
 
-Stock Q4_K_M at 8K on the same tree: 1222.5 tok/s. hipml is format-blind
-between UD and stock, unlike llama.cpp (1,354 vs 1,170), which is why the UD
-file is the hard comparison.
-
-Stage split at 8K (UD), ms:
-
-| stage | ms | share |
-|---|---:|---:|
-| ffn GEMMs (gate, up, down x 64) | 3310.1 | 47.6% |
-| GDN chunk recurrence | 1478.5 | 21.2% |
-| attention (16 layers) | 880.7 | 12.7% |
-| GDN projection GEMMs | 820.4 | 11.8% |
-| attention projection GEMMs | 224.9 | 3.2% |
-| elementwise, embed, final | 209.2 | 3.0% |
-| stage sum | 6923.8 | 99.5% |
-| wall, including the split's syncs | 6960 | |
-
-The shares are of the 6,960 ms wall. The ffn bucket includes two
-`prefill_xhalf` passes and `silu_mul` (about 250 ms at 8K), so the pure ffn GEMM
-rate is 91.6 TFLOPS in engine against 106.6 TFLOPS in the probe. The rest of
-the gap to the probe (whole bucket 84.7 TF) is launch and scheduling, and it is
-outside this tile: the tile probe cannot see it, and fixing it needs the
-launch/accounting path, not a kernel change.
+The bucket still runs at 11.1 ms per layer-chunk against 8.9-9.7 ms of probe
+time for its three GEMMs at the formats it carries (Q5_K, 18 of the 64 `up`
+projections, is the slowest of them), so 1.4-2.2 ms per layer-chunk is launch
+and scheduling. That part is outside this tile: the tile probe cannot see it,
+and removing it needs the launch/accounting path, not a kernel change.
 
 ## 7. Verdict on 1,354 tok/s
 
 | scenario | 8K time | tok/s |
 |---|---:|---:|
-| shipped, split run | 6.96 s | 1,178 |
-| all non-tile overhead removed (*model*) | 6.31 s | 1,298 |
-| staging-free tile, not reachable (*model*) | 5.72 s | 1,431 |
+| `913550f`, this hold, plain run | 6.90 s | 1,186 |
+| this branch, this hold, plain run | 6.29 s | 1,302 |
+| ffn GEMMs at the staging-free rate (*model*) | 5.6-5.8 s | 1,410-1,460 |
 | llama.cpp reference | 6.05 s | 1,354 |
 
-The first row is the split run because it is the only run that reports the
-stage buckets; it adds one stream sync per stage and reads about 3% below the
-plain run. Both model rows are arithmetic, not plans. The staging-free one
-credits the ffn GEMMs with the measured compute-only rate (2.47/2.47/2.19 ms
-per layer-chunk) and leaves every other stage untouched; the middle one credits
-them with the probe's shipped rate (about 400 ms) and removes the 250 ms of
-`xhalf`/`silu` that the ffn bucket also counts. The staging-free row clears
-1,354; the middle row, which removes everything outside the tile, does not. It
-was an open question whether the staging phase could be *hidden* rather than
-removed; section 5.1 answers it for every mechanism gfx1201 offers, and the
-answer is no: the best of them is still 14-20% slower than the shipped loop, so
-the shipped depth stays `PF=0` and 1,354 is still 0.9 s of GEMM staging away.
-The three-and-a-half seconds of non-GEMM time (GDN scan 21.5%, attention
-12.5%) is not a tile problem at all, and the 18% gap between the probe GEMM rate
-and the engine's is the launch/accounting path.
+The plain runs are section 6's means. The split run reads 1.2% below the plain
+one on both trees (7.07 vs 6.90 s, 6.43 vs 6.29 s) because it adds one stream
+sync per stage, so it is used for the buckets and not for this table.
+
+The model row credits the 256 ffn GEMMs at 8K with the staging-free rate of
+section 2.1's `now` builds - 2.37-2.45 ms instead of the 2.94-3.34 ms they ship
+at - and leaves every other stage untouched: 0.5-0.7 s off the wall. It is
+arithmetic, not a plan. It clears 1,354, and that is the honest measure of how
+far away the target now is: one phase, not a redesign.
+
+It is also not reachable from here. Section 5.1 shows the phase cannot be hidden
+on this chip, and shrinking it further needs a tile that stages less, which is
+the accumulator budget this note opened with: past 128 rows the fp16 staging
+and 32 accumulators do not both fit, and every shape that bought the rows back
+lost more in compute than it saved. What this tile could still do was spend
+fewer instructions on the phase and stop paying a separate elementwise pass for
+the ffn's SwiGLU; the branch does both, for 422 ms of the 8K wall.
+
+The last 244 ms is not staging either. The staging-free column is 149-154 TF
+against the register-only 171-188 TF, so a tile that staged nothing would still
+sit 19% under the compute ceiling - the k-loop schedule gap section 3 records,
+which every measured change to the schedule lost to. That gap, plus the 1.4-2.2
+ms per layer-chunk by which the engine's ffn bucket exceeds the probe time of
+its own GEMMs, is where the rest lives.
 
 ## 8. What is unverified
 
@@ -302,15 +447,23 @@ and the engine's is the launch/accounting path.
   behave differently on real weights.
 * One block per CU is inferred from VGPR counts and the 65,536-VGPR file, not
   from a hardware occupancy counter; WDDM does not expose one here.
-* The end-to-end comparison is three runs per tree in one lock hold. Its
-  interleaved delta in section 6 (+0.3% at 512, -0.2% at 8,192) is smaller than
-  the drift across that hold (about 1%), so that PR's effect is measured as
-  zero but is not bounded tighter than about 1%.
-* The staging-free row multiplies the probe's rate by the counted GEMM
-  launches (256 per ffn tensor at 8K). It assumes the 8K chunk decomposes into
-  exactly 4 x 2,048 tiles, which is true for this fixture length.
-* Attention and GDN numbers are copied from the shipped split, not re-measured
-  per variant; no variant changed them.
+* The end-to-end comparison is three runs per tree in one lock hold, in two
+  processes. The interleaved delta is +11.6% at 512 and +9.8% at 8,192, against
+  a 2-3% offset between the two processes and a downward drift of about 0.5-1%
+  across each process's six runs, so the deltas are well outside the noise.
+* The stage buckets in section 6 and the model row in section 7 are single runs
+  each; the split run's per-stage syncs make it unsuitable for rate comparisons,
+  and the bucket-to-bucket deltas (9-10% on the projection buckets) are larger
+  than the drift a single run shows, but they are not averaged.
+* The fused epilogue's +2.7% comes from one hold comparing two builds of the
+  same tree (one with the fused path forced off). It is a single-shot switch,
+  not a variant family.
+* The staging-free row multiplies the probe's rate by the counted GEMM launches
+  (256 per ffn tensor at 8K). It assumes the 8K chunk decomposes into exactly
+  4 x 2,048 tiles, which is true for this fixture length.
+* The `now` builds still run the decoder, so the "staging" they remove is the
+  weight fetch and its stores, not the ALU. The phase times quoted in section
+  2.1 are therefore the phase minus the decoder.
 * Section 5.1's 21% cost for the double buffer is measured, not explained. Two
   candidate causes remain: the LDS footprint doubling from 30,720 to 61,440
   bytes per block, and the extra buffer making the fragment reads and the

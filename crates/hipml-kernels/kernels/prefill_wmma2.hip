@@ -129,18 +129,26 @@ typedef _Float16 __attribute__((ext_vector_type(8))) pww2_h8;
 typedef float __attribute__((ext_vector_type(8))) pww2_f8;
 typedef unsigned int __attribute__((ext_vector_type(4))) pww2_u4;
 
-static __device__ __forceinline__ void pww2_ld8b(const unsigned char* p, pww2_u4& r, int lo)
+static __device__ __forceinline__ void pww2_ld8b(const unsigned char* p, unsigned& lo,
+                                                 unsigned& hi)
 {
-    unsigned a, b;
-    __builtin_memcpy(&a, p, 4);
-    __builtin_memcpy(&b, p + 4, 4);
-    if (lo) { r.x = a; r.y = b; } else { r.z = a; r.w = b; }
+    __builtin_memcpy(&lo, p, 4);
+    __builtin_memcpy(&hi, p + 4, 4);
+}
+
+// One 16-byte window of a block header, read as four words.
+static __device__ __forceinline__ void pww2_ld16b(const unsigned char* p, unsigned& w0,
+                                                  unsigned& w1, unsigned& w2, unsigned& w3)
+{
+    pww2_ld8b(p, w0, w1);
+    pww2_ld8b(p + 8, w2, w3);
 }
 
 // One half out of the four 32-bit words of a prefetched 16-byte run.
-static __device__ __forceinline__ __half pww2_h(const pww2_u4& r, int i)
+static __device__ __forceinline__ __half pww2_h(unsigned w0, unsigned w1, unsigned w2,
+                                                unsigned w3, int i)
 {
-    const unsigned w = i < 2 ? r.x : (i < 4 ? r.y : (i < 6 ? r.z : r.w));
+    const unsigned w = i < 2 ? w0 : (i < 4 ? w1 : (i < 6 ? w2 : w3));
     return __ushort_as_half((unsigned short)((w >> (16 * (i & 1))) & 0xFFFFu));
 }
 
@@ -150,49 +158,117 @@ static __device__ __forceinline__ int pww2_b(unsigned lo, unsigned hi, int i)
     return (int)(((i < 4 ? lo >> (8 * i) : hi >> (8 * (i - 4)))) & 0xFFu);
 }
 
-// Raw quant bytes an 8-value run needs, loaded early and dequantised later.
-template <int KIND>
-static __device__ __forceinline__ pww2_u4 pww2_loadraw(const unsigned char* __restrict__ rp, int v)
+// One nibble out of the same run, from bit `sh` of the byte (0 or 4: the two
+// halves of a Q4_K/Q5_K sub-block). A bit-field extract because the half the
+// run wants is uniform, so the shift is one scalar, not a per-value select.
+static __device__ __forceinline__ int pww2_nib(unsigned lo, unsigned hi, int i, int sh)
 {
-    pww2_u4 r;
-    r.x = r.y = r.z = r.w = 0u;
+    const unsigned w = i < 4 ? lo : hi;
+    return (int)__builtin_amdgcn_ubfe(w, (unsigned)(8 * (i & 3) + sh), 4u);
+}
+
+// A weight run plus every block-header word its decoder reads. The header is
+// 2-16 bytes and arrives in the same fetch as the quant bytes, so the decode
+// that runs after the barrier reads registers only: the old path loaded the
+// scale and the two block scales one byte at a time at decode time, which put
+// three more dependent global loads inside the staging phase.
+struct pww2_raw {
+    unsigned int q0, q1;             // the run, value i in byte i
+    unsigned int h0, h1, h2, h3;     // 16-byte block header window
+    unsigned int a, b;               // second window: fifth/high bits or signs
+    unsigned int sc;                 // one scale word outside both windows
+};
+
+// Q4_K / Q5_K sub-block scale and min, out of the 16-byte header window. The
+// bytes are picked with shifts instead of the three scalar loads `pf_scale_min`
+// needs, so the header costs no memory access at decode time.
+static __device__ __forceinline__ void pww2_scale_min(int sub, const pww2_raw& r, int* sc,
+                                                      int* mn)
+{
+    if (sub < 4) {
+        *sc = (int)((r.h1 >> (8 * sub)) & 63u);
+        *mn = (int)((r.h2 >> (8 * sub)) & 63u);
+    } else {
+        const int x = 8 * (sub - 4);
+        const unsigned lo = (r.h1 >> x) & 0xFFu;   // q[sub - 4]
+        const unsigned mid = (r.h2 >> x) & 0xFFu;  // q[sub]
+        const unsigned hi = (r.h3 >> x) & 0xFFu;   // q[sub + 4]
+        *sc = (int)((hi & 0xFu) | ((lo & 0xC0u) >> 2));
+        *mn = (int)((hi >> 4) | ((mid & 0xC0u) >> 2));
+    }
+}
+
+// Q3_K's 16 signed six-bit scales, from the three 32-bit words that hold them.
+// `pf_q3k_scale` is the same shuffle against global memory; this one has the
+// words in registers because the header came in with the run.
+static __device__ __forceinline__ int pww2_q3k_scale(unsigned a, unsigned b, unsigned c,
+                                                     int is)
+{
+    const unsigned KM1 = 0x03030303u;
+    const unsigned KM2 = 0x0f0f0f0fu;
+    const int ai = is >> 2;
+    unsigned int v;
+    if (ai == 0) {
+        v = (a & KM2) | ((c & KM1) << 4);
+    } else if (ai == 1) {
+        v = (b & KM2) | (((c >> 2) & KM1) << 4);
+    } else if (ai == 2) {
+        v = ((a >> 4) & KM2) | (((c >> 4) & KM1) << 4);
+    } else {
+        v = ((b >> 4) & KM2) | (((c >> 6) & KM1) << 4);
+    }
+    return (int)(signed char)((v >> (8 * (is & 3))) & 0xFFu) - 32;
+}
+
+// Raw bytes an 8-value run needs, loaded early and dequantised later.
+template <int KIND>
+static __device__ __forceinline__ void pww2_loadraw(const unsigned char* __restrict__ rp, int v,
+                                                    pww2_raw& r)
+{
     if (KIND == 0) {
         const int blk = v >> 8, within = v & 255;
-        const unsigned char* qp = rp + (size_t)blk * PF_Q4K_BLOCK_BYTES + 16 +
-                                  ((within >> 5) >> 1) * 32 + ((within & 31) >> 3) * 8;
-        pww2_ld8b(qp, r, 1);
+        const unsigned char* b = rp + (size_t)blk * PF_Q4K_BLOCK_BYTES;
+        pww2_ld8b(b + 16 + ((within >> 5) >> 1) * 32 + ((within & 31) >> 3) * 8, r.q0, r.q1);
+        pww2_ld16b(b, r.h0, r.h1, r.h2, r.h3);
     } else if (KIND == 1) {
         const int blk = v >> 8, within = v & 255, j = within >> 4, l0 = within & 15;
         const int half = j >> 3, s = j & 7, group = s >> 1, is = s & 1;
         const unsigned char* b = rp + (size_t)blk * PF_Q6K_BLOCK_BYTES;
         const int ql = half * 64 + (group & 1) * 32 + is * 16 + l0;
         const int qh = 128 + half * 32 + is * 16 + l0;
-        pww2_ld8b(b + ql, r, 1);
-        pww2_ld8b(b + qh, r, 0);
+        pww2_ld8b(b + ql, r.q0, r.q1);
+        pww2_ld8b(b + qh, r.a, r.b);
+        __builtin_memcpy(&r.h0, b + 208, 2);
+        __builtin_memcpy(&r.sc, b + 192 + j, 2);
     } else if (KIND == 2) {
         const int blk = v >> 5, part = (v & 31) >> 3;
-        pww2_ld8b(rp + (size_t)blk * PF_Q8_0_BLOCK_BYTES + 2 + part * 8, r, 1);
+        const unsigned char* b = rp + (size_t)blk * PF_Q8_0_BLOCK_BYTES;
+        pww2_ld8b(b + 2 + part * 8, r.q0, r.q1);
+        __builtin_memcpy(&r.h0, b, 2);
     } else if (KIND == 4) {
         // Q5_K needs both byte runs an 8-value chunk touches: 8 qs bytes (low
         // nibble side) and the 8 qh bytes that carry the fifth bit.
         const int blk = v >> 8, within = v & 255, g = within >> 6;
         const unsigned char* b = rp + (size_t)blk * PF_Q5K_BLOCK_BYTES;
-        pww2_ld8b(b + 48 + g * 32 + (within & 31), r, 1);
-        pww2_ld8b(b + 16 + (within & 31), r, 0);
+        pww2_ld8b(b + 48 + g * 32 + (within & 31), r.q0, r.q1);
+        pww2_ld8b(b + 16 + (within & 31), r.a, r.b);
+        pww2_ld16b(b, r.h0, r.h1, r.h2, r.h3);
     } else if (KIND == 3) {
-        __builtin_memcpy(&r, rp + (size_t)v * 2, 16);
+        pww2_ld16b(rp + (size_t)v * 2, r.q0, r.q1, r.a, r.b);
     } else if (KIND == 5) {
         const int blk = v >> 8, within = v & 255, sub = within >> 5;
         const int part = (within & 31) >> 3;
-        pww2_ld8b(rp + (size_t)blk * PF_IQ4_XS_BLOCK_BYTES + 8 + sub * 16 +
-                      (part & 1) * 8, r, 1);
+        const unsigned char* b = rp + (size_t)blk * PF_IQ4_XS_BLOCK_BYTES;
+        pww2_ld8b(b + 8 + sub * 16 + (part & 1) * 8, r.q0, r.q1);
+        pww2_ld8b(b, r.h0, r.h1);
     } else if (KIND == 7) {
         // Q3_K: 8 qs bytes (low) and the 8 hmask bytes that refine them (high).
         const int blk = v >> 8, within = v & 255;
         const int n = within >> 7, half = (within >> 4) & 1, l0 = within & 15;
         const unsigned char* b = rp + (size_t)blk * PF_Q3K_BLOCK_BYTES;
-        pww2_ld8b(b + 32 + n * 32 + half * 16 + l0, r, 1);
-        pww2_ld8b(b + half * 16 + l0, r, 0);
+        pww2_ld8b(b + 32 + n * 32 + half * 16 + l0, r.q0, r.q1);
+        pww2_ld8b(b + half * 16 + l0, r.a, r.b);
+        pww2_ld16b(b + 96, r.h0, r.h1, r.h2, r.h3);
     } else if (KIND == 8) {
         // IQ3_S: two qs bytes, one qh byte and one sign byte for 8 values.
         const int blk = v >> 8, within = v & 255;
@@ -200,125 +276,113 @@ static __device__ __forceinline__ pww2_u4 pww2_loadraw(const unsigned char* __re
         const int l = (within & 31) >> 3;
         const unsigned char* b = rp + (size_t)blk * PF_IQ3S_BLOCK_BYTES;
         const unsigned char* qp = b + 2 + pair * 16 + half * 8 + 2 * l;
-        r.x = (unsigned)qp[0] | ((unsigned)qp[1] << 8) |
-              ((unsigned)b[66 + pair * 2 + half] << 16) |
-              ((unsigned)b[74 + pair * 8 + half * 4 + l] << 24);
-        r.y = r.z = r.w = 0u;
+        r.q0 = (unsigned)qp[0] | ((unsigned)qp[1] << 8);
+        __builtin_memcpy(&r.h0, b, 2);
+        r.a = b[66 + pair * 2 + half];
+        r.b = b[74 + pair * 8 + half * 4 + l];
+        r.sc = b[106 + pair];
     } else {
         const int blk = v >> 5, part = (v & 31) >> 3;
-        pww2_ld8b(rp + (size_t)blk * PF_IQ4_NL_BLOCK_BYTES + 2 + (part & 1) * 8, r, 1);
+        const unsigned char* b = rp + (size_t)blk * PF_IQ4_NL_BLOCK_BYTES;
+        pww2_ld8b(b + 2 + (part & 1) * 8, r.q0, r.q1);
+        __builtin_memcpy(&r.h0, b, 2);
     }
-    return r;
 }
 
-// Dequantise one 8-value run from the prefetched bytes. Scales, mins and the
-// Q6_K/Q8_0 block scales are read here: they are 2-16 bytes per 128-256 values
-// and land in the same 128 B line the raw load already pulled in.
+// Dequantise one 8-value run from the prefetched bytes.
 template <int KIND>
-static __device__ __forceinline__ void pww2_dequant8(const pww2_u4& r,
-                                                     const unsigned char* __restrict__ rp,
-                                                     int v, float* out)
+static __device__ __forceinline__ void pww2_dequant8(const pww2_raw& r, int v, float* out)
 {
     if (KIND == 0) {
-        const int blk = v >> 8, within = v & 255, sub = within >> 5;
-        const unsigned char* b = rp + (size_t)blk * PF_Q4K_BLOCK_BYTES;
-        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
-        const float dmin = __half2float(pf_ldh(reinterpret_cast<const __half*>(b + 2)));
+        const int within = v & 255, sub = within >> 5;
+        const float d = __half2float(__ushort_as_half((unsigned short)r.h0));
+        const float dmin = __half2float(__ushort_as_half((unsigned short)(r.h0 >> 16)));
         int sc, mn;
-        pf_scale_min(sub, b + 4, &sc, &mn);
+        pww2_scale_min(sub, r, &sc, &mn);
         const float scale = d * (float)sc;
         const float minv = dmin * (float)mn;
-        const bool high = (sub & 1) != 0;
+        const int sh = (sub & 1) ? 4 : 0;
 #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            const int q = pww2_b(r.x, r.y, i);
-            out[i] = scale * (float)(high ? (q >> 4) : (q & 0xF)) - minv;
-        }
+        for (int i = 0; i < 8; ++i)
+            out[i] = scale * (float)pww2_nib(r.q0, r.q1, i, sh) - minv;
     } else if (KIND == 1) {
-        const int blk = v >> 8, within = v & 255, j = within >> 4;
-        const unsigned char* b = rp + (size_t)blk * PF_Q6K_BLOCK_BYTES;
-        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b + 208)));
-        const float scale = d * (float)(signed char)pf_ld8(b + 192 + j);
+        const int within = v & 255, j = within >> 4;
+        const float d = __half2float(__ushort_as_half((unsigned short)r.h0));
+        const float scale = d * (float)(signed char)(r.sc & 0xFFu);
         const int s = j & 7, group = s >> 1, is = s & 1;
         const int shift = 2 * group;
-        const bool high = group >= 2;
+        const int sh = group >= 2 ? 4 : 0;
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
-            const int qb = pww2_b(r.x, r.y, i);
-            const int hb = (pww2_b(r.z, r.w, i) >> shift) & 3;
-            const int nib = high ? (qb >> 4) : (qb & 0xF);
+            const unsigned qh = i < 4 ? r.a : r.b;
+            const int hb = (int)__builtin_amdgcn_ubfe(qh, (unsigned)(8 * (i & 3) + shift), 2u);
+            const int nib = pww2_nib(r.q0, r.q1, i, sh);
             out[i] = scale * (float)((nib | (hb << 4)) - 32);
         }
     } else if (KIND == 2) {
-        const int blk = v >> 5, part = (v & 31) >> 3;
-        const unsigned char* b = rp + (size_t)blk * PF_Q8_0_BLOCK_BYTES;
-        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
+        const float d = __half2float(__ushort_as_half((unsigned short)r.h0));
 #pragma unroll
-        for (int i = 0; i < 8; ++i) out[i] = d * (float)(signed char)pww2_b(r.x, r.y, i);
+        for (int i = 0; i < 8; ++i) out[i] = d * (float)(signed char)pww2_b(r.q0, r.q1, i);
     } else if (KIND == 4) {
-        const int blk = v >> 8, within = v & 255, sub = within >> 5, g = within >> 6;
-        const unsigned char* b = rp + (size_t)blk * PF_Q5K_BLOCK_BYTES;
-        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
-        const float dmin = __half2float(pf_ldh(reinterpret_cast<const __half*>(b + 2)));
+        const int within = v & 255, sub = within >> 5, g = within >> 6;
+        const float d = __half2float(__ushort_as_half((unsigned short)r.h0));
+        const float dmin = __half2float(__ushort_as_half((unsigned short)(r.h0 >> 16)));
         int sc, mn;
-        pf_scale_min(sub, b + 4, &sc, &mn);
+        pww2_scale_min(sub, r, &sc, &mn);
         const float scale = d * (float)sc;
         const float minv = dmin * (float)mn;
-        const bool high = (sub & 1) != 0;
-        const unsigned int bit = high ? (2u << (2 * g)) : (1u << (2 * g));
+        // The fifth bit sits at `2g` for the low half of each 64-value group
+        // and `2g + 1` for the high half, so one extract per value replaces the
+        // mask/compare/select the byte-wise form needed.
+        const int sh = (sub & 1) ? 4 : 0;
+        const int bsh = 2 * g + ((sub & 1) ? 1 : 0);
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
-            const int qs = pww2_b(r.x, r.y, i);
-            const int nib = high ? (qs >> 4) : (qs & 0xF);
-            const int qh = pww2_b(r.z, r.w, i);
-            out[i] = scale * (float)(nib + ((qh & bit) ? 16 : 0)) - minv;
+            const unsigned qh = i < 4 ? r.a : r.b;
+            const int nib = pww2_nib(r.q0, r.q1, i, sh);
+            const int fifth =
+                (int)__builtin_amdgcn_ubfe(qh, (unsigned)(8 * (i & 3) + bsh), 1u) << 4;
+            out[i] = scale * (float)(nib | fifth) - minv;
         }
     } else if (KIND == 3) {
 #pragma unroll
-        for (int i = 0; i < 8; ++i) out[i] = __half2float(pww2_h(r, i));
+        for (int i = 0; i < 8; ++i)
+            out[i] = __half2float(pww2_h(r.q0, r.q1, r.a, r.b, i));
     } else if (KIND == 5) {
-        const int blk = v >> 8, within = v & 255, sub = within >> 5;
+        const int within = v & 255, sub = within >> 5;
         const int part = (within & 31) >> 3;
-        const unsigned char* b = rp + (size_t)blk * PF_IQ4_XS_BLOCK_BYTES;
-        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
-        const unsigned short scales_h =
-            *reinterpret_cast<const unsigned short*>(b + 2);
-        const int ls = ((b[4 + (sub >> 1)] >> (4 * (sub & 1))) & 0xF) |
-                       (((scales_h >> (2 * sub)) & 3) << 4);
-        const float dl = d * (float)(ls - 32);
-        const bool high = part >= 2;
+        const float d = __half2float(__ushort_as_half((unsigned short)r.h0));
+        const int scales_h = (int)(r.h0 >> 16);
+        const int ls = ((int)((r.h1 >> (8 * (sub >> 1))) & 0xFFu) >> (4 * (sub & 1))) & 0xF;
+        const int lsb = ls | (((scales_h >> (2 * sub)) & 3) << 4);
+        const float dl = d * (float)(lsb - 32);
+        const int sh = part >= 2 ? 4 : 0;
 #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            const int q = pww2_b(r.x, r.y, i);
-            out[i] = dl * (float)PF_IQ4NL_KV[high ? (q >> 4) : (q & 0xF)];
-        }
+        for (int i = 0; i < 8; ++i)
+            out[i] = dl * (float)PF_IQ4NL_KV[pww2_nib(r.q0, r.q1, i, sh)];
     } else if (KIND == 7) {
-        const int blk = v >> 8, within = v & 255;
+        const int within = v & 255;
         const int n = within >> 7, j = (within >> 5) & 3, half = (within >> 4) & 1;
-        const unsigned char* b = rp + (size_t)blk * PF_Q3K_BLOCK_BYTES;
-        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b + 108)));
-        const float scale = d * (float)pf_q3k_scale(b, n * 8 + j * 2 + half);
+        const float d = __half2float(__ushort_as_half((unsigned short)r.h3));
+        const float scale = d * (float)pww2_q3k_scale(r.h0, r.h1, r.h2, n * 8 + j * 2 + half);
         const int shift = 2 * j;
         const int bit = 1 << (n * 4 + j);
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
-            const int q = (pww2_b(r.x, r.y, i) >> shift) & 3;
-            const int sub = (pww2_b(r.z, r.w, i) & bit) ? 0 : 4;
+            const unsigned w = i < 4 ? r.q0 : r.q1;
+            const int q = (int)__builtin_amdgcn_ubfe(w, (unsigned)(8 * (i & 3) + shift), 2u);
+            const int sub = (pww2_b(r.a, r.b, i) & bit) ? 0 : 4;
             out[i] = scale * (float)(q - sub);
         }
     } else if (KIND == 8) {
-        const int blk = v >> 8, within = v & 255;
-        const int pair = within >> 6, half = (within >> 5) & 1;
-        const int l = (within & 31) >> 3;
-        const unsigned char* b = rp + (size_t)blk * PF_IQ3S_BLOCK_BYTES;
-        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
-        const unsigned int sc = pf_ld8(b + 106 + pair);
-        const int nib = half ? (int)(sc >> 4) : (int)(sc & 0xF);
+        const int within = v & 255, half = (within >> 5) & 1, l = (within & 31) >> 3;
+        const float d = __half2float(__ushort_as_half((unsigned short)r.h0));
+        const int nib = half ? (int)(r.sc >> 4) : (int)(r.sc & 0xF);
         const float db = d * (float)(1 + 2 * nib);
-        const unsigned int qh = (r.x >> 16) & 0xFFu;
-        const unsigned int sign = (r.x >> 24) & 0xFFu;
-        const int i1 = (int)(r.x & 0xFFu) | (int)((qh << (8 - 2 * l)) & 256u);
-        const int i2 = (int)((r.x >> 8) & 0xFFu) | (int)((qh << (7 - 2 * l)) & 256u);
+        const unsigned int qh = r.a;
+        const unsigned int sign = r.b;
+        const int i1 = (int)(r.q0 & 0xFFu) | (int)((qh << (8 - 2 * l)) & 256u);
+        const int i2 = (int)((r.q0 >> 8) & 0xFFu) | (int)((qh << (7 - 2 * l)) & 256u);
         const unsigned int g1 = PF_IQ3S_GRID[i1];
         const unsigned int g2 = PF_IQ3S_GRID[i2];
 #pragma unroll
@@ -329,15 +393,11 @@ static __device__ __forceinline__ void pww2_dequant8(const pww2_u4& r,
             out[4 + t] = db * (float)((g2 >> (8 * t)) & 0xFFu) * s2;
         }
     } else {
-        const int blk = v >> 5, part = (v & 31) >> 3;
-        const unsigned char* b = rp + (size_t)blk * PF_IQ4_NL_BLOCK_BYTES;
-        const float d = __half2float(pf_ldh(reinterpret_cast<const __half*>(b)));
-        const bool high = part >= 2;
+        const float d = __half2float(__ushort_as_half((unsigned short)r.h0));
+        const int sh = (((v & 31) >> 3) >= 2) ? 4 : 0;
 #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            const int q = pww2_b(r.x, r.y, i);
-            out[i] = d * (float)PF_IQ4NL_KV[high ? (q >> 4) : (q & 0xF)];
-        }
+        for (int i = 0; i < 8; ++i)
+            out[i] = d * (float)PF_IQ4NL_KV[pww2_nib(r.q0, r.q1, i, sh)];
     }
 }
 
@@ -346,17 +406,25 @@ static __device__ __forceinline__ void pww2_dequant8(const pww2_u4& r,
 // `z > 0` writes `scratch` at `(z - 1) * tokens * m`, so the caller sums them
 // in order. NS exists for the 64-row SSM projections, where one row tile is so
 // few blocks that the matrix units idle.
-template <int KIND, bool XHALF, bool SPLIT = false, bool NS = false>
+// SILU: the epilogue applies the ffn's SwiGLU instead of storing the raw
+// projection: `y = silu(gate) * acc` and `yh` the fp16 copy of it, so the
+// separate `silu_mul` and activation-copy launches the graph ran between the
+// `up` and `down` projections become this launch's tail. Only the single-pass
+// shape can carry it: split-K and n-slice write partials.
+template <int KIND, bool XHALF, bool SPLIT = false, bool NS = false, bool SILU = false>
 static __device__ __forceinline__ void pww2_body_impl(
     const unsigned char* __restrict__ w,
     const void* __restrict__ x,
     float* __restrict__ y,
     float* __restrict__ scratch,
+    const float* __restrict__ gate,
+    _Float16* __restrict__ yh,
     int m,
     int k,
     int tokens,
     int ks)
 {
+    static_assert(!(SILU && (SPLIT || NS)), "the SwiGLU epilogue needs the single-pass shape");
     const int z = SPLIT ? (int)blockIdx.z : 0;
     const int kb = NS ? z * ks : (SPLIT ? (z ? ks : 0) : 0);
     const int ke = NS ? ((kb + ks < k) ? kb + ks : k) : (SPLIT ? (z ? k : ks) : k);
@@ -403,8 +471,29 @@ static __device__ __forceinline__ void pww2_body_impl(
         b0[j] = *reinterpret_cast<const pww2_h8*>(shw + boff + j * 16 * PWW2_WS);
 #endif
 
-    // Progressive prefix of the raw loads so the arrays are declared once.
-    pww2_u4 wraw[PWW2_WN];
+    // Rows outside the prompt (or outside `m`) are clamped onto the last valid
+    // one instead of predicated: their accumulators are masked at the store, so
+    // the staged tile only has to be defined there, not correct. That takes
+    // every exec-mask save/restore and guard branch out of the k loop.
+    constexpr int PWW2_XP = XHALF ? PWW2_TT / PWW2_XROW_H : PWW2_TT / PWW2_XROW;
+    size_t xofs[PWW2_XP];
+#pragma unroll
+    for (int p = 0; p < PWW2_XP; ++p) {
+        int gt = tok_base + p * (XHALF ? PWW2_XROW_H : PWW2_XROW) + xt;
+        if (gt >= tokens) gt = tokens - 1;
+        xofs[p] = (size_t)gt * k;
+    }
+    // Same for the weight rows: one row pointer per staging pass, resolved
+    // once, so the k loop only adds the k-tile offset.
+    const unsigned char* wptr[PWW2_RP];
+#pragma unroll
+    for (int p = 0; p < PWW2_RP; ++p) {
+        int gr = row_base + p * PWW2_DPROW + d_row;
+        if (gr >= m) gr = m - 1;
+        wptr[p] = w + (size_t)gr * wrow;
+    }
+
+    pww2_raw wraw[PWW2_WN];
     float4 xf[PWW2_XN];
     pww2_u4 xh[PWW2_XNH];
 
@@ -415,23 +504,16 @@ static __device__ __forceinline__ void pww2_body_impl(
 #pragma unroll
         for (int q = 0; q < PWW2_KQ; ++q)
 #pragma unroll
-            for (int p = 0; p < (XHALF ? PWW2_TT / PWW2_XROW_H : PWW2_TT / PWW2_XROW); ++p) {
-                const int idx = q * (XHALF ? PWW2_TT / PWW2_XROW_H : PWW2_TT / PWW2_XROW) + p;
-                const int rl = p * (XHALF ? PWW2_XROW_H : PWW2_XROW) + xt;
-                const int gt = tok_base + rl;
+            for (int p = 0; p < PWW2_XP; ++p) {
+                const int idx = q * PWW2_XP + p;
                 const int kc = base + q * 32 + xc;
-                if (gt < tokens) {
-                    if (XHALF) {
-                        const unsigned char* sp =
-                            reinterpret_cast<const unsigned char*>(x) + (size_t)gt * k * 2 + kc * 2;
-                        __builtin_memcpy(&xh[idx], sp, 16);
-                    } else {
-                        xf[idx] = *reinterpret_cast<const float4*>(
-                            reinterpret_cast<const float*>(x) + (size_t)gt * k + kc);
-                    }
+                if (XHALF) {
+                    const unsigned char* sp =
+                        reinterpret_cast<const unsigned char*>(x) + (xofs[p] + kc) * 2;
+                    __builtin_memcpy(&xh[idx], sp, 16);
                 } else {
-                    if (XHALF) xh[idx].x = xh[idx].y = xh[idx].z = xh[idx].w = 0u;
-                    else xf[idx] = make_float4(0.f, 0.f, 0.f, 0.f);
+                    xf[idx] = *reinterpret_cast<const float4*>(
+                        reinterpret_cast<const float*>(x) + xofs[p] + kc);
                 }
             }
 #endif
@@ -444,16 +526,8 @@ static __device__ __forceinline__ void pww2_body_impl(
 #pragma unroll
         for (int q = 0; q < PWW2_KQ; ++q)
 #pragma unroll
-            for (int p = 0; p < PWW2_RP; ++p) {
-                const int idx = q * PWW2_RP + p;
-                const int rl = p * PWW2_DPROW + d_row;
-                const int gr = row_base + rl;
-                const int kc = base + q * 32 + d_q * 8;
-                if (rl < PWW2_RT && gr < m)
-                    wraw[idx] = pww2_loadraw<KIND>(w + (size_t)gr * wrow, kc);
-                else
-                    wraw[idx].x = wraw[idx].y = wraw[idx].z = wraw[idx].w = 0u;
-            }
+            for (int p = 0; p < PWW2_RP; ++p)
+                pww2_loadraw<KIND>(wptr[p], base + q * 32 + d_q * 8, wraw[q * PWW2_RP + p]);
 #endif
     };
 
@@ -465,8 +539,8 @@ static __device__ __forceinline__ void pww2_body_impl(
 #pragma unroll
         for (int q = 0; q < PWW2_KQ; ++q)
 #pragma unroll
-            for (int p = 0; p < (XHALF ? PWW2_TT / PWW2_XROW_H : PWW2_TT / PWW2_XROW); ++p) {
-                const int idx = q * (XHALF ? PWW2_TT / PWW2_XROW_H : PWW2_TT / PWW2_XROW) + p;
+            for (int p = 0; p < PWW2_XP; ++p) {
+                const int idx = q * PWW2_XP + p;
                 const int rl = p * (XHALF ? PWW2_XROW_H : PWW2_XROW) + xt;
                 if (XHALF) {
                     *reinterpret_cast<pww2_u4*>(xs + rl * PWW2_XS + q * 32 + xc) = xh[idx];
@@ -491,25 +565,18 @@ static __device__ __forceinline__ void pww2_body_impl(
             for (int p = 0; p < PWW2_RP; ++p) {
                 const int idx = q * PWW2_RP + p;
                 const int rl = p * PWW2_DPROW + d_row;
-                if (rl >= PWW2_RT) continue;
-                const int gr = row_base + rl;
-                const int kc = base + q * 32 + d_q * 8;
-                float v[8];
-                if (gr < m) {
-#if PWW2_PROBE_NO_DEQ
-                    // Same loads, no block decoder: both prefetched words are
-                    // read so the second global load is not eliminated.
-#pragma unroll
-                    for (int i = 0; i < 8; ++i)
-                        v[i] = (float)((pww2_b(wraw[idx].x, wraw[idx].y, i) ^
-                                        pww2_b(wraw[idx].z, wraw[idx].w, i)) & 0x1F);
-#else
-                    pww2_dequant8<KIND>(wraw[idx], w + (size_t)gr * wrow, kc, v);
+#if PWW2_RP * PWW2_DPROW > PWW2_RT
+                if (rl >= PWW2_RT) continue;   // ragged tail of a non-shipped shape
 #endif
-                } else {
+                float v[8];
+#if PWW2_PROBE_NO_DEQ
+                // Same loads, no block decoder.
 #pragma unroll
-                    for (int i = 0; i < 8; ++i) v[i] = 0.f;
-                }
+                for (int i = 0; i < 8; ++i)
+                    v[i] = (float)(pww2_b(wraw[idx].q0, wraw[idx].q1, i) & 0x1F);
+#else
+                pww2_dequant8<KIND>(wraw[idx], base + q * 32 + d_q * 8, v);
+#endif
                 pww2_h8 hv;
 #pragma unroll
                 for (int i = 0; i < 8; ++i) hv[i] = (_Float16)v[i];
@@ -603,15 +670,8 @@ static __device__ __forceinline__ void pww2_body_impl(
             const int p = idx % PWW2_RP;
             const int rl = p * PWW2_DPROW + d_row;
             if (rl >= PWW2_RT) continue;
-            const int gr = row_base + rl;
-            const int kc = base + q * 32 + d_q * 8;
             float v[8];
-            if (gr < m) {
-                pww2_dequant8<KIND>(wraw[idx], w + (size_t)gr * wrow, kc, v);
-            } else {
-#pragma unroll
-                for (int i = 0; i < 8; ++i) v[i] = 0.f;
-            }
+            pww2_dequant8<KIND>(wraw[idx], base + q * 32 + d_q * 8, v);
             pww2_h8 hv;
 #pragma unroll
             for (int i = 0; i < 8; ++i) hv[i] = (_Float16)v[i];
@@ -771,7 +831,14 @@ static __device__ __forceinline__ void pww2_body_impl(
                 const int r = gr + j * 16;
                 if (gt < tokens && r < m) {
                     const size_t o = (size_t)gt * m + r;
-                    out[o] = acc[i * PWW2_NRG + j][e];
+                    if (SILU) {
+                        const float g = gate[o];
+                        const float a = (g / (1.0f + expf(-g))) * acc[i * PWW2_NRG + j][e];
+                        out[o] = a;
+                        yh[o] = (_Float16)a;
+                    } else {
+                        out[o] = acc[i * PWW2_NRG + j][e];
+                    }
                 }
             }
         }
@@ -789,7 +856,21 @@ static __device__ __forceinline__ void pww2_body(
     int k,
     int tokens)
 {
-    pww2_body_impl<KIND, XHALF, false>(w, x, y, nullptr, m, k, tokens, 0);
+    pww2_body_impl<KIND, XHALF, false>(w, x, y, nullptr, nullptr, nullptr, m, k, tokens, 0);
+}
+
+template <int KIND, bool XHALF>
+static __device__ __forceinline__ void pww2_body_silu(
+    const unsigned char* __restrict__ w,
+    const void* __restrict__ x,
+    float* __restrict__ y,
+    const float* __restrict__ gate,
+    _Float16* __restrict__ yh,
+    int m,
+    int k,
+    int tokens)
+{
+    pww2_body_impl<KIND, XHALF, false, false, true>(w, x, y, nullptr, gate, yh, m, k, tokens, 0);
 }
 
 template <int KIND, bool XHALF>
@@ -803,7 +884,7 @@ static __device__ __forceinline__ void pww2_body_split(
     int tokens,
     int ks)
 {
-    pww2_body_impl<KIND, XHALF, true>(w, x, y, scratch, m, k, tokens, ks);
+    pww2_body_impl<KIND, XHALF, true>(w, x, y, scratch, nullptr, nullptr, m, k, tokens, ks);
 }
 
 template <int KIND, bool XHALF>
@@ -817,7 +898,7 @@ static __device__ __forceinline__ void pww2_body_slice(
     int tokens,
     int ks)
 {
-    pww2_body_impl<KIND, XHALF, true, true>(w, x, y, scratch, m, k, tokens, ks);
+    pww2_body_impl<KIND, XHALF, true, true>(w, x, y, scratch, nullptr, nullptr, m, k, tokens, ks);
 }
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q4_k_w2(const unsigned char* __restrict__ w,
@@ -918,6 +999,88 @@ extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) pref
                                               float* __restrict__ y, int m, int k, int tokens)
 {
     pww2_body<8, true>(w, x, y, m, k, tokens);
+}
+
+// SwiGLU epilogue: the ffn `up` projection, with `gate` already written. Same
+// tile, same decoder, same k order; only the store loop differs.
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q4_k_w2h_silu(const unsigned char* __restrict__ w,
+                                              const void* __restrict__ x,
+                                              float* __restrict__ y,
+                                              const float* __restrict__ gate,
+                                              _Float16* __restrict__ yh,
+                                              int m, int k, int tokens)
+{
+    pww2_body_silu<0, true>(w, x, y, gate, yh, m, k, tokens);
+}
+
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q6_k_w2h_silu(const unsigned char* __restrict__ w,
+                                              const void* __restrict__ x,
+                                              float* __restrict__ y,
+                                              const float* __restrict__ gate,
+                                              _Float16* __restrict__ yh,
+                                              int m, int k, int tokens)
+{
+    pww2_body_silu<1, true>(w, x, y, gate, yh, m, k, tokens);
+}
+
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q8_0_w2h_silu(const unsigned char* __restrict__ w,
+                                              const void* __restrict__ x,
+                                              float* __restrict__ y,
+                                              const float* __restrict__ gate,
+                                              _Float16* __restrict__ yh,
+                                              int m, int k, int tokens)
+{
+    pww2_body_silu<2, true>(w, x, y, gate, yh, m, k, tokens);
+}
+
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q5_k_w2h_silu(const unsigned char* __restrict__ w,
+                                              const void* __restrict__ x,
+                                              float* __restrict__ y,
+                                              const float* __restrict__ gate,
+                                              _Float16* __restrict__ yh,
+                                              int m, int k, int tokens)
+{
+    pww2_body_silu<4, true>(w, x, y, gate, yh, m, k, tokens);
+}
+
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_iq4_xs_w2h_silu(const unsigned char* __restrict__ w,
+                                              const void* __restrict__ x,
+                                              float* __restrict__ y,
+                                              const float* __restrict__ gate,
+                                              _Float16* __restrict__ yh,
+                                              int m, int k, int tokens)
+{
+    pww2_body_silu<5, true>(w, x, y, gate, yh, m, k, tokens);
+}
+
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_iq4_nl_w2h_silu(const unsigned char* __restrict__ w,
+                                              const void* __restrict__ x,
+                                              float* __restrict__ y,
+                                              const float* __restrict__ gate,
+                                              _Float16* __restrict__ yh,
+                                              int m, int k, int tokens)
+{
+    pww2_body_silu<6, true>(w, x, y, gate, yh, m, k, tokens);
+}
+
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q3_k_w2h_silu(const unsigned char* __restrict__ w,
+                                              const void* __restrict__ x,
+                                              float* __restrict__ y,
+                                              const float* __restrict__ gate,
+                                              _Float16* __restrict__ yh,
+                                              int m, int k, int tokens)
+{
+    pww2_body_silu<7, true>(w, x, y, gate, yh, m, k, tokens);
+}
+
+extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_iq3_s_w2h_silu(const unsigned char* __restrict__ w,
+                                              const void* __restrict__ x,
+                                              float* __restrict__ y,
+                                              const float* __restrict__ gate,
+                                              _Float16* __restrict__ yh,
+                                              int m, int k, int tokens)
+{
+    pww2_body_silu<8, true>(w, x, y, gate, yh, m, k, tokens);
 }
 
 // Split-K variants: same body over a k slice. The launcher runs [0,ks) with
