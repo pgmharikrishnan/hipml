@@ -893,6 +893,26 @@ pub const KERNELS: &[KernelSpec] = &[
         kind: KernelKind::Linear { block: 256 },
     },
     KernelSpec {
+        name: "stream_shape_w4",
+        entry: "stream_shape_w4",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "stream_shape_w16",
+        entry: "stream_shape_w16",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "stream_shape_w4_r1",
+        entry: "stream_shape_w4_r1",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "stream_shape_flat",
+        entry: "stream_shape_flat",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
         name: "rmsnorm_f32",
         entry: "rmsnorm_f32",
         kind: KernelKind::PerRow { block: 256 },

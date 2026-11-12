@@ -86,12 +86,23 @@ pub(crate) fn gemv_pass(
         if shape.len() != 2 || t.name().ends_with("token_embd.weight") {
             continue;
         }
-        let entry = match t.ty() {
-            TensorType::Q4K => "gemv_q4_k",
-            TensorType::Q6K => "gemv_q6_k",
-            TensorType::Q8_0 => "gemv_q8_0",
-            _ => continue,
+        let entry = match hipml_model::gpu_weights::gemv_entry(t.ty()) {
+            Ok(e) => e,
+            Err(_) => continue,
         };
+        if !matches!(
+            t.ty(),
+            TensorType::Q4K
+                | TensorType::Q6K
+                | TensorType::Q8_0
+                | TensorType::Q5K
+                | TensorType::IQ4XS
+                | TensorType::IQ4NL
+                | TensorType::Q3K
+                | TensorType::IQ3S
+        ) {
+            continue;
+        }
         let (m, k) = (shape[0] as usize, shape[1] as usize);
         if k > 32768 {
             continue;

@@ -27,6 +27,8 @@ mod device_cmd;
 mod gdn_parity;
 #[cfg(feature = "hip")]
 mod gemv_cmd;
+#[cfg(feature = "hip")]
+mod gemv_entry_cmd;
 mod gen_cmd;
 #[cfg(feature = "hip")]
 mod gpu_bench_cmd;
@@ -45,6 +47,8 @@ mod quant_cmd;
 mod rows_cmd;
 #[cfg(feature = "hip")]
 mod serve;
+#[cfg(feature = "hip")]
+mod shape_cmd;
 #[cfg(feature = "hip")]
 mod skinny_cmd;
 #[cfg(feature = "hip")]
@@ -136,6 +140,15 @@ fn main() {
         "column-bench" => std::process::exit(column_cmd::bench(&args[1..])),
         #[cfg(feature = "hip")]
         "gemv-check" => std::process::exit(gemv_cmd::gemv_check(&args[1..])),
+        "gemv-entries" => {
+            #[cfg(feature = "hip")]
+            std::process::exit(gemv_entry_cmd::run(&args[1..]));
+            #[cfg(not(feature = "hip"))]
+            {
+                eprintln!("gemv-entries needs a build with `--features hip`");
+                std::process::exit(2);
+            }
+        }
         #[cfg(feature = "hip")]
         "gemv-bench" => std::process::exit(gemv_cmd::gemv_bench(&args[1..])),
         "mtp-accept" => std::process::exit(mtp_cmd::run(&args[1..])),
@@ -175,6 +188,15 @@ fn main() {
             #[cfg(not(feature = "hip"))]
             {
                 eprintln!("gpu-sweep needs a build with `--features hip`");
+                std::process::exit(2);
+            }
+        }
+        "stream-shape" => {
+            #[cfg(feature = "hip")]
+            std::process::exit(shape_cmd::run(&args[1..]));
+            #[cfg(not(feature = "hip"))]
+            {
+                eprintln!("stream-shape needs a build with `--features hip`");
                 std::process::exit(2);
             }
         }
