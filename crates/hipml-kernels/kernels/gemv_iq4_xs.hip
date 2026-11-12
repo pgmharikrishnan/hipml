@@ -193,9 +193,11 @@ extern "C" __global__ void gemv_iq4_xs(
 #define IQ4XB_K_TILE_SMALL 512
 #define IQ4XB_ROWS_PER_WARP 2
 
-// Dequantise this lane's 16 values of one row into `wv`.
-static __device__ __forceinline__ void iq4x_load(const unsigned char* __restrict__ rp,
-                                                 int p, float* wv)
+// Dequantise this lane's 16 values of one row into `wv`, reading the codebook
+// from `scb` (shared) rather than the `__constant__` table.
+static __device__ __forceinline__ void iq4x_load_b(const unsigned char* __restrict__ rp,
+                                                   int p, const float* __restrict__ scb,
+                                                   float* wv)
 {
     const int blk = p >> 8;
     const int within = p & 255;
@@ -219,8 +221,23 @@ static __device__ __forceinline__ void iq4x_load(const unsigned char* __restrict
 #pragma unroll
     for (int i = 0; i < IQ4X_VPL; ++i) {
         const int v = high ? (int)(q.b[i] >> 4) : (int)(q.b[i] & 0xF);
-        wv[i] = dl * (float)IQ4NL_VALUES[v];
+        wv[i] = dl * scb[v];
     }
+}
+
+// One row's 16 contiguous x values, as four 128-bit loads.
+static __device__ __forceinline__ void iq4x_xrow(const float* __restrict__ x, int p,
+                                                 float* xv)
+{
+    const float4* xp = reinterpret_cast<const float4*>(x + p);
+    const float4 v0 = xp[0];
+    const float4 v1 = xp[1];
+    const float4 v2 = xp[2];
+    const float4 v3 = xp[3];
+    xv[0] = v0.x;  xv[1] = v0.y;  xv[2] = v0.z;  xv[3] = v0.w;
+    xv[4] = v1.x;  xv[5] = v1.y;  xv[6] = v1.z;  xv[7] = v1.w;
+    xv[8] = v2.x;  xv[9] = v2.y;  xv[10] = v2.z; xv[11] = v2.w;
+    xv[12] = v3.x; xv[13] = v3.y; xv[14] = v3.z; xv[15] = v3.w;
 }
 
 template <int B, int RPW, int TILE>
@@ -239,6 +256,13 @@ static __device__ __forceinline__ void iq4x_tile_b(
     const int nblocks = k / IQ4X_VALUES;
     const int row_tile = IQ4X_WARPS * RPW;
 
+    // The codebook goes to shared for the same reason the single-row kernel
+    // does it: `__constant__` lives in global memory on this target, so the
+    // per-value divergent index would be a global load in the inner loop.
+    float* scb = sx;
+    if (tid < 16) scb[tid] = (float)IQ4NL_VALUES[tid];
+    __syncthreads();
+
     int row[RPW];
     int r[RPW];
     const unsigned char* rp[RPW];
@@ -252,39 +276,54 @@ static __device__ __forceinline__ void iq4x_tile_b(
         for (int bi = 0; bi < B; ++bi) acc[rr][bi] = 0.0f;
     }
 
+    // The x rows are read straight from global: x is at most `B * k` floats,
+    // so every block on the card hits it in L2, and a lane's 16 columns are
+    // contiguous there (four 128-bit loads) instead of the 16 scalar shared
+    // loads the staged layout costs. The staged copy also wrote B * TILE
+    // floats per block per k-tile, a cost that grows with B even though the
+    // weight bytes do not -- the reason the verify used to scale with rows.
     for (int base = 0; base < k; base += TILE) {
         const int n = min(TILE, k - base);
-        const int nchunks = n / IQ4X_VPL;
-        for (int j = tid; j < nchunks; j += IQ4X_BLOCK) {
-#pragma unroll
-            for (int bi = 0; bi < B; ++bi)
-                iq4x_stage_group(x + (size_t)bi * k, sx + bi * TILE, base, j);
-        }
-        __syncthreads();
 
         for (int c = lane * IQ4X_VPL; c < n; c += IQ4X_GROUP) {
-            const int g = c / IQ4X_GROUP;
-            const int s = g * IQ4X_GROUP + lane;
             const int p = base + c;
             float wv[RPW][IQ4X_VPL];
 #pragma unroll
-            for (int rr = 0; rr < RPW; ++rr) iq4x_load(rp[rr], p, wv[rr]);
+            for (int rr = 0; rr < RPW; ++rr) iq4x_load_b(rp[rr], p, scb, wv[rr]);
+            if constexpr (B <= 4) {
+                // Load every row's x chunk before the FMAs: the four 128-bit
+                // loads per row then overlap the dequant instead of stalling
+                // the first one. Above B=4 the same preload spills, so that
+                // path reads one row at a time.
+                float xv[B][IQ4X_VPL];
 #pragma unroll
-            for (int bi = 0; bi < B; ++bi) {
-                const float* src = sx + bi * TILE + s;
-                float xv[IQ4X_VPL];
+                for (int bi = 0; bi < B; ++bi)
+                    iq4x_xrow(x + (size_t)bi * k, p, xv[bi]);
 #pragma unroll
-                for (int i = 0; i < IQ4X_VPL; ++i) xv[i] = src[i * 32];
+                for (int bi = 0; bi < B; ++bi) {
 #pragma unroll
-                for (int rr = 0; rr < RPW; ++rr) {
-                    float a = acc[rr][bi];
+                    for (int rr = 0; rr < RPW; ++rr) {
+                        float a = acc[rr][bi];
 #pragma unroll
-                    for (int i = 0; i < IQ4X_VPL; ++i) a = fmaf(wv[rr][i], xv[i], a);
-                    acc[rr][bi] = a;
+                        for (int i = 0; i < IQ4X_VPL; ++i) a = fmaf(wv[rr][i], xv[bi][i], a);
+                        acc[rr][bi] = a;
+                    }
+                }
+            } else {
+#pragma unroll
+                for (int bi = 0; bi < B; ++bi) {
+                    float xv[IQ4X_VPL];
+                    iq4x_xrow(x + (size_t)bi * k, p, xv);
+#pragma unroll
+                    for (int rr = 0; rr < RPW; ++rr) {
+                        float a = acc[rr][bi];
+#pragma unroll
+                        for (int i = 0; i < IQ4X_VPL; ++i) a = fmaf(wv[rr][i], xv[i], a);
+                        acc[rr][bi] = a;
+                    }
                 }
             }
         }
-        __syncthreads();
     }
 
 #pragma unroll

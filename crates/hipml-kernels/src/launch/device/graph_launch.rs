@@ -256,7 +256,15 @@ impl Launcher {
             } else {
                 tile
             };
-            let shared = r * tile * 4;
+            // The Q5_K, Q6_K and IQ4_XS `_b` kernels read the x rows straight
+            // from global, so they need no staged tile; only IQ4_XS keeps the
+            // 16-float codebook in shared. Allocating the old `r * tile`
+            // anyway cost L1 for nothing and made B=4 slower than B=2.
+            let shared = match entry {
+                "gemv_q5_k_b" | "gemv_q6_k_b" => 0,
+                "gemv_iq4_xs_b" => 16 * 4,
+                _ => r * tile * 4,
+            };
             let mut p_w = w.as_ptr();
             let mut p_x = unsafe { px.add(base * k * 4) } as *mut c_void;
             let mut p_y = unsafe { py.add(base * m * 4) } as *mut c_void;

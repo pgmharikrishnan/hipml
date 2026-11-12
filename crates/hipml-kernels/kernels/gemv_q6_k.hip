@@ -281,39 +281,40 @@ static __device__ __forceinline__ void q6k_tile_b(
         for (int bi = 0; bi < B; ++bi) acc[rr][bi] = 0.0f;
     }
 
+    // The x rows are read straight from global: x is at most `B * k` floats,
+    // so every block hits it in L2, and a lane's eight columns are two
+    // 128-bit loads instead of eight scalar shared reads. The staged copy
+    // also wrote B * TILE floats per block per k-tile, a cost that grows with
+    // B even though the weight bytes do not.
     for (int base = 0; base < k; base += TILE) {
         const int n = min(TILE, k - base);
-        const int nchunks = n >> 3;
-        for (int j = tid; j < nchunks; j += Q6K_BLOCK) {
-#pragma unroll
-            for (int bi = 0; bi < B; ++bi)
-                stage_group6(x + (size_t)bi * k, sx + bi * TILE, base, j);
-        }
-        __syncthreads();
 
         for (int c = lane * 8; c < n; c += 256) {
-            const int g = c >> 8;
-            const int s = g * 256 + lane;
             const int p = base + c;
+            float xv[B][8];
+#pragma unroll
+            for (int bi = 0; bi < B; ++bi) {
+                const float4* xp =
+                    reinterpret_cast<const float4*>(x + (size_t)bi * k + p);
+                const float4 v0 = xp[0];
+                const float4 v1 = xp[1];
+                xv[bi][0] = v0.x; xv[bi][1] = v0.y; xv[bi][2] = v0.z; xv[bi][3] = v0.w;
+                xv[bi][4] = v1.x; xv[bi][5] = v1.y; xv[bi][6] = v1.z; xv[bi][7] = v1.w;
+            }
             float wv[RPW][8];
 #pragma unroll
             for (int rr = 0; rr < RPW; ++rr) q6k_load(rp[rr], p, wv[rr]);
 #pragma unroll
             for (int bi = 0; bi < B; ++bi) {
-                const float* src = sx + bi * TILE + s;
-                float xv[8];
-#pragma unroll
-                for (int i = 0; i < 8; ++i) xv[i] = src[i * 32];
 #pragma unroll
                 for (int rr = 0; rr < RPW; ++rr) {
                     float a = acc[rr][bi];
 #pragma unroll
-                    for (int i = 0; i < 8; ++i) a = fmaf(wv[rr][i], xv[i], a);
+                    for (int i = 0; i < 8; ++i) a = fmaf(wv[rr][i], xv[bi][i], a);
                     acc[rr][bi] = a;
                 }
             }
         }
-        __syncthreads();
     }
 
 #pragma unroll

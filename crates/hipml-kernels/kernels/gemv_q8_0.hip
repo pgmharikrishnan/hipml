@@ -104,12 +104,29 @@ static __device__ __forceinline__ void q80_row_b(
         float qf[32];
 #pragma unroll
         for (int l = 0; l < 32; ++l) qf[l] = (float)q[l];
+        // Eight 128-bit loads per row instead of 32 scalar ones; the sum is
+        // still l = 0..31 in order, so each row stays bit-identical.
 #pragma unroll
         for (int bi = 0; bi < B; ++bi) {
-            const float* xr = x + (size_t)bi * k + (size_t)b * 32;
+            const float4* xp = reinterpret_cast<const float4*>(
+                x + (size_t)bi * k + (size_t)b * 32);
+            const float4 v0 = xp[0];
+            const float4 v1 = xp[1];
+            const float4 v2 = xp[2];
+            const float4 v3 = xp[3];
+            const float4 v4 = xp[4];
+            const float4 v5 = xp[5];
+            const float4 v6 = xp[6];
+            const float4 v7 = xp[7];
+            const float xv[32] = {
+                v0.x, v0.y, v0.z, v0.w, v1.x, v1.y, v1.z, v1.w,
+                v2.x, v2.y, v2.z, v2.w, v3.x, v3.y, v3.z, v3.w,
+                v4.x, v4.y, v4.z, v4.w, v5.x, v5.y, v5.z, v5.w,
+                v6.x, v6.y, v6.z, v6.w, v7.x, v7.y, v7.z, v7.w,
+            };
             float a = 0.0f;
 #pragma unroll
-            for (int l = 0; l < 32; ++l) a += qf[l] * xr[l];
+            for (int l = 0; l < 32; ++l) a += qf[l] * xv[l];
             acc[bi] += d * a;
         }
     }
