@@ -65,8 +65,23 @@
 #endif
 // Probe-only switches: split the loop's cost into staging, fragment reads and
 // matrix work. They default to 0 and the shipped kernel is unaffected.
+// `NO_X`/`NO_W` drop one half of the staging phase (the fp16 activation tile or
+// the dequantised weight tile), `NO_DEQ` keeps the weight loads but replaces the
+// block decoder with a byte cast, and `NO_STORE` skips the epilogue.
 #ifndef PWW2_PROBE_NO_STAGE
 #define PWW2_PROBE_NO_STAGE 0
+#endif
+#ifndef PWW2_PROBE_NO_X
+#define PWW2_PROBE_NO_X 0
+#endif
+#ifndef PWW2_PROBE_NO_W
+#define PWW2_PROBE_NO_W 0
+#endif
+#ifndef PWW2_PROBE_NO_DEQ
+#define PWW2_PROBE_NO_DEQ 0
+#endif
+#ifndef PWW2_PROBE_NO_STORE
+#define PWW2_PROBE_NO_STORE 0
 #endif
 #ifndef PWW2_PROBE_NO_FRAG
 #define PWW2_PROBE_NO_FRAG 0
@@ -383,6 +398,9 @@ static __device__ __forceinline__ void pww2_body_impl(
     pww2_u4 xh[PWW2_XNH];
 
     auto load_x = [&](int base) {
+#if PWW2_PROBE_NO_X
+        (void)base;
+#else
 #pragma unroll
         for (int q = 0; q < PWW2_KQ; ++q)
 #pragma unroll
@@ -405,9 +423,13 @@ static __device__ __forceinline__ void pww2_body_impl(
                     else xf[idx] = make_float4(0.f, 0.f, 0.f, 0.f);
                 }
             }
+#endif
     };
 
     auto load_w = [&](int base) {
+#if PWW2_PROBE_NO_W
+        (void)base;
+#else
 #pragma unroll
         for (int q = 0; q < PWW2_KQ; ++q)
 #pragma unroll
@@ -421,10 +443,14 @@ static __device__ __forceinline__ void pww2_body_impl(
                 else
                     wraw[idx].x = wraw[idx].y = wraw[idx].z = wraw[idx].w = 0u;
             }
+#endif
     };
 
     auto commit_x = [&](_Float16* xs, int base) {
         (void)base;
+#if PWW2_PROBE_NO_X
+        (void)xs;
+#else
 #pragma unroll
         for (int q = 0; q < PWW2_KQ; ++q)
 #pragma unroll
@@ -440,9 +466,14 @@ static __device__ __forceinline__ void pww2_body_impl(
                     dst[1] = __floats2half2_rn(v.z, v.w);
                 }
             }
+#endif
     };
 
     auto commit_w = [&](_Float16* ws, int base) {
+#if PWW2_PROBE_NO_W
+        (void)ws;
+        (void)base;
+#else
 #pragma unroll
         for (int q = 0; q < PWW2_KQ; ++q)
 #pragma unroll
@@ -454,7 +485,16 @@ static __device__ __forceinline__ void pww2_body_impl(
                 const int kc = base + q * 32 + d_q * 8;
                 float v[8];
                 if (gr < m) {
+#if PWW2_PROBE_NO_DEQ
+                    // Same loads, no block decoder: both prefetched words are
+                    // read so the second global load is not eliminated.
+#pragma unroll
+                    for (int i = 0; i < 8; ++i)
+                        v[i] = (float)((pww2_b(wraw[idx].x, wraw[idx].y, i) ^
+                                        pww2_b(wraw[idx].z, wraw[idx].w, i)) & 0x1F);
+#else
                     pww2_dequant8<KIND>(wraw[idx], w + (size_t)gr * wrow, kc, v);
+#endif
                 } else {
 #pragma unroll
                     for (int i = 0; i < 8; ++i) v[i] = 0.f;
@@ -464,6 +504,7 @@ static __device__ __forceinline__ void pww2_body_impl(
                 for (int i = 0; i < 8; ++i) hv[i] = (_Float16)v[i];
                 *reinterpret_cast<pww2_h8*>(ws + rl * PWW2_WS + q * 32 + d_q * 8) = hv;
             }
+#endif
     };
 
     auto stage = [&](_Float16* xs, _Float16* ws, int base) {
@@ -571,6 +612,11 @@ static __device__ __forceinline__ void pww2_body_impl(
 
     const int mrow = 8 * (lane >> 4);
     const int gr = row_base + wrg * PWW2_WR + (lane & 15);
+#if PWW2_PROBE_NO_STORE
+    // Keep the accumulators live but never write them: `m` is a kernel argument,
+    // so the compiler cannot fold the branch away.
+    if (m < 0) {
+#endif
 #pragma unroll
     for (int i = 0; i < PWW2_NTG; ++i)
 #pragma unroll
@@ -585,6 +631,9 @@ static __device__ __forceinline__ void pww2_body_impl(
                 }
             }
         }
+#if PWW2_PROBE_NO_STORE
+    }
+#endif
 }
 
 template <int KIND, bool XHALF>
