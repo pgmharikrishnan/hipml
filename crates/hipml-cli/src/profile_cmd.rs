@@ -50,6 +50,8 @@ pub fn profile(args: &[String]) -> i32 {
     let mut gguf = String::new();
     let mut reps = 2000usize;
     let mut trace = false;
+    let mut depth = 0usize;
+    let mut kv = KvMode::F32;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -65,11 +67,29 @@ pub fn profile(args: &[String]) -> i32 {
                 reps = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(2000);
                 i += 2;
             }
+            "--depth" => {
+                depth = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                i += 2;
+            }
+            "--kv" => {
+                kv = match args.get(i + 1).map(|s| KvMode::parse(s)) {
+                    Some(Ok(m)) => m,
+                    _ => {
+                        eprintln!("gpu-profile: --kv needs f32, q8 or q4");
+                        return 2;
+                    }
+                };
+                i += 2;
+            }
             other => {
                 eprintln!("gpu-profile: unknown argument {other}");
                 return 2;
             }
         }
+    }
+    if depth > 0 && kv == KvMode::F32 {
+        eprintln!("gpu-profile: --depth needs a quantized cache (--kv q8 or q4)");
+        return 2;
     }
 
     let (model, _report) = match Model::load(&gguf) {
@@ -177,14 +197,19 @@ pub fn profile(args: &[String]) -> i32 {
     }
 
     // The graph itself, so the profile is against the same build it measures.
-    let mut engine = match GpuEngine::new(&model, 64, KvMode::F32) {
+    let n_ctx = depth + 64;
+    let mut engine = match GpuEngine::new(&model, n_ctx, kv) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("gpu-profile: graph: {e}");
             return 1;
         }
     };
-    let mut st = engine.new_state();
+    if let Err(e) = engine.fill_synthetic(depth) {
+        eprintln!("gpu-profile: synthetic fill: {e}");
+        return 1;
+    }
+    let mut st = engine.state_at(depth);
     let mut t = Instant::now();
     for _ in 0..4 {
         if let Err(e) = engine.forward_token(1, &mut st) {
@@ -213,10 +238,11 @@ pub fn profile(args: &[String]) -> i32 {
     );
 
     if trace {
-        let mut st = engine.new_state();
+        let mut st = engine.state_at(depth);
         for _ in 0..2 {
             let _ = engine.forward_token_id(1, &mut st);
         }
+        hipml_hip::probe::set_enabled(true);
         let n = 4;
         engine.trace = Some(hipml_model::gpu::Trace::default());
         for _ in 0..n {
@@ -229,48 +255,59 @@ pub fn profile(args: &[String]) -> i32 {
             eprintln!("gpu-profile: trace sync: {e}");
             return 1;
         }
-        // The name on a span is the boundary it starts at, so weight bytes are
-        // attributed one stage earlier: `post_norm` is the gate GEMV, `gate` is
-        // up, `up` is silu+down, `out_norm` is lm_head, `ssm_in` is the four
-        // GDN input projections, `ssm_rec` is the GDN output projection,
-        // `attn_in` is a whole full-attention block.
-        let spans = engine.trace.as_mut().map(|t| t.fold()).unwrap_or_default();
         let bytes: std::collections::HashMap<&str, usize> = engine
             .stage_bytes()
             .into_iter()
             .map(|(n, b)| (n, b))
             .collect();
+        // Weight bytes of the stage that runs the GEMVs of that name.
         let attr = |name: &str| -> usize {
             match name {
-                "post_norm" => bytes["gate"],
-                "gate" => bytes["up"],
-                "up" => bytes["down"],
-                "attn_in" => bytes["attn"],
-                "ssm_in" => bytes["ssm_proj"],
-                "ssm_rec" => bytes["ssm_step"],
-                "out_norm" => bytes["lm_head"],
+                "ffn_gate" => bytes["gate"],
+                "ffn_up" => bytes["up"],
+                "ffn_down" => bytes["down"],
+                "attn_qkv" => bytes["attn"],
+                "ssm_proj" => bytes["ssm_proj"],
+                "ssm_out" => bytes["ssm_step"],
+                "lm_head" => bytes["lm_head"],
                 _ => 0,
             }
         };
-        let total: f64 = spans.iter().map(|(_, u)| u).sum();
-        println!("trace per token ({n} tokens, ranked by GPU time):");
-        for (name, us) in &spans {
-            let b = attr(name);
-            let ms = us / 1e3 / n as f64;
-            // `us` is summed over the traced tokens; weight bytes are per token.
+        let rows: Vec<hipml_hip::probe::StageRow> = match engine.trace.as_mut() {
+            Some(tr) => tr.fold().to_vec(),
+            None => Vec::new(),
+        };
+        let total: f64 = rows.iter().map(|r| r.span_us).sum();
+        let launches: usize = rows.iter().map(|r| r.launches).sum();
+        println!(
+            "trace at depth {depth} ({n} tokens, ranked by GPU time; launches per token):\n  \
+             {:<12} {:>10} {:>7} {:>7} {}",
+            "stage", "ms/token", "share", "launch", "GB/s"
+        );
+        for r in &rows {
+            let b = attr(r.name);
+            let ms = r.span_us / 1e3 / n as f64;
             let gbs = if b > 0 && ms > 0.0 {
-                format!("{:6.1} GB/s", b as f64 * n as f64 / (us / 1e6) / 1e9)
+                format!("{:6.1}", b as f64 / (ms / 1e3) / 1e9)
             } else {
                 String::new()
             };
             println!(
-                "  {name:<12} {:7.3} ms/token  {:5.1}%  {b:>11} B  {gbs}",
+                "  {:<12} {:10.3} {:6.1}% {:7} {}",
+                r.name,
                 ms,
-                us / total * 100.0,
-                b = b
+                r.span_us / total * 100.0,
+                r.launches / n,
+                gbs
             );
         }
-        println!("  {:<12} {:7.3} ms/token", "sum", total / 1e3 / n as f64);
+        println!(
+            "  {:<12} {:10.3} {:6.1}% {:7}",
+            "sum",
+            total / 1e3 / n as f64,
+            100.0,
+            launches / n
+        );
     }
     0
 }

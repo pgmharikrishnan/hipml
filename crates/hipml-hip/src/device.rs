@@ -535,7 +535,11 @@ impl<'a> Kernel<'a> {
         stream: &Stream,
         params: &mut [*mut std::ffi::c_void],
     ) -> Result<(), String> {
-        unsafe {
+        let probe = crate::probe::enabled();
+        if probe {
+            crate::probe::count_launch();
+        }
+        let r = unsafe {
             check(
                 ffi::hipModuleLaunchKernel(
                     self.function,
@@ -552,7 +556,8 @@ impl<'a> Kernel<'a> {
                 ),
                 "hipModuleLaunchKernel",
             )
-        }
+        };
+        r
     }
 
     #[cfg(not(feature = "hip"))]

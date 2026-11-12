@@ -33,7 +33,7 @@ use hipml_core::config::Config;
 use hipml_core::gguf::Gguf;
 use hipml_core::kv::{self, KvDtype};
 use hipml_core::mat::Kind;
-use hipml_hip::{Buffer, ByteBuffer, Event};
+use hipml_hip::{Buffer, ByteBuffer};
 use hipml_kernels::launch_kv;
 use hipml_kernels::ssm::{SsmDims, SsmGpuLayer, SsmResidentRefs};
 use hipml_kernels::{AttnLayer, Launcher};
@@ -361,6 +361,7 @@ impl<'a> GpuEngine<'a> {
             l.set_step(pos, pos + 1, token as usize)?;
         }
 
+        mark(&mut self.trace, l, "embed")?;
         l.embed_row_dev(
             self.embed.2,
             self.embed.0,
@@ -368,42 +369,43 @@ impl<'a> GpuEngine<'a> {
             &self.x,
             cfg.n_embd,
         )?;
-        mark(&mut self.trace, l, "embed")?;
 
         for i in 0..layer_limit(self.layers.len()) {
             let block = &self.layers[i];
             let block_out: &Buffer = match &block.kind {
                 BlockKind::Ssm(s) => {
+                    mark(&mut self.trace, l, "attn_norm")?;
                     l.rmsnorm_buf(&self.x, &block.attn_norm, s.input(), cfg.n_embd, cfg.eps)?;
-                    mark(&mut self.trace, l, "ssm_in")?;
-                    s.gemvs()?;
                     mark(&mut self.trace, l, "ssm_proj")?;
-                    s.recurrent()?;
-                    mark(&mut self.trace, l, "ssm_rec")?;
-                    s.output_gemv()?;
+                    s.gemvs()?;
                     mark(&mut self.trace, l, "ssm_step")?;
+                    s.recurrent()?;
+                    mark(&mut self.trace, l, "ssm_out")?;
+                    s.output_gemv()?;
                     s.output()
                 }
                 BlockKind::Full { attn, deep: None } => {
+                    mark(&mut self.trace, l, "attn_norm")?;
                     l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
-                    mark(&mut self.trace, l, "attn_in")?;
+                    mark(&mut self.trace, l, "attn_qkv")?;
                     attn.prepare_qkv(l, &self.t)?;
-                    mark(&mut self.trace, l, "attn_append")?;
+                    mark(&mut self.trace, l, "attn_kv")?;
                     attn.append_at(l, attn.k_buf().as_ptr(), attn.v_buf().as_ptr())?;
-                    mark(&mut self.trace, l, "attn_mix")?;
+                    mark(&mut self.trace, l, "attn_core")?;
                     attn.attention_at(l, attn.q_buf().as_ptr(), attn.attn_out().as_ptr(), pos)?;
                     mark(&mut self.trace, l, "attn_wo")?;
                     attn.apply_output(l)?;
-                    mark(&mut self.trace, l, "block")?;
                     attn.output()
                 }
                 BlockKind::Full {
                     attn,
                     deep: Some(dk),
                 } => {
+                    mark(&mut self.trace, l, "attn_norm")?;
                     l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
-                    mark(&mut self.trace, l, "attn_in")?;
+                    mark(&mut self.trace, l, "attn_qkv")?;
                     attn.prepare_qkv(l, &self.t)?;
+                    mark(&mut self.trace, l, "attn_kv")?;
                     // Quantize and append the new K/V row on the device: one
                     // launch instead of a readback and eight uploads.
                     l.kv_encode(
@@ -416,27 +418,32 @@ impl<'a> GpuEngine<'a> {
                         cfg.head_dim,
                         dk.seq,
                     )?;
+                    mark(&mut self.trace, l, "attn_core")?;
                     deep_attention(l, cfg, attn, dk, pos)?;
+                    mark(&mut self.trace, l, "attn_wo")?;
                     attn.apply_output(l)?;
-                    mark(&mut self.trace, l, "block")?;
                     attn.output()
                 }
             };
+            mark(&mut self.trace, l, "residual_in")?;
             l.residual_buf(&self.x, block_out, &self.x1, cfg.n_embd)?;
-            l.rmsnorm_buf(&self.x1, &block.post_norm, &self.t, cfg.n_embd, cfg.eps)?;
             mark(&mut self.trace, l, "post_norm")?;
+            l.rmsnorm_buf(&self.x1, &block.post_norm, &self.t, cfg.n_embd, cfg.eps)?;
 
+            mark(&mut self.trace, l, "ffn_gate")?;
             block.gate.gemv(l, &self.t, &self.gate)?;
-            mark(&mut self.trace, l, "gate")?;
+            mark(&mut self.trace, l, "ffn_up")?;
             block.up.gemv(l, &self.t, &self.up)?;
-            mark(&mut self.trace, l, "up")?;
+            mark(&mut self.trace, l, "ffn_act")?;
             l.silu_mul_buf(&self.gate, &self.up, &self.act, cfg.n_ff)?;
+            mark(&mut self.trace, l, "ffn_down")?;
             block.down.gemv(l, &self.act, &self.down)?;
-            mark(&mut self.trace, l, "down")?;
+            mark(&mut self.trace, l, "residual_out")?;
             l.residual_buf(&self.down, &self.x1, &self.x, cfg.n_embd)?;
         }
 
         st.pos += 1;
+        mark(&mut self.trace, l, "out_norm")?;
         l.rmsnorm_buf(
             &self.x,
             &self.output_norm,
@@ -444,7 +451,7 @@ impl<'a> GpuEngine<'a> {
             cfg.n_embd,
             cfg.eps,
         )?;
-        mark(&mut self.trace, l, "out_norm")?;
+        mark(&mut self.trace, l, "lm_head")?;
         let out = self
             .model
             .tensor(crate::OUTPUT)
@@ -456,8 +463,7 @@ impl<'a> GpuEngine<'a> {
             &self.logits,
             cfg.n_vocab,
             cfg.n_embd,
-        )?;
-        mark(&mut self.trace, l, "lm_head")
+        )
     }
 
     pub fn model(&self) -> &Model {
