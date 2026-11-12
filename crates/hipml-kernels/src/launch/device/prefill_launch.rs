@@ -297,6 +297,88 @@ pub fn prefill_resident_half(
     prefill_resident(module, stream, name, w, xh, y, m, k, tokens)
 }
 
+/// The SwiGLU-epilogue variant of a converted-activation entry: same tile and
+/// same decoder, and its store loop reads the already-written gate tile and
+/// writes both the f32 activation and its fp16 copy. `None` for an entry that
+/// cannot carry it.
+fn silu_entry(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "prefill_q4_k_w2h" => "prefill_q4_k_w2h_silu",
+        "prefill_q5_k_w2h" => "prefill_q5_k_w2h_silu",
+        "prefill_q6_k_w2h" => "prefill_q6_k_w2h_silu",
+        "prefill_q8_0_w2h" => "prefill_q8_0_w2h_silu",
+        "prefill_iq4_xs_w2h" => "prefill_iq4_xs_w2h_silu",
+        "prefill_iq4_nl_w2h" => "prefill_iq4_nl_w2h_silu",
+        "prefill_q3_k_w2h" => "prefill_q3_k_w2h_silu",
+        "prefill_iq3_s_w2h" => "prefill_iq3_s_w2h_silu",
+        _ => return None,
+    })
+}
+
+/// Whether `name` (a `_w2h` entry) has a fused-swiGLU launch.
+pub fn prefill_has_silu(name: &str) -> bool {
+    silu_entry(name).is_some()
+}
+
+/// Tiled prefill GEMM whose epilogue applies the ffn's swiGLU:
+/// `y = silu(gate) * (W @ x)` and `yh` the fp16 copy of it.
+///
+/// The graph used to run three launches between the `up` and `down`
+/// projections (`silu_mul`, then the fp16 copy of its output, then `down`).
+/// Doing it in the `up` epilogue reads the gate tile and writes the two outputs
+/// in the launch that already owns those rows, which removes a 1.7 GB
+/// read-pass pair per layer-chunk. The arithmetic is the elementwise kernel's
+/// expression verbatim, so the logits are unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn prefill_resident_silu(
+    module: &Module,
+    stream: &Stream,
+    name: &str,
+    w: &ByteBuffer,
+    xh: &Buffer,
+    gate: &Buffer,
+    y: &Buffer,
+    yh: &Buffer,
+    m: usize,
+    k: usize,
+    tokens: usize,
+) -> Result<(), String> {
+    let entry = silu_entry(name).ok_or_else(|| format!("{name}: no swiGLU epilogue"))?;
+    let spec = crate::spec(name).ok_or_else(|| format!("{name} is not in the manifest"))?;
+    let (rpb, tpb, block) = match spec.kind {
+        crate::KernelKind::Prefill {
+            rows,
+            tokens,
+            block,
+        } => (rows, tokens, block),
+        _ => return Err(format!("{name}: not a prefill kernel")),
+    };
+    let kernel = module.kernel(entry)?;
+    let mut p_w = w.as_ptr();
+    let mut p_x = xh.as_ptr();
+    let mut p_y = y.as_ptr();
+    let mut p_g = gate.as_ptr();
+    let mut p_h = yh.as_ptr();
+    let mut v_m = m as i32;
+    let mut v_k = k as i32;
+    let mut v_tokens = tokens as i32;
+    let mut params: [*mut c_void; 8] = [
+        &mut p_w as *mut _ as *mut c_void,
+        &mut p_x as *mut _ as *mut c_void,
+        &mut p_y as *mut _ as *mut c_void,
+        &mut p_g as *mut _ as *mut c_void,
+        &mut p_h as *mut _ as *mut c_void,
+        &mut v_m as *mut _ as *mut c_void,
+        &mut v_k as *mut _ as *mut c_void,
+        &mut v_tokens as *mut _ as *mut c_void,
+    ];
+    kernel.launch(
+        LaunchConfig::prefill(m, tokens, rpb, tpb, block),
+        stream,
+        &mut params,
+    )
+}
+
 /// Split-K entry for a converted-activation kernel, when the shape is
 /// wave-starved. `None` means the shape runs the single-pass kernel.
 fn split_entry(name: &str) -> Option<&'static str> {
