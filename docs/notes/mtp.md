@@ -242,6 +242,71 @@ per-`B` preload only up to `B=4`; above that it reads one row at a time, because
 keeping all rows live spilled and made the wide batch slower than the staged
 version it replaced.
 
+### Four-column verify: per-column attention and the GDN chain (2026-11-12)
+
+The row-scaling fix left the four-column verify at 1.57x (q8) / 1.53x (f32) a
+one-column pass. A trace at four columns put two stages on the wrong side of
+the line: `attn_mix` 7.37 ms at q8 (f32 ran one `attn_decode_cols_f32` for all
+columns, but q8 launched `attn_decode_kv_w2` once per column) and the GDN
+recurrence 6.03 ms (one block per value head, each walking all of the head's
+state rows). Two changes:
+
+* `attn_decode_kv_w2_b`: the same whole-group warp body with one `grid.y` step
+  per column, carrying the column's query row, partial scratch slice and
+  `(position, seq)` pair. One launch per group of columns that share a split
+  count. The staged `attn_decode_kv_q8_b` would not do: it is a different
+  kernel, so a column would stop being bit-identical to the plain step.
+* `gdn_cols_f32`: `gridDim.y` splits the head's state rows over several blocks
+  (independent chains, so any split is bit-identical), and the `(token, head)`
+  gate pair is computed once per block into shared instead of once per
+  (state row, token) — the state rows are the inner loop, so `expf` was being
+  recomputed per row.
+
+Measured separately on `column-bench --cols 4` (q8 unless stated):
+
+| stage / measure | before | attention fix only | both fixes |
+| --- | ---: | ---: | ---: |
+| `attn_mix` | 7.37 ms | 1.16 ms | 1.19 ms |
+| GDN chain (`ssm_proj` span) | 6.03 ms | 6.02 ms | 1.46 ms |
+| four-column pass | 55.37 ms | 50.23 ms | 46.07 ms |
+| f32 four-column pass | 50.73 ms | 50.87 ms | 47.11 ms |
+
+`column-check` is 0-differ for q8 at 2 and 4 columns and f32 at 4 (logits,
+hidden and residual), and `spec-bench` stays 128/128 exact on every row.
+
+| measure | before | after |
+| --- | --- | --- |
+| `column-bench` q8, 1/2/3/4 cols (ms/pass) | 34.94 / 40.37 / 48.55 / 55.37 | 34.51 / 35.19 / 41.68 / 46.07 |
+| `--vs 1 col` q8 | 1.00x / 1.16x / 1.39x / 1.58x | 1.00x / 1.02x / 1.21x / 1.33x |
+| `column-bench` f32, 1/2/3/4 cols | 33.20 / 37.43 / 44.90 / 50.73 | 32.14 / 35.45 / 42.40 / 47.11 |
+| `--vs 1 col` f32 | 1.00x / 1.13x / 1.35x / 1.53x | 1.00x / 1.10x / 1.32x / 1.47x |
+| `spec-bench` q8, drafts 0/1/2/3 (tok/s) | 30.38 / 43.98 / 50.29 / 52.35 | 30.47 / 50.23 / 59.22 / 62.32 |
+| `spec-bench` f32, drafts 0/1/2/3 | 30.37 / 47.24 / 55.08 / 57.24 | 30.43 / 50.06 / 58.55 / 61.55 |
+
+Serve cell a (one request at a time, 5 conversations, greedy, 64 tokens,
+2,423-token prompt) moves from 42.22 / 44.09 / 44.53 tok/s at drafts 1/2/3 to
+47.27 / 50.71 / 51.91, TTFT 3.08 -> 3.11 s. The two fixes are what the verify
+pass gained; the cell is still below llama.cpp's 62.45 because its prompts
+accept less (0.70 here) and because the remaining 4-row cost is the batched
+GEMV, not the attention or the scan.
+
+**The 1.2x target is not reached, and the residue is the GEMV.** At four
+columns the weight stages run at 337-448 GB/s where a one-column pass runs at
+450-660 GB/s; in the q8 trace the seven weight stages total 42.2 ms of the
+46.2 ms pass, against 30.7 ms for the same stages traced at one column (f32
+run, same model bytes), while the two stages this slice fixed are down to
+2.7 ms. Removing *all* remaining non-weight work would leave 43.5 ms, still
+1.25x. Four rows therefore need the same 4-11% treatment two rows got in
+`gemv_*.hip`, which is a separate change.
+
+The `_b` kernels the serve process runs at B=4 are the exact ones even though
+`serve` sets `HIPML_BATCH_SKINNY=1`, and that is deliberate: `skinny_on()` reads
+`HIPML_SKINNY`, `forward_columns` takes an `exact_scope()` unless that is set,
+and `gemv_batched_at` refuses the WMMA tile while the scope is held. Reproduced
+with `HIPML_BATCH_SKINNY=1 HIPML_BATCH_SKINNY_TRACE=1` on `spec-bench --drafts
+3`: no `[skinny]` line is printed. The non-bit-identical tile at B>=4 is the
+exact defect the review-4 audit fixed; the exact route must stay.
+
 ## What is not verified / not done
 
 * The prose ≥48 / JSON ≥53 tok/s targets are **not met** (42.6 / 50.1, before
