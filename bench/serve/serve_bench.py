@@ -157,7 +157,7 @@ def start_llama(cell, out_dir):
            "-ngl", "99", "-c", str(total_ctx), "--parallel", str(cell["slots"]),
            "-ctk", "q8_0", "-ctv", "q8_0", "--no-webui", "--no-cache-idle-slots"]
     # Extra llama-server flags for an A/B (e.g. "--spec-type draft-mtp -md
-    # C:\models\mtp.gguf"). Empty by default so the baseline command stands.
+    # <drafter.gguf>"). Empty by default so the baseline command stands.
     cmd += os.environ.get("HIPML_BENCH_LLAMA_EXTRA", "").split()
     log = open(os.path.join(out_dir, "server.log"), "w", encoding="utf-8")
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
