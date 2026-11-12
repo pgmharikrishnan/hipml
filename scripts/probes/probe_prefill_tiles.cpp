@@ -12,8 +12,10 @@
 // against at the same shape.
 //
 // Compile with -DPWW2_PROBE_NO_STAGE / -DPWW2_PROBE_NO_COMPUTE /
-// -DPWW2_PROBE_NO_FRAG to split the tile's cost, and -DPWW2_PF=0..3 or
-// -DPWW2_RT/-DPWW2_TT to test another shape.
+// -DPWW2_PROBE_NO_FRAG to split the tile's cost, and -DPWW2_PF=0..5 or
+// -DPWW2_RT/-DPWW2_TT to test another shape or pipeline depth. PF 4 and 5 are
+// the staging-overlap mechanisms, both slower than the shipped PF 0; see
+// `docs/notes/prefill-tile-ceiling.md` section 5.1.
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <cstdio>
