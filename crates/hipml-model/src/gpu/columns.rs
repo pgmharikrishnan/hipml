@@ -56,6 +56,13 @@ pub(crate) struct Cols {
     /// Split-K partials for every column, `[cap][n_heads][splits][..]`.
     pub p_acc: Buffer,
     pub p_ml: Buffer,
+    /// Per-column `(position, position + 1)` pairs for the batched quantized
+    /// decode attention, and its partials `[cap][n_heads][deep_splits][..]`.
+    pub pos: Buffer,
+    pub dq_acc: Buffer,
+    pub dq_ml: Buffer,
+    pub dq_acc_slot: usize,
+    pub dq_ml_slot: usize,
     pub final_h: Buffer,
     pub logits: Buffer,
     pub arg_v: Buffer,
@@ -76,13 +83,21 @@ pub struct Snap {
 }
 
 impl Cols {
-    pub(crate) fn new(cfg: &Config, cap: usize, p_acc: usize, p_ml: usize) -> Result<Cols, String> {
+    pub(crate) fn new(
+        cfg: &Config,
+        cap: usize,
+        p_acc: usize,
+        p_ml: usize,
+        deep_splits: usize,
+    ) -> Result<Cols, String> {
         let n = cfg.n_embd;
         let ff = cfg.n_ff;
         let qd = cfg.n_head * cfg.head_dim;
         let w = cfg.n_head_kv * cfg.head_dim;
         let ssm = SsmDims::from_config(cfg);
         let zeros = |len: usize| Buffer::alloc(len);
+        let dq_acc_slot = cfg.n_head * deep_splits * cfg.head_dim;
+        let dq_ml_slot = cfg.n_head * deep_splits * 2;
         Ok(Cols {
             cap,
             x: zeros(cap * n)?,
@@ -111,6 +126,11 @@ impl Cols {
             ay: zeros(cap * n)?,
             p_acc: zeros(p_acc)?,
             p_ml: zeros(p_ml)?,
+            pos: zeros(2 * cap)?,
+            dq_acc: zeros((cap * dq_acc_slot).max(1))?,
+            dq_ml: zeros((cap * dq_ml_slot).max(1))?,
+            dq_acc_slot,
+            dq_ml_slot,
             final_h: zeros(cap * n)?,
             logits: zeros(cap * cfg.n_vocab)?,
             arg_v: zeros(cap * ARGMAX_PARTS)?,
@@ -229,6 +249,23 @@ impl<'a> GpuEngine<'a> {
         for (i, &id) in tokens.iter().enumerate() {
             l.embed_row_at(embed.2, embed.0, id as usize, embed.1, &c.x, i * n, n)?;
         }
+        if rows > 1
+            && self
+                .layers
+                .iter()
+                .any(|b| matches!(&b.kind, BlockKind::Full { deep: Some(_), .. }))
+        {
+            // One (position, seq) pair per column for the batched quantized
+            // attention. Eight bytes per column, uploaded once per pass.
+            let mut pos_bytes = vec![0u8; 8 * rows];
+            for col in 0..rows {
+                pos_bytes[col * 8..col * 8 + 4]
+                    .copy_from_slice(&((pos0 + col) as i32).to_le_bytes());
+                pos_bytes[col * 8 + 4..col * 8 + 8]
+                    .copy_from_slice(&((pos0 + col + 1) as i32).to_le_bytes());
+            }
+            c.pos.upload_bytes_async(0, &pos_bytes, l.stream())?;
+        }
         super::trace::mark(&mut self.trace, l, "embed")?;
 
         let mut ssm_idx = 0usize;
@@ -298,19 +335,40 @@ impl<'a> GpuEngine<'a> {
                             rows,
                         )?,
                         Some(dk) => {
-                            // The quantized decode kernel takes the position
-                            // count from the step buffer; one upload per column
-                            // is left on this path at 8K.
-                            for r in 0..rows {
-                                l.set_step(pos0 + r, pos0 + r + 1, 0)?;
-                                super::attn_tile::deep_attention_ptr(
+                            // All columns through one batched warp launch per
+                            // split-count group. The `_b` entry is the same warp
+                            // body, so each column still matches a plain step;
+                            // selectors without one keep the per-column loop.
+                            let batched = rows > 1
+                                && super::attn_tile::deep_attention_cols(
                                     l,
                                     &cfg,
                                     dk,
-                                    pos0 + r,
-                                    row_ptr(&c.q, r, cfg.n_head * cfg.head_dim),
-                                    row_ptr(&c.aout, r, cfg.n_head * cfg.head_dim),
+                                    pos0,
+                                    rows,
+                                    c.q.as_ptr(),
+                                    c.aout.as_ptr(),
+                                    &c.pos,
+                                    c.dq_acc.as_ptr(),
+                                    c.dq_ml.as_ptr(),
+                                    c.dq_acc_slot,
+                                    c.dq_ml_slot,
                                 )?;
+                            if !batched {
+                                // The quantized decode kernel takes the position
+                                // count from the step buffer; one upload per
+                                // column is left on this path at 8K.
+                                for r in 0..rows {
+                                    l.set_step(pos0 + r, pos0 + r + 1, 0)?;
+                                    super::attn_tile::deep_attention_ptr(
+                                        l,
+                                        &cfg,
+                                        dk,
+                                        pos0 + r,
+                                        row_ptr(&c.q, r, cfg.n_head * cfg.head_dim),
+                                        row_ptr(&c.aout, r, cfg.n_head * cfg.head_dim),
+                                    )?;
+                                }
                             }
                         }
                     }
@@ -429,7 +487,17 @@ impl<'a> GpuEngine<'a> {
                     BlockKind::Ssm(_) => None,
                 })
                 .ok_or_else(|| "model has no full-attention layer".to_string())?;
-            self.cols = Some(Cols::new(&self.cfg, cap, p_acc, p_ml)?);
+            // The quantized cache's split count is fixed by the context size and
+            // is the same for every layer, so one scratch size serves the pass.
+            let deep_splits = self
+                .layers
+                .iter()
+                .find_map(|b| match &b.kind {
+                    BlockKind::Full { deep: Some(dk), .. } => Some(dk.splits(self.n_ctx)),
+                    _ => None,
+                })
+                .unwrap_or(1);
+            self.cols = Some(Cols::new(&self.cfg, cap, p_acc, p_ml, deep_splits)?);
         }
         Ok(())
     }

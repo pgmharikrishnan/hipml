@@ -227,7 +227,7 @@ impl<'a> SsmGpuLayer<'a> {
             &mut v_rows as *mut _ as *mut c_void,
         ];
         let cfg = LaunchConfig {
-            grid: (d.n_v as u32, 1, 1),
+            grid: (d.n_v as u32, j_split(d.head_v) as u32, 1),
             block: (128, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -283,4 +283,11 @@ impl<'a> SsmGpuLayer<'a> {
 /// Device pointer advanced by `floats` f32s.
 fn offset(p: *mut c_void, floats: usize) -> *mut c_void {
     unsafe { (p as *mut u8).add(floats * 4) as *mut c_void }
+}
+
+/// `gridDim.y` for the delta-net recurrence: about eight state rows per block,
+/// so a head's serial walk is spread over many blocks instead of one. The rows
+/// are independent, so any split is bit-identical.
+pub(crate) fn j_split(head_v: usize) -> usize {
+    (head_v / 8).clamp(1, 32)
 }

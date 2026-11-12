@@ -222,3 +222,72 @@ pub(super) fn deep_attention_ptr_on(
         0,
     )
 }
+
+/// Quantized-KV decode attention for `cols` consecutive columns of one
+/// sequence: one launch per group of equal cache split count, instead of one
+/// pair per column. The columns share the cache, so only the query row, the
+/// partial scratch slice and the (position, seq) pair move.
+///
+/// Returns false when the selector has no batched warp entry; the caller then
+/// keeps its per-column loop. The batched entry is the same warp body, so every
+/// column's partials are the ones the one-column launch writes.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn deep_attention_cols(
+    l: &Launcher,
+    cfg: &Config,
+    dk: &DeepKv,
+    pos0: usize,
+    cols: usize,
+    q_ptr: *mut std::ffi::c_void,
+    out_ptr: *mut std::ffi::c_void,
+    pos_buf: &Buffer,
+    part_acc: *mut std::ffi::c_void,
+    part_ml: *mut std::ffi::c_void,
+    acc_slot: usize,
+    ml_slot: usize,
+) -> Result<bool, String> {
+    // Only the whole-group warp entries have a `_b` form (dk.kernel 4/5).
+    if !matches!(dk.kernel, 4 | 5) {
+        return Ok(false);
+    }
+    let qw = cfg.n_head * cfg.head_dim;
+    let scale = 1.0f32 / (cfg.head_dim as f32).sqrt();
+    let at = |p: *mut std::ffi::c_void, words: usize| unsafe {
+        (p as *mut u8).add(words * 4) as *mut std::ffi::c_void
+    };
+    let mut c0 = 0usize;
+    while c0 < cols {
+        // A plain step at this depth sizes its split count from the position;
+        // group the columns that share one so each column's arithmetic is the
+        // one-column launch's.
+        let splits = dk.splits(pos0 + c0 + 1);
+        let mut c1 = c0 + 1;
+        while c1 < cols && dk.splits(pos0 + c1 + 1) == splits {
+            c1 += 1;
+        }
+        launch_kv::launch_cols_ptrs(
+            l.module(),
+            l.stream(),
+            dk.kernel,
+            at(pos_buf.as_ptr(), c0 * 2),
+            at(q_ptr, c0 * qw),
+            &dk.k,
+            &dk.v,
+            at(part_acc, c0 * acc_slot),
+            at(part_ml, c0 * ml_slot),
+            at(out_ptr, c0 * qw),
+            cfg.n_head,
+            cfg.n_head_kv,
+            cfg.head_dim,
+            dk.seq,
+            scale,
+            splits,
+            c1 - c0,
+            acc_slot,
+            ml_slot,
+            qw,
+        )?;
+        c0 = c1;
+    }
+    Ok(true)
+}

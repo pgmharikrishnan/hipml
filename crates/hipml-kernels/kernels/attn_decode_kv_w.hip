@@ -285,3 +285,31 @@ KVW_ENTRY(attn_decode_kv_s2, 2, false)
 KVW_ENTRY(attn_decode_kv_s4, 4, false)
 
 #undef KVW_ENTRY
+
+// Batched form: one grid.y step per verify column. The columns share the
+// cache, so the K/V base is unchanged; each column carries its own query row,
+// its own split scratch slice and its own (position, seq) pair. Slot b runs the
+// single-column body at its own position, so a column's partials are the ones
+// the one-column launch would have written.
+#define KVW_ENTRY_B(NAME, ROWS, ALL)                                          \
+    extern "C" __global__ void NAME(                                          \
+        const float* __restrict__ q,                                          \
+        const void* __restrict__ k,                                           \
+        const void* __restrict__ v,                                           \
+        float* __restrict__ part_acc,                                         \
+        float* __restrict__ part_ml,                                          \
+        int n_heads, int n_kv, int head_dim, const int* pos, int stride,      \
+        float scale, int splits, int acc_slot, int ml_slot, int q_slot)       \
+    {                                                                         \
+        const int slot = blockIdx.y;                                          \
+        kvw_dispatch<ROWS, ALL>(                                              \
+            q + (size_t)slot * q_slot, k, v,                                  \
+            part_acc + (size_t)slot * acc_slot,                               \
+            part_ml + (size_t)slot * ml_slot,                                 \
+            n_heads, n_kv, head_dim, pos + slot * 2, stride, scale, splits);  \
+    }
+
+KVW_ENTRY_B(attn_decode_kv_w2_b, 2, true)
+KVW_ENTRY_B(attn_decode_kv_w4_b, 4, true)
+
+#undef KVW_ENTRY_B

@@ -278,3 +278,126 @@ pub fn launch_ptrs(
     };
     reduce.launch(cfg, stream, &mut params)
 }
+
+/// The same pair for `cols` consecutive columns of one sequence, which share the
+/// cache and differ only in their query row, split scratch slice and position.
+///
+/// Only the whole-group warp entries have a batched form (`dtype` 4/5, the
+/// `w2`/`w4` kernels); the caller keeps the per-column loop for every other
+/// selector. Splitting columns into groups of equal `splits` is the caller's
+/// job, because `splits` is an argument and a plain step at a different cache
+/// depth runs a different count.
+#[cfg(feature = "hip")]
+#[allow(clippy::too_many_arguments)]
+pub fn launch_cols_ptrs(
+    module: &Module,
+    stream: &Stream,
+    dtype: usize,
+    pos: *mut std::ffi::c_void,
+    q_ptr: *mut std::ffi::c_void,
+    k: &Buffer,
+    v: &Buffer,
+    part_acc: *mut std::ffi::c_void,
+    part_ml: *mut std::ffi::c_void,
+    out_ptr: *mut std::ffi::c_void,
+    n_heads: usize,
+    n_kv: usize,
+    head_dim: usize,
+    stride: usize,
+    scale: f32,
+    splits: usize,
+    cols: usize,
+    acc_slot: usize,
+    ml_slot: usize,
+    q_slot: usize,
+) -> Result<(), String> {
+    if n_kv == 0 || n_heads % n_kv != 0 {
+        return Err(format!(
+            "n_heads {n_heads} is not a multiple of n_kv {n_kv}"
+        ));
+    }
+    let group = n_heads / n_kv;
+    if group > 8 {
+        return Err(format!(
+            "GQA group {group} > 8: one block holds at most 8 warps"
+        ));
+    }
+    if head_dim != 256 {
+        return Err(format!(
+            "head_dim {head_dim}: the batched warp kernel is head_dim 256 only"
+        ));
+    }
+    let entry = match dtype {
+        4 => "attn_decode_kv_w2_b",
+        5 => "attn_decode_kv_w4_b",
+        other => return Err(format!("KV dtype {other}: no batched warp kernel")),
+    };
+    let kernel = module.kernel(entry)?;
+    // `ALL` shape: one warp per (KV head, split), four warps to a block, one
+    // grid.y step per column. Same grid.x a one-column launch computes.
+    let tasks = n_kv * splits;
+    let mut p_q = q_ptr;
+    let mut p_k = k.as_ptr();
+    let mut p_v = v.as_ptr();
+    let mut p_acc = part_acc;
+    let mut p_ml = part_ml;
+    let mut v_heads = n_heads as i32;
+    let mut v_kv = n_kv as i32;
+    let mut v_dim = head_dim as i32;
+    let mut p_pos = pos;
+    let mut v_stride = stride as i32;
+    let mut v_scale = scale;
+    let mut v_splits = splits as i32;
+    let mut v_acc = acc_slot as i32;
+    let mut v_ml = ml_slot as i32;
+    let mut v_qs = q_slot as i32;
+    let mut params: [*mut std::ffi::c_void; 15] = [
+        &mut p_q as *mut _ as *mut std::ffi::c_void,
+        &mut p_k as *mut _ as *mut std::ffi::c_void,
+        &mut p_v as *mut _ as *mut std::ffi::c_void,
+        &mut p_acc as *mut _ as *mut std::ffi::c_void,
+        &mut p_ml as *mut _ as *mut std::ffi::c_void,
+        &mut v_heads as *mut _ as *mut std::ffi::c_void,
+        &mut v_kv as *mut _ as *mut std::ffi::c_void,
+        &mut v_dim as *mut _ as *mut std::ffi::c_void,
+        &mut p_pos as *mut _ as *mut std::ffi::c_void,
+        &mut v_stride as *mut _ as *mut std::ffi::c_void,
+        &mut v_scale as *mut _ as *mut std::ffi::c_void,
+        &mut v_splits as *mut _ as *mut std::ffi::c_void,
+        &mut v_acc as *mut _ as *mut std::ffi::c_void,
+        &mut v_ml as *mut _ as *mut std::ffi::c_void,
+        &mut v_qs as *mut _ as *mut std::ffi::c_void,
+    ];
+    let cfg = LaunchConfig {
+        grid: ((tasks).div_ceil(4) as u32, cols as u32, 1),
+        block: (128, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    kernel.launch(cfg, stream, &mut params)?;
+
+    let red = module.kernel("attn_decode_kv_reduce_b")?;
+    let mut p_acc = part_acc;
+    let mut p_ml = part_ml;
+    let mut p_out = out_ptr;
+    let mut v_dim = head_dim as i32;
+    let mut v_splits = splits as i32;
+    let mut v_acc = acc_slot as i32;
+    let mut v_ml = ml_slot as i32;
+    let mut v_out = q_slot as i32;
+    let mut params: [*mut std::ffi::c_void; 8] = [
+        &mut p_acc as *mut _ as *mut std::ffi::c_void,
+        &mut p_ml as *mut _ as *mut std::ffi::c_void,
+        &mut p_out as *mut _ as *mut std::ffi::c_void,
+        &mut v_dim as *mut _ as *mut std::ffi::c_void,
+        &mut v_splits as *mut _ as *mut std::ffi::c_void,
+        &mut v_acc as *mut _ as *mut std::ffi::c_void,
+        &mut v_ml as *mut _ as *mut std::ffi::c_void,
+        &mut v_out as *mut _ as *mut std::ffi::c_void,
+    ];
+    let cfg = LaunchConfig {
+        grid: (n_heads as u32, cols as u32, 1),
+        block: (head_dim as u32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    red.launch(cfg, stream, &mut params)
+}
