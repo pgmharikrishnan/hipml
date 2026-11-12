@@ -1169,3 +1169,9 @@ extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) pref
 {
     pww2_body_slice<3, true>(w, x, y, scratch, m, k, tokens, ks);
 }
+
+// The ffn's fused gate+up pass: one launch, one staged activation tile, both
+// weight streams, SwiGLU in the epilogue. Separate file because it is a new
+// tile shape (the accumulator budget is shared by the two matrices), not
+// another epilogue of the shipped one.
+#include "prefill_fuse.inc"

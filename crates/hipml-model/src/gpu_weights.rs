@@ -411,6 +411,59 @@ impl<'a> Proj<'a> {
         Ok(true)
     }
 
+    /// The ffn's `gate` and `up` pair in one launch: `act = silu(Wg @ xh) * (Wu @
+    /// xh)` and `acth` its fp16 copy. `self` is the `up` projection and `gate`
+    /// the gate projection of the same layer.
+    ///
+    /// Returns `false` when the pair cannot take the fused tile (no fp16
+    /// activation entry for either side, a format pair with no instantiation, the
+    /// Q5_K copy path, a shape the split-K predicate owns, or mismatched
+    /// geometry), so the caller keeps the two-launch sequence. Both projections
+    /// must be the single-pass shape: the fused epilogue has no partial-sum path.
+    pub(crate) fn gemm_half_gu(
+        &self,
+        l: &Launcher,
+        gate: &Proj<'_>,
+        xh: &Buffer,
+        act: &Buffer,
+        acth: &Buffer,
+        tokens: usize,
+    ) -> Result<bool, String> {
+        if self.q5_half.is_some() || gate.q5_half.is_some() {
+            return Ok(false);
+        }
+        if self.rows != gate.rows || self.cols != gate.cols {
+            return Ok(false);
+        }
+        if hipml_kernels::prefill_should_split(self.rows, self.cols, tokens) {
+            return Ok(false);
+        }
+        let (Ok(up), Ok(g)) = (
+            prefill_entry_half(self.entry),
+            prefill_entry_half(gate.entry),
+        ) else {
+            return Ok(false);
+        };
+        if !hipml_kernels::prefill_has_gu(g, up) {
+            return Ok(false);
+        }
+        hipml_kernels::prefill_resident_gu(
+            l.module(),
+            l.stream(),
+            g,
+            up,
+            gate.w,
+            self.w,
+            xh,
+            act,
+            acth,
+            self.rows,
+            self.cols,
+            tokens,
+        )?;
+        Ok(true)
+    }
+
     pub(crate) fn bytes(&self) -> usize {
         self.w.len() + self.q5_half.as_ref().map_or(0, |b| b.len())
     }

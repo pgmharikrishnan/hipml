@@ -164,6 +164,74 @@ impl Launcher {
     }
 }
 
+impl Launcher {
+    /// Launch the fused gate+up pass `reps` times over one upload and return the
+    /// activation tile, its fp16 copy and the time inside the launch loop.
+    ///
+    /// This exists for parity: the fused epilogue has to produce the same logits as
+    /// the two launches it replaces, so the case compares both outputs of one fused
+    /// launch against the host reference of the two GEMMs plus `silu_mul_f32`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_prefill_gu_reps(
+        &self,
+        gate: &str,
+        up: &str,
+        wg: &[u8],
+        wu: &[u8],
+        x: &[f32],
+        m: usize,
+        k: usize,
+        tokens: usize,
+        reps: usize,
+    ) -> Result<(Vec<f32>, Vec<f32>, f64), String> {
+        assert!(reps > 0, "reps must be positive");
+        if k % 64 != 0 {
+            return Err(format!("k={k} must be a multiple of the 64-value k-tile"));
+        }
+        let wgb = ByteBuffer::from_host(wg)?;
+        let wub = ByteBuffer::from_host(wu)?;
+        let xb = Buffer::from_host(x)?;
+        let xh = Buffer::alloc((tokens * k + 1) / 2)?;
+        prefill_xhalf(&self.module, &self.stream, &xb, &xh, tokens * k)?;
+        let act = Buffer::alloc(tokens * m)?;
+        let acth = Buffer::alloc((tokens * m + 1) / 2)?;
+        let start = std::time::Instant::now();
+        for _ in 0..reps {
+            prefill_resident_gu(
+                &self.module,
+                &self.stream,
+                gate,
+                up,
+                &wgb,
+                &wub,
+                &xh,
+                &act,
+                &acth,
+                m,
+                k,
+                tokens,
+            )?;
+        }
+        self.stream.synchronize()?;
+        let secs = start.elapsed().as_secs_f64();
+        // The fp16 copy comes back packed two halves per f32 word: value `2i` in
+        // the low half of word `i`, `2i + 1` in the high half.
+        let halves: Vec<f32> = acth
+            .to_host()?
+            .iter()
+            .flat_map(|&w| {
+                let bits = w.to_bits();
+                [
+                    hipml_core::quant::f16_to_f32((bits & 0xFFFF) as u16),
+                    hipml_core::quant::f16_to_f32((bits >> 16) as u16),
+                ]
+            })
+            .take(tokens * m)
+            .collect();
+        Ok((act.to_host()?, halves, secs))
+    }
+}
+
 /// Warp-per-output f32 GEMM for the few wide-and-short projections (the SSM
 /// `alpha`/`beta` pair). `gemm_f32`'s row-per-block structure is a decode
 /// kernel; on a 512-token chunk it costs more than the weights it reads.
@@ -367,6 +435,123 @@ pub fn prefill_resident_silu(
         &mut p_x as *mut _ as *mut c_void,
         &mut p_y as *mut _ as *mut c_void,
         &mut p_g as *mut _ as *mut c_void,
+        &mut p_h as *mut _ as *mut c_void,
+        &mut v_m as *mut _ as *mut c_void,
+        &mut v_k as *mut _ as *mut c_void,
+        &mut v_tokens as *mut _ as *mut c_void,
+    ];
+    kernel.launch(
+        LaunchConfig::prefill(m, tokens, rpb, tpb, block),
+        stream,
+        &mut params,
+    )
+}
+
+/// Format tag of a converted-activation entry, as `prefill_fuse.inc` decodes it.
+fn fuse_kind(name: &str) -> Option<i32> {
+    Some(match name {
+        "prefill_q4_k_w2h" => 0,
+        "prefill_q6_k_w2h" => 1,
+        "prefill_q8_0_w2h" => 2,
+        "prefill_halfw_w2h" => 3,
+        "prefill_q5_k_w2h" => 4,
+        "prefill_iq4_xs_w2h" => 5,
+        "prefill_iq4_nl_w2h" => 6,
+        "prefill_q3_k_w2h" => 7,
+        "prefill_iq3_s_w2h" => 8,
+        _ => return None,
+    })
+}
+
+/// The fused gate+up entry for a gate/up format pair, or `None` when the pair
+/// has no instantiation (the caller then runs the two separate launches).
+///
+/// The pair is a template argument because a runtime format tag in the decoder
+/// spills (317 slots); the instantiated list is the pairs the shipped UD mixes
+/// use. A new mix only loses the fusion, never correctness.
+pub fn prefill_gu_entry(gate: &str, up: &str) -> Option<&'static str> {
+    let g = fuse_kind(prefill_entry_for_half(gate).unwrap_or(gate))?;
+    let u = fuse_kind(prefill_entry_for_half(up).unwrap_or(up))?;
+    Some(match (g, u) {
+        (0, 0) => "prefill_gu_q4_k_q4_k",
+        (1, 1) => "prefill_gu_q6_k_q6_k",
+        (2, 2) => "prefill_gu_q8_0_q8_0",
+        (3, 3) => "prefill_gu_halfw_halfw",
+        (4, 4) => "prefill_gu_q5_k_q5_k",
+        (5, 5) => "prefill_gu_iq4_xs_iq4_xs",
+        (6, 6) => "prefill_gu_iq4_nl_iq4_nl",
+        (7, 7) => "prefill_gu_q3_k_q3_k",
+        (8, 8) => "prefill_gu_iq3_s_iq3_s",
+        (0, 4) => "prefill_gu_q4_k_q5_k",
+        (0, 5) => "prefill_gu_q4_k_iq4_xs",
+        (0, 1) => "prefill_gu_q4_k_q6_k",
+        (4, 0) => "prefill_gu_q5_k_q4_k",
+        (4, 1) => "prefill_gu_q5_k_q6_k",
+        (5, 0) => "prefill_gu_iq4_xs_q4_k",
+        (5, 4) => "prefill_gu_iq4_xs_q5_k",
+        (5, 7) => "prefill_gu_iq4_xs_q3_k",
+        (5, 8) => "prefill_gu_iq4_xs_iq3_s",
+        (6, 4) => "prefill_gu_iq4_nl_q5_k",
+        (6, 5) => "prefill_gu_iq4_nl_iq4_xs",
+        (7, 5) => "prefill_gu_q3_k_iq4_xs",
+        (1, 2) => "prefill_gu_q6_k_q8_0",
+        (1, 4) => "prefill_gu_q6_k_q5_k",
+        _ => return None,
+    })
+}
+
+/// Whether a gate/up pair can run as one fused launch.
+pub fn prefill_has_gu(gate: &str, up: &str) -> bool {
+    prefill_gu_entry(gate, up).is_some()
+}
+
+/// Fused ffn `gate`+`up`: one launch reads the fp16 activation tile once, streams
+/// both weight matrices, and applies the SwiGLU in its epilogue, so the gate tile
+/// is never written.
+///
+/// The tile is 256 tokens x 64 rows per matrix (256 threads), i.e. one shipped
+/// block's accumulator budget shared by the pair; `prefill_gu_w2h` carries the
+/// geometry.
+#[allow(clippy::too_many_arguments)]
+pub fn prefill_resident_gu(
+    module: &Module,
+    stream: &Stream,
+    gate: &str,
+    up: &str,
+    wg: &ByteBuffer,
+    wu: &ByteBuffer,
+    xh: &Buffer,
+    act: &Buffer,
+    acth: &Buffer,
+    m: usize,
+    k: usize,
+    tokens: usize,
+) -> Result<(), String> {
+    let entry =
+        prefill_gu_entry(gate, up).ok_or_else(|| format!("{gate}+{up}: no fused gate/up entry"))?;
+    let spec = crate::spec("prefill_gu_w2h").ok_or_else(|| "prefill_gu_w2h missing".to_string())?;
+    let (rpb, tpb, block) = match spec.kind {
+        crate::KernelKind::Prefill {
+            rows,
+            tokens,
+            block,
+        } => (rows, tokens, block),
+        _ => return Err("prefill_gu_w2h: not a prefill kernel".to_string()),
+    };
+    let kernel = module.kernel(entry)?;
+    let mut p_wg = wg.as_ptr();
+    let mut p_wu = wu.as_ptr();
+    let mut p_x = xh.as_ptr();
+    let mut p_a = act.as_ptr();
+    let mut p_h = acth.as_ptr();
+    let mut v_m = m as i32;
+    let mut v_k = k as i32;
+    let mut v_tokens = tokens as i32;
+    let mut params: [*mut c_void; 8] = [
+        &mut p_wg as *mut _ as *mut c_void,
+        &mut p_wu as *mut _ as *mut c_void,
+        &mut p_x as *mut _ as *mut c_void,
+        &mut p_a as *mut _ as *mut c_void,
         &mut p_h as *mut _ as *mut c_void,
         &mut v_m as *mut _ as *mut c_void,
         &mut v_k as *mut _ as *mut c_void,

@@ -449,29 +449,42 @@ impl<'a> GpuEngine<'a> {
                     &c.xh,
                     n_tok * cfg.n_embd,
                 )?;
-                gemm_v2(l, &block.gate, &c.t, &c.xh, &c.gate, &c.sk, n_tok)?;
-                // The `up` projection writes the swiGLU activation and its fp16
-                // copy from its own epilogue, which is where the gate tile and
-                // the output rows already are. Falls back to the pair of
-                // elementwise passes when the tile cannot carry the epilogue
-                // (split-K, or a projection without an fp16 tile).
-                let acth = if block
-                    .up
-                    .gemm_half_silu(l, &c.xh, &c.gate, &c.act, &c.acth, n_tok)?
-                {
-                    &c.acth
-                } else {
-                    gemm_v2(l, &block.up, &c.t, &c.xh, &c.up, &c.sk, n_tok)?;
-                    l.silu_mul_buf(&c.gate, &c.up, &c.act, n_tok * cfg.n_ff)?;
-                    ::hipml_kernels::prefill_xhalf(
-                        l.module(),
-                        l.stream(),
-                        &c.act,
-                        &c.xh,
-                        n_tok * cfg.n_ff,
-                    )?;
-                    &c.xh
-                };
+                // The ffn's gate and up projections are two [n_ff, n_embd]
+                // matrices over one activation tile, and the swiGLU needs both
+                // values for one output element. The fused launch holds both
+                // products in registers, so it stages the tile once and never
+                // writes the gate tile. It declines (and the two launches run)
+                // when a tensor has no converted-activation tile, the format
+                // pair has no instantiation, or the shape is split-K's.
+                let acth =
+                    if block
+                        .up
+                        .gemm_half_gu(l, &block.gate, &c.xh, &c.act, &c.acth, n_tok)?
+                    {
+                        &c.acth
+                    } else {
+                        gemm_v2(l, &block.gate, &c.t, &c.xh, &c.gate, &c.sk, n_tok)?;
+                        // The `up` projection writes the swiGLU activation and its
+                        // fp16 copy from its own epilogue, which is where the gate
+                        // tile and the output rows already are.
+                        if block
+                            .up
+                            .gemm_half_silu(l, &c.xh, &c.gate, &c.act, &c.acth, n_tok)?
+                        {
+                            &c.acth
+                        } else {
+                            gemm_v2(l, &block.up, &c.t, &c.xh, &c.up, &c.sk, n_tok)?;
+                            l.silu_mul_buf(&c.gate, &c.up, &c.act, n_tok * cfg.n_ff)?;
+                            ::hipml_kernels::prefill_xhalf(
+                                l.module(),
+                                l.stream(),
+                                &c.act,
+                                &c.xh,
+                                n_tok * cfg.n_ff,
+                            )?;
+                            &c.xh
+                        }
+                    };
                 gemm_v2(l, &block.down, &c.act, acth, &c.down, &c.sk, n_tok)?;
             } else {
                 block.gate.gemm(l, &c.t, &c.gate, n_tok)?;

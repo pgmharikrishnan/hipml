@@ -16,6 +16,11 @@
 // -DPWW2_RT/-DPWW2_TT to test another shape or pipeline depth. PF 4 and 5 are
 // the staging-overlap mechanisms, both slower than the shipped PF 0; see
 // `docs/notes/prefill-tile-ceiling.md` section 5.1.
+//
+// The second table is the fused ffn gate+up pass (`prefill_fuse.inc`): one
+// launch against the two the graph runs today, for the format pairs a UD
+// dynamic quant mixes. `-DPFU_TT=128 -DPFU_RT=128` measures the other shape the
+// accumulator budget allows; section 9 of the same note records both.
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <cstdio>
@@ -75,6 +80,44 @@ static void launch(int kind, dim3 grid, dim3 block, const unsigned char* w, cons
     case 6: hipLaunchKernelGGL(prefill_iq4_nl_w2h, grid, block, 0, 0, w, x, y, m, k, tokens); break;
     default: break;
     }
+}
+
+
+// The fused gate+up entry for a format pair. Mirrors the engine's mapping: a pair
+// without an instantiation has no fused launch.
+static bool launch_gu(int kg, int ku, dim3 grid, const unsigned char* wg,
+                      const unsigned char* wu, const void* x, float* y, _Float16* yh, int m,
+                      int k, int tokens)
+{
+    const dim3 block(PFU_THREADS, 1, 1);
+    const int pair = kg * 16 + ku;
+    switch (pair) {
+    case 0 * 16 + 0: hipLaunchKernelGGL(prefill_gu_q4_k_q4_k, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 1 * 16 + 1: hipLaunchKernelGGL(prefill_gu_q6_k_q6_k, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 2 * 16 + 2: hipLaunchKernelGGL(prefill_gu_q8_0_q8_0, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 3 * 16 + 3: hipLaunchKernelGGL(prefill_gu_halfw_halfw, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 4 * 16 + 4: hipLaunchKernelGGL(prefill_gu_q5_k_q5_k, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 5 * 16 + 5: hipLaunchKernelGGL(prefill_gu_iq4_xs_iq4_xs, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 6 * 16 + 6: hipLaunchKernelGGL(prefill_gu_iq4_nl_iq4_nl, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 7 * 16 + 7: hipLaunchKernelGGL(prefill_gu_q3_k_q3_k, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 8 * 16 + 8: hipLaunchKernelGGL(prefill_gu_iq3_s_iq3_s, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 0 * 16 + 4: hipLaunchKernelGGL(prefill_gu_q4_k_q5_k, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 0 * 16 + 5: hipLaunchKernelGGL(prefill_gu_q4_k_iq4_xs, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 0 * 16 + 1: hipLaunchKernelGGL(prefill_gu_q4_k_q6_k, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 4 * 16 + 0: hipLaunchKernelGGL(prefill_gu_q5_k_q4_k, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 4 * 16 + 1: hipLaunchKernelGGL(prefill_gu_q5_k_q6_k, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 5 * 16 + 0: hipLaunchKernelGGL(prefill_gu_iq4_xs_q4_k, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 5 * 16 + 4: hipLaunchKernelGGL(prefill_gu_iq4_xs_q5_k, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 5 * 16 + 7: hipLaunchKernelGGL(prefill_gu_iq4_xs_q3_k, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 5 * 16 + 8: hipLaunchKernelGGL(prefill_gu_iq4_xs_iq3_s, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 6 * 16 + 4: hipLaunchKernelGGL(prefill_gu_iq4_nl_q5_k, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 6 * 16 + 5: hipLaunchKernelGGL(prefill_gu_iq4_nl_iq4_xs, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 7 * 16 + 5: hipLaunchKernelGGL(prefill_gu_q3_k_iq4_xs, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 1 * 16 + 2: hipLaunchKernelGGL(prefill_gu_q6_k_q8_0, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    case 1 * 16 + 4: hipLaunchKernelGGL(prefill_gu_q6_k_q5_k, grid, block, 0, 0, wg, wu, x, y, yh, m, k, tokens); break;
+    default: return false;
+    }
+    return true;
 }
 
 int main(int argc, char** argv)
@@ -145,6 +188,85 @@ int main(int argc, char** argv)
             hipFree(dw);
             hipFree(dx);
             hipFree(dy);
+        }
+    }
+
+    // The fused ffn pair: gate and up are two [m, k] matrices over one activation
+    // tile, so the comparison is one fused launch against the two shipped ones
+    // (gate then up) that the graph runs today, same total work. The pair list is
+    // the UD dynamic quant's own mix: 42 of 65 layers pair the same format, and
+    // the rest pair IQ4_XS/Q4_K/Q5_K in the observed combinations.
+    if (only < 0) {
+        const int pairs[][2] = {{0, 0}, {4, 4}, {5, 5}, {5, 0}, {0, 4}, {5, 4}, {0, 1}};
+        const Shape s{17408, 5120, "gate/up 17408x5120"};
+        printf("\n%-18s %6s %9s %9s %8s %8s\n", "fused pair", "tokens", "sep ms", "fused ms",
+               "delta%", "TFLOPS");
+        for (const auto& pr : pairs) {
+            const int kg = pr[0], ku = pr[1];
+            const size_t rbg = row_bytes(kg, s.k), rbu = row_bytes(ku, s.k);
+            const size_t wbg = rbg * (size_t)s.m, wbu = rbu * (size_t)s.m;
+            const size_t xb = (size_t)tokens * s.k * 2;
+            std::vector<unsigned char> wg(wbg), wu(wbu);
+            for (size_t i = 0; i < wbg; ++i) wg[i] = (unsigned char)(i * 37u + 11u);
+            for (size_t i = 0; i < wbu; ++i) wu[i] = (unsigned char)(i * 53u + 7u);
+            std::vector<__half> x((size_t)tokens * s.k);
+            for (size_t i = 0; i < x.size(); ++i) x[i] = __float2half((float)((i % 97) - 48) / 128.0f);
+            std::vector<float> y((size_t)tokens * s.m);
+            std::vector<_Float16> yh((size_t)tokens * s.m);
+
+            unsigned char *dwg = nullptr, *dwu = nullptr;
+            __half* dx = nullptr;
+            float* dy = nullptr;
+            _Float16* dyh = nullptr;
+            hipMalloc(&dwg, wbg);
+            hipMalloc(&dwu, wbu);
+            hipMalloc(&dx, xb);
+            hipMalloc(&dy, y.size() * sizeof(float));
+            hipMalloc(&dyh, yh.size() * sizeof(_Float16));
+            hipMemcpy(dwg, wg.data(), wbg, hipMemcpyHostToDevice);
+            hipMemcpy(dwu, wu.data(), wbu, hipMemcpyHostToDevice);
+            hipMemcpy(dx, x.data(), xb, hipMemcpyHostToDevice);
+
+            const dim3 gsep((unsigned)((s.m + PWW2_RT - 1) / PWW2_RT),
+                            (unsigned)((tokens + PWW2_TT - 1) / PWW2_TT), 1);
+            const dim3 gfus((unsigned)((s.m + PFU_RT - 1) / PFU_RT),
+                            (unsigned)((tokens + PFU_TT - 1) / PFU_TT), 1);
+            const dim3 bsep(PWW2_THREADS, 1, 1);
+            launch_gu(kg, ku, gfus, dwg, dwu, dx, dy, dyh, s.m, s.k, tokens);
+            if (hipDeviceSynchronize() != hipSuccess) {
+                printf("%-18s launch failed\n", "fused");
+                continue;
+            }
+            hipEvent_t t0, t1;
+            hipEventCreate(&t0);
+            hipEventCreate(&t1);
+            hipEventRecord(t0);
+            for (int r = 0; r < reps; ++r) {
+                launch(kg, gsep, bsep, dwg, dx, dy, s.m, s.k, tokens);
+                launch(ku, gsep, bsep, dwu, dx, dy, s.m, s.k, tokens);
+            }
+            hipEventRecord(t1);
+            hipEventSynchronize(t1);
+            float sep = 0.0f;
+            hipEventElapsedTime(&sep, t0, t1);
+            sep /= reps;
+            hipEventRecord(t0);
+            for (int r = 0; r < reps; ++r)
+                launch_gu(kg, ku, gfus, dwg, dwu, dx, dy, dyh, s.m, s.k, tokens);
+            hipEventRecord(t1);
+            hipEventSynchronize(t1);
+            float fus = 0.0f;
+            hipEventElapsedTime(&fus, t0, t1);
+            fus /= reps;
+            const double flops = 2.0 * 2.0 * tokens * (double)s.m * s.k;
+            printf("%-5s+%-12s %6d %9.3f %9.3f %8.1f %8.2f\n",
+                   kind_name(kg), kind_name(ku), tokens, sep, fus,
+                   100.0 * (fus - sep) / sep, flops / (fus * 1e-3) / 1e12);
+            hipFree(dwg);
+            hipFree(dwu);
+            hipFree(dx);
+            hipFree(dy);
+            hipFree(dyh);
         }
     }
     return 0;

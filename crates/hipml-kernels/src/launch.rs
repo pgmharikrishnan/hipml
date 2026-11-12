@@ -62,10 +62,10 @@ pub(crate) mod device {
     mod prefill_launch;
 
     pub use prefill_launch::{
-        gemm_rows_f32, prefill_entry_for_half, prefill_has_silu, prefill_has_xhalf,
-        prefill_resident, prefill_resident_half, prefill_resident_silu, prefill_resident_slices,
-        prefill_resident_split_half, prefill_should_split, prefill_split_scratch_cap,
-        prefill_xhalf,
+        gemm_rows_f32, prefill_entry_for_half, prefill_gu_entry, prefill_has_gu, prefill_has_silu,
+        prefill_has_xhalf, prefill_resident, prefill_resident_gu, prefill_resident_half,
+        prefill_resident_silu, prefill_resident_slices, prefill_resident_split_half,
+        prefill_should_split, prefill_split_scratch_cap, prefill_xhalf,
     };
     #[path = "batch_launch.rs"]
     mod batch_launch;
@@ -611,9 +611,9 @@ pub use device::{gemm_rows_f32, prefill_resident, prefill_resident_slices, prefi
 pub use device::{gemv_job_tiles, GemvJob, Launcher, ReadJob};
 #[cfg(feature = "hip")]
 pub use device::{
-    prefill_entry_for_half, prefill_has_silu, prefill_has_xhalf, prefill_resident_half,
-    prefill_resident_silu, prefill_resident_split_half, prefill_should_split,
-    prefill_split_scratch_cap,
+    prefill_entry_for_half, prefill_gu_entry, prefill_has_gu, prefill_has_silu, prefill_has_xhalf,
+    prefill_resident_gu, prefill_resident_half, prefill_resident_silu, prefill_resident_split_half,
+    prefill_should_split, prefill_split_scratch_cap,
 };
 #[cfg(feature = "hip")]
 pub use device::{
@@ -695,6 +695,24 @@ impl Launcher {
         _tokens: usize,
         _reps: usize,
     ) -> Result<(Vec<f32>, f64), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    /// Fused gate+up parity launch. Same signature as the device one, so the
+    /// `parity` command needs no conditional compilation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_prefill_gu_reps(
+        &self,
+        _gate: &str,
+        _up: &str,
+        _wg: &[u8],
+        _wu: &[u8],
+        _x: &[f32],
+        _m: usize,
+        _k: usize,
+        _tokens: usize,
+        _reps: usize,
+    ) -> Result<(Vec<f32>, Vec<f32>, f64), String> {
         Err("hipml was built without the `hip` feature".to_string())
     }
 

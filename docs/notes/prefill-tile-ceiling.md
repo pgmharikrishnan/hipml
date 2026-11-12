@@ -11,6 +11,11 @@ second directory interleaved in the same hold. Nothing in the shipped kernel
 changed; sections 0-4, 6 and 7 are the earlier hold's numbers and are restated
 unchanged.
 
+Section 9 was measured on `2631720`, branch `feat/pro-1491-ffn-fuse`, under the
+`prefill-fuse` lock with the `2631720` tree built in a second directory and run
+interleaved in the same hold. It changes the kernel again: the ffn's gate and up
+projections become one launch (`kernels/prefill_fuse.inc`).
+
 Sections 2.1, 3, 5.2, 5.3, 6 and 7 were re-measured on `913550f`, branch
 `feat/pro-1491-prefill-instr`, under the `prefill-instr` lock, base `913550f`
 built in a second directory and run interleaved in the same hold. This branch
@@ -44,8 +49,10 @@ branch does: the staging body is cut to about half its instructions (section
 SwiGLU moves into the `up` projection's epilogue (section 5.3). The two
 together are **+9.9% end to end at 8K (1,186 -> 1,303 tok/s) and +11.6% at 512**,
 which is the largest prefill win this note has recorded, and it still lands
-**3.8% short of 1,354**: what is left is the compute-side gap above plus the
-launch/accounting inside the engine's ffn bucket, not the staging phase.
+**3.8% short of 1,354** (section 9 takes another 1.1 points of that, to 1,332,
+by fusing the ffn's gate and up projections into one launch): what is left is
+the compute-side gap above plus the launch/accounting inside the engine's ffn
+bucket, not the staging phase.
 
 ## 1. The tile
 
@@ -438,7 +445,8 @@ against the register-only 171-188 TF, so a tile that staged nothing would still
 sit 19% under the compute ceiling - the k-loop schedule gap section 3 records,
 which every measured change to the schedule lost to. That gap, plus the 1.4-2.2
 ms per layer-chunk by which the engine's ffn bucket exceeds the probe time of
-its own GEMMs, is where the rest lives.
+its own GEMMs, is where the rest lives. Section 9 takes 83 ms of it (one launch
+per layer less) and leaves the rest.
 
 ## 8. What is unverified
 
@@ -475,4 +483,174 @@ its own GEMMs, is where the rest lives.
   the gfx1201 assembly of the whole kernel set at `PF=0` is instruction-for-
   instruction identical to `89d0d8d` (`clang -S` diff, only the per-TU
   `__hip_fatbin` GUID differs).
+* Section 9's end-to-end deltas are 6 interleaved pairs at each length in one
+  hold, all positive, spread +0.85% to +1.30% at 8K. The 2,423-token row is two
+  clean reps per tree: another slice stole the GPU lock mid-hold (the lock's own
+  45-minute staleness rule) and two branch reps read 1.93 s and 9.30 s while its
+  process was running. The buckets in section 9.3 are one run each, as in
+  section 6.
+* Section 9's format-pair list is the pairs the UD mixes actually use: 23
+  instantiations, the 9 same-format pairs plus 14 mismatched ones. A pair that
+  is not in the list runs the two launches, so a new mix loses the fusion and
+  nothing else. Whether *all* pairs would fit the register file is answered for
+  the shapes, not per pair: the 23 shipped ones are 186-208 VGPRs, 0 spills.
+* The fused launch's win is attributed to the launch count by elimination: the
+  probe says its kernel time is within +-3% of the two launches at 2,048 tokens,
+  and the engine's ffn bucket falls 83 ms for 64 launches fewer per chunk. The
+  83 ms was not decomposed further (per-launch driver cost against grid ramp
+  and drain).
 
+
+## 9. Fusing the ffn's gate and up projections (shipped)
+
+The ffn pair is two `[17408, 5120]` matrices over one activation tile, and §7
+names two residues: the staging-free rate is 149-154 TF against the 171-188 TF
+register-only ceiling, and the ffn bucket still carries 1.4-2.2 ms per
+layer-chunk of launch and accounting. Fusing the pair attacks the second one
+twice over: one launch instead of two, and the SwiGLU moves into that launch's
+epilogue with both products in registers, so the gate tile is never stored or
+re-read.
+
+### 9.1 What the accumulator budget allows
+
+A block's accumulators are `TT * RT` f32 values over 256 threads, and the shipped
+tile is pinned by them: 256 x 128 = 32,768 floats = **128 VGPRs per thread** in a
+256-VGPR file with one resident block. The pair needs one output element's gate
+*and* up value in the same block, so a fused block holds both. Doubling the
+accumulators at the shipped shape is **256 VGPRs before a single staging
+register** - the entire file - so the full fusion does not fit at 128 rows per
+matrix. That is the register accounting the card asked for, and it is why the
+activation staging cannot be halved: the x stream is `m * tokens * k * 2 / RT`
+bytes per matrix, so halving it needs `RT = 128` per matrix *and* the pair in one
+block, i.e. the 256-VGPR shape.
+
+Two shapes keep the budget at one shipped block's (`TT * 2 * RT == 32,768`):
+
+| shape | accumulators | staged x | staged weights | LDS | x stream | weight sweeps | launches |
+|---|---:|---:|---:|---:|---|---|---:|
+| 256 tokens, 128 rows, 1 matrix (shipped) | 128 | 64 | 64 | 30,720 B | 1x | 8 | 2 |
+| 128 tokens, 128 rows x 2 matrices | 128 | 8 | 32 | 30,720 B | 0.5x | 16 | 1 |
+| 256 tokens, 64 rows x 2 (shipped fusion) | 128 | 16 | 16 | 30,720 B | 1x | 8 | 1 |
+
+Registers are per thread, VGPRs. Both fused shapes compile to **186-208 VGPRs
+(190 for Q4_K/Q4_K), 0 spill slots, 0 scratch** - the shipped `_w2h` tile is
+181-211 - and both keep 30,720 B of LDS (one x tile plus two weight tiles), so
+both still fit one block per CU. The 128/128 shape is also *shorter* in
+registers; its cost is the weight stream, not an occupancy loss.
+
+### 9.2 Probe, both shapes, 2,048 tokens
+
+One fused launch against the two shipped ones over the same bytes, same hold
+(`probe_prefill_tiles.cpp`, 3 reps). The pairs are the ones a UD dynamic quant
+mixes: 42 of 65 layers pair the same format and the rest pair IQ4_XS with
+Q4_K/Q5_K/Q3_K.
+
+| gate+up pair | two launches ms | fused 256/64 ms | delta | fused 128/128 ms | delta |
+|---|---:|---:|---:|---:|---:|
+| Q4_K + Q4_K | 6.046 | 5.972 | -1.2% | 9.232 | +54.3% |
+| Q5_K + Q5_K | 6.538 | 6.361 | -2.7% | 12.394 | +91.6% |
+| IQ4_XS + IQ4_XS | 6.297 | 6.408 | +1.8% | 8.353 | +33.5% |
+| IQ4_XS + Q4_K | 6.180 | 6.487 | +5.0% | 8.201 | +32.7% |
+| Q4_K + Q5_K | 6.313 | 6.146 | -2.6% | 11.155 | +79.6% |
+| IQ4_XS + Q5_K | 6.435 | 6.624 | +2.9% | 10.219 | +60.5% |
+| Q4_K + Q6_K | 6.257 | 6.489 | +3.7% | 16.280 | +164.9% |
+
+So the shape that halves the activation stream is 33-165% *slower*, and the shape
+that only halves the launch count is within +-3% of the pair. The reason is the
+other stream: at 128 tokens per block the weight matrix is swept 16 times per
+chunk instead of 8, and a pair of 4-bit matrices (37-73 MB each) does not stay in
+the 64 MB Infinity Cache, so the halved activation reads are paid for twice over
+in weight reads. **The duplicated activation stage cannot be removed inside this
+register file**, and the fused pass's gain has to come from the launch count.
+
+One more thing this hold settled: the format tag has to be a template argument.
+The first build took the pair as two runtime `int`s so one kernel served every
+pair; the decoder's 9-way branch inside the staging loop cost **317 spill slots,
+760 B of scratch and 256 VGPRs**, and the launch ran 101 ms against 5.7 ms. The
+shipped kernel therefore instantiates the 23 pairs the supported mixes use and
+falls back to the two launches for anything else.
+
+### 9.3 End to end, interleaved with `2631720`
+
+`hipml gpu-bench --gguf <UD> --prefill N`, chunk 2,048, f32 KV. Both trees built
+in separate directories, three reps each in two processes, alternating within one
+lock hold:
+
+| prompt | process | `2631720` tok/s | this branch tok/s | delta |
+|---|---|---:|---:|---:|
+| 512 | p1 | 1300.5 / 1300.3 / 1299.7 | 1329.4 / 1330.4 / 1329.2 | +2.2% |
+| 512 | p2 | 1301.5 / 1299.9 / 1299.5 | 1330.5 / 1328.5 / 1327.5 | +2.2% |
+| 8,192 | p1 | 1331.3 / 1319.9 / 1311.6 | 1345.2 / 1331.1 / 1327.7 | +1.1% |
+| 8,192 | p2 | 1312.4 / 1312.3 / 1312.2 | 1329.5 / 1328.5 / 1327.8 | +1.2% |
+
+All six interleaved pairs are positive: +0.85% to +1.30% at 8K (mean +1.14%)
+and +2.2% at 512. Both trees drift down within a process (the first run of each
+is the fastest), which is why the per-pair delta, not the absolute level, is the
+number to read.
+
+Launch count per 2,048-token chunk (64 layers): the ffn's gate/up pair goes from
+2 launches to 1, so the ffn is **192 -> 128 launches** per chunk and 768 -> 512
+at 8K. A temporary per-launch trace at 8K counted **256 fused launches = 4 chunks
+x 64 layers**, so every layer's pair is fused at the 2,048-token chunk; the
+one-token tail chunk keeps the two-launch path (the split-K predicate owns that
+shape, and the fused epilogue has no partial-sum form).
+
+Stage split at 8K, one run each, ms:
+
+| stage | `2631720` | this branch |
+|---|---:|---:|
+| ffn GEMMs | 2808.3 | 2725.3 |
+| GDN chunk recurrence | 1471.0 | 1485.1 |
+| attention | 838.3 | 845.0 |
+| GDN projection GEMMs | 746.8 | 749.5 |
+| attention projection GEMMs | 203.4 | 204.3 |
+| elementwise, embed, final | 212.4 | 208.9 |
+| wall | 6.31 s | 6.25 s |
+
+The ffn bucket falls **83.0 ms (-3.0%)**, from 10.97 to 10.65 ms per
+layer-chunk; the other buckets move by single-run drift. That 83 ms is 1.3% of
+the wall and the whole of the gain, and it is the launch/accounting part of the
+1.4-2.2 ms per layer-chunk §6 identified: the probe says the fused tile's own
+kernel time is not better.
+
+### 9.4 A 2,423-token prompt
+
+`--prefill 2423`: 1.85-1.87 s on `2631720` against 1.82-1.83 s on the branch, so
+the prefill that the serve TTFT is made of drops by the same 1-2%. Two reps of
+the branch read 1.93 s and 9.30 s in the same hold because another slice stole
+the GPU lock (the lock's 45-minute staleness rule) and its process was running;
+those two are contamination, not the tree. This is the `gpu-bench` prompt, not
+the serve prompt the card named, so it is not comparable to llama's 2.06 s.
+
+### 9.5 Correctness
+
+| gate | result |
+| --- | --- |
+| greedy 12 ids, UD | `[11751, 13, 198, 760, 6511, 314, 9564, 369, 19241, 13, 198, 760]`, byte-identical |
+| `parity prefill --deep` | 15 passed (12 + 3 new fused cases), 0 failed |
+| `parity --deep` | 74 passed, 0 failed, 1 skipped |
+| `oracle-gate` UD, 20 steps | PASS 20/20, prefill max abs **0.1086** |
+| `oracle-gate` stock Q4_K_M, 20 steps | PASS 20/20, prefill max abs **0.1481** |
+| `cargo test --workspace`, `cargo fmt --check` | clean |
+
+The two `oracle-gate` maxima are the *same values* the previous slice measured
+(0.1086 and 0.1481, §6 of that report), i.e. the fused pass reproduces the
+two-launch logits to the last printed digit rather than to a new tolerance. The
+new parity cases (`prefill_gu q4_k/q4_k`, `q4_k/q5_k`, `iq4_xs/iq4_xs`, 256x512,
+8 tokens) compare the fused activation against the two host GEMMs plus
+`silu_mul_f32`'s expression, and the fp16 copy against the f32 one; their
+absolute budget is 5e-3 of the tile's largest value because the case multiplies
+two reductions, and the observed errors are 4-5e-4 of it.
+
+### 9.6 Verdict
+
+The fusion is real but small: **+1.14% at 8K (1,317 -> 1,332) and +2.2% at 512**,
+with the ffn bucket down 83 ms. It does not reach 1,360, and it leaves 1.6%
+(1,332 against llama's 1,354) on the table. The half of the card's premise that
+promised more - halving the duplicated activation staging - is not reachable
+here: it needs the pair's accumulators in one block at 128 rows each, which is
+256 VGPRs of accumulators alone, and the shape that trades rows for tokens to
+get it loses 33-165% because it doubles the weight sweeps. What is left after
+this slice is the same residue §7 named, minus one launch per layer: the
+compute-side gap (149-154 TF against 171-188 TF), and roughly 1 ms per
+layer-chunk of launch/accounting that one launch per pair did not remove.
