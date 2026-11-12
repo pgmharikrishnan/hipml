@@ -5,6 +5,12 @@ Base `3401e1a` plus the GEMV dequant change from PR #9. Branch
 UD-Q4_K_M and stock Q4_K_M, chunk 2,048, f32 KV for prefill. All GPU work ran
 under the `prefill-tiles` lock, port 8093.
 
+Section 5.1 was measured later, on `89d0d8d`, branch `feat/prefill-pipeline`,
+under the `prefill-pipe` lock on the same box, against a `89d0d8d` tree in a
+second directory interleaved in the same hold. Nothing in the shipped kernel
+changed; sections 0-4, 6 and 7 are the earlier hold's numbers and are restated
+unchanged.
+
 The measuring tool is `scripts/probes/probe_prefill_tiles.cpp`. It compiles
 the shipped `prefill_wmma2.hip` (not a copy) and drives it with random bytes of
 the right block layout, so the numbers are the tile's own cost: the decoder
@@ -137,6 +143,92 @@ accumulators at this tile width; 32 accumulators do not fit at 256 threads
 alongside the fp16 staging, and every shape that bought the rows back lost more
 in compute than it saved in staging.
 
+### 5.1 Hiding the staging phase: three mechanisms, all measured at a loss
+
+Staging is 22-30% of every GEMM (section 4), and it cannot overlap the multiply
+at one block per CU because all eight warps sit in the same phase and there are
+only two warps per SIMD to hide a dependency chain. The three mechanisms that
+could overlap it were built and measured. The answer is no, and the reason is
+sharper than the earlier note's model: **the double buffer is a 21% tax before
+any overlap is created**, so the best overlap mechanism would have to recover
+more than that, and the best one recovers 5.6 points. The probe depths
+`PWW2_PF=4` and `PWW2_PF=5` below are the kept, off-by-default residue, with
+`PF=0` still the shipped depth.
+
+**1. Direct-to-LDS global loads: not available on gfx1201.** The previous
+entry said only that the `vmems-to-lds` target feature was missing. The
+instruction itself settles it. `llvm-mc` for gfx1201 gives
+
+```
+global_load_lds_dword v[0:1], v2      error: instruction not supported on this GPU
+global_load_lds_b32   v1, v[2:3]      error: invalid instruction
+global_load_lds_b128  v[0:3], v4      error: invalid instruction
+buffer_load_dword     v0, s[0:3], 0 offen lds   error: invalid operand
+```
+
+so the gfx9 `buffer_load ... lds` form does not assemble for this target and the
+`global_load_lds_*` family exists in the assembler but is rejected for
+`gfx1201`. There is no asynchronous global-to-shared path on this chip, and the
+weight tile could not use it anyway: it is dequantised, not copied.
+
+**2. Double-buffered staging through VGPRs: -21% before any overlap at all.**
+The decisive measurement is `PF=1`, which is the plainest possible change from
+the shipped loop: two buffers instead of one, and one barrier per k-tile
+instead of two. It stages the next tile and then multiplies the current one. It
+holds nothing across the multiply, so it costs 215 VGPRs against the shipped
+191. It is 21% *slower*, and every mechanism below is measured against that
+starting point. Means at `gate/up`, 2,048 tokens, 3 reps:
+
+| build | VGPRs | LDS/block | Q4_K | IQ4_XS | fp16 weights |
+|---|---:|---:|---:|---:|---:|
+| `PF=0` shipped | 191 | 30,720 | 3.334 ms | 3.529 ms | 4.534 ms |
+| `PF=1` two buffers | 215 | 61,440 | 4.036 (+21%) | 4.525 (+28%) | 4.033 (-11%) |
+| `PF=2` fetch, commit after | 248 | 61,440 | 4.309 (+29%) | 4.508 (+28%) | 3.855 (-15%) |
+| `PF=3` activation run only prefetched | 247 | 61,440 | 4.108 (+23%) | 4.331 (+23%) | 3.988 (-12%) |
+| `PF=4` branch-free, sliced into the multiply | 231 | 61,440 | 4.161 (+25%) | 4.321 (+22%) | 3.987 (-12%) |
+| `PF=5` split barrier | 213 | 61,440 | 3.808 (+14%) | 4.220 (+20%) | 3.811 (-16%) |
+
+`PF=0` and `PF=4`/`PF=5` are three interleaved runs in one hold; `PF=1`-`PF=3`
+are from the adjacent hold, whose own `PF=0` baseline read 3.315 / 3.528 /
+4.495 (0.6% apart), so each percentage uses its hold's baseline. `PF=4` also
+reaches 3.87 / 4.09 / 4.12 in the stage-late and fetch-early sub-variants; they
+are within noise of the row above and are not kept.
+
+The `PF=4` body is branch-free on purpose. With the `if (more)` guard the
+scheduler splits the body into predicated blocks and sinks every prefetched
+load down to the store that consumes it, which is why `PF=1..3` measured as the
+serial loop; staging one extra tile into the buffer the loop leaves unused
+removes the guard and the fetch then stays above the multiply (`clang -S`
+verified). Removing the branch is worth 4 points of the 29 that `PF=2` loses.
+
+Two facts bound the lever from here. First, the double buffer is a 21% tax
+before any overlap is created, and the best overlap mechanism - the gfx12 split
+barrier - buys back only 5.6 of those points. Second, the one format that
+*gains* throughout is fp16 weights, which has no decoder: the quantised formats
+carry a dependent `load -> ALU -> store` chain per staging chunk, and
+interleaving it does not create overlap with two warps per SIMD, it moves the
+chain's stalls into the compute phase. Holding the next tile also costs ~40
+registers (191 -> 213-248), and the allocator pays for it out of the fragment
+software pipeline. A `PF` where staging overlaps does exist for this tile - it
+is the fp16-weight one, which is not a path the UD model's ffn uses.
+
+**3. Split barrier: the best of them, and still -14 to -20%.** gfx12 splits
+`s_barrier` into `s_barrier_signal` and `s_barrier_wait` (the plain barrier
+lowers to that pair with id `-1`), so a warp that has finished its shared
+stores starts multiplying while its neighbours are still storing, holding
+nothing in registers: 213 VGPRs, between the shipped 191 and `PF=1`'s 215.
+`PF=5` is exactly that around the `PF=1` order, and it recovers 5.6 points of
+`PF=1`'s 21% loss: Q4_K 3.808 ms (+14%), IQ4_XS 4.220 (+20%), fp16 3.811
+(-16%). It does not recover the rest because the eight warps are not skewed to
+begin with - they do the same work in the same order, so the signal fires at
+nearly the same instant in all of them, and the 21% tax on the double buffer is
+paid regardless.
+
+The producer/consumer split was not built: it needs the accumulator grid
+covered by fewer warps, which is the `RT>128` problem one level down, and the
+128x128 tile that makes it fit is the second row of this section's first table.
+
+
 ## 6. End to end
 
 `hipml gpu-bench --gguf <UD> --prefill N`, chunk 2,048, f32 KV, three runs
@@ -194,12 +286,14 @@ credits the ffn GEMMs with the measured compute-only rate (2.47/2.47/2.19 ms
 per layer-chunk) and leaves every other stage untouched; the middle one credits
 them with the probe's shipped rate (about 400 ms) and removes the 250 ms of
 `xhalf`/`silu` that the ffn bucket also counts. The staging-free row clears
-1,354; the middle row, which removes everything outside the tile, does not. So
-beating llama.cpp requires *hiding* the staging phase, and at one block per CU
-the only mechanisms are a second resident block (needs <=128 VGPRs) or a
-producer/consumer split of the block (no measured shape wins). Parameter
-tuning cannot get there, and the three-and-a-half seconds of non-GEMM time
-(GDN scan 21.5%, attention 12.5%) is not a tile problem at all.
+1,354; the middle row, which removes everything outside the tile, does not. It
+was an open question whether the staging phase could be *hidden* rather than
+removed; section 5.1 answers it for every mechanism gfx1201 offers, and the
+answer is no: the best of them is still 14-20% slower than the shipped loop, so
+the shipped depth stays `PF=0` and 1,354 is still 0.9 s of GEMM staging away.
+The three-and-a-half seconds of non-GEMM time (GDN scan 21.5%, attention
+12.5%) is not a tile problem at all, and the 18% gap between the probe GEMM rate
+and the engine's is the launch/accounting path.
 
 ## 8. What is unverified
 
@@ -209,11 +303,23 @@ tuning cannot get there, and the three-and-a-half seconds of non-GEMM time
 * One block per CU is inferred from VGPR counts and the 65,536-VGPR file, not
   from a hardware occupancy counter; WDDM does not expose one here.
 * The end-to-end comparison is three runs per tree in one lock hold. Its
-  interleaved delta (+0.3% at 512, -0.2% at 8,192) is smaller than the drift
-  across that hold (about 1%), so this PR's effect is measured as zero but is
-  not bounded tighter than about 1%.
+  interleaved delta in section 6 (+0.3% at 512, -0.2% at 8,192) is smaller than
+  the drift across that hold (about 1%), so that PR's effect is measured as
+  zero but is not bounded tighter than about 1%.
 * The staging-free row multiplies the probe's rate by the counted GEMM
   launches (256 per ffn tensor at 8K). It assumes the 8K chunk decomposes into
   exactly 4 x 2,048 tiles, which is true for this fixture length.
 * Attention and GDN numbers are copied from the shipped split, not re-measured
   per variant; no variant changed them.
+* Section 5.1's 21% cost for the double buffer is measured, not explained. Two
+  candidate causes remain: the LDS footprint doubling from 30,720 to 61,440
+  bytes per block, and the extra buffer making the fragment reads and the
+  staging stores contend for the same shared-memory banks. `PF=5` at 213 VGPRs
+  still loses 14%, so plain register pressure does not account for it on its
+  own.
+* `PF=4` and `PF=5` are kept as probe depths and are compiled out of the
+  shipped build. Their machine code has been checked to be irrelevant to it:
+  the gfx1201 assembly of the whole kernel set at `PF=0` is instruction-for-
+  instruction identical to `89d0d8d` (`clang -S` diff, only the per-TU
+  `__hip_fatbin` GUID differs).
+

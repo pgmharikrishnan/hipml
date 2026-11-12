@@ -19,8 +19,19 @@
 //                        into registers before the multiply and only converted
 //                        into shared after it, so the global latency overlaps
 //                        the matrix work instead of preceding it.
+//                     3  as 2, but only the activation run is held.
+//                     4  branch-free version of 2 whose conversion and store
+//                        are sliced into the multiply itself, one slice between
+//                        every four matrix instructions.
+//                     5  as 1, but the rendezvous is a split barrier
+//                        (`s_barrier_signal`/`s_barrier_wait`, gfx12), so a
+//                        warp that finished its stores starts multiplying
+//                        while its neighbours are still storing.
 //   PWW2_TOKFAST      swap the grid so token tiles run fastest, which keeps one
 //                      weight panel hot in L2 across all token tiles.
+//
+// The shipped depth is 0. Depths 1-5 are probe depths; none of them is faster
+// at this tile, and `docs/notes/prefill-tile-ceiling.md` records why.
 //
 // The k order is unchanged (16-value steps, in order), so every shape here is
 // bit-identical to the shipped kernel; only the tile boundaries move.
@@ -554,12 +565,143 @@ static __device__ __forceinline__ void pww2_body_impl(
         for (int kk = 0; kk < PWW2_KW / 16; ++kk) compute_kk(xs, ws, kk);
     };
 
+#if PWW2_PF == 4
+    // The multiplier is cut into four quadrants per 16-wide k step, so eight
+    // slices of staging can sit between matrix instructions. `s` selects the
+    // slice; a chunk is emitted on the slice it was spread to. Every byte was
+    // already fetched by load_x/load_w, so only the conversion and the shared
+    // store happen here.
+    constexpr int PWW2_NX = XHALF ? PWW2_TT / PWW2_XROW_H : PWW2_TT / PWW2_XROW;
+    constexpr int PWW2_NW = PWW2_KQ * PWW2_RP;
+    constexpr int PWW2_NSLICE = (PWW2_KW / 16) * 4;
+    auto commit_slice = [&](_Float16* xs, _Float16* ws, int base, int s) {
+#if PWW2_PROBE_NO_STAGE
+        (void)xs; (void)ws; (void)base; (void)s;
+#else
+#if !PWW2_PROBE_NO_X
+#pragma unroll
+        for (int idx = 0; idx < PWW2_KQ * PWW2_NX; ++idx) {
+            if (idx * PWW2_NSLICE / (PWW2_KQ * PWW2_NX) != s) continue;
+            const int q = idx / PWW2_NX;
+            const int p = idx % PWW2_NX;
+            const int rl = p * (XHALF ? PWW2_XROW_H : PWW2_XROW) + xt;
+            if (XHALF) {
+                *reinterpret_cast<pww2_u4*>(xs + rl * PWW2_XS + q * 32 + xc) = xh[idx];
+            } else {
+                const float4 v = xf[idx];
+                __half2* dst = reinterpret_cast<__half2*>(xs + rl * PWW2_XS + q * 32 + xc);
+                dst[0] = __floats2half2_rn(v.x, v.y);
+                dst[1] = __floats2half2_rn(v.z, v.w);
+            }
+        }
+#endif
+#if !PWW2_PROBE_NO_W
+#pragma unroll
+        for (int idx = 0; idx < PWW2_NW; ++idx) {
+            if (idx * PWW2_NSLICE / PWW2_NW != s) continue;
+            const int q = idx / PWW2_RP;
+            const int p = idx % PWW2_RP;
+            const int rl = p * PWW2_DPROW + d_row;
+            if (rl >= PWW2_RT) continue;
+            const int gr = row_base + rl;
+            const int kc = base + q * 32 + d_q * 8;
+            float v[8];
+            if (gr < m) {
+                pww2_dequant8<KIND>(wraw[idx], w + (size_t)gr * wrow, kc, v);
+            } else {
+#pragma unroll
+                for (int i = 0; i < 8; ++i) v[i] = 0.f;
+            }
+            pww2_h8 hv;
+#pragma unroll
+            for (int i = 0; i < 8; ++i) hv[i] = (_Float16)v[i];
+            *reinterpret_cast<pww2_h8*>(ws + rl * PWW2_WS + q * 32 + d_q * 8) = hv;
+        }
+#endif
+#endif
+    };
+#endif
+
 #if PWW2_PF >= 1
     stage(shx, shw, kb);
     __syncthreads();
+#endif
+
+#if PWW2_PF == 4
+    // Branch-free pipeline body. The `if (more)` guard the shallower depths use
+    // splits the body into predicated blocks, and the scheduler then sinks
+    // every prefetched load down to the store that consumes it, which is why
+    // those depths measure as the serial reference: the global fetch never
+    // overlaps anything. Staging one extra tile, into the buffer the loop then
+    // leaves unused, removes the guard from the body so the fetch of tile i+1
+    // can sit above the multiply of tile i.
+    const int ntiles = (ke - kb + PWW2_KW - 1) / PWW2_KW;
+    for (int t = 0, b = 0, base = kb; t < ntiles; ++t, b ^= 1) {
+        const int nb = (t + 1 < ntiles) ? base + PWW2_KW : base;
+        load_x(nb);
+        load_w(nb);
+        // The conversion and the shared store of that fetch are cut into eight
+        // slices, each sitting between two groups of matrix instructions, so
+        // the LDS unit and the vector ALU work while the matrix pipe drains
+        // tile i. The accumulator order is untouched: a slice only moves stores
+        // that the next iteration's fragment reads consume.
+        const _Float16* cx = shx + b * PWW2_TT * PWW2_XS;
+        const _Float16* cw = shw + b * PWW2_RT * PWW2_WS;
+        _Float16* nx = shx + (b ^ 1) * PWW2_TT * PWW2_XS;
+        _Float16* nw = shw + (b ^ 1) * PWW2_RT * PWW2_WS;
+#pragma unroll
+        for (int kk = 0; kk < PWW2_KW / 16; ++kk) {
+            // Four quadrants of the 16-accumulator grid. Only two activation
+            // fragments and two weight fragments are live at a time, which is
+            // what keeps the prefetched next tile inside the register file.
+#pragma unroll
+            for (int qi = 0; qi < PWW2_NTG / 2; ++qi)
+#pragma unroll
+                for (int qj = 0; qj < PWW2_NRG / 2; ++qj) {
+                    pww2_h8 av[2];
+                    pww2_h8 bv[2];
+#pragma unroll
+                    for (int e = 0; e < 2; ++e)
+                        av[e] = *reinterpret_cast<const pww2_h8*>(
+                            cx + xoff + (qi * 2 + e) * 16 * PWW2_XS + kk * 16);
+#pragma unroll
+                    for (int e = 0; e < 2; ++e)
+                        bv[e] = *reinterpret_cast<const pww2_h8*>(
+                            cw + boff + (qj * 2 + e) * 16 * PWW2_WS + kk * 16);
+#pragma unroll
+                    for (int ei = 0; ei < 2; ++ei)
+#pragma unroll
+                        for (int ej = 0; ej < 2; ++ej) {
+                            const int idx = (qi * 2 + ei) * PWW2_NRG + qj * 2 + ej;
+                            acc[idx] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(
+                                av[ei], bv[ej], acc[idx]);
+                        }
+                    commit_slice(nx, nw, nb, kk * 4 + qi * 2 + qj);
+                }
+        }
+        __syncthreads();
+        base = nb;
+    }
+#elif PWW2_PF >= 1
     for (int base = kb, b = 0; base < ke; base += PWW2_KW, b ^= 1) {
         const bool more = base + PWW2_KW < ke;
-#if PWW2_PF >= 3
+#if PWW2_PF == 5
+        // Same order as PF=1 (stage the next tile, then multiply the current
+        // one), but the rendezvous is a split barrier: `s_barrier_signal` and
+        // `s_barrier_wait` are separate instructions on gfx12, so a warp that
+        // has finished its shared stores starts multiplying while its
+        // neighbours are still storing. Nothing is held in registers across the
+        // multiply, so this costs the same VGPRs as the serial loop.
+        if (more) {
+            load_x(base + PWW2_KW);
+            commit_x(shx + (b ^ 1) * PWW2_TT * PWW2_XS, base + PWW2_KW);
+            load_w(base + PWW2_KW);
+            commit_w(shw + (b ^ 1) * PWW2_RT * PWW2_WS, base + PWW2_KW);
+        }
+        __builtin_amdgcn_s_barrier_signal(-1);
+        compute(shx + b * PWW2_TT * PWW2_XS, shw + b * PWW2_RT * PWW2_WS);
+        __builtin_amdgcn_s_barrier_wait(-1);
+#elif PWW2_PF >= 3
         // x-only pipeline: the fp16 activation run is the widest global stream
         // in the tile, and it needs no conversion, so hold just that array in
         // registers across the multiply. The weight bytes are fetched after it,
@@ -599,7 +741,9 @@ static __device__ __forceinline__ void pww2_body_impl(
         }
         compute(shx + b * PWW2_TT * PWW2_XS, shw + b * PWW2_RT * PWW2_WS);
 #endif
+#if PWW2_PF != 5
         __syncthreads();
+#endif
     }
 #else
     for (int base = kb; base < ke; base += PWW2_KW) {
