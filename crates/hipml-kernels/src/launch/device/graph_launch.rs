@@ -72,12 +72,30 @@ impl Launcher {
     /// This is the whole batch integration: `R <= 16` columns are padded to one
     /// 16-wide WMMA tile, so the cost is the weight stream, not R.
     fn skinny_for_kind(kind: i32) -> Option<&'static str> {
-        Some(match kind {
-            GEMV_B_Q4K => "gemm_skinny_q4_k",
-            GEMV_B_Q6K => "gemm_skinny_q6_k",
-            GEMV_B_Q80 => "gemm_skinny_q8_0",
-            _ => return None,
-        })
+        crate::batch_kind_gemv(kind).and_then(crate::skinny_entry)
+    }
+
+    /// `HIPML_BATCH_TRACE=1`: name each batched projection route once, so an
+    /// operator can see which kernel a slot count actually reaches. Once per
+    /// `(entry, m, k, batch)` rather than per step, so a long server run prints
+    /// a table and not a firehose.
+    fn trace_route(entry: &'static str, m: usize, k: usize, batch: usize) {
+        use std::sync::{Mutex, OnceLock};
+        type Seen = Mutex<Vec<(&'static str, usize, usize, usize)>>;
+        static SEEN: OnceLock<Seen> = OnceLock::new();
+        if std::env::var_os("HIPML_BATCH_TRACE").is_none() {
+            return;
+        }
+        let mut seen = SEEN
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .expect("batch trace table");
+        let key = (entry, m, k, batch);
+        if seen.contains(&key) {
+            return;
+        }
+        seen.push(key);
+        eprintln!("[batch] {entry} m={m} k={k} b={batch}");
     }
 
     /// `y[b][row] = W[row,:] . x[b][:]` for `batch` rows, one weight pass.
@@ -165,6 +183,7 @@ impl Launcher {
             && (std::env::var_os("HIPML_BATCH_SKINNY").is_some() || crate::skinny_on());
         if skinny {
             if let Some(entry) = Self::skinny_for_kind(kind) {
+                Self::trace_route(entry, m, k, batch);
                 let mut base = 0usize;
                 while base < batch {
                     let r = (batch - base).min(16);
@@ -189,21 +208,42 @@ impl Launcher {
                 return Ok(());
             }
         }
-        let (entry, rows, tile, tid) = match kind {
-            GEMV_B_Q4K => ("gemv_q4_k_b", 16usize, 1024usize, 256u32),
-            GEMV_B_Q6K => ("gemv_q6_k_b", 16, 1024, 256),
-            GEMV_B_Q5K => ("gemv_q5_k_b", 16, 1024, 256),
-            GEMV_B_Q80 => ("gemv_q8_0_b", 1, 0, 256),
-            GEMV_B_IQ4XS => ("gemv_iq4_xs_b", 16, 1024, 256),
-            GEMV_B_IQ4NL => ("gemv_iq4_nl_b", 16, 1024, 256),
-            GEMV_B_Q3K => ("gemv_q3_k_b", 16, 1024, 256),
-            GEMV_B_IQ3S => ("gemv_iq3_s_b", 16, 1024, 256),
-            other => return Err(format!("unknown batched GEMV kind {other}")),
+        let name = crate::batch_kind_gemv(kind)
+            .ok_or_else(|| format!("unknown batched GEMV kind {kind}"))?;
+        // One active slot is not a batch: the single-column decode kernel reads
+        // the same bytes with a better geometry (one row per warp) and measured
+        // 7.4% faster at B=1 on the UD file (28.87 vs 31.19 tok/s in-process,
+        // batch-bench). The `_b` row tile stays the path from B=2 up, where its
+        // sharing is what wins. The exact contract is unchanged -- this is the
+        // kernel `batch-bench --check` already measures every slot against.
+        if batch == 1 {
+            let entry = crate::stream_entry(name);
+            Self::trace_route(entry, m, k, batch);
+            return self.run_quant_resident_ptr(
+                entry,
+                w,
+                px as *mut c_void,
+                py as *mut c_void,
+                m,
+                k,
+            );
+        }
+        let (entry, rows, tile, tid) = match name {
+            "gemv_q4_k" => ("gemv_q4_k_b", 16usize, 1024usize, 256u32),
+            "gemv_q6_k" => ("gemv_q6_k_b", 16, 1024, 256),
+            "gemv_q5_k" => ("gemv_q5_k_b", 16, 1024, 256),
+            "gemv_q8_0" => ("gemv_q8_0_b", 1, 0, 256),
+            "gemv_iq4_xs" => ("gemv_iq4_xs_b", 16, 1024, 256),
+            "gemv_iq4_nl" => ("gemv_iq4_nl_b", 16, 1024, 256),
+            "gemv_q3_k" => ("gemv_q3_k_b", 16, 1024, 256),
+            "gemv_iq3_s" => ("gemv_iq3_s_b", 16, 1024, 256),
+            other => return Err(format!("{other}: no batched GEMV kernel")),
         };
+        Self::trace_route(entry, m, k, batch);
         let kernel = self.module.kernel(entry)?;
-        // Formats without a skinny entry (Q5_K today) still have the `_b`
-        // kernel; it covers at most 8 rows, so run it once per group. Those
-        // tensors are a small share of the resident bytes.
+        // The `_b` kernels cover at most 8 rows, so the exact path takes one
+        // pass per 8-row group (`HIPML_BATCH_LEGACY` at any B, or B < 4 where
+        // the tile pads R to 16 and loses).
         let mut base = 0usize;
         while base < batch {
             let r = (batch - base).min(8);

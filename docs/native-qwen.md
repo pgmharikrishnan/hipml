@@ -48,9 +48,18 @@ nine; what differs is *how*, and that is the whole of the cost:
   (was 17,826,136,064 B / 16.60 GiB, the difference being the 1.19 GiB the two
   Q3_K and two IQ3_S tensors used to gain), and `UD-Q4_K_XL` 17,548,181,504 B
   (16.34 GiB, was 17.53 GiB).
-- Still unmeasured: nothing beyond 8,192 tokens, batching, MTP or the cache
-  gates has been run on a UD file; the 64-row f32-tile `prefill_iq4_*` entries
-  are wired but the default WMMA path selects `_w2h` instead.
+- **Batched decode reaches the skinny tile for all eight block types.** The tile
+  has an entry per resident format (`gemm_skinny_{q4_k,q5_k,q6_k,q8_0,iq4_xs,
+  iq4_nl,q3_k,iq3_s}`), chosen from one table (`BATCH_RESIDENT` in
+  `crates/hipml-kernels`). Before that, Q5_K (32% of this file's bytes) and the
+  four IQ/small-K formats had no entry and every batched projection fell back to
+  the exact `_b` GEMV, which is why 16 slots on UD ran at 97.42 tok/s against
+  216.88 for the stock file. With the entries, 16 slots reach 201.59 on the
+  approximate tile (2.07x its own baseline, 92.9% of stock); the exact path is
+  unchanged at 96.87. See [`notes/serve-ud-batch.md`](notes/serve-ud-batch.md).
+- Still unmeasured on a UD file: contexts beyond 8,192 tokens with batching,
+  MTP over a batch, and the cache gates; the 64-row f32-tile `prefill_iq4_*`
+  entries are wired but the default WMMA path selects `_w2h` instead.
 
 ## Architecture config (read from the GGUF by `hipml load`)
 

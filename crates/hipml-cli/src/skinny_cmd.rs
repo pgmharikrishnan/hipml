@@ -12,7 +12,10 @@
 
 use std::time::Instant;
 
-use hipml_core::quant::{random_q4_k_bytes, random_q6_k_bytes, random_q8_0_bytes, TensorType};
+use hipml_core::quant::{
+    random_iq3_s_bytes, random_iq4_nl_bytes, random_iq4_xs_bytes, random_q3_k_bytes,
+    random_q4_k_bytes, random_q5_k_bytes, random_q6_k_bytes, random_q8_0_bytes, TensorType,
+};
 use hipml_core::rng::Rng;
 use hipml_hip::{Buffer, ByteBuffer};
 use hipml_kernels::Launcher;
@@ -63,11 +66,53 @@ const SHAPES: &[Shape] = &[
 
 const ROWS: &[usize] = &[1, 2, 4, 8, 16];
 
+/// The same ffn projections as they appear in an Unsloth dynamic-quant mix,
+/// where IQ4_XS and Q5_K are two thirds of the resident bytes. `--ud` measures
+/// these instead: the tile's cost is per format, and the Q4_K/Q6_K curves say
+/// nothing about the formats that decide a UD file's slot throughput.
+const UD_SHAPES: &[Shape] = &[
+    Shape {
+        label: "q5_k 17408x5120 ffn_gate (UD)",
+        ty: TensorType::Q5K,
+        n: 17408,
+        k: 5120,
+    },
+    Shape {
+        label: "iq4_xs 17408x5120 ffn_up (UD)",
+        ty: TensorType::IQ4XS,
+        n: 17408,
+        k: 5120,
+    },
+    Shape {
+        label: "q5_k 5120x17408 ffn_down (UD)",
+        ty: TensorType::Q5K,
+        n: 5120,
+        k: 17408,
+    },
+    Shape {
+        label: "iq4_xs 5120x17408 ffn_down (UD)",
+        ty: TensorType::IQ4XS,
+        n: 5120,
+        k: 17408,
+    },
+    Shape {
+        label: "iq4_nl 5120x17408 ffn_down (UD)",
+        ty: TensorType::IQ4NL,
+        n: 5120,
+        k: 17408,
+    },
+];
+
 fn weight_bytes(ty: TensorType, n: usize, k: usize) -> u64 {
     match ty {
         TensorType::Q4K => (n * k / 256 * 144) as u64,
+        TensorType::Q5K => (n * k / 256 * 176) as u64,
         TensorType::Q6K => (n * k / 256 * 210) as u64,
         TensorType::Q8_0 => (n * k / 32 * 34) as u64,
+        TensorType::IQ4XS => (n * k / 256 * 136) as u64,
+        TensorType::IQ4NL => (n * k / 32 * 18) as u64,
+        TensorType::Q3K => (n * k / 256 * 110) as u64,
+        TensorType::IQ3S => (n * k / 256 * 110) as u64,
         _ => 0,
     }
 }
@@ -76,8 +121,13 @@ fn build_weights(ty: TensorType, n: usize, k: usize, seed: u64) -> Vec<u8> {
     let mut rng = Rng::new(seed);
     match ty {
         TensorType::Q4K => random_q4_k_bytes(&mut rng, n * k / 256),
+        TensorType::Q5K => random_q5_k_bytes(&mut rng, n * k / 256),
         TensorType::Q6K => random_q6_k_bytes(&mut rng, n * k / 256),
         TensorType::Q8_0 => random_q8_0_bytes(&mut rng, n * k / 32),
+        TensorType::IQ4XS => random_iq4_xs_bytes(&mut rng, n * k / 256),
+        TensorType::IQ4NL => random_iq4_nl_bytes(&mut rng, n * k / 32),
+        TensorType::Q3K => random_q3_k_bytes(&mut rng, n * k / 256),
+        TensorType::IQ3S => random_iq3_s_bytes(&mut rng, n * k / 256),
         _ => Vec::new(),
     }
 }
@@ -85,8 +135,13 @@ fn build_weights(ty: TensorType, n: usize, k: usize, seed: u64) -> Vec<u8> {
 fn entry_for(ty: TensorType) -> &'static str {
     match ty {
         TensorType::Q4K => "gemm_skinny_q4_k",
+        TensorType::Q5K => "gemm_skinny_q5_k",
         TensorType::Q6K => "gemm_skinny_q6_k",
         TensorType::Q8_0 => "gemm_skinny_q8_0",
+        TensorType::IQ4XS => "gemm_skinny_iq4_xs",
+        TensorType::IQ4NL => "gemm_skinny_iq4_nl",
+        TensorType::Q3K => "gemm_skinny_q3_k",
+        TensorType::IQ3S => "gemm_skinny_iq3_s",
         _ => unreachable!(),
     }
 }
@@ -94,8 +149,13 @@ fn entry_for(ty: TensorType) -> &'static str {
 fn gemv_for(ty: TensorType) -> &'static str {
     match ty {
         TensorType::Q4K => "gemv_q4_k_r1",
+        TensorType::Q5K => "gemv_q5_k",
         TensorType::Q6K => "gemv_q6_k_r1",
         TensorType::Q8_0 => "gemv_q8_0",
+        TensorType::IQ4XS => "gemv_iq4_xs",
+        TensorType::IQ4NL => "gemv_iq4_nl",
+        TensorType::Q3K => "gemv_q3_k",
+        TensorType::IQ3S => "gemv_iq3_s",
         _ => unreachable!(),
     }
 }
@@ -133,9 +193,14 @@ pub fn run(args: &[String]) -> i32 {
         launcher.device_name, reps
     );
 
+    let shapes: &[Shape] = if args.iter().any(|a| a == "--ud") {
+        UD_SHAPES
+    } else {
+        SHAPES
+    };
     let mut worst4 = 0.0f64;
     let mut worst8 = 0.0f64;
-    for (si, shape) in SHAPES.iter().enumerate() {
+    for (si, shape) in shapes.iter().enumerate() {
         let bytes = weight_bytes(shape.ty, shape.n, shape.k);
         let w = build_weights(shape.ty, shape.n, shape.k, 0x5C33_0001 + si as u64);
         let wb = match ByteBuffer::from_host(&w) {
@@ -235,7 +300,10 @@ pub fn run(args: &[String]) -> i32 {
         println!();
     }
 
-    println!("worst case over the five shapes: r=4 {worst4:.2}x, r=8 {worst8:.2}x");
+    println!(
+        "worst case over the {} shapes: r=4 {worst4:.2}x, r=8 {worst8:.2}x",
+        shapes.len()
+    );
 
     if args.iter().any(|a| a == "--geometry") {
         println!(

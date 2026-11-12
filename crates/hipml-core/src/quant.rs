@@ -777,6 +777,8 @@ const D_Q6K: [u8; 2] = 0x1400u16.to_le_bytes();
 const D_Q8_0: [u8; 2] = 0x1400u16.to_le_bytes();
 const D_Q3K: [u8; 2] = 0x1400u16.to_le_bytes();
 const D_IQ3S: [u8; 2] = 0x1400u16.to_le_bytes();
+const D_IQ4XS: [u8; 2] = 0x1400u16.to_le_bytes();
+const D_IQ4NL: [u8; 2] = 0x1400u16.to_le_bytes();
 
 /// Deterministic Q4_K block bytes: valid fp16 scales, random 6-bit headers and
 /// random quants. Used by the parity and bench cases.
@@ -841,6 +843,28 @@ pub fn random_iq3_s_bytes(rng: &mut Rng, nblocks: usize) -> Vec<u8> {
     for b in out.chunks_mut(IQ3_S_BYTES) {
         fill_random(rng, b);
         b[0..2].copy_from_slice(&D_IQ3S);
+    }
+    out
+}
+
+/// Deterministic IQ4_XS block bytes: random 6-bit sub-block scales and quants,
+/// with a valid fp16 super-scale in front.
+pub fn random_iq4_xs_bytes(rng: &mut Rng, nblocks: usize) -> Vec<u8> {
+    let mut out = vec![0u8; nblocks * IQ4_XS_BYTES];
+    for b in out.chunks_mut(IQ4_XS_BYTES) {
+        fill_random(rng, b);
+        b[0..2].copy_from_slice(&D_IQ4XS);
+    }
+    out
+}
+
+/// Deterministic IQ4_NL block bytes: random 4-bit codebook indices, with a
+/// valid fp16 block scale in front.
+pub fn random_iq4_nl_bytes(rng: &mut Rng, nblocks: usize) -> Vec<u8> {
+    let mut out = vec![0u8; nblocks * IQ4_NL_BYTES];
+    for b in out.chunks_mut(IQ4_NL_BYTES) {
+        fill_random(rng, b);
+        b[0..2].copy_from_slice(&D_IQ4NL);
     }
     out
 }

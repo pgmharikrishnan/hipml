@@ -90,10 +90,13 @@ It reads `HIPML_EXE`, `HIPML_GGUF`, `HIPML_MTP_GGUF`, `HIP_PATH` and
 
 ## Exactness
 
-Batched decode at B ≥ 4 uses a WMMA skinny GEMV that is 1.4× (B=8) to 2.5×
-(B=16) faster than the exact kernels at fleet slot counts. It is not
-bit-identical to single-stream decode at 4+ rows. The server says which path
-served a reply:
+Batched decode at B ≥ 4 uses a WMMA skinny GEMV that is 1.4x (B=8) to 2.5x
+(B=16) faster than the exact kernels at fleet slot counts. It covers every
+resident block type, including the Unsloth UD formats: the tile's five
+UD-only entries (Q5_K, IQ4_XS, IQ4_NL, Q3_K, IQ3_S) are what keep a UD file
+off the exact `_b` GEMV at 16 slots. It is not bit-identical to single-stream
+decode at 4+ rows. `HIPML_BATCH_TRACE=1` names the kernel each projection
+actually took, once per shape. The server says which path served a reply:
 
 | header | meaning |
 |---|---|

@@ -89,8 +89,17 @@ static __device__ __forceinline__ void pws_scale_min(int j, unsigned w0, unsigne
 //   Q4_K  r[0] = d | dmin, r[1..3] = the 12 scale bytes, r[4..5] = 8 nibbles
 //   Q6_K  r[0..1] = ql, r[2..3] = qh, r[4] = d, r[5] = sub-block scale
 //   Q8_0  r[0..1] = the 8 quants, r[2] = d
+//
+// Kinds 4..6 (Q5_K, IQ4_XS, IQ4_NL) get their own prep/finish below: their
+// bytes are contiguous in the same "eight values per lane" run the Q4_K path
+// reads, and a vector load is 2.5-6x faster than the prefill reader's per-value
+// byte loads (which are tuned for a different loop). Kinds 7 and 8 (Q3_K,
+// IQ3_S) keep the prefill reader: together they are 1.4% of a UD file's bytes
+// and 110-byte blocks make the vector split awkward.
 struct pws_raw {
     unsigned r[6];
+    const unsigned char* rp;
+    int v;
 };
 
 static __device__ __forceinline__ unsigned pws_u16pair(const unsigned char* p)
@@ -104,6 +113,56 @@ template <int KIND>
 static __device__ __forceinline__ void pws_prep(const unsigned char* __restrict__ rp,
                                                 int v, pws_raw& out)
 {
+    if (KIND == 4) {
+        // Q5_K: 16-byte header (d, dmin, the 12 scale bytes) and the `qh` run;
+        // the qs run is the one load left to the arithmetic phase.
+        const int blk = v >> 8;
+        const int part = (v & 31) >> 3;
+        const unsigned char* b = rp + (size_t)blk * PF_Q5K_BLOCK_BYTES;
+        const uint2 h0 = *reinterpret_cast<const uint2*>(b);
+        const uint2 h1 = *reinterpret_cast<const uint2*>(b + 8);
+        const uint2 p = *reinterpret_cast<const uint2*>(b + 16 + part * 8);
+        out.r[0] = h0.x;
+        out.r[1] = h0.y;
+        out.r[2] = h1.x;
+        out.r[3] = h1.y;
+        out.r[4] = p.x;
+        out.r[5] = p.y;
+        out.rp = b;
+        return;
+    }
+    if (KIND == 5) {
+        // IQ4_XS: d and scales_h share one dword, the four scales_l bytes are
+        // the next, then the 8-value run. 136-byte blocks are 8-aligned.
+        const int blk = v >> 8;
+        const int sub = (v & 255) >> 5;
+        const int part = (v & 31) >> 3;
+        const unsigned char* b = rp + (size_t)blk * PF_IQ4_XS_BLOCK_BYTES;
+        const uint2 q =
+            *reinterpret_cast<const uint2*>(b + 8 + sub * 16 + (part & 1) * 8);
+        out.r[0] = *reinterpret_cast<const unsigned*>(b);
+        out.r[1] = *reinterpret_cast<const unsigned*>(b + 4);
+        out.r[2] = q.x;
+        out.r[3] = q.y;
+        return;
+    }
+    if (KIND == 6) {
+        // IQ4_NL: 18-byte blocks are only 2-aligned, so the run is read as u16
+        // pairs -- still four loads for eight values, not eight.
+        const int blk = v >> 5;
+        const int part = (v & 31) >> 3;
+        const unsigned char* b = rp + (size_t)blk * PF_IQ4_NL_BLOCK_BYTES;
+        const unsigned char* p = b + 2 + (part & 1) * 8;
+        out.r[0] = (unsigned)*(reinterpret_cast<const unsigned short*>(b));
+        out.r[1] = pws_u16pair(p);
+        out.r[2] = pws_u16pair(p + 4);
+        return;
+    }
+    if (KIND >= 7) {
+        out.rp = rp;
+        out.v = v;
+        return;
+    }
     if (KIND == 0) {
         // 144-byte blocks, 16-aligned rows: the 16-byte header and the 8-byte
         // nibble run are both naturally aligned, so each is one load.
@@ -153,11 +212,69 @@ static __device__ __forceinline__ void pws_prep(const unsigned char* __restrict_
 }
 
 // The same eight values, arithmetic only. `within` is `(base + wcol) & 255`.
+// `kv` is the IQ4 codebook staged in shared by `pws_body` (a `__constant__`
+// table is a global load on this target, and the index is per-lane).
 template <int KIND>
 static __device__ __forceinline__ void pws_finish(const pws_raw& in, int within,
-                                                  float* out)
+                                                  const float* kv, float* out)
 {
-    if (KIND == 0) {
+    if (KIND == 4) {
+        const int sub = within >> 5;
+        const int g = within >> 6;
+        const int part = (within & 31) >> 3;
+        const float d =
+            __half2float(__ushort_as_half((unsigned short)(in.r[0] & 0xFFFFu)));
+        const float dmin =
+            __half2float(__ushort_as_half((unsigned short)(in.r[0] >> 16)));
+        int sc, mn;
+        pws_scale_min(sub, in.r[1], in.r[2], in.r[3], &sc, &mn);
+        const float scale = d * (float)sc;
+        const float minv = dmin * (float)mn;
+        const bool high = (sub & 1) != 0;
+        const unsigned bit = high ? (2u << (2 * g)) : (1u << (2 * g));
+        const uint2 q = *reinterpret_cast<const uint2*>(
+            in.rp + 48 + g * 32 + part * 8);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const unsigned word = (i < 4) ? q.x : q.y;
+            const unsigned hw = (i < 4) ? in.r[4] : in.r[5];
+            const int byte = (int)((word >> (8 * (i & 3))) & 0xFF);
+            const int nib = high ? (byte >> 4) : (byte & 0xF);
+            const int fifth = ((hw >> (8 * (i & 3))) & bit) ? 16 : 0;
+            out[i] = scale * (float)(nib + fifth) - minv;
+        }
+    } else if (KIND == 5) {
+        const int sub = within >> 5;
+        const int part = (within & 31) >> 3;
+        const float d =
+            __half2float(__ushort_as_half((unsigned short)(in.r[0] & 0xFFFFu)));
+        const unsigned sh = in.r[0] >> 16;
+        const int ls = (int)((in.r[1] >> (8 * (sub >> 1) + 4 * (sub & 1))) & 0xF) |
+                       (int)(((sh >> (2 * sub)) & 3) << 4);
+        const float dl = d * (float)(ls - 32);
+        const bool high = part >= 2;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const unsigned word = in.r[2 + (i >> 2)];
+            const int byte = (int)((word >> (8 * (i & 3))) & 0xFF);
+            const int q = high ? (byte >> 4) : (byte & 0xF);
+            out[i] = dl * kv[q];
+        }
+    } else if (KIND == 6) {
+        const int part = (within & 31) >> 3;
+        const float d =
+            __half2float(__ushort_as_half((unsigned short)(in.r[0] & 0xFFFFu)));
+        const bool high = part >= 2;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const unsigned word = in.r[1 + (i >> 2)];
+            const int byte = (int)((word >> (8 * (i & 3))) & 0xFF);
+            const int q = high ? (byte >> 4) : (byte & 0xF);
+            out[i] = d * kv[q];
+        }
+    } else if (KIND >= 7) {
+        pf_dequant8<KIND>(in.rp, in.v, out);
+    } else if (KIND == 0) {
         const int sub = within >> 5;
         const float d =
             __half2float(__ushort_as_half((unsigned short)(in.r[0] & 0xFFFFu)));
@@ -228,13 +345,18 @@ static __device__ __forceinline__ void pws_body(
     static_assert(KW % 32 == 0 && KW <= 256, "KW must be 32-aligned and <= 256");
     static_assert(16 % XRP == 0, "token staging must cover 16 rows");
     static_assert(RT % PRP == 0, "ragged weight staging");
+    // KIND 3 is the already-half prefill variant; no resident weight is half.
+    static_assert(KIND != 3, "gemm_skinny: kind 3 has no resident weight");
 
     __shared__ __align__(16) _Float16 shx[16 * XS];
     __shared__ __align__(16) _Float16 shw[RT * WS];
+    // The IQ4 codebook, for the kinds that index it per lane.
+    __shared__ float shkv[16];
 
     const int tid = threadIdx.x;
     const int lane = tid & 31;
     const int warp = tid >> 5;
+    if ((KIND == 5 || KIND == 6) && tid < 16) shkv[tid] = (float)PF_IQ4NL_KV[tid];
     const int row_base = blockIdx.x * RT;
     const size_t wrow = pf_row_bytes(k, KIND);
 
@@ -291,7 +413,7 @@ static __device__ __forceinline__ void pws_body(
                 for (int p = 0; p < WB; ++p) {
                     const int rl = (p0 + p) * PRP + wrow_l;
                     float v[8];
-                    pws_finish<KIND>(raw[p], within, v);
+                    pws_finish<KIND>(raw[p], within, shkv, v);
                     pws_h8 hv;
 #pragma unroll
                     for (int i = 0; i < 8; ++i) hv[i] = (_Float16)v[i];
@@ -391,4 +513,60 @@ extern "C" __global__ void gemm_skinny_q8_0(
     int r)
 {
     pws_body<2, PWS_RT, PWS_KW, PWS_THREADS>(w, x, y, n, k, r);
+}
+
+// The dynamic-quant formats: same tile, the prefill reader for the blocks.
+extern "C" __global__ void gemm_skinny_q5_k(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int n,
+    int k,
+    int r)
+{
+    pws_body<4, PWS_RT, PWS_KW, PWS_THREADS>(w, x, y, n, k, r);
+}
+
+extern "C" __global__ void gemm_skinny_iq4_xs(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int n,
+    int k,
+    int r)
+{
+    pws_body<5, PWS_RT, PWS_KW, PWS_THREADS>(w, x, y, n, k, r);
+}
+
+extern "C" __global__ void gemm_skinny_iq4_nl(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int n,
+    int k,
+    int r)
+{
+    pws_body<6, PWS_RT, PWS_KW, PWS_THREADS>(w, x, y, n, k, r);
+}
+
+extern "C" __global__ void gemm_skinny_q3_k(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int n,
+    int k,
+    int r)
+{
+    pws_body<7, PWS_RT, PWS_KW, PWS_THREADS>(w, x, y, n, k, r);
+}
+
+extern "C" __global__ void gemm_skinny_iq3_s(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int n,
+    int k,
+    int r)
+{
+    pws_body<8, PWS_RT, PWS_KW, PWS_THREADS>(w, x, y, n, k, r);
 }
