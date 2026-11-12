@@ -68,8 +68,14 @@ static __device__ __forceinline__ void iq4x_stage_group(const float* __restrict_
 }
 
 // Sixteen-column contribution of one IQ4_XS row to `acc`.
+//
+// The 16-entry codebook is read from shared memory as floats instead of indexed
+// out of the `__constant__` table per value: on this target `__constant__` lives
+// in global memory, so a divergent index costs an address add plus a load per
+// value. Same table, same values.
 static __device__ __forceinline__ void iq4x_acc(const unsigned char* __restrict__ rp,
-                                                int p, const float* xv, float* acc)
+                                                int p, const float* xv,
+                                                const float* __restrict__ scb, float* acc)
 {
     const int blk = p >> 8;
     const int within = p & 255;
@@ -95,7 +101,7 @@ static __device__ __forceinline__ void iq4x_acc(const unsigned char* __restrict_
 #pragma unroll
     for (int i = 0; i < IQ4X_VPL; ++i) {
         const int v = high ? (int)(q.b[i] >> 4) : (int)(q.b[i] & 0xF);
-        a = fmaf(dl * (float)IQ4NL_VALUES[v], xv[i], a);
+        a = fmaf(dl * scb[v], xv[i], a);
     }
     *acc = a;
 }
@@ -108,6 +114,7 @@ static __device__ __forceinline__ void iq4x_tile(
     int m,
     int k,
     float* __restrict__ sx,
+    float* __restrict__ scb,
     int tile)
 {
     const int tid = threadIdx.x;
@@ -115,6 +122,9 @@ static __device__ __forceinline__ void iq4x_tile(
     const int warp = tid >> 5;
     const int nblocks = k / IQ4X_VALUES;
     const int row_tile = IQ4X_WARPS * RPW;
+
+    // The first `__syncthreads()` after the x staging covers this store.
+    if (tid < 16) scb[tid] = (float)IQ4NL_VALUES[tid];
 
     int row[RPW];
     int r[RPW];
@@ -142,7 +152,7 @@ static __device__ __forceinline__ void iq4x_tile(
             for (int comp = 0; comp < IQ4X_VPL; ++comp) xv[comp] = sx[s + comp * 32];
             const int p = base + c;
 #pragma unroll
-            for (int rr = 0; rr < RPW; ++rr) iq4x_acc(rp[rr], p, xv, &acc[rr]);
+            for (int rr = 0; rr < RPW; ++rr) iq4x_acc(rp[rr], p, xv, scb, &acc[rr]);
         }
         __syncthreads();
     }
@@ -164,7 +174,8 @@ extern "C" __global__ void gemv_iq4_xs(
     int k)
 {
     __shared__ __align__(16) float sx[IQ4X_K_TILE];
-    iq4x_tile<IQ4X_ROWS_PER_WARP>(w, x, y, m, k, sx, blockIdx.x);
+    __shared__ __align__(16) float scb[16];
+    iq4x_tile<IQ4X_ROWS_PER_WARP>(w, x, y, m, k, sx, scb, blockIdx.x);
 }
 
 // ---------------------------------------------------------------------------

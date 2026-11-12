@@ -13,8 +13,8 @@
 //
 // Row tile, one row per warp: `gemv_q4_k_r1`'s geometry (8 rows per block,
 // 2048-value shared x tile, 16 values per lane) with Q5_K's fifth bit. The
-// dequant is the same shape as Q4_K's (`d*scale*q - dmin*min`) plus one bit
-// test per value, so it costs about one extra instruction per 16 values.
+// dequant is the same shape as Q4_K's (`d*scale*q - dmin*min`) with the nibble
+// and the fifth bit packed into one byte, so a value is one bit-field extract.
 //
 // Q5_K super-block (176 bytes, 256 values):
 //   d(2) dmin(2) scales(12) qh(32) qs(128)
@@ -71,6 +71,11 @@ static __device__ __forceinline__ void q5k_stage_group(const float* __restrict__
 }
 
 // Sixteen-column contribution of one Q5_K row to `acc`.
+//
+// The 5-bit value is formed as an integer and converted once, instead of adding
+// 16.0f under a predicate: same integers, same order, same FMAs, so the output
+// is bit-identical, and it drops the compare+select+add per value that the
+// float form compiles to.
 static __device__ __forceinline__ void q5k_acc(const unsigned char* __restrict__ rp,
                                                int p, const float* xv, float* acc)
 {
@@ -87,7 +92,6 @@ static __device__ __forceinline__ void q5k_acc(const unsigned char* __restrict__
     q5k_scale_min(sub, b + 4, &sc, &mn);
     const float scale = d * (float)sc;
     const float minv = dmin * (float)mn;
-    const unsigned int bit = high ? (2u << (2 * g)) : (1u << (2 * g));
 
     // 16 consecutive qs bytes and 16 consecutive qh bytes: four dwords each.
     // `within` is a multiple of 16, so `within & 31` selects which half of the
@@ -108,12 +112,22 @@ static __device__ __forceinline__ void q5k_acc(const unsigned char* __restrict__
     qh.w[3] = qhp[3];
 
     float a = *acc;
+    // Pack the nibble and the fifth bit into one dword: byte j of `qb[k]` then
+    // holds value 4k+j in bits 0..4, so a value is one bit-field extract.
+    // `qsh` moves the chunk's fifth bit to bit 4 of each byte; `nsh` selects the
+    // low or high nibble.
+    const unsigned int qsh = (unsigned int)(2 * g + (high ? 1 : 0));
+    const unsigned int nsh = high ? 4u : 0u;
+    unsigned int qb[4];
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+        const unsigned int b4 = ((qh.w[k] >> qsh) << 4) & 0x10101010u;
+        qb[k] = ((qs.w[k] >> nsh) & 0x0F0F0F0Fu) | b4;
+    }
 #pragma unroll
     for (int i = 0; i < Q5K_VPL; ++i) {
-        const unsigned int byte = qs.b[i];
-        const unsigned int nib = high ? (byte >> 4) : (byte & 0xF);
-        const float q = (float)nib + ((qh.b[i] & bit) ? 16.0f : 0.0f);
-        a = fmaf(scale * q - minv, xv[i], a);
+        const unsigned int q = (qb[i >> 2] >> (8 * (i & 3))) & 0x1Fu;
+        a = fmaf(scale * (float)q - minv, xv[i], a);
     }
     *acc = a;
 }

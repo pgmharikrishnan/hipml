@@ -49,31 +49,41 @@ static __device__ __forceinline__ void iq4n_stage_group(const float* __restrict_
     }
 }
 
-// IQ4_NL blocks are 18 bytes, so the payload at b+2 is only byte-aligned.
+// IQ4_NL blocks are 18 bytes, so the payload at b+2 is only 2-byte aligned.
+// Four dword loads instead of sixteen byte loads: same bytes, and a global load
+// only needs 4-byte alignment on this target.
 static __device__ __forceinline__ void iq4n_read16(const unsigned char* src,
-                                                   unsigned char* dst)
+                                                   unsigned int* dst)
 {
 #pragma unroll
-    for (int i = 0; i < 16; ++i) dst[i] = src[i];
+    for (int i = 0; i < 4; ++i) __builtin_memcpy(dst + i, src + 4 * i, 4);
 }
 
+// The 16-entry codebook is read from shared memory as floats instead of indexed
+// out of the `__constant__` table per value: on this target `__constant__` lives
+// in global memory, so a divergent index costs an address add plus a load per
+// value. Same table, same values.
 static __device__ __forceinline__ void iq4n_acc(const unsigned char* __restrict__ rp,
-                                                int p, const float* xv, float* acc)
+                                                int p, const float* xv,
+                                                const float* __restrict__ scb, float* acc)
 {
     const int blk = p >> 5;
     const int part = (p & 31) >> 4;
 
     const unsigned char* b = rp + (size_t)blk * IQ4N_BLOCK_BYTES;
     const float d = __half2float(*reinterpret_cast<const __half*>(b));
-    unsigned char q[16];
-    iq4n_read16(b + 2, q);
+    union IQ4NBytes {
+        unsigned int w[4];
+        unsigned char b[16];
+    } q;
+    iq4n_read16(b + 2, q.w);
     const bool high = part != 0;
 
     float a = *acc;
 #pragma unroll
     for (int i = 0; i < IQ4N_VPL; ++i) {
-        const int v = high ? (int)(q[i] >> 4) : (int)(q[i] & 0xF);
-        a = fmaf(d * (float)IQ4N_KV[v], xv[i], a);
+        const int v = high ? (int)(q.b[i] >> 4) : (int)(q.b[i] & 0xF);
+        a = fmaf(d * scb[v], xv[i], a);
     }
     *acc = a;
 }
@@ -86,6 +96,7 @@ static __device__ __forceinline__ void iq4n_tile(
     int m,
     int k,
     float* __restrict__ sx,
+    float* __restrict__ scb,
     int tile)
 {
     const int tid = threadIdx.x;
@@ -93,6 +104,9 @@ static __device__ __forceinline__ void iq4n_tile(
     const int warp = tid >> 5;
     const int nblocks = k / IQ4N_VALUES;
     const int row_tile = IQ4N_WARPS * RPW;
+
+    // The first `__syncthreads()` after the x staging covers this store.
+    if (tid < 16) scb[tid] = (float)IQ4N_KV[tid];
 
     int row[RPW];
     int r[RPW];
@@ -120,7 +134,7 @@ static __device__ __forceinline__ void iq4n_tile(
             for (int comp = 0; comp < IQ4N_VPL; ++comp) xv[comp] = sx[s + comp * 32];
             const int p = base + c;
 #pragma unroll
-            for (int rr = 0; rr < RPW; ++rr) iq4n_acc(rp[rr], p, xv, &acc[rr]);
+            for (int rr = 0; rr < RPW; ++rr) iq4n_acc(rp[rr], p, xv, scb, &acc[rr]);
         }
         __syncthreads();
     }
@@ -142,7 +156,8 @@ extern "C" __global__ void gemv_iq4_nl(
     int k)
 {
     __shared__ __align__(16) float sx[IQ4N_K_TILE];
-    iq4n_tile<IQ4N_ROWS_PER_WARP>(w, x, y, m, k, sx, blockIdx.x);
+    __shared__ __align__(16) float scb[16];
+    iq4n_tile<IQ4N_ROWS_PER_WARP>(w, x, y, m, k, sx, scb, blockIdx.x);
 }
 
 // ---------------------------------------------------------------------------
@@ -160,12 +175,15 @@ static __device__ __forceinline__ void iq4n_load(const unsigned char* __restrict
     const int part = (p & 31) >> 4;
     const unsigned char* b = rp + (size_t)blk * IQ4N_BLOCK_BYTES;
     const float d = __half2float(*reinterpret_cast<const __half*>(b));
-    unsigned char q[16];
-    iq4n_read16(b + 2, q);
+    union IQ4NBytesB {
+        unsigned int w[4];
+        unsigned char b[16];
+    } q;
+    iq4n_read16(b + 2, q.w);
     const bool high = part != 0;
 #pragma unroll
     for (int i = 0; i < IQ4N_VPL; ++i) {
-        const int v = high ? (int)(q[i] >> 4) : (int)(q[i] & 0xF);
+        const int v = high ? (int)(q.b[i] >> 4) : (int)(q.b[i] & 0xF);
         wv[i] = d * (float)IQ4N_KV[v];
     }
 }
