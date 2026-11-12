@@ -63,6 +63,8 @@ pub const GEMV_B_Q5K: i32 = 2;
 pub const GEMV_B_Q80: i32 = 3;
 pub const GEMV_B_IQ4XS: i32 = 4;
 pub const GEMV_B_IQ4NL: i32 = 5;
+pub const GEMV_B_Q3K: i32 = 6;
+pub const GEMV_B_IQ3S: i32 = 7;
 
 impl Launcher {
     /// The skinny-GEMM entry for a batched kind, when the format has one.
@@ -194,6 +196,8 @@ impl Launcher {
             GEMV_B_Q80 => ("gemv_q8_0_b", 1, 0, 256),
             GEMV_B_IQ4XS => ("gemv_iq4_xs_b", 16, 1024, 256),
             GEMV_B_IQ4NL => ("gemv_iq4_nl_b", 16, 1024, 256),
+            GEMV_B_Q3K => ("gemv_q3_k_b", 16, 1024, 256),
+            GEMV_B_IQ3S => ("gemv_iq3_s_b", 16, 1024, 256),
             other => return Err(format!("unknown batched GEMV kind {other}")),
         };
         let kernel = self.module.kernel(entry)?;

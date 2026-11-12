@@ -109,12 +109,8 @@ mod imp {
                 Kind::Q5K => "gemv_q5_k",
                 Kind::IQ4XS => "gemv_iq4_xs",
                 Kind::IQ4NL => "gemv_iq4_nl",
-                Kind::Q3K | Kind::IQ3S => {
-                    return Err(format!(
-                        "attention weight {:?} is expanded to F32 at load",
-                        self.kind
-                    ))
-                }
+                Kind::Q3K => "gemv_q3_k",
+                Kind::IQ3S => "gemv_iq3_s",
             }))
         }
 
@@ -131,6 +127,8 @@ mod imp {
                 Kind::Q8_0 => "prefill_q8_0",
                 Kind::IQ4XS => "prefill_iq4_xs",
                 Kind::IQ4NL => "prefill_iq4_nl",
+                Kind::Q3K => "prefill_q3_k",
+                Kind::IQ3S => "prefill_iq3_s",
                 other => {
                     return Err(format!(
                         "attention weight {other:?}: no tiled prefill kernel"

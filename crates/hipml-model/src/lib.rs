@@ -9,12 +9,13 @@
 //! trivial. Uploads happen once, synchronously, before `load` returns, so the
 //! residency figure is a settled number and not a queue depth.
 //!
-//! Quantized payloads are uploaded byte-for-byte (Q4_K, Q5_K, Q6_K, Q8_0, IQ4)
-//! and stay in their on-disk block layout; `F32` is uploaded as raw
-//! little-endian f32. Q3_K and IQ3_S have a host dequant but no device kernel,
-//! so those tensors are expanded to f32 during the upload: `ty()` reports the
-//! resident `F32`, `disk_ty()`/`disk_nbytes()` keep the file's type and size,
-//! and every consumer sees an ordinary F32 matrix.
+//! Quantized payloads are uploaded byte-for-byte (Q4_K, Q5_K, Q6_K, Q8_0, Q3_K,
+//! IQ3_S, IQ4) and stay in their on-disk block layout; `F32` is uploaded as raw
+//! little-endian f32. `HIPML_EXPAND_SMALL_QUANTS=1` is a debug fallback that
+//! expands Q3_K and IQ3_S on the host instead: `ty()` then reports `F32`,
+//! `disk_ty()`/`disk_nbytes()` keep the file's type and size, and every
+//! consumer sees an ordinary F32 matrix. Off by default, where the block
+//! kernels read those tensors directly.
 
 #[cfg(feature = "hip")]
 pub mod gpu;
@@ -180,8 +181,8 @@ pub struct Model {
 fn supported(ty: TensorType) -> bool {
     // Q5_K has a decode GEMV (`gemv_q5_k`), a batched GEMV and an fp16-copy
     // prefill path; it is a fine-tune tensor type too (`blk.51/55.ffn_down`),
-    // so treating it as raw-only was wrong. Q3_K and IQ3_S arrive as F32 after
-    // the load-time expansion.
+    // so treating it as raw-only was wrong. Q3_K and IQ3_S stay in block form
+    // unless `HIPML_EXPAND_SMALL_QUANTS=1` asks for the F32 fallback.
     matches!(
         ty,
         TensorType::F32
@@ -196,8 +197,15 @@ fn supported(ty: TensorType) -> bool {
     )
 }
 
-/// Host dequant to little-endian f32 for the formats no device kernel reads.
-/// The payload is still block-laid-out, so one call per 256-value block.
+/// `HIPML_EXPAND_SMALL_QUANTS=1` keeps the pre-kernel debug path: Q3_K and
+/// IQ3_S are dequantised to F32 on the host during the upload. Off by default.
+fn expand_small_quants() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("HIPML_EXPAND_SMALL_QUANTS").is_some())
+}
+
+/// Host dequant to little-endian f32 for the debug expansion path. The payload
+/// is still block-laid-out, so one call per 256-value block.
 fn expand_to_f32(ty: TensorType, raw: &[u8]) -> Result<Vec<u8>, String> {
     let dequant: fn(&[u8], &mut [f32]) = match ty {
         TensorType::Q3K => dequant_q3_k,
@@ -267,11 +275,12 @@ impl Model {
                 ));
             }
             let disk_ty = info.ty;
-            let (ty, payload) = if matches!(disk_ty, TensorType::Q3K | TensorType::IQ3S) {
-                (TensorType::F32, expand_to_f32(disk_ty, &raw)?)
-            } else {
-                (disk_ty, raw)
-            };
+            let (ty, payload) =
+                if matches!(disk_ty, TensorType::Q3K | TensorType::IQ3S) && expand_small_quants() {
+                    (TensorType::F32, expand_to_f32(disk_ty, &raw)?)
+                } else {
+                    (disk_ty, raw)
+                };
             let resident_bytes = payload.len() as u64;
             let buffer = ByteBuffer::from_host(&payload).map_err(|e| {
                 format!(
@@ -389,11 +398,12 @@ impl Model {
                 ));
             }
             let disk_ty = info.ty;
-            let (ty, payload) = if matches!(disk_ty, TensorType::Q3K | TensorType::IQ3S) {
-                (TensorType::F32, expand_to_f32(disk_ty, &raw)?)
-            } else {
-                (disk_ty, raw)
-            };
+            let (ty, payload) =
+                if matches!(disk_ty, TensorType::Q3K | TensorType::IQ3S) && expand_small_quants() {
+                    (TensorType::F32, expand_to_f32(disk_ty, &raw)?)
+                } else {
+                    (disk_ty, raw)
+                };
             let resident_bytes = payload.len() as u64;
             let buffer = ByteBuffer::from_host(&payload).map_err(|e| {
                 format!(

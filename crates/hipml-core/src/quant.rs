@@ -6,11 +6,10 @@
 //! Quantized block formats from GGML, and their reference dequantisation.
 //!
 //! Only the formats hipml's models store are here: Q4_K, Q5_K, Q6_K, Q8_0, the
-//! IQ4 pair Unsloth's dynamic quants use, and Q3_K/IQ3_S (sized, dequantised on
-//! the host, and expanded to F32 at load). The layout below is the on-disk ggml
-//! layout, byte for byte — no padding, no reordering. Getting the 6-bit
-//! unpacking in Q4_K and the qh bit planes in Q6_K right is the whole point of
-//! this module, so the hand-computed vectors live in
+//! IQ4 pair Unsloth's dynamic quants use, plus Q3_K and IQ3_S. The layout below
+//! is the on-disk ggml layout, byte for byte — no padding, no reordering.
+//! Getting the 6-bit unpacking in Q4_K and the qh bit planes in Q6_K right is
+//! the whole point of this module, so the hand-computed vectors live in
 //! `tests/quant_reference.rs`.
 //!
 //! Reference GEMV is dequantise-then-dot, block by block: it never materialises
@@ -703,8 +702,7 @@ pub fn gemv_iq4_nl(w: &[u8], x: &[f32], m: usize, k: usize) -> Vec<f32> {
 }
 
 /// `y[m] = W[m,k] · x[k]` with `W` stored as Q3_K blocks, row-major. The host
-/// reference for the CPU-oracle path; the GPU never sees these blocks (they
-/// are expanded to F32 at load).
+/// reference for the `gemv_q3_k` kernel and the CPU-oracle path.
 pub fn gemv_q3_k(w: &[u8], x: &[f32], m: usize, k: usize) -> Vec<f32> {
     assert_eq!(k % QK_K, 0, "k must be a multiple of 256");
     let blocks_per_row = k / QK_K;
@@ -777,6 +775,8 @@ const D_Q5K: [u8; 2] = 0x1400u16.to_le_bytes();
 const DMIN_Q5K: [u8; 2] = 0x1000u16.to_le_bytes();
 const D_Q6K: [u8; 2] = 0x1400u16.to_le_bytes();
 const D_Q8_0: [u8; 2] = 0x1400u16.to_le_bytes();
+const D_Q3K: [u8; 2] = 0x1400u16.to_le_bytes();
+const D_IQ3S: [u8; 2] = 0x1400u16.to_le_bytes();
 
 /// Deterministic Q4_K block bytes: valid fp16 scales, random 6-bit headers and
 /// random quants. Used by the parity and bench cases.
@@ -818,6 +818,29 @@ pub fn random_q8_0_bytes(rng: &mut Rng, nblocks: usize) -> Vec<u8> {
     for b in out.chunks_mut(Q8_0_BYTES) {
         fill_random(rng, b);
         b[0..2].copy_from_slice(&D_Q8_0);
+    }
+    out
+}
+
+/// Deterministic Q3_K block bytes: random 2-bit quants, hmask and scales with a
+/// valid fp16 super-scale at the end. The random 6-bit scales keep the
+/// dequantised range close to a real Q3_K tensor.
+pub fn random_q3_k_bytes(rng: &mut Rng, nblocks: usize) -> Vec<u8> {
+    let mut out = vec![0u8; nblocks * Q3_K_BYTES];
+    for b in out.chunks_mut(Q3_K_BYTES) {
+        fill_random(rng, b);
+        b[108..110].copy_from_slice(&D_Q3K);
+    }
+    out
+}
+
+/// Deterministic IQ3_S block bytes: random grid indices, `qh`, signs and scale
+/// nibbles, with a valid fp16 super-scale in front.
+pub fn random_iq3_s_bytes(rng: &mut Rng, nblocks: usize) -> Vec<u8> {
+    let mut out = vec![0u8; nblocks * IQ3_S_BYTES];
+    for b in out.chunks_mut(IQ3_S_BYTES) {
+        fill_random(rng, b);
+        b[0..2].copy_from_slice(&D_IQ3S);
     }
     out
 }
