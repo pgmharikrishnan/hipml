@@ -7,7 +7,6 @@
 //! The two streams carry alternating slots so the small per-slot kernels
 //! overlap instead of serialising.
 
-use super::deep_kv::MAX_SPLITS;
 use super::*;
 use std::time::Instant;
 
@@ -93,8 +92,7 @@ impl<'a> BatchEngine<'a> {
                     // per-slot position and contiguous cache are read from the
                     // slot index on grid.y.
                     let dk = &f.kv;
-                    let seq_max = positions.iter().max().copied().unwrap_or(0) + 1;
-                    let splits = (seq_max / 64).clamp(1, MAX_SPLITS);
+                    let splits = dk.splits;
                     l.kv_encode_batch(
                         dk.dtype.id(),
                         &f.k,

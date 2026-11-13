@@ -55,8 +55,9 @@ nine; what differs is *how*, and that is the whole of the cost:
   four IQ/small-K formats had no entry and every batched projection fell back to
   the exact `_b` GEMV, which is why 16 slots on UD ran at 97.42 tok/s against
   216.88 for the stock file. With the entries, 16 slots reach 201.59 on the
-  approximate tile (2.07x its own baseline, 92.9% of stock); the exact path is
-  unchanged at 96.87. See [`notes/serve-ud-batch.md`](notes/serve-ud-batch.md).
+  approximate tile; the follow-up's Q5_K load-order rewrite took it to
+  **220.65** (2.27x its own baseline); the exact path is unchanged at 96.87.
+  See [`notes/serve-ud-batch.md`](notes/serve-ud-batch.md).
 - Still unmeasured on a UD file: contexts beyond 8,192 tokens with batching,
   MTP over a batch, and the cache gates; the 64-row f32-tile `prefill_iq4_*`
   entries are wired but the default WMMA path selects `_w2h` instead.

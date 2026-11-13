@@ -16,7 +16,6 @@
 //! already uses, so the same row with the same input produces the same bits.
 
 use super::*;
-use crate::gpu::deep_kv::MAX_SPLITS;
 use hipml_kernels::ssm::SsmDims;
 use std::ffi::c_void;
 
@@ -217,15 +216,15 @@ impl<'a> BatchEngine<'a> {
         if total == 0 || total > 128 {
             return Err(format!("verify: {total} rows outside 1..=128"));
         }
-        // Each column is the plain batched step it would have been: slot `b`'s
-        // column `c` sits at that slot's position `p0 + c`, and a plain step at
-        // position `p` sizes the cache split count from `(p + 1) / 64`. Slots
-        // advance independently, so this is per slot, not per column.
+        // Each column is the plain batched step it would have been: the split
+        // count is a function of the cache's row count and the slot capacity,
+        // never of the position, so every column of every layer uses the same
+        // count a plain step uses.
         let mut split_max = 1usize;
-        for (bi, &slot) in self.active.iter().enumerate() {
-            let p0 = self.positions[slot];
-            for c in 0..lens[bi] {
-                split_max = split_max.max(((p0 + c + 1) / 64).clamp(1, MAX_SPLITS));
+        for b in &self.layers {
+            if let BatchKind::Full(f) = &b.kind {
+                split_max = f.kv.splits;
+                break;
             }
         }
         self.ensure_verify(total, split_max)?;
@@ -312,12 +311,11 @@ impl<'a> BatchEngine<'a> {
                     let slot_words = dk.slot_bytes() / 4;
                     for b in 0..cols.len() {
                         let slot = self.active[b];
-                        let start = self.positions[slot];
                         let len = lens[b];
                         let first = base[b];
-                        // Append every column first, then attend: column c sees
-                        // positions 0..=start+c, exactly as the single-column
-                        // path at that position.
+                        // Append every column first, then attend: column c sits
+                        // one position past column `c - 1` on its slot and sees
+                        // exactly what the single-column path sees there.
                         l.kv_encode_rows_ptr(
                             dk.dtype.id(),
                             at(&s.k, first * kw),
@@ -331,41 +329,31 @@ impl<'a> BatchEngine<'a> {
                             0,
                             len,
                         )?;
-                        // One launch per group of columns whose cache split
-                        // count is the same. The count is a function of this
-                        // slot's position, so every column is the same
+                        // Every column shares the cache's split count, so the
+                        // whole group is one launch and each column is the same
                         // arithmetic a plain step at that position runs.
-                        let mut c0 = 0usize;
-                        while c0 < len {
-                            let splits = ((start + c0 + 1) / 64).clamp(1, MAX_SPLITS);
-                            let mut c1 = c0 + 1;
-                            while c1 < len && ((start + c1 + 1) / 64).clamp(1, MAX_SPLITS) == splits
-                            {
-                                c1 += 1;
-                            }
-                            l.attn_decode_rows_ptr(
-                                dk.dtype.id(),
-                                at(&s.pos, (first + c0) * 2),
-                                at(&s.q, (first + c0) * qw),
-                                at(&dk.k, slot * slot_words),
-                                at(&dk.v, slot * slot_words),
-                                at(&s.part_acc, (first + c0) * s.parts),
-                                at(&s.part_ml, (first + c0) * s.ml_parts),
-                                at(&s.aout, (first + c0) * qw),
-                                cfg.n_head,
-                                cfg.n_head_kv,
-                                cfg.head_dim,
-                                dk.seq,
-                                1.0f32 / (cfg.head_dim as f32).sqrt(),
-                                splits,
-                                0,
-                                s.parts,
-                                s.ml_parts,
-                                qw,
-                                c1 - c0,
-                            )?;
-                            c0 = c1;
-                        }
+                        let splits = dk.splits;
+                        l.attn_decode_rows_ptr(
+                            dk.dtype.id(),
+                            at(&s.pos, first * 2),
+                            at(&s.q, first * qw),
+                            at(&dk.k, slot * slot_words),
+                            at(&dk.v, slot * slot_words),
+                            at(&s.part_acc, first * s.parts),
+                            at(&s.part_ml, first * s.ml_parts),
+                            at(&s.aout, first * qw),
+                            cfg.n_head,
+                            cfg.n_head_kv,
+                            cfg.head_dim,
+                            dk.seq,
+                            1.0f32 / (cfg.head_dim as f32).sqrt(),
+                            splits,
+                            0,
+                            s.parts,
+                            s.ml_parts,
+                            qw,
+                            len,
+                        )?;
                     }
                     f.attn.out_rows(l, &s.aout, &s.agate, &s.y, m)?;
                     &s.y

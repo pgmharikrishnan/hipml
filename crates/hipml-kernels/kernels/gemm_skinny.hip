@@ -97,7 +97,7 @@ static __device__ __forceinline__ void pws_scale_min(int j, unsigned w0, unsigne
 // IQ3_S) keep the prefill reader: together they are 1.4% of a UD file's bytes
 // and 110-byte blocks make the vector split awkward.
 struct pws_raw {
-    unsigned r[6];
+    unsigned r[8];
     const unsigned char* rp;
     int v;
 };
@@ -114,21 +114,27 @@ static __device__ __forceinline__ void pws_prep(const unsigned char* __restrict_
                                                 int v, pws_raw& out)
 {
     if (KIND == 4) {
-        // Q5_K: 16-byte header (d, dmin, the 12 scale bytes) and the `qh` run;
-        // the qs run is the one load left to the arithmetic phase.
+        // Q5_K: 16-byte header (d, dmin, the 12 scale bytes), the `qh` run and
+        // the `qs` run. All three are loaded here, not split between `prep` and
+        // `finish`: a load inside the arithmetic phase serialises against the
+        // dequant it feeds, and the measured cost of that was the whole Q5_K
+        // deficit (356 GB/s staged against ~400 for Q4_K with the same loads).
+        // A 176-byte block is a multiple of 16, so the header is one uint4.
         const int blk = v >> 8;
+        const int g = (v & 255) >> 6;
         const int part = (v & 31) >> 3;
         const unsigned char* b = rp + (size_t)blk * PF_Q5K_BLOCK_BYTES;
-        const uint2 h0 = *reinterpret_cast<const uint2*>(b);
-        const uint2 h1 = *reinterpret_cast<const uint2*>(b + 8);
-        const uint2 p = *reinterpret_cast<const uint2*>(b + 16 + part * 8);
-        out.r[0] = h0.x;
-        out.r[1] = h0.y;
-        out.r[2] = h1.x;
-        out.r[3] = h1.y;
-        out.r[4] = p.x;
-        out.r[5] = p.y;
-        out.rp = b;
+        const uint4 h = *reinterpret_cast<const uint4*>(b);
+        const uint2 q = *reinterpret_cast<const uint2*>(b + 16 + part * 8);
+        const uint2 s = *reinterpret_cast<const uint2*>(b + 48 + g * 32 + part * 8);
+        out.r[0] = h.x;
+        out.r[1] = h.y;
+        out.r[2] = h.z;
+        out.r[3] = h.w;
+        out.r[4] = q.x;
+        out.r[5] = q.y;
+        out.r[6] = s.x;
+        out.r[7] = s.y;
         return;
     }
     if (KIND == 5) {
@@ -221,7 +227,6 @@ static __device__ __forceinline__ void pws_finish(const pws_raw& in, int within,
     if (KIND == 4) {
         const int sub = within >> 5;
         const int g = within >> 6;
-        const int part = (within & 31) >> 3;
         const float d =
             __half2float(__ushort_as_half((unsigned short)(in.r[0] & 0xFFFFu)));
         const float dmin =
@@ -231,17 +236,23 @@ static __device__ __forceinline__ void pws_finish(const pws_raw& in, int within,
         const float scale = d * (float)sc;
         const float minv = dmin * (float)mn;
         const bool high = (sub & 1) != 0;
-        const unsigned bit = high ? (2u << (2 * g)) : (1u << (2 * g));
-        const uint2 q = *reinterpret_cast<const uint2*>(
-            in.rp + 48 + g * 32 + part * 8);
+        // The GEMV's packing, at eight values: byte j of `qb[k]` holds value
+        // 4k+j in bits 0..4, so a value is one bit-field extract instead of a
+        // nibble shift, a fifth-bit test, a compare and an add. `qsh` moves the
+        // chunk's fifth bit to bit 4 of each byte (the bit that `<< 4` would
+        // otherwise land on is shifted past the byte and masked off).
+        const unsigned qsh = 2u * (unsigned)g + (high ? 1u : 0u);
+        const unsigned nsh = high ? 4u : 0u;
+        const uint2 qs = make_uint2(in.r[6], in.r[7]);
+        const unsigned b0 = ((qs.x >> nsh) & 0x0F0F0F0Fu) |
+                            (((in.r[4] >> qsh) << 4) & 0x10101010u);
+        const unsigned b1 = ((qs.y >> nsh) & 0x0F0F0F0Fu) |
+                            (((in.r[5] >> qsh) << 4) & 0x10101010u);
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
-            const unsigned word = (i < 4) ? q.x : q.y;
-            const unsigned hw = (i < 4) ? in.r[4] : in.r[5];
-            const int byte = (int)((word >> (8 * (i & 3))) & 0xFF);
-            const int nib = high ? (byte >> 4) : (byte & 0xF);
-            const int fifth = ((hw >> (8 * (i & 3))) & bit) ? 16 : 0;
-            out[i] = scale * (float)(nib + fifth) - minv;
+            const unsigned word = (i < 4) ? b0 : b1;
+            const unsigned q = (word >> (8 * (i & 3))) & 0x1Fu;
+            out[i] = scale * (float)q - minv;
         }
     } else if (KIND == 5) {
         const int sub = within >> 5;

@@ -206,6 +206,21 @@ The harness does not read llama-server's `cache_n` counter, so its
 `prefix_hit_tokens` column reads 0 even when the shared prefix was cached; judge
 that from its TTFT, not that column.
 
+Set these variables in a `.cmd` file or on their own line. In
+`call env.cmd && hipml ... %HIPML_GGUF%`, cmd expands the variable while parsing
+the line, i.e. before `env.cmd` runs, so a machine-wide `HIPML_GGUF` silently
+wins and the cell describes the other model. `oracle-gate` and `generate` print
+the resident size, which is the tell.
+
+Two hooks attribute a cell's time without changing a step when unset. Poll the
+server with `PROBE_CTX=32768 PROBE_REQS=3 python bench\serve\probe_a.py` for the
+per-request split, and `PROBE_CTX=32768 python bench\serve\probe_ids.py` for the
+five replies' sha1s (base against branch must match). On the server,
+`HIPML_SERVE_STEP_LOG=1` prints per step the weight pass's wall time and the gap
+since the previous step began, and `HIPML_SERVE_SPLIT=1` prints the nine syncing
+stage buckets every 16 steps — the gap minus forward is what the server adds,
+and the buckets name which stage grew with the cache.
+
 ## 7. Prefix cache
 
 ```powershell

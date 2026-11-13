@@ -108,6 +108,15 @@ A lone request, and every MTP verify, always take the exact path.
 (107.46 against 149.43 tok/s) and still beats llama.cpp's 97.54 tok/s there,
 but at 16 slots the exact path is 107.33 against llama.cpp's 227.89.
 
+Batched attention partitions each slot's KV cache into split-K runs whose count
+comes from the cache's row count and the slot count, never from the live
+position (`attn_splits` in `gpu/batch/kv.rs`). A position-derived count on a 32K
+cache at a 2.4K sequence left three live runs for the whole cache; the count is
+now 256 at one slot and 32 at 16 slots in an 8K cache, and the scratch is sized
+for the count in use. The partition is exact — the same rows, summed in a
+different order — so it changes no id in the gates, but it is not bit-identical
+to the single-column engine's own (position-derived) partition.
+
 ## Metrics
 
 All names are prefixed `hipml_`. The ones an operator wants first:
