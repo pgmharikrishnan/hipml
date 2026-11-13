@@ -142,12 +142,15 @@ llama-at-default is llama-at-3, and the d3 row is depth-matched. Acceptance is
 nearly equal: 0.699 for hipml's serve path at three drafts against llama's 0.712
 median. The drafts are not worse; the step that verifies them is more expensive.
 
-There is one more asymmetry, in the other direction. hipml's d3 verify step runs
-at a batch width of 4, exactly the threshold where the projection path switches
-from the exact batched GEMV to the approximate tile; d1 and d2 stay exact. So
-the one MTP row compared against llama is also the one hipml MTP row on the
-approximate path, which is why it is marked pending re-measurement rather than
-quoted as final.
+There is a second, unresolved point about that row. The batch trace reports a
+width of 4 at three drafts — exactly the threshold where the projection path
+switches from the exact batched GEMV to the approximate tile — and widths of 2
+and 3, both exact, at one and two drafts. The batching note records the
+opposite: the verify pass is exact by construction, because
+`HIPML_BATCH_SKINNY` is ignored for MTP verify. Those two statements cannot both
+be right. Whether the trace's label or the dispatch is wrong is being settled
+now, and that contradiction — not the throughput gap — is why the row is marked
+pending rather than quoted as final.
 
 **hipml's serve MTP loses about 11 tok/s against its own kernel path.** The CLI
 `spec-bench` at three drafts is 63.57 tok/s at q8; the serve cell at the same
@@ -166,16 +169,20 @@ the gap is visible in TTFT, not proof of cause.
 ## Decode is finished as a bandwidth problem
 
 The engine's own counter says one decode token streams 15,484,418,048 bytes —
-14.42 GiB of weights. At the 30.02 ms a plain step measures, that is
-**515.7 GB/s, 80.6% of the card's 640 GB/s spec**.
+14.42 GiB of weights. Against the **30.17 ms** the table measures, that is
+**513.2 GB/s, 80.2% of the card's 640 GB/s spec**. The ablation's instrumented
+plain step is **30.02 ms**, and the same bytes against it are **515.7 GB/s,
+80.6%**. The 0.15 ms between the two is the gap between an instrumented step and
+the wall clock behind 33.15 tok/s; either denominator puts decode at about four
+fifths of the spec, and the conclusion does not depend on which is used.
 
 That number is the whole argument. A dense decode cannot stream fewer bytes than
 the model, so the ceiling is the model divided by the bandwidth, and both
 engines sit at roughly four fifths of it, 2.8% apart. The +2.8% is the last few
 percent of a problem that is essentially solved, not a new regime. The two
 levers that remain are the ones the arithmetic points at: fewer bytes per
-weight, and less per-step overhead in the 19.4% that is not the stream. Neither
-is a rewrite of the matrix-vector multiply.
+weight, and less per-step overhead in the roughly one fifth that is not the
+stream. Neither is a rewrite of the matrix-vector multiply.
 
 It is also why the prefill win does not transfer. A prefill tile holds a weight
 tile in shared memory and multiplies 256 prompt tokens against it; a decode GEMV

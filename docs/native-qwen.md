@@ -211,12 +211,31 @@ same window on the same ids. The full table, its spreads and its caveats are in
 | decode @0 tok/s | 33.15 | 32.24 | +2.8% |
 | decode @8,192 tok/s | 31.98 | 31.41 | +1.8% |
 
-The two build-flag comparisons that established the Q5_K tile — the old F32
-expansion of Q3_K and IQ3_S (`HIPML_EXPAND_SMALL_QUANTS=1`) and the
-batched-GEMV fallback (`HIPML_Q5K_COPY_GB=0`) — were measured on an earlier
-tree and are not re-run here; they are recorded in
-[`notes/serve-ud-batch.md`](notes/serve-ud-batch.md) and
-[`notes/prefill-tile-ceiling.md`](notes/prefill-tile-ceiling.md).
+### The Q5_K tile's fallback comparison (earlier tree)
+
+These rows were measured on an earlier tree, before the re-verification, and are
+not re-run here. They are kept because the Q5_K dequant-in-shared tile's whole
+justification is the comparison against the batched-GEMV fallback, not the
+current headline; the current numbers are the table above.
+
+```
+                          prefill tok/s            decode tok/s
+depth 0 (--prefill 512)     1,186.27 (512 tok)       29.20
+depth 8,192                 1,207.27 (8,192 tok)     28.43
+
+with HIPML_EXPAND_SMALL_QUANTS=1 (the old F32 expansion):
+depth 0 (--prefill 512)     1,059.21                 27.58
+depth 8,192                 1,086.31                 26.93
+
+with HIPML_Q5K_COPY_GB=0 (no Q5_K tile kernel, batched GEMV instead):
+depth 0                       289.76                  27.62
+depth 8,192                   297.68                  26.92
+```
+
+`HIPML_Q5K_COPY_GB=0` still selects the old batched-GEMV route, so the
+comparison stays reproducible. The variable, and why an fp16 Q5_K copy could
+never have been resident on this file, are in
+[`notes/serve-vram.md`](notes/serve-vram.md).
 
 Serving Q3_K and IQ3_S in block form is worth 1.19 GiB of residency and a few
 percent on both axes: the four tensors stream 9.31× fewer bytes per token, and

@@ -109,8 +109,12 @@ session measured, not a final result.
 
 Decode streams every weight through the memory bus for every token, so the
 arithmetic is short. hipml's own counter says one token streams
-**15,484,418,048 B** (14.42 GiB). At the 30.02 ms a plain step measures, that is
-**515.7 GB/s — 80.6% of the card's 640 GB/s spec**. llama.cpp prints no
+**15,484,418,048 B** (14.42 GiB). Against the **30.17 ms** the decode table
+measures, that is **513.2 GB/s — 80.2% of the card's 640 GB/s spec**. The
+ablation's instrumented plain step is **30.02 ms**, which gives **515.7 GB/s,
+80.6%**; the 0.15 ms between them is the gap between an instrumented step and
+the wall clock. Either denominator puts decode at about four fifths of the spec,
+and the conclusion does not depend on which is used. llama.cpp prints no
 per-token stream counter, so that row has no llama value rather than a
 comparable one.
 
@@ -133,7 +137,7 @@ The server labels its own batch path. Widths observed per `server.log`:
 | serve b plain | `b=8` (33) plus `b=7`, `b=6`, `b=2`, `b=1` tails | **approximate** WMMA tile at b=8 |
 | serve c plain | `b=16` (33) plus `b=15`, `b=14`, `b=2`, `b=1` tails | **approximate** WMMA tile at b=16 |
 | MTP d1 / d2 (serve a) | `b=1` + `b=2` / `b=3` | **exact** batched GEMV |
-| MTP d3 (serve a) | `b=1` + `b=4` | **approximate** — the verify step is at the tile threshold |
+| MTP d3 (serve a) | `b=1` + `b=4` | **disputed** — see the caveat below |
 
 llama.cpp has no equivalent switch; every one of its numbers is its production
 path.
@@ -164,10 +168,13 @@ path.
   tokens per step, so llama-at-default is llama-at-3. hipml's d1 and d2 rows have
   no llama counterpart. Acceptance is nearly equal (0.699 against 0.712), which
   makes the gap per-step cost rather than draft quality.
-- **The d3 MTP verify step runs at b=4**, exactly the approximate-tile
-  threshold; d1 (b=2) and d2 (b=3) stay on the exact batched GEMV. So the one
-  MTP row compared against llama.cpp is also the one hipml MTP row on the
-  approximate path. This is why the row is marked pending.
+- **The d3 MTP verify path is disputed, and that is why the row is pending.**
+  The batch trace reports width 4 at three drafts — the approximate-tile
+  threshold — and widths 2 and 3, both exact, at one and two drafts.
+  [`notes/serve-ud-batch.md`](notes/serve-ud-batch.md) §8 records the verify pass
+  as exact by construction (`HIPML_BATCH_SKINNY` is ignored for MTP verify).
+  Both cannot be right; whether the trace label or the dispatch is wrong is
+  unresolved.
 - **llama.cpp's MTP exactness was not verified.** Its speculative ids were not
   diffed against its own plain greedy; hipml's `spec-bench` exactness does not
   transfer to it.
