@@ -90,7 +90,7 @@ The 142 IQ4_XS tensors hold 10.722B values in 5.30 GiB. Expanded: 42.9 GB as f32
 
 ## The trap that is not about formats
 
-`UD-Q6_K` is 20.46 GiB of tensor data, which fits on 32 GiB with room for a cache. Its 115 Q5_K tensors hold 8.001B values. An engine that materialises a resident fp16 copy for its prefill GEMM pays 16.0 GB for those, or 14.9 GiB, taking the file to 35.4 GiB before a single KV page. The mechanism is not exotic: the engine in this repository keeps exactly that copy for Q5_K, because the GEMV reads blocks but the tiled prefill GEMM needs an fp16 operand (`crates/hipml-model/src/gpu_weights.rs`).
+`UD-Q6_K` is 20.46 GiB of tensor data, which fits on 32 GiB with room for a cache. Its 115 Q5_K tensors hold 8.001B values. An engine that materialises a resident fp16 copy for its prefill GEMM pays 16.0 GB for those, or 14.9 GiB, taking the file to 35.4 GiB before a single KV page. The mechanism is not exotic: an engine whose GEMV reads blocks but whose tiled prefill GEMM needs an fp16 operand keeps exactly that copy, and this repository did (`crates/hipml-model/src/gpu_weights.rs`). It no longer does: the tile kernel now dequantises a 256-value block into shared memory and streams the blocks, so no copy is budgeted.
 
 `UD-Q4_K_M` is the near miss: 14.2 GiB of copies on 15.42 GiB of blocks, 29.6 GiB before the cache. A file can pass a size check, load, and fail on the first long prompt, worse than failing at load.
 
