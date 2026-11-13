@@ -199,6 +199,7 @@ pub fn bench(args: &[String]) -> i32 {
         };
         let ids = vec![1u32; a.cols];
         let n = 3;
+        hipml_hip::probe::set_enabled(true);
         engine.trace = Some(hipml_model::gpu::Trace::default());
         for _ in 0..n {
             if let Err(e) = engine.forward_columns(&ids, &mut st, &mut snaps) {
@@ -210,7 +211,6 @@ pub fn bench(args: &[String]) -> i32 {
             eprintln!("column-bench: trace sync: {e}");
             return 1;
         }
-        let spans = engine.trace.as_mut().map(|t| t.fold()).unwrap_or_default();
         let bytes: std::collections::HashMap<&str, usize> =
             engine.stage_bytes().into_iter().collect();
         let attr = |name: &str| -> usize {
@@ -225,12 +225,18 @@ pub fn bench(args: &[String]) -> i32 {
                 _ => 0,
             }
         };
-        let total: f64 = spans.iter().map(|(_, u)| u).sum();
+        let rows: Vec<hipml_hip::probe::StageRow> = match engine.trace.as_mut() {
+            Some(tr) => tr.fold().to_vec(),
+            None => Vec::new(),
+        };
+        let total: f64 = rows.iter().map(|r| r.span_us).sum();
         println!(
             "\ntrace, {} columns ({n} passes, ranked by GPU time):",
             a.cols
         );
-        for (name, us) in &spans {
+        for r in &rows {
+            let name = r.name;
+            let us = r.span_us;
             let b = attr(name);
             let ms = us / 1e3 / n as f64;
             let gbs = if b > 0 && ms > 0.0 {
@@ -239,9 +245,10 @@ pub fn bench(args: &[String]) -> i32 {
                 String::new()
             };
             println!(
-                "  {name:<12} {:7.3} ms/pass  {:5.1}%  {b:>11} B  {gbs}",
+                "  {name:<12} {:7.3} ms/pass  {:5.1}%  {b:>11} B  {gbs}  {} launches",
                 ms,
                 us / total * 100.0,
+                r.launches / n,
                 b = b
             );
         }

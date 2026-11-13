@@ -1,64 +1,41 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Per-stage timing and per-stage byte accounting for one token.
 //!
-//! `gpu-profile --trace` uses this: every stage boundary records a HIP event,
-//! and after one synchronize the spans are folded by stage name. Recording is a
-//! queue operation, so the graph's execution order is unchanged.
+//! `gpu-profile --trace` uses this: [`mark`] opens a stage on the launcher's
+//! stream, and the timeline behind it (see `hipml_hip::probe`) also brackets
+//! every launch, so a stage reports both what it cost and how many launches it
+//! issued. Folding runs after one synchronize.
 //!
-//! The name on a span is the *start* boundary, so a stage's weight bytes are
-//! attributed to the span that begins just before it runs (see `stage_bytes`).
+//! The name on a stage is the *start* boundary, so a stage's weight bytes are
+//! attributed to the stage that begins just before it runs (see `stage_bytes`).
 
 use super::*;
 
 /// Per-stage GPU timing for one token.
 ///
-/// Every stage mark is a recorded HIP event; `fold` runs after one synchronize
-/// and folds the spans by stage name.
+/// A stage mark is a recorded HIP event; `fold` runs after one synchronize and
+/// folds the spans by stage name.
 #[derive(Default)]
 pub struct Trace {
-    /// Boundary events in issue order; `names[i]` is the stage that starts at
-    /// `events[i]`. A span is the gap between consecutive boundaries.
-    events: Vec<Event>,
-    names: Vec<&'static str>,
+    /// Stages folded by the last [`Trace::fold`].
+    rows: Vec<hipml_hip::probe::StageRow>,
 }
 
 impl Trace {
     pub(crate) fn tick(&mut self, l: &Launcher, name: &'static str) -> Result<(), String> {
-        let e = Event::new()?;
-        e.record(l.stream())?;
-        self.events.push(e);
-        self.names.push(name);
+        hipml_hip::probe::mark(name, l.stream());
         Ok(())
     }
 
-    /// Folded `(stage, microseconds)` totals, largest first. The caller must
-    /// have synchronised the stream so every event has completed.
-    pub fn fold(&mut self) -> Vec<(&'static str, f64)> {
-        let mut out: Vec<(&'static str, f64)> = Vec::new();
-        let mut bad = 0usize;
-        for i in 0..self.events.len().saturating_sub(1) {
-            let us = match self.events[i].since(&self.events[i + 1]) {
-                Ok(ms) => ms as f64 * 1e3,
-                Err(_) => {
-                    bad += 1;
-                    0.0
-                }
-            };
-            match out.iter().position(|(n, _)| *n == self.names[i]) {
-                Some(j) => out[j].1 += us,
-                None => out.push((self.names[i], us)),
-            }
-        }
-        if bad > 0 {
-            println!("trace: {bad} event pairs did not complete");
-        }
-        out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        out
+    /// Folded stage rows, largest span first. The caller must have
+    /// synchronised the stream so every event has completed.
+    pub fn fold(&mut self) -> &[hipml_hip::probe::StageRow] {
+        self.rows = hipml_hip::probe::report();
+        &self.rows
     }
 
     pub fn clear(&mut self) {
-        self.events.clear();
-        self.names.clear();
+        self.rows.clear();
     }
 }
 

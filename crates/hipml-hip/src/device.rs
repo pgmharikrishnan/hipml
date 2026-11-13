@@ -374,7 +374,8 @@ pub struct Module {
     /// 1299 times a token, so the lookup is cached here rather than at each
     /// call site.
     #[cfg(feature = "hip")]
-    functions: std::cell::RefCell<std::collections::HashMap<String, ffi::HipFunction>>,
+    functions:
+        std::cell::RefCell<std::collections::HashMap<String, (ffi::HipFunction, std::rc::Rc<str>)>>,
 }
 
 impl Module {
@@ -403,8 +404,8 @@ impl Module {
     /// Look up a kernel by name. The returned handle borrows the module.
     #[cfg(feature = "hip")]
     pub fn kernel(&self, name: &str) -> Result<Kernel<'_>, String> {
-        if let Some(&function) = self.functions.borrow().get(name) {
-            return Ok(Kernel::from_function(function));
+        if let Some((function, label)) = self.functions.borrow().get(name) {
+            return Ok(Kernel::from_function(*function, label.clone()));
         }
         let c_name = std::ffi::CString::new(name).map_err(|e| format!("bad kernel name: {e}"))?;
         unsafe {
@@ -413,10 +414,11 @@ impl Module {
                 ffi::hipModuleGetFunction(&mut function, self.handle, c_name.as_ptr()),
                 "hipModuleGetFunction",
             )?;
+            let label: std::rc::Rc<str> = std::rc::Rc::from(name);
             self.functions
                 .borrow_mut()
-                .insert(name.to_string(), function);
-            Ok(Kernel::from_function(function))
+                .insert(name.to_string(), (function, label.clone()));
+            Ok(Kernel::from_function(function, label))
         }
     }
 
@@ -451,17 +453,27 @@ impl Drop for Module {
 pub struct Kernel<'a> {
     #[cfg(feature = "hip")]
     function: ffi::HipFunction,
+    /// Entry-point name, for the per-launch span probe.
+    #[cfg(feature = "hip")]
+    name: std::rc::Rc<str>,
     _module: PhantomData<&'a Module>,
 }
 
 impl Kernel<'_> {
     /// Wrap an already-resolved entry point (see `Module::kernel`'s cache).
     #[cfg(feature = "hip")]
-    fn from_function(function: ffi::HipFunction) -> Kernel<'static> {
+    fn from_function(function: ffi::HipFunction, name: std::rc::Rc<str>) -> Kernel<'static> {
         Kernel {
             function,
+            name,
             _module: PhantomData,
         }
+    }
+
+    /// The entry point's name, as resolved.
+    #[cfg(feature = "hip")]
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -535,7 +547,15 @@ impl<'a> Kernel<'a> {
         stream: &Stream,
         params: &mut [*mut std::ffi::c_void],
     ) -> Result<(), String> {
-        unsafe {
+        let probe = crate::probe::enabled();
+        if probe {
+            crate::probe::count_launch();
+        }
+        let span = crate::probe::span_enabled();
+        if span {
+            crate::probe::span_begin(&self.name, stream);
+        }
+        let r = unsafe {
             check(
                 ffi::hipModuleLaunchKernel(
                     self.function,
@@ -552,7 +572,11 @@ impl<'a> Kernel<'a> {
                 ),
                 "hipModuleLaunchKernel",
             )
+        };
+        if span {
+            crate::probe::span_end(stream);
         }
+        r
     }
 
     #[cfg(not(feature = "hip"))]

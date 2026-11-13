@@ -7,6 +7,7 @@
 
 pub mod device;
 pub mod memory;
+pub mod probe;
 
 #[cfg(feature = "hip")]
 pub mod ffi;

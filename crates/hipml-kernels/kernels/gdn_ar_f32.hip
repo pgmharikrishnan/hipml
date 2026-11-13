@@ -13,6 +13,17 @@
 // holds sd/32 elements of that row in registers, and the two dots are group
 // reductions. No barrier is needed because rows never overlap.
 //
+// GDN_ROWS rows of a head are in flight at once. Rows are independent, so this
+// is a scheduling change only: every row's dot is the same fma chain in the
+// same order and the same butterfly, and its update is the same expression.
+// With one row in flight the wave chain is load -> reduce -> fma -> reduce ->
+// store per row, and the state row it waits on is a full memory latency away;
+// four rows give the wave four independent latencies to hide behind.
+//
+// The grid's y axis splits one head's value rows into `gridDim.y` stripes, so a
+// single value head can fill more than one CU. Rows never interact, so the
+// split changes which block runs a row and nothing about what it computes.
+//
 // Kernel: gdn_ar_f32. Reference: delta::gdn_ar_f32.
 
 #include <hip/hip_runtime.h>
@@ -24,6 +35,8 @@
 // either way; using `warpSize` as the shuffle width is not (it exceeds the
 // supported segment width when the compiler emits wave32).
 #define GDN_LANES 32
+// Independent state rows one wave keeps in flight.
+#define GDN_ROWS 4
 
 __device__ __forceinline__ float wave_sum(float v)
 {
@@ -53,6 +66,12 @@ extern "C" __global__ void gdn_ar_f32(
     const int wave = threadIdx.x / GDN_LANES;
     const int nwave = blockDim.x / GDN_LANES;
 
+    // This block owns value rows [lo, hi) of head h.
+    const int stripe = gridDim.y;
+    const int seg = (sd + stripe - 1) / stripe;
+    const int lo = blockIdx.y * seg;
+    const int hi = min(sd, lo + seg);
+
     const int hk = h % n_k;
     const float decay = expf(g[h]);
     const float b = beta[h];
@@ -78,37 +97,59 @@ extern "C" __global__ void gdn_ar_f32(
         }
     }
 
-    for (int j = wave; j < sd; j += nwave) {
-        float* row = head + (size_t)j * sd;
-
-        float r[GDN_MAXV];
-        float dot = 0.0f;
+    for (int j0 = lo + wave; j0 < hi; j0 += GDN_ROWS * nwave) {
+        // Row index of slot u, uniform across the wave.
+        int jr[GDN_ROWS];
+        float rows[GDN_ROWS][GDN_MAXV];
+        float dot[GDN_ROWS];
         #pragma unroll
-        for (int t = 0; t < GDN_MAXV; ++t) {
-            const int i = lane + t * GDN_LANES;
-            r[t] = i < sd ? row[i] : 0.0f;
-            // Explicit fma so the batched kernel compiles to the same
-            // rounding; contraction is otherwise per-file.
-            dot = __fmaf_rn(__fmul_rn(r[t], decay), kk[t], dot);
+        for (int u = 0; u < GDN_ROWS; ++u) {
+            jr[u] = j0 + u * nwave;
         }
-        dot = wave_sum(dot);
 
-        const float delta = (vh[j] - dot) * b;
-
-        float acc = 0.0f;
+        // Load every row first, then reduce: the loads are independent, so the
+        // wave has GDN_ROWS memory latencies in flight instead of one.
         #pragma unroll
-        for (int t = 0; t < GDN_MAXV; ++t) {
-            const int i = lane + t * GDN_LANES;
-            if (i < sd) {
-                const float nv = __fmaf_rn(r[t], decay, __fmul_rn(kk[t], delta));
-                row[i] = nv;
-                acc = __fmaf_rn(nv, qq[t], acc);
+        for (int u = 0; u < GDN_ROWS; ++u) {
+            dot[u] = 0.0f;
+            const bool on = jr[u] < hi;
+            const float* row = head + (size_t)jr[u] * sd;
+            #pragma unroll
+            for (int t = 0; t < GDN_MAXV; ++t) {
+                const int i = lane + t * GDN_LANES;
+                rows[u][t] = (on && i < sd) ? row[i] : 0.0f;
+                // Explicit fma so the batched kernel compiles to the same
+                // rounding; contraction is otherwise per-file.
+                dot[u] = __fmaf_rn(__fmul_rn(rows[u][t], decay), kk[t], dot[u]);
             }
         }
-        acc = wave_sum(acc);
+        #pragma unroll
+        for (int u = 0; u < GDN_ROWS; ++u) {
+            dot[u] = wave_sum(dot[u]);
+        }
 
-        if (lane == 0) {
-            out[(size_t)h * sd + j] = acc * scale;
+        #pragma unroll
+        for (int u = 0; u < GDN_ROWS; ++u) {
+            if (jr[u] >= hi) continue;
+            const float delta = (vh[jr[u]] - dot[u]) * b;
+            float* row = head + (size_t)jr[u] * sd;
+
+            float acc = 0.0f;
+            #pragma unroll
+            for (int t = 0; t < GDN_MAXV; ++t) {
+                const int i = lane + t * GDN_LANES;
+                if (i < sd) {
+                    const float nv =
+                        __fmaf_rn(rows[u][t], decay, __fmul_rn(kk[t], delta));
+                    row[i] = nv;
+                    acc = __fmaf_rn(nv, qq[t], acc);
+                }
+            }
+            acc = wave_sum(acc);
+
+            if (lane == 0) {
+                out[(size_t)h * sd + jr[u]] = acc * scale;
+            }
         }
     }
 }
