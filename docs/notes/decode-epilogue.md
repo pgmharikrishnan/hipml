@@ -146,6 +146,13 @@ is 0.19 ms slower (`decode-dispatch.md`), merging the two GDN pairs is 5 µs for
 a wider grid without changing its reduction order, i.e. without leaving
 bit-identical.
 
+A fourth way has since been measured and the 1.93 ms has not survived it:
+folding the add into the *producing* projection's epilogue removes all 128
+launches and moves the token 0.02 ms, because the span table's 15 µs a residual
+span is mostly the trace, not the kernel — see
+[`decode-residual-gemv.md`](decode-residual-gemv.md). Read the 1.93 ms as an
+upper bound on the residual stage's span, not as a pot.
+
 ## 6. Gates
 
 | gate | result |

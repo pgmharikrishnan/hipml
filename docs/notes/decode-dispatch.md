@@ -155,7 +155,9 @@ work must fit in 3.33 ms while the non-GEMV kernels already measure 3.3 ms
 that elementwise work *inside* the neighbouring GEMV or attention launch (one
 kernel, one ramp), which is a kernel change in the files another slice owns;
 the residual/norm merge shows that even a 2→1 merge of this exact kind does
-not automatically pay.
+not automatically pay. It has since been done for the residual adds and it is
+neutral: 128 launches removed, −0.02 ms
+([`decode-residual-gemv.md`](decode-residual-gemv.md)).
 
 **Verdict: no. The 5.3 ms is GPU-side kernel execution, and the measured
 cost of a launch is below 0.2 ms of it.** Decode stays at 32.8 / 33.5 ms
