@@ -138,7 +138,7 @@ All names are prefixed `hipml_`. The ones an operator wants first:
 | `hipml_prompt_tokens_total`, `hipml_generated_tokens_total` | counter | work done |
 | `hipml_prefill_chunks_total`, `hipml_prefill_seconds_total`, `hipml_prefill_interleaved_total` | counter | prefill path |
 | `hipml_decode_steps_total`, `hipml_batch_steps_total` | counter | decode path |
-| `hipml_batch_exact_path` | gauge | 1 when the last batch used exact kernels |
+| `hipml_batch_exact_path` | gauge | the capability, not a route: 1 when the approximate tile is disabled for this process, 0 when it is enabled and B>=4 may take it (except where `exact_scope` holds); per-call routes are `HIPML_BATCH_TRACE=1` |
 | `hipml_batch_resets_total`, `hipml_job_errors_total`, `hipml_slot_faults_total` | counter | failure scopes |
 | `hipml_prefix_lookups_total`, `hipml_prefix_hits_total`, `hipml_prefix_misses_total`, `hipml_prefix_hit_rate`, `hipml_prefix_hit_tokens_total` | counter/gauge | prefix cache |
 | `hipml_prefix_captures_total`, `hipml_prefix_refused_total`, `hipml_prefix_invalidated_total`, `hipml_prefix_capture_seconds_total`, `hipml_prefix_restore_seconds_total` | counter | prefix cache cost; `refused` counts a snapshot larger than the cache bound |

@@ -360,7 +360,7 @@ impl Metrics {
         );
         c(
             "hipml_batch_exact_path",
-            "1 when batched decode is bit-exact at every B, 0 when B>=4 uses the WMMA tile",
+            "1 when the approximate WMMA tile is disabled for this process (batched decode stays exact at every B); 0 when the tile is enabled and B>=4 may take it, except where exact_scope holds. A capability, not a per-call route: set HIPML_BATCH_TRACE=1 for the routes",
             "gauge",
             s.batch_exact.to_string(),
         );
