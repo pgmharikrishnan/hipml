@@ -297,7 +297,7 @@ pub fn run(args: &[String]) -> i32 {
     println!(
         "hipml serve on http://{}:{} | {} tensors, {:.2} GiB resident + {:.2} GiB drafter\n\
          slots {} x ctx {} | chunk {} | drafts {} | prefix cache {} entries / {} MiB\n\
-         admission: {} in flight ({} slots + {} queued) | {} connections | batch exact: {}",
+         admission: {} in flight ({} slots + {} queued) | {} connections | batch path: {}",
         a.host,
         a.port,
         report.tensor_count,
@@ -314,9 +314,9 @@ pub fn run(args: &[String]) -> i32 {
         queue_max,
         a.max_conns,
         if skinny {
-            "no (WMMA tile at B>=4)"
+            "tile available at B>=4 unless exact_scope holds; per-call route: HIPML_BATCH_TRACE=1"
         } else {
-            "yes"
+            "exact GEMV at every B (HIPML_BATCH_LEGACY set); per-call route: HIPML_BATCH_TRACE=1"
         }
     );
 

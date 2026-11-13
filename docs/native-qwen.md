@@ -56,8 +56,8 @@ nine; what differs is *how*, and that is the whole of the cost:
   the exact `_b` GEMV, which is why 16 slots on UD ran at 97.42 tok/s against
   216.88 for the stock file. With the entries, 16 slots reach 201.59 on the
   approximate tile; the follow-up's Q5_K load-order rewrite took it to 220.65
-  (2.27x its own baseline), and the re-verification on `409f4ad` measures
-  **222.13** tok/s in cell c; the exact path is 96.87.
+  (2.27x its own baseline), and the re-verification on `af132a4` measures
+  **222.42** tok/s in cell c; the exact path is 96.87.
   See [`notes/serve-ud-batch.md`](notes/serve-ud-batch.md).
 - Batching runs past 8,192 tokens per slot on a UD file: cell b is 8 slots at
   16,384 tokens each and cell c is 16 slots at 8,192, with the prefix cache
@@ -199,17 +199,19 @@ wavelengths…" (32 ids, identical on rerun).
 resident: 15.42 GiB in 866 tensors; 14.42 GiB streamed/token; q8 KV 0.268 GiB at 8,192
 ```
 
-The current numbers are the re-verification on `409f4ad`: one binary, one
-session, 3 reps in each of 2 separate processes, llama.cpp build 11820 in the
-same window on the same ids. The full table, its spreads and its caveats are in
+The current numbers are the re-verification on `af132a4`: one binary, one
+session, 3 reps in each of 2 separate processes (a third process for the two
+prefill@512 cells), llama.cpp build 11820 in the same window on the same ids.
+The full table, its spreads and its caveats are in
 [`benchmarks.md`](benchmarks.md).
 
 | cell | hipml | llama.cpp | Δ |
 | --- | ---: | ---: | ---: |
-| prefill @512 tok/s | 1,346.1 | 1,215.2 | +10.8% |
-| prefill @8,192 tok/s | 1,326.1 | 1,352.5 | −1.9% |
-| decode @0 tok/s | 33.15 | 32.24 | +2.8% |
-| decode @8,192 tok/s | 31.98 | 31.41 | +1.8% |
+| prefill @512 tok/s | 1,353.8 | 1,210.5 | +11.8% |
+| prefill @512 tok/s, cold first request dropped | 1,357.6 | 1,219.9 | +11.3% |
+| prefill @8,192 tok/s | 1,328.0 | 1,353.3 | −1.9% |
+| decode @0 tok/s | 33.22 | 32.26 | +3.0% |
+| decode @8,192 tok/s | 31.99 | 31.48 | +1.6% |
 
 ### The Q5_K tile's fallback comparison (earlier tree)
 
@@ -358,7 +360,7 @@ python bench/job.py --engine llama --prompt prose_explanation --depth 0 --reps 3
 
 ## Checks
 
-Re-run on `409f4ad`, the tree the table above was timed on, before any cell:
+Re-run on `af132a4`, the tree the table above was timed on, before any cell:
 
 | check | result |
 | --- | --- |
@@ -371,6 +373,8 @@ Re-run on `409f4ad`, the tree the table above was timed on, before any cell:
 | `hipml batch-bench --slots 16 --check` (UD, q8) | 16/16 ids on all 16 slots, "all slots reproduce the B=1 path" |
 | `hipml spec-bench` drafts 0–3, q8 | 128/128 exact on every row |
 | `hipml spec-bench` drafts 0–3, f32 | 128/128 exact on every row |
+| `probe_exact.py --ctx 32768 --drafts 1,2,3` | 48 replies id-for-id (16 chats × 3 drafts, 128 tokens each) |
+| `hipml column-bench --check`, cols 4, q8 and f32 | 0 differ on 7,946,240 logits, max &#124;d&#124; 0.0 |
 
 The same binary is the one timed. Both oracle gates reproduce the reference
 max-error to four decimal places and the same index on this tree, so the

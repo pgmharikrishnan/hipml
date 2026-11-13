@@ -5,10 +5,10 @@ current at the time. This one measured all of them in a single window, from a
 single binary, with the gates run first and the spread recorded for every cell —
 the losses included.*
 
-The interesting number is not 33.15 tokens per second. It is that 33.15, 62.33,
-25,201 MiB and 6.42 s all came out of the same 56 minutes: one binary built from
-one tree, one model file measured, one card, every axis measured between 11:56
-and 12:52 UTC. Earlier articles each took one axis — prefill, batching,
+The interesting number is not 33.22 tokens per second. It is that 33.22, 62.36,
+25,380 MiB and 6.20 s all came out of the same 57 minutes: one binary built from
+one tree, one model file measured, one card, every axis measured between 18:38
+and 19:35 UTC. Earlier articles each took one axis — prefill, batching,
 speculation, the roofline — and each had to say which tree it came from. This is
 the first table where the same build produced the prefill number, the decode
 number, the server number, the speculation number and the memory number, so the
@@ -28,24 +28,26 @@ absolute error against the CPU reference at 0.1086 on the UD file (index
 decimals and the same index as the previous session, on a different tree.
 `parity --deep` passes 74 cases; `parity prefill --deep` passes 15;
 `batch-bench --slots 16 --check` reproduces the single-row path on all 16 slots,
-16 ids each; `spec-bench` is 128 of 128 token-exact at q8 and again at f32, and
-it now installs the server's dispatch and exits non-zero on any drafts row that
-is not exact; and `serve` with speculation on reproduces `serve` plain id for
-id — 48 replies across drafts 1, 2 and 3 at 32,768 context, compared one for
-one. A cell that had failed a gate would not have been timed, which is the only
-reason a timing table means anything.
+16 ids each; `spec-bench` is 128 of 128 token-exact on all eight rows, at q8 and
+again at f32, and it now installs the server's dispatch and exits non-zero on
+any drafts row that is not exact; `probe_exact --ctx 32768 --drafts 1,2,3`
+reproduces plain decode id for id, 48 replies compared one for one; and
+`column-bench --check` finds 0 differing logits in 7,946,240. A cell that had
+failed a gate would not have been timed, which is the only reason a timing table
+means anything.
 
-**The hashes were asserted before and after.** The binary and all three model
-files were hashed at the start of the window and re-hashed after the last cell;
-every one is byte-identical. No model file was written.
+**The hashes were asserted before and after.** The binary, the tree, the head
+and all three model files were hashed at the start of the window and re-hashed
+after the last cell; every one is byte-identical. No model file was written.
 
 **The spread is reported for every cell, not only the good ones.** CLI rows are
-three reps in each of two separate processes, so six values. Serve rows are the
-harness's wave aggregates: ten waves at one slot, six at eight, three at
-sixteen. The llama.cpp cells were run in the same window as the hipml cells, not
-in a block afterwards. Where the gap is smaller than the spread, this article
-says so instead of calling it a win, and the cells where that happens are named
-below.
+three reps in each of two separate processes, so six values; the two
+prefill@512 cells took a third process, nine values, after the drift check.
+Serve rows are the harness's wave aggregates: ten waves at one slot, six at
+eight, three at sixteen. The llama.cpp cells were run in the same window as the
+hipml cells, not in a block afterwards. Where the gap is smaller than the
+spread, this article says so instead of calling it a win, and the cells where
+that happens are named below.
 
 ## The table
 
@@ -54,90 +56,93 @@ Spread is max−min over the cell, as a percentage of the median.
 
 | axis | hipml | llama.cpp | Δ | spread hipml / llama |
 | --- | ---: | ---: | ---: | --- |
-| CLI prefill @512 | **1,346.1 tok/s** | 1,215.2 | **+10.8%** | 2.3% / 13.5% |
-| CLI prefill @8,192 | 1,326.1 | **1,352.5** | −1.9% | 0.5% / 0.9% |
-| CLI decode @0 | **33.15 tok/s / 30.17 ms** | 32.24 / 31.01 | **+2.8%** | 0.13% / 1.0% |
-| CLI decode @8,192 | **31.98 / 31.27 ms** | 31.41 / 31.84 | **+1.8%** | 0.35% / 0.42% |
-| serve 1 slot | 31.64 tok/s, TTFT p50 2,124 ms † | **32.12, 1,921 ms** | −1.5% | 0.3% / 0.5% |
-| serve 8 slots | **132.37, TTFT 489 ms** | 109.42, 563 ms | **+21.0%** | 0.7% / 12.0% |
-| serve 16 slots | 222.13, TTFT 742 ms | **234.61, 1,123 ms** | −5.3% | 0.7% / 11.2% |
-| MTP serve, drafts 3 | 52.32 | **62.33** | **−16.1%** | 1.0% / 1.7% |
-| `spec-bench` d0→d3 (q8) | 33.30 → 51.75 → 60.58 → **63.57** | no harness | — | — |
+| CLI prefill @512 | **1,353.8 tok/s** | 1,210.5 | **+11.8%** | 3.3% / 16.1% |
+| CLI prefill @512, cold first request dropped | **1,357.6** | 1,219.9 | **+11.3%** | 1.6% / 1.9% |
+| CLI prefill @8,192 | 1,328.0 | **1,353.3** | −1.9% | 0.5% / 0.9% |
+| CLI decode @0 | **33.22 tok/s / 30.10 ms** | 32.26 / 30.99 | **+3.0%** | 0.35% / 1.1% |
+| CLI decode @8,192 | **31.99 / 31.26 ms** | 31.48 / 31.77 | **+1.6%** | 0.24% / 0.84% |
+| serve 1 slot | 31.64 tok/s, TTFT p50 2,130 ms | **32.17, 1,918 ms** | −1.7% | 0.6% / 0.2% |
+| serve 8 slots | **131.96, TTFT 488 ms** | 114.51 (re-run 105.89), 548 ms | **+15.2%** (+24.6%) | 0.6% / 7.9%–11.0% |
+| serve 16 slots | 222.42, TTFT 738 ms | **215.70** (re-run 229.45), 1,055 ms | +3.1% / −3.1% | 0.2% / 18.1%–6.0% |
+| MTP serve, drafts 3 | 52.36 | **62.36** | **−16.0%** | 0.8% / 0.7% |
+| `spec-bench` d0→d3 (q8) | 33.28 → 51.77 → 60.52 → **63.66** | no harness | — | — |
 | peak VRAM, CLI @8,192 | 18,395 MiB | **15,809 MiB** | +16.4% | 0 |
-| peak VRAM, serve 16 slots | 25,466 MiB † | **22,608 MiB** | +12.6% | 0 |
+| peak VRAM, serve 16 slots | 25,380 MiB | **22,638 MiB** | +12.1% | 0 |
 | streamed bytes/token | 15,484,418,048 B | not printed | — | — |
-
-† The serve one-slot TTFT and serve-16-slot VRAM rows are re-measured at the
-512-token default the server now ships; the rest of the table is the
-single-session matrix. At the earlier 256 default they read 2,500 ms (+30.1%)
-and 25,201 MiB (+11.5%).
 
 ## The verdict, axis by axis
 
-**Won: single-stream decode, at both depths.** 33.15 against 32.24 tok/s at
-depth 0 (+2.8%, 30.17 against 31.01 ms per token) and 31.98 against 31.41 at
-8,192 (+1.8%). The spreads are 0.13% and 1.0% at depth 0, 0.35% and 0.42% at
-8,192, so these are separable. They are also small: 0.84 ms and 0.57 ms per
-token.
+**Won: single-stream decode, at both depths.** 33.22 against 32.26 tok/s at
+depth 0 (+3.0%, 30.10 against 30.99 ms per token) and 31.99 against 31.48 at
+8,192 (+1.6%, 31.26 against 31.77 ms). The spreads are 0.35% and 1.1% at depth
+0, 0.24% and 0.84% at 8,192, so these are separable. They are also small: 0.89 ms
+and 0.51 ms per token.
 
-**Won: eight-slot serve, by a wide margin.** 132.37 aggregate against 109.42,
-+21.0%, with the 95th-percentile time to first token at 491 ms against 1,252.
-The delta is 22.9 tok/s against llama's 13.2 spread, so the cell is separable
+**Won: eight-slot serve, by a wide margin.** 131.96 aggregate against 114.51,
++15.2%, with the 95th-percentile time to first token at 490 ms against 1,392.
+The delta is 17.5 tok/s against llama's 9.05 spread, so the cell is separable
 even though llama's batching is noisy. A re-run of the same cell put llama's
-median at 106.78, which widens the lead rather than narrowing it.
+median at 105.89, which widens the lead to +24.6% rather than narrowing it; the
+table quotes the first run, which is the conservative one.
 
 **Won: prefill at 512 tokens — with a caveat that has to travel with the
-number.** 1,346.1 against 1,215.2, +10.8%. But llama's spread on that cell is
-13.5%, driven entirely by the first request of each process (1069.3 and 1108.5).
-Drop each process's cold first request and llama is 1209.6–1233.3, a 1.9%
-spread, against hipml's 1,349.6 at 0.7% — a +10.2% lead. The full-set delta is
-130.9 tok/s against a 164.0 spread, so the strict reading of the full set is
-*indistinguishable*; the warm reading is a real 10% lead. Both readings are in
-the table and neither should be quoted without the other. The warm-up repeats in
-a third process on both engines, in the same direction, so it is warm-up inside
-the process rather than thermal decay.
+number.** 1,353.8 against 1,210.5, +11.8%. But llama's spread on that cell is
+16.1%, 194.7 tok/s, driven entirely by the first request of each process
+(1035.0, 1085.6, 1088.4). The full-set delta is 143.3 tok/s against that 194.7
+spread, so the strict reading of the full set is *indistinguishable*. Drop each
+process's cold first request and llama is 1,219.9 at a 1.9% spread against
+hipml's 1,357.6 at 1.6% — a 137.7 tok/s delta, +11.3% — and that lead holds.
+Both readings are in the table and neither should be quoted without the other.
+The warm-up repeats in a third process on both engines, in the same direction
+and the same magnitude, so it is warm-up inside the process rather than thermal
+decay.
 
-**Lost: prefill at 8,192 tokens, narrowly.** 1,326.1 against 1,352.5, −1.9%.
-The delta is 26.4 tok/s against spreads of 7.2 and 11.9, so this one is
-separable too. hipml is flat from 512 to 8,192; llama gains about 11% over the
+**Lost: prefill at 8,192 tokens, narrowly.** 1,328.0 against 1,353.3, −1.9%.
+The delta is 25.3 tok/s against spreads of 6.4 and 11.6, so this one is
+separable too. hipml is flat from 512 to 8,192; llama gains about 11.8% over the
 same range.
 
-**Lost: one-slot serve.** 31.64 against 32.12, −1.5% — 0.48 tok/s. The latency
-is worse by more: median time to first token 2,124 ms against 1,921, +10.6%, at
-the server's 512-token default. That default is llama-server's own ubatch; the
-earlier 256-token default accounted for another 19.5 points of the gap. The
-mechanics are below.
+**Lost: one-slot serve.** 31.64 against 32.17, −1.7% — 0.53 tok/s. The latency
+is worse by more: median time to first token 2,130 ms against 1,918, +11.0%.
+That is much closer than it used to be, and what closed it is the serve prefill
+chunk, which now defaults to 512. The mechanics are below, and it is still a
+loss.
 
-**Lost: MTP at matched depth.** 52.32 against 62.33, −16.1%, with acceptance
-nearly equal. The mechanics are below.
+**Lost: MTP at matched depth.** 52.36 against 62.36, −16.0%, with acceptance
+nearly equal and the verify exact on both sides of our own path. The mechanics
+are below.
 
 **Lost: memory, on every cell.** Peak VRAM is 17,031 against 15,546 MiB at 512
-tokens (+9.6%), 18,395 against 15,809 at 8,192 (+16.4%), and 20,271 / 24,528 /
-25,466 against 16,728 / 21,417 / 22,608 across the three serve cells (+21.2% /
-+14.5% / +12.6%). Peak VRAM is identical across reps on both engines, so this is
+tokens (+9.6%), 18,395 against 15,809 at 8,192 (+16.4%), 20,271 / 24,288 /
+25,380 against 16,728 / 21,417 / 22,638 across the three serve cells (+21.2% /
++13.4% / +12.1%), and 21,072 against 18,624 MiB with the drafter at three
+drafts (+13.1%). Peak VRAM is identical across reps on both engines, so this is
 the one axis with no measurement noise at all. It is the q8 KV layout plus the
 recurrent state plus, in serve, a second KV/SSM engine, a prefix snapshot and
 the drafter.
 
 ## Three results that are not claims
 
-**Sixteen slots is a tie, not a loss.** 222.13 against 234.61 is −5.3%, but
-llama's three waves were 234.6, 211.4 and 237.8 — a 26.4 tok/s spread, 11.2% —
-against a 12.5 tok/s delta. The medians are the middle of a noisy distribution
-and the difference is smaller than the noise. On latency the cell is not close:
-median time to first token 742 against 1,123 ms, p95 744 against 2,550, and
-hipml's own spread is 0.7%. Throughput is indistinguishable; tail latency is not.
+**Sixteen slots is a tie, not a loss.** 222.42 against 215.70 is 6.7 tok/s
+ahead, +3.1%, but llama's three waves were 199.20, 215.70 and 238.34 — a 39.15
+tok/s spread, 18.1%. A re-run of the same cell gave 224.04, 229.45 and 237.81,
+median 229.45 and spread 13.77, which puts hipml 7.0 tok/s behind at −3.1%. The
+sign flips between runs, the medians are the middle of a noisy distribution,
+and the difference is smaller than the noise both times. On latency the cell is
+not close: median time to first token 738 against 1,055 ms, p95 742 against
+2,621, and hipml's own spread is 0.2%. Throughput is indistinguishable; tail
+latency is not.
 
 **Load time is level, and it is not the same quantity.** hipml loads the engine
-in 6.17 and 6.42 s across the two CLI processes. llama.cpp reports 6.89, 7.00
-and 7.05 s from process start to model loaded, and 8.25 s with the drafter.
+in 6.18 to 6.95 s across five values, median 6.20. llama.cpp reports 6.85, 7.01
+and 7.07 s from process start to model loaded, and 8.09 s with the drafter.
 hipml's number is tensor upload plus graph build; llama's includes process
 start. No claim.
 
 **Cell a is not the same metric as cells b and c.** The serve harness computes
 cell a as the median of per-stream decode rates, so it equals single-stream
 decode, and cells b and c as `sum(decode_tokens) / (last − first)` across the
-wave, which is aggregate goodput. Comparing 31.64 with 132.37 and calling it a
+wave, which is aggregate goodput. Comparing 31.64 with 131.96 and calling it a
 fourfold speed-up would be comparing a rate with a sum. The harness does this on
 both engines, so the comparison within a cell is fair; across cells it is not.
 
@@ -151,56 +156,49 @@ llama-at-default is llama-at-3, and the d3 row is depth-matched. Acceptance is
 nearly equal: 0.699 for hipml's serve path at three drafts against llama's 0.712
 median. The drafts are not worse; the step that verifies them is more expensive.
 
-There is a second point about that row, and it settles the row rather than
-qualifying it. The batch trace reports a width of 4 at three drafts — exactly
-the threshold where the projection path switches from the exact batched GEMV to
-the approximate tile — and widths of 2 and 3 at one and two drafts, so the row
-was once read as sitting on the approximate path at the one depth that matters.
-It is not. `serve` sets only `HIPML_BATCH_SKINNY`, while `skinny_on()` reads
-`HIPML_SKINNY`, so `exact_scope` is held on the verify columns and the verify
-runs the exact `gemv_*_b` entries at every draft count: the run's own trace
-names `gemv_q5_k_b`, `gemv_q6_k_b` and `gemv_iq4_xs_b` at b=2, 3 and 4, and the
-`gemm_skinny_*` tile appears only at b=6, 7, 8, 14, 15 and 16 — the serve
-cells, not the verify. A control run that forces `HIPML_SKINNY=1` onto the tile
-does diverge, 1 of 48 replies at drafts 3 with the first differing id at
-position 5, while drafts 1 and 2 stay exact, so the protection is load-bearing
-and intact. That misreading is why the trace now prints `route=exact` or
-`route=skinny` on every line, and why `spec-bench` now exits 1 on a drafts row
-that is not exact. 52.32 against 62.33 is therefore a clean exact-path
-comparison, and the gap is per-step cost rather than an approximate kernel.
+That row is also exact on both sides of our own path, and this time it is read
+from the trace rather than inferred from the width. All three draft counts trace
+`route=exact` — b=1+2 at one draft, b=1+3 at two, b=1+4 at three. The verify
+holds `exact_scope`, so even the four-column step runs the exact `gemv_*_b`
+entries; the approximate tile appears only at b=6, 7, 8, 14, 15 and 16, which is
+serve cells b and c, not the verify. 52.36 against 62.36 is therefore an
+exact-path comparison on both sides, and the −16.0% is what a scalar GEMV that
+issues four FMAs per weight value at b=4 costs against llama's own verify. What
+it does not say is whether llama's MTP is exact against its own plain decode:
+that was not diffed, and hipml's 128/128 `spec-bench` and 48/48 `probe_exact`
+do not transfer to it.
 
 **hipml's serve MTP loses about 11 tok/s against its own kernel path.** The CLI
-`spec-bench` at three drafts is 63.57 tok/s at q8; the serve cell at the same
-depth is 52.32. Different harness, different chunk, different prompt, and a
+`spec-bench` at three drafts is 63.66 tok/s at q8; the serve cell at the same
+depth is 52.36. Different harness, different chunk, different prompt, and a
 64-token stream against a 128-token one, so the 11 tok/s is not a measurement of
 serve overhead. It is a warning not to read either number across, and an open
 item rather than a result.
 
-**The one-slot TTFT gap was the chunk, and the chunk is now 512.** The serve
-default used to be a 256-token prefill chunk and llama-server has no chunk
-knob, so hipml was choosing a smaller tile than the reference. At 256 the
-one-slot TTFT was 2,500 ms for a 2,423-token prompt, about 969 tok/s implied;
-at 512 it is 2,124 ms, +10.6% against llama's 1,921. The 256-token tile was 10
-tiles where 512 is 5, and the measured difference is 372 ms. 512
-is llama-server's `-ub 512`, so the comparison is like-for-like; raising it
-further flips one greedy reply of sixteen at token 5 on a 0.008–0.018 nat tie,
-which was accepted as a trade. Time to first token is still not a prefill
-number — it includes HTTP, admission, queueing and the first token — so the
-remaining 10.6% is not all prefill either.
+**The one-slot TTFT gap is now +11.0%, and the chunk is why.** The serve default
+used to be a 256-token prefill chunk and llama-server has no chunk knob, so
+hipml was choosing a smaller tile than the reference. At 256 the one-slot TTFT
+was 2,500 ms for a 2,423-token prompt; at 512 it is 2,130 ms, +11.0% against
+llama's 1,918, where the gap was +30.1%. 512 is llama-server's own `-ub 512`, so
+the physical tile is now matched, and the measured difference is 370 ms over 5
+tiles. What is left is one tile of fixed cost per prefill tile, about 59 ms
+each. Time to first token is still not a prefill number — it includes HTTP,
+admission, queueing and the first token — so the remaining 11.0% is not all
+prefill either, and it is still a loss.
 
 ## Decode is finished as a bandwidth problem
 
 The engine's own counter says one decode token streams 15,484,418,048 bytes —
-14.42 GiB of weights. Against the **30.17 ms** the table measures, that is
-**513.2 GB/s, 80.2% of the card's 640 GB/s spec**. The ablation's instrumented
+14.42 GiB of weights. Against the **30.10 ms** the table measures, that is
+**514.4 GB/s, 80.4% of the card's 640 GB/s spec**. The ablation's instrumented
 plain step is **30.02 ms**, and the same bytes against it are **515.7 GB/s,
-80.6%**. The 0.15 ms between the two is the gap between an instrumented step and
-the wall clock behind 33.15 tok/s; either denominator puts decode at about four
+80.6%**. The 0.08 ms between the two is the gap between an instrumented step and
+the wall clock behind 33.22 tok/s; either denominator puts decode at about four
 fifths of the spec, and the conclusion does not depend on which is used.
 
 That number is the whole argument. A dense decode cannot stream fewer bytes than
 the model, so the ceiling is the model divided by the bandwidth, and both
-engines sit at roughly four fifths of it, 2.8% apart. The +2.8% is the last few
+engines sit at roughly four fifths of it, 3.0% apart. The +3.0% is the last few
 percent of a problem that is essentially solved, not a new regime. The two
 levers that remain are the ones the arithmetic points at: fewer bytes per
 weight, and less per-step overhead in the roughly one fifth that is not the
@@ -213,17 +211,17 @@ reads the same bytes once and throws them away.
 ## What this does not say
 
 It does not say the engine is faster. It wins four axes, loses four and ties
-one, and the four it wins are three narrow ones and one wide one: 2.8%, 1.8% and
-10.8% on the medians (10.2% on the warm prefill set), and 21% at eight slots.
-Against that it loses 1.9% on long-context prefill, 1.5% on one-slot throughput
-with a 10.6% worse median TTFT, 16.1% on MTP at matched depth, and 9.6% to 21.2%
-on peak VRAM in every cell. Any summary that leads with "faster than llama.cpp"
-without those four is not this table.
+one, and the four it wins are three narrow ones and one wide one: 3.0%, 1.6% and
+11.8% on the medians (11.3% on the warm prefill set), and 15.2% at eight slots.
+Against that it loses 1.9% on long-context prefill, 1.7% on one-slot throughput
+with an 11.0% worse median TTFT, 16.0% on MTP at matched depth, and 9.6% to
+21.2% on peak VRAM in every cell. Any summary that leads with "faster than
+llama.cpp" without those four is not this table.
 
 The earlier articles quote an earlier tree's matrix, where decode was 6.1–7.4%
 behind. This table has decode ahead at both depths. The one-slot serve numbers
 are not directly comparable: the release run's cell a ran the speculative path
-and came out 30.4% ahead, while this table's cell a is plain decode at −1.5%.
+and came out 30.4% ahead, while this table's cell a is plain decode at −1.7%.
 Both engines were re-measured here; the earlier tree was not re-run, so the
 difference between the two is a comparison against a report rather than a
 measurement. It is consistent with the decode-path work that landed in between.
@@ -237,14 +235,14 @@ Three comparisons need a note rather than a correction:
 - Time to first token is not a prefill number; only the CLI rows are prefill
   like-for-like.
 - Cells b and c run hipml's approximate WMMA tile at batch widths 8 and 16, while
-  llama.cpp runs its production kernel. Cell a, the MTP plain step and the MTP
-  verify are the only exact-path hipml serve rows.
+  llama.cpp runs its production kernel. Cell a and all three MTP rows are the
+  exact-path hipml serve rows.
 
-And the MTP row is now settled on the point that once made it provisional: the
-three-draft verify holds `exact_scope`, so 52.32 against 62.33 compares the
-exact path on both sides and its −16.1% is per-step cost, not a kernel
-substitution. What it does not say is why that step costs more; that is the open
-item.
+And the MTP row is settled on the point that once made it provisional: all three
+draft counts trace `route=exact`, so 52.36 against 62.36 compares the exact path
+on both sides and its −16.0% is per-step cost, not a kernel substitution. What
+it does not say is whether llama's own MTP matches its own plain decode, and why
+our four-column step costs more; those are the open items.
 
 ## Where the numbers come from
 
@@ -257,5 +255,6 @@ item.
   [`../notes/decode-ablation.md`](../notes/decode-ablation.md) and
   [`../notes/decode-epilogue.md`](../notes/decode-epilogue.md).
 - The serve VRAM decomposition: [`../notes/serve-vram.md`](../notes/serve-vram.md).
+- The serve prefill chunk decision: [`../notes/serve-prefill-chunk.md`](../notes/serve-prefill-chunk.md).
 - The earlier stock-model matrix this one is not comparable with on decode:
   [`../release-run.md`](../release-run.md).
