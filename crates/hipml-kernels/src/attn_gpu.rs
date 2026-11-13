@@ -328,6 +328,26 @@ mod imp {
             self.kv_v.zero()
         }
 
+        /// Zero every activation buffer of the block, so a decode ablation that
+        /// drops a producer leaves its consumer reading zeros instead of
+        /// uninitialized memory (`gpu/ablate.rs`).
+        pub fn zero_activations(&self) -> Result<(), String> {
+            for b in [
+                &self.qg,
+                &self.q,
+                &self.gate,
+                &self.k,
+                &self.v,
+                &self.out,
+                &self.y,
+                &self.part_acc,
+                &self.part_ml,
+            ] {
+                b.zero()?;
+            }
+            Ok(())
+        }
+
         /// Run q/k RMS norm and M-RoPE alone (the standalone parity target).
         pub fn norm_rope(
             &self,
@@ -448,10 +468,22 @@ mod imp {
         /// the K/V rows in their buffers; attention and the cache append are the
         /// caller's choice.
         pub fn prepare_qkv(&self, l: &Launcher, x: &Buffer) -> Result<(), String> {
+            self.qkv_gemvs(l, x)?;
+            self.front_only(l)
+        }
+
+        /// The three Q/K/V projections and nothing else. Split out of
+        /// `prepare_qkv` so a decode ablation can keep the weight stream and
+        /// drop the front end, or the other way round (`gpu/ablate.rs`).
+        pub fn qkv_gemvs(&self, l: &Launcher, x: &Buffer) -> Result<(), String> {
             let d = self.dims;
             self.gemv(l, &self.wq, x, &self.qg, 2 * d.n_head * d.head_dim)?;
             self.gemv(l, &self.wk, x, &self.k, d.width)?;
-            self.gemv(l, &self.wv, x, &self.v, d.width)?;
+            self.gemv(l, &self.wv, x, &self.v, d.width)
+        }
+
+        /// Split, q/k head norm and M-RoPE only — the front end's own launches.
+        pub fn front_only(&self, l: &Launcher) -> Result<(), String> {
             self.front(l)
         }
 
@@ -728,6 +760,12 @@ mod imp {
 
         /// `out = W_o (attn_out * gate)` — the tail shared by both KV paths.
         pub fn apply_output(&self, l: &Launcher) -> Result<(), String> {
+            self.q_gate_only(l)?;
+            self.out_gemv(l)
+        }
+
+        /// `attn_out *= silu(gate)` on its own, without the output projection.
+        pub fn q_gate_only(&self, l: &Launcher) -> Result<(), String> {
             let d = self.dims;
             let gate = self.module_kernel(l, "q_gate_f32")?;
             let mut p_out = self.out.as_ptr();
@@ -744,7 +782,12 @@ mod imp {
                 LaunchConfig::linear(d.n_head * d.head_dim, 256),
                 &l.stream,
                 &mut params,
-            )?;
+            )
+        }
+
+        /// The `attn_output` projection on its own.
+        pub fn out_gemv(&self, l: &Launcher) -> Result<(), String> {
+            let d = self.dims;
             self.gemv(l, &self.wo, &self.out, &self.y, d.n_embd)
         }
 
@@ -1067,7 +1110,23 @@ impl AttnLayer {
         Err("hipml was built without the `hip` feature".to_string())
     }
 
+    pub fn qkv_gemvs(&self, _l: &crate::Launcher, _x: &hipml_hip::Buffer) -> Result<(), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    pub fn front_only(&self, _l: &crate::Launcher) -> Result<(), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
     pub fn apply_output(&self, _l: &crate::Launcher) -> Result<(), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    pub fn q_gate_only(&self, _l: &crate::Launcher) -> Result<(), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    pub fn out_gemv(&self, _l: &crate::Launcher) -> Result<(), String> {
         Err("hipml was built without the `hip` feature".to_string())
     }
 
@@ -1194,6 +1253,10 @@ impl AttnLayer {
     }
 
     pub fn zero_kv(&self) -> Result<(), String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    pub fn zero_activations(&self) -> Result<(), String> {
         Err("hipml was built without the `hip` feature".to_string())
     }
 

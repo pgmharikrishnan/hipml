@@ -41,6 +41,8 @@ use hipml_kernels::{AttnLayer, Launcher};
 use crate::gpu_weights::{gemv_entry, mat_kind, Proj};
 use crate::Model;
 
+#[path = "gpu/ablate.rs"]
+mod ablate;
 #[path = "gpu/attn_tile.rs"]
 mod attn_tile;
 #[path = "gpu/deep_kv.rs"]
@@ -56,6 +58,7 @@ mod trace;
 
 #[path = "gpu/graph.rs"]
 mod graph;
+pub use ablate::{Ablate, Stage};
 pub use graph::{launches_per_token, GraphTiming};
 #[path = "gpu/batch.rs"]
 mod batch;
@@ -169,6 +172,8 @@ pub struct GpuEngine<'a> {
     /// The captured token graph, built on first use: one `hipGraphLaunch`
     /// submits the whole step instead of ~1,300 kernel launches.
     graph: Option<hipml_hip::Graph>,
+    /// Stages to drop, for `decode-ablate`. Empty on the shipped path.
+    ablate: Ablate,
     /// Stage timing; `None` unless the caller asked for a trace.
     pub trace: Option<Trace>,
     /// Prefix snapshots (SSM recurrent state + f32 KV rows), when enabled.
@@ -256,6 +261,12 @@ impl<'a> GpuEngine<'a> {
 
         let output_norm = Buffer::from_host(&model.f32_vec("output_norm.weight")?)?;
         let zeros = |n: usize| Buffer::alloc(n);
+        // `decode-ablate` seeds the set through the environment so a cell can be
+        // reproduced in a fresh process; the shipped path leaves it unset.
+        let ablate = match std::env::var("HIPML_ABLATE") {
+            Ok(v) => Ablate::parse(&v)?,
+            Err(_) => Ablate::none(),
+        };
         Ok(GpuEngine {
             model,
             cfg: cfg.clone(),
@@ -278,6 +289,7 @@ impl<'a> GpuEngine<'a> {
             arg_out: zeros(1)?,
             chunk: None,
             graph: None,
+            ablate,
             trace: None,
             prefix: None,
             cols: None,
@@ -334,14 +346,16 @@ impl<'a> GpuEngine<'a> {
     pub fn forward_token_id(&mut self, token: u32, st: &mut GpuState) -> Result<u32, String> {
         self.run_token(token, st, true)?;
         let l = self.model.launcher();
-        l.argmax_buf(
-            &self.logits,
-            &self.arg_v,
-            &self.arg_i,
-            &self.arg_out,
-            self.cfg.n_vocab,
-            ARGMAX_PARTS,
-        )?;
+        if !self.ablate.dropped(Stage::Argmax) {
+            l.argmax_buf(
+                &self.logits,
+                &self.arg_v,
+                &self.arg_i,
+                &self.arg_out,
+                self.cfg.n_vocab,
+                ARGMAX_PARTS,
+            )?;
+        }
         l.synchronize()?;
         let bytes = self.arg_out.download_bytes(0, 4)?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
@@ -353,104 +367,199 @@ impl<'a> GpuEngine<'a> {
     /// buffer. It is false inside a capture: the graph reads that buffer at
     /// launch time, so the host writes it once per token instead and the captured
     /// launch has no host arguments left.
+    ///
+    /// Every stage below is skippable through `self.ablate`, which
+    /// `decode-ablate` sets and nothing else does. A dropped stage issues no
+    /// launch at all, so the difference between two runs is the stage's real
+    /// in-situ cost and cannot include an instrument's.
     fn run_token(&mut self, token: u32, st: &mut GpuState, set_step: bool) -> Result<(), String> {
         let l = self.model.launcher();
         let cfg = &self.cfg;
+        let drop = self.ablate;
         let pos = st.pos;
         if set_step {
             l.set_step(pos, pos + 1, token as usize)?;
         }
 
-        mark(&mut self.trace, l, "embed")?;
-        l.embed_row_dev(
-            self.embed.2,
-            self.embed.0,
-            self.embed.1,
-            &self.x,
-            cfg.n_embd,
-        )?;
+        if !drop.dropped(Stage::Embed) {
+            mark(&mut self.trace, l, "embed")?;
+            l.embed_row_dev(
+                self.embed.2,
+                self.embed.0,
+                self.embed.1,
+                &self.x,
+                cfg.n_embd,
+            )?;
+        }
 
         for i in 0..layer_limit(self.layers.len()) {
             let block = &self.layers[i];
             let block_out: &Buffer = match &block.kind {
                 BlockKind::Ssm(s) => {
-                    mark(&mut self.trace, l, "attn_norm")?;
-                    l.rmsnorm_buf(&self.x, &block.attn_norm, s.input(), cfg.n_embd, cfg.eps)?;
-                    mark(&mut self.trace, l, "ssm_proj")?;
-                    s.gemvs()?;
-                    mark(&mut self.trace, l, "ssm_step")?;
-                    s.recurrent()?;
-                    mark(&mut self.trace, l, "ssm_out")?;
-                    s.output_gemv()?;
+                    if !drop.dropped(Stage::Norm) {
+                        mark(&mut self.trace, l, "attn_norm")?;
+                        l.rmsnorm_buf(&self.x, &block.attn_norm, s.input(), cfg.n_embd, cfg.eps)?;
+                    }
+                    if !drop.dropped(Stage::SsmGemv) {
+                        mark(&mut self.trace, l, "ssm_proj")?;
+                        s.gemvs()?;
+                    }
+                    if drop.splits_ssm_scan() {
+                        mark(&mut self.trace, l, "ssm_step")?;
+                        if !drop.dropped(Stage::SsmGates) {
+                            s.step_gates()?;
+                        }
+                        if !drop.dropped(Stage::SsmConv) {
+                            s.step_conv()?;
+                        }
+                        if !drop.dropped(Stage::SsmL2) {
+                            s.step_l2()?;
+                        }
+                        if !drop.dropped(Stage::SsmRec) {
+                            s.step_rec()?;
+                        }
+                        if !drop.dropped(Stage::SsmGateNorm) {
+                            s.step_gate_norm()?;
+                        }
+                    } else {
+                        mark(&mut self.trace, l, "ssm_step")?;
+                        s.recurrent()?;
+                    }
+                    if !drop.dropped(Stage::SsmGemv) {
+                        mark(&mut self.trace, l, "ssm_out")?;
+                        s.output_gemv()?;
+                    }
                     s.output()
                 }
                 BlockKind::Full { attn, deep: None } => {
-                    mark(&mut self.trace, l, "attn_norm")?;
-                    l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
-                    mark(&mut self.trace, l, "attn_qkv")?;
-                    attn.prepare_qkv(l, &self.t)?;
-                    mark(&mut self.trace, l, "attn_kv")?;
-                    attn.append_at(l, attn.k_buf().as_ptr(), attn.v_buf().as_ptr())?;
-                    mark(&mut self.trace, l, "attn_core")?;
-                    attn.attention_at(l, attn.q_buf().as_ptr(), attn.attn_out().as_ptr(), pos)?;
-                    mark(&mut self.trace, l, "attn_wo")?;
-                    attn.apply_output(l)?;
+                    if !drop.dropped(Stage::Norm) {
+                        mark(&mut self.trace, l, "attn_norm")?;
+                        l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
+                    }
+                    // The stage marks keep the names and boundaries the shipped
+                    // path had, so `gpu-profile`'s table is comparable across
+                    // trees: `attn_qkv` covers the projections and the front end
+                    // together, `attn_wo` covers `q_gate` and the output
+                    // projection together.
+                    if !drop.dropped(Stage::AttnGemv) || !drop.dropped(Stage::AttnFront) {
+                        mark(&mut self.trace, l, "attn_qkv")?;
+                    }
+                    if !drop.dropped(Stage::AttnGemv) {
+                        attn.qkv_gemvs(l, &self.t)?;
+                    }
+                    if !drop.dropped(Stage::AttnFront) {
+                        attn.front_only(l)?;
+                    }
+                    if !drop.dropped(Stage::KvAppend) {
+                        mark(&mut self.trace, l, "attn_kv")?;
+                        attn.append_at(l, attn.k_buf().as_ptr(), attn.v_buf().as_ptr())?;
+                    }
+                    if !drop.dropped(Stage::AttnReduce) {
+                        mark(&mut self.trace, l, "attn_core")?;
+                        attn.attention_at(l, attn.q_buf().as_ptr(), attn.attn_out().as_ptr(), pos)?;
+                    }
+                    if !drop.dropped(Stage::QGate) || !drop.dropped(Stage::AttnGemv) {
+                        mark(&mut self.trace, l, "attn_wo")?;
+                    }
+                    if !drop.dropped(Stage::QGate) {
+                        attn.q_gate_only(l)?;
+                    }
+                    if !drop.dropped(Stage::AttnGemv) {
+                        attn.out_gemv(l)?;
+                    }
                     attn.output()
                 }
                 BlockKind::Full {
                     attn,
                     deep: Some(dk),
                 } => {
-                    mark(&mut self.trace, l, "attn_norm")?;
-                    l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
-                    mark(&mut self.trace, l, "attn_qkv")?;
-                    attn.prepare_qkv(l, &self.t)?;
-                    mark(&mut self.trace, l, "attn_kv")?;
-                    // Quantize and append the new K/V row on the device: one
-                    // launch instead of a readback and eight uploads.
-                    l.kv_encode(
-                        dk.dtype.id(),
-                        attn.k_buf(),
-                        attn.v_buf(),
-                        &dk.k,
-                        &dk.v,
-                        cfg.n_head_kv,
-                        cfg.head_dim,
-                        dk.seq,
-                    )?;
-                    mark(&mut self.trace, l, "attn_core")?;
-                    deep_attention(l, cfg, attn, dk, pos)?;
-                    mark(&mut self.trace, l, "attn_wo")?;
-                    attn.apply_output(l)?;
+                    if !drop.dropped(Stage::Norm) {
+                        mark(&mut self.trace, l, "attn_norm")?;
+                        l.rmsnorm_buf(&self.x, &block.attn_norm, &self.t, cfg.n_embd, cfg.eps)?;
+                    }
+                    if !drop.dropped(Stage::AttnGemv) || !drop.dropped(Stage::AttnFront) {
+                        mark(&mut self.trace, l, "attn_qkv")?;
+                    }
+                    if !drop.dropped(Stage::AttnGemv) {
+                        attn.qkv_gemvs(l, &self.t)?;
+                    }
+                    if !drop.dropped(Stage::AttnFront) {
+                        attn.front_only(l)?;
+                    }
+                    if !drop.dropped(Stage::KvAppend) {
+                        mark(&mut self.trace, l, "attn_kv")?;
+                        // Quantize and append the new K/V row on the device: one
+                        // launch instead of a readback and eight uploads.
+                        l.kv_encode(
+                            dk.dtype.id(),
+                            attn.k_buf(),
+                            attn.v_buf(),
+                            &dk.k,
+                            &dk.v,
+                            cfg.n_head_kv,
+                            cfg.head_dim,
+                            dk.seq,
+                        )?;
+                    }
+                    if !drop.dropped(Stage::AttnReduce) {
+                        mark(&mut self.trace, l, "attn_core")?;
+                        deep_attention(l, cfg, attn, dk, pos)?;
+                    }
+                    if !drop.dropped(Stage::QGate) || !drop.dropped(Stage::AttnGemv) {
+                        mark(&mut self.trace, l, "attn_wo")?;
+                    }
+                    if !drop.dropped(Stage::QGate) {
+                        attn.q_gate_only(l)?;
+                    }
+                    if !drop.dropped(Stage::AttnGemv) {
+                        attn.out_gemv(l)?;
+                    }
                     attn.output()
                 }
             };
-            mark(&mut self.trace, l, "residual_in")?;
-            l.residual_buf(&self.x, block_out, &self.x1, cfg.n_embd)?;
-            mark(&mut self.trace, l, "post_norm")?;
-            l.rmsnorm_buf(&self.x1, &block.post_norm, &self.t, cfg.n_embd, cfg.eps)?;
+            if !drop.dropped(Stage::Ew) {
+                mark(&mut self.trace, l, "residual_in")?;
+                l.residual_buf(&self.x, block_out, &self.x1, cfg.n_embd)?;
+            }
+            if !drop.dropped(Stage::Norm) {
+                mark(&mut self.trace, l, "post_norm")?;
+                l.rmsnorm_buf(&self.x1, &block.post_norm, &self.t, cfg.n_embd, cfg.eps)?;
+            }
 
-            mark(&mut self.trace, l, "ffn_gate")?;
-            block.gate.gemv(l, &self.t, &self.gate)?;
-            mark(&mut self.trace, l, "ffn_up")?;
-            block.up.gemv(l, &self.t, &self.up)?;
-            mark(&mut self.trace, l, "ffn_act")?;
-            l.silu_mul_buf(&self.gate, &self.up, &self.act, cfg.n_ff)?;
-            mark(&mut self.trace, l, "ffn_down")?;
-            block.down.gemv(l, &self.act, &self.down)?;
-            mark(&mut self.trace, l, "residual_out")?;
-            l.residual_buf(&self.down, &self.x1, &self.x, cfg.n_embd)?;
+            if !drop.dropped(Stage::FfnGemv) {
+                mark(&mut self.trace, l, "ffn_gate")?;
+                block.gate.gemv(l, &self.t, &self.gate)?;
+                mark(&mut self.trace, l, "ffn_up")?;
+                block.up.gemv(l, &self.t, &self.up)?;
+            }
+            if !drop.dropped(Stage::Ew) {
+                mark(&mut self.trace, l, "ffn_act")?;
+                l.silu_mul_buf(&self.gate, &self.up, &self.act, cfg.n_ff)?;
+            }
+            if !drop.dropped(Stage::FfnGemv) {
+                mark(&mut self.trace, l, "ffn_down")?;
+                block.down.gemv(l, &self.act, &self.down)?;
+            }
+            if !drop.dropped(Stage::Ew) {
+                mark(&mut self.trace, l, "residual_out")?;
+                l.residual_buf(&self.down, &self.x1, &self.x, cfg.n_embd)?;
+            }
         }
 
         st.pos += 1;
-        mark(&mut self.trace, l, "out_norm")?;
-        l.rmsnorm_buf(
-            &self.x,
-            &self.output_norm,
-            &self.final_h,
-            cfg.n_embd,
-            cfg.eps,
-        )?;
+        if !drop.dropped(Stage::Norm) {
+            mark(&mut self.trace, l, "out_norm")?;
+            l.rmsnorm_buf(
+                &self.x,
+                &self.output_norm,
+                &self.final_h,
+                cfg.n_embd,
+                cfg.eps,
+            )?;
+        }
+        if drop.dropped(Stage::LmHead) {
+            return Ok(());
+        }
         mark(&mut self.trace, l, "lm_head")?;
         let out = self
             .model
@@ -464,6 +573,51 @@ impl<'a> GpuEngine<'a> {
             cfg.n_vocab,
             cfg.n_embd,
         )
+    }
+
+    /// The stages `decode-ablate` is currently dropping (empty on the shipped
+    /// path).
+    pub fn ablate(&self) -> Ablate {
+        self.ablate
+    }
+
+    /// Change the dropped set. Only `decode-ablate` calls this; a graph built
+    /// under one set replays that set, so build it after the last change.
+    pub fn set_ablate(&mut self, a: Ablate) {
+        self.ablate = a;
+    }
+
+    /// Zero the decode scratch, so an ablated cell reads zeros rather than
+    /// whatever the previous cell left in an uninitialized buffer.
+    ///
+    /// This matters for the measurement, not just for tidiness: a dropped norm
+    /// leaves its consumer reading the same buffer, and a buffer that is
+    /// uninitialized can hold subnormals, which this card executes an order of
+    /// magnitude slower than zeros. `decode-ablate` calls this once per cell.
+    pub fn reset_scratch(&self) -> Result<(), String> {
+        for b in [
+            &self.x,
+            &self.x1,
+            &self.t,
+            &self.gate,
+            &self.up,
+            &self.act,
+            &self.down,
+            &self.final_h,
+            &self.logits,
+            &self.arg_v,
+            &self.arg_i,
+            &self.arg_out,
+        ] {
+            b.zero()?;
+        }
+        for b in &self.layers {
+            match &b.kind {
+                BlockKind::Full { attn, .. } => attn.zero_activations()?,
+                BlockKind::Ssm(s) => s.zero_activations()?,
+            }
+        }
+        self.model.launcher().synchronize()
     }
 
     pub fn model(&self) -> &Model {
