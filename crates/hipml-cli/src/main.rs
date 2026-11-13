@@ -23,6 +23,8 @@ mod cache_gate;
 #[cfg(feature = "hip")]
 mod column_cmd;
 #[cfg(feature = "hip")]
+mod decode_ablate_cmd;
+#[cfg(feature = "hip")]
 mod device_cmd;
 #[cfg(feature = "hip")]
 mod gdn_parity;
@@ -139,6 +141,8 @@ fn main() {
         }
         #[cfg(feature = "hip")]
         "column-bench" => std::process::exit(column_cmd::bench(&args[1..])),
+        #[cfg(feature = "hip")]
+        "decode-ablate" => std::process::exit(decode_ablate_cmd::run(&args[1..])),
         #[cfg(feature = "hip")]
         "gemv-check" => std::process::exit(gemv_cmd::gemv_check(&args[1..])),
         "gemv-entries" => {
@@ -263,6 +267,10 @@ fn help() {
          \x20 splitk-gate --gguf PATH [--chunk 2048 --tails 40]  split-K ffn\n\
          \x20           scratch vs HIPML_SPLITK=0 at every chunk tail\n\
          \x20 gpu-profile --gguf PATH  launch cost, host round-trips, graph token\n\
+         \x20 decode-ablate --gguf PATH [--depth D --tokens N --reps R]  the\n\
+         \x20           decode stage budget by removing each stage and timing\n\
+         \x20           the untraced step; --cells picks rows, --ctx sizes the\n\
+         \x20           caches independently of the depth\n\
          \x20 bench-kv  quantized-KV decode attention: depth x q8/q4 x 1 head / 16 layers\n\
          \x20           --depths 1024,8192,32768,100000 --reps 3\n\
          \x20 rows-check --gguf PATH [--slots N --prefix P --tail T --decode D]\n\

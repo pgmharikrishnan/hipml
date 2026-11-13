@@ -139,6 +139,37 @@ impl<'a> SsmGpuLayer<'a> {
         self.gate_norm()
     }
 
+    /// The five launches of the recurrent block, one at a time, so a decode
+    /// ablation can drop one of them (`gpu/ablate.rs`). Each is the same call
+    /// `recurrent` makes; the order is the order `recurrent` uses.
+    pub fn step_gates(&self) -> Result<(), String> {
+        self.gates()
+    }
+
+    pub fn step_conv(&self) -> Result<(), String> {
+        if std::env::var_os("HIPML_SSM_SPLIT").is_some() {
+            self.conv()
+        } else {
+            self.conv_silu()
+        }
+    }
+
+    pub fn step_l2(&self) -> Result<(), String> {
+        if std::env::var_os("HIPML_SSM_SPLIT").is_some() {
+            self.l2norms()
+        } else {
+            self.l2norm_pair()
+        }
+    }
+
+    pub fn step_rec(&self) -> Result<(), String> {
+        self.recurrence()
+    }
+
+    pub fn step_gate_norm(&self) -> Result<(), String> {
+        self.gate_norm()
+    }
+
     /// `conv_out = silu(conv1d(qkv, state))` as one launch: the conv tap chain
     /// and the SiLU on its result, which is what the two-launch pair computes.
     fn conv_silu(&self) -> Result<(), String> {

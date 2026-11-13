@@ -480,6 +480,28 @@ impl<'a> SsmGpuLayer<'a> {
         &self.out
     }
 
+    /// Zero the block's activation buffers (not its carried state), so a decode
+    /// ablation that drops a producer leaves its consumer reading zeros
+    /// (`gpu/ablate.rs`).
+    pub fn zero_activations(&self) -> Result<(), String> {
+        for b in [
+            &self.x,
+            &self.qkv,
+            &self.z,
+            &self.alpha_raw,
+            &self.beta_raw,
+            &self.g,
+            &self.beta_sig,
+            &self.conv_out,
+            &self.o,
+            &self.gated,
+            &self.out,
+        ] {
+            b.zero()?;
+        }
+        Ok(())
+    }
+
     /// One token through the layer. State buffers are updated in place.
     pub fn step(&self) -> Result<(), String> {
         self.gemvs()?;
