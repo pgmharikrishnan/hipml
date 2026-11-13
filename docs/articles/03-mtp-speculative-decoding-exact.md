@@ -6,7 +6,7 @@ On a 364-token tool prompt the engine emits 65 tokens at 58.60 tok/s. Plain gree
 
 ## Draft, verify, accept
 
-The model carries a multi-token-prediction head: one extra transformer block (`blk.64`) plus two glue tensors, `nextn.eh_proj` and `shared_head_norm`, in a small sidecar. The head shares the target's embedding and output head, runs its own f32 KV cache, and drafts recursively: token 1 from the last target hidden state, token 2 from the state after token 1, up to three.
+The model carries a multi-token-prediction head: one extra transformer block (`blk.64`) plus two glue tensors, `nextn.eh_proj` and `shared_head_norm`, in a small sidecar (the stock files carry the same block inline). The head shares the target's embedding and output head, runs its own f32 KV cache, and drafts recursively: token 1 from the last target hidden state, token 2 from the state after token 1, up to three.
 
 The target then runs all `1 + drafts` columns through all 64 layers in one weight pass:
 

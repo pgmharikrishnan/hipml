@@ -119,7 +119,8 @@ tokens (+9.6%), 18,395 against 15,809 at 8,192 (+16.4%), 20,271 / 24,288 /
 drafts (+13.1%). Peak VRAM is identical across reps on both engines, so this is
 the one axis with no measurement noise at all. It is the q8 KV layout plus the
 recurrent state plus, in serve, a second KV/SSM engine, a prefix snapshot and
-the drafter.
+the drafter's own KV and verify scratch — not the drafter's weights, which the
+model file carries inline and both engines hold.
 
 ## Three results that are not claims
 
