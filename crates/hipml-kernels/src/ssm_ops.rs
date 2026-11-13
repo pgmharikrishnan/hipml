@@ -119,12 +119,76 @@ impl<'a> SsmGpuLayer<'a> {
     /// Everything except the projections: gates, conv, norm, recurrence,
     /// gated RMS norm. This is the compute the recurrent block adds on top of
     /// streaming the weights.
+    ///
+    /// The decoder runs the conv and its SiLU in one launch and the two L2
+    /// norms in one, so a layer is five launches where it used to be seven;
+    /// `HIPML_SSM_SPLIT=1` selects the seven-launch form for an A/B. The
+    /// arithmetic is the same either way.
     pub fn recurrent(&self) -> Result<(), String> {
+        if std::env::var_os("HIPML_SSM_SPLIT").is_some() {
+            self.gates()?;
+            self.conv()?;
+            self.l2norms()?;
+            self.recurrence()?;
+            return self.gate_norm();
+        }
         self.gates()?;
-        self.conv()?;
-        self.l2norms()?;
+        self.conv_silu()?;
+        self.l2norm_pair()?;
         self.recurrence()?;
         self.gate_norm()
+    }
+
+    /// `conv_out = silu(conv1d(qkv, state))` as one launch: the conv tap chain
+    /// and the SiLU on its result, which is what the two-launch pair computes.
+    fn conv_silu(&self) -> Result<(), String> {
+        let d = &self.dims;
+        let kernel = self.module.kernel("ssm_conv_silu_f32")?;
+        let mut p_x = self.qkv.as_ptr();
+        let mut p_w = self.conv_w.as_ptr();
+        let mut p_state = self.conv_state.as_ptr();
+        let mut p_y = self.conv_out.as_ptr();
+        let mut v_c = d.conv_ch as i32;
+        let mut v_k = d.d_conv as i32;
+        let mut params: [*mut c_void; 6] = [
+            &mut p_x as *mut _ as *mut c_void,
+            &mut p_w as *mut _ as *mut c_void,
+            &mut p_state as *mut _ as *mut c_void,
+            &mut p_y as *mut _ as *mut c_void,
+            &mut v_c as *mut _ as *mut c_void,
+            &mut v_k as *mut _ as *mut c_void,
+        ];
+        kernel.launch(
+            LaunchConfig::linear(d.conv_ch, 256),
+            self.stream,
+            &mut params,
+        )
+    }
+
+    /// The q and k slices' L2 norms in one launch (two per-head grids).
+    fn l2norm_pair(&self) -> Result<(), String> {
+        let d = &self.dims;
+        let kernel = self.module.kernel("ssm_l2norm2_f32")?;
+        let mut p_x = self.conv_out.as_ptr();
+        let mut v_off0 = 0i32;
+        let mut v_off1 = d.key_dim() as i32;
+        let mut v_h = d.n_k as i32;
+        let mut v_d = d.head_k as i32;
+        let mut v_eps = d.eps;
+        let mut params: [*mut c_void; 6] = [
+            &mut p_x as *mut _ as *mut c_void,
+            &mut v_off0 as *mut _ as *mut c_void,
+            &mut v_off1 as *mut _ as *mut c_void,
+            &mut v_h as *mut _ as *mut c_void,
+            &mut v_d as *mut _ as *mut c_void,
+            &mut v_eps as *mut _ as *mut c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (2 * d.n_k as u32, 1, 1),
+            block: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        kernel.launch(cfg, self.stream, &mut params)
     }
 
     pub fn step_reps(&self, reps: usize) -> Result<f64, String> {
@@ -325,11 +389,21 @@ impl<'a> SsmGpuLayer<'a> {
     }
 
     fn recurrence(&self) -> Result<(), String> {
-        self.gdn_at(
+        // One block per value head leaves half the CUs idle: a head is 32
+        // blocks at 128 threads, and the kernel is state-load latency bound.
+        // Striping a head's rows across eight blocks (one full row pass each)
+        // is the measured best point; `HIPML_GDN_SPLIT=1` is the old single
+        // block form for an A/B.
+        let split = std::env::var("HIPML_GDN_SPLIT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(8);
+        self.gdn_split_at(
             self.conv_out.as_ptr(),
             self.g.as_ptr(),
             self.beta_sig.as_ptr(),
             self.o.as_ptr(),
+            split,
         )
     }
 
@@ -340,6 +414,20 @@ impl<'a> SsmGpuLayer<'a> {
         g: *mut c_void,
         beta: *mut c_void,
         o: *mut c_void,
+    ) -> Result<(), String> {
+        self.gdn_split_at(conv_out, g, beta, o, 1)
+    }
+
+    /// [`Self::gdn_at`] with the value rows of a head split across `split`
+    /// blocks (grid y). Rows are independent, so this is a scheduling change
+    /// only; `split = 1` is the single-block form.
+    pub fn gdn_split_at(
+        &self,
+        conv_out: *mut c_void,
+        g: *mut c_void,
+        beta: *mut c_void,
+        o: *mut c_void,
+        split: usize,
     ) -> Result<(), String> {
         let d = &self.dims;
         let mut p_s = self.s_state.as_ptr();
@@ -365,7 +453,7 @@ impl<'a> SsmGpuLayer<'a> {
             &mut v_sd as *mut _ as *mut c_void,
         ];
         let cfg = LaunchConfig {
-            grid: (d.n_v as u32, 1, 1),
+            grid: (d.n_v as u32, split.clamp(1, d.head_v) as u32, 1),
             block: (128, 1, 1),
             shared_mem_bytes: 0,
         };
