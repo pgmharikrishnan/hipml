@@ -542,8 +542,8 @@ tokens, one slot, ctx 32,768:
 At 3.03 streamed tokens per step that is 18.7 ms per token, against the client's
 19.05 — the difference is the first token, which prefill produces. The hook is
 inert when unset (`spec_log` is false, so the step takes the same branch it did
-before) and the cell measures 53.07 tok/s with it on against 52.48 with it off,
-the same one-percent run-to-run spread the cell shows between reps.
+before); with it on the cell reads 53.07 tok/s against 52.48 off, 1.1% and the
+same size as the cell's own rep-to-rep variation (52.84 / 52.48 / 52.35).
 
 The gap between consecutive step starts is the step's own buckets to within
 0.1 ms on every request, so the scheduler and the streaming write cost nothing
