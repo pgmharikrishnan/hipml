@@ -102,6 +102,17 @@ impl Config {
             let interval = u("full_attention_interval")?;
             (0..n_layer).map(|i| (i + 1) % interval != 0).collect()
         };
+        // Some files declare the mask over every block, inline MTP included:
+        // 65 entries for a 64-layer decoder with `nextn_predict_layers = 1`.
+        // The MTP block is not a decoder layer, so its entry is dropped. Only
+        // that exact length is accepted; any other length is still an error, so
+        // a genuinely wrong mask cannot pass as a truncated one.
+        let is_recr = trim_mtp_entry(is_recr, n_layer, nextn_layers).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "recurrent layer mask length != block_count",
+            )
+        })?;
 
         let ssm_d_conv = u("ssm.conv_kernel")?;
         let ssm_d_state = u("ssm.state_size")?;
@@ -121,12 +132,6 @@ impl Config {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("ssm.inner_size {ssm_d_inner} is not a multiple of time_step_rank {ssm_dt_rank}"),
-            ));
-        }
-        if is_recr.len() != n_layer {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "recurrent layer mask length != block_count",
             ));
         }
 
@@ -179,4 +184,67 @@ fn bad(key: &str, want: &str) -> io::Error {
         io::ErrorKind::InvalidData,
         format!("metadata {key} is not a {want}"),
     )
+}
+
+/// Accept a declared mask that covers the inline MTP block as well, by dropping
+/// that block's entry. `None` means the length is not one the MTP rule can
+/// explain, so the caller reports it as the error it is.
+fn trim_mtp_entry(mut mask: Vec<bool>, n_layer: usize, nextn: usize) -> Option<Vec<bool>> {
+    if nextn > 0 && mask.len() == n_layer + nextn {
+        mask.truncate(n_layer);
+    }
+    (mask.len() == n_layer).then_some(mask)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trim_mtp_entry;
+
+    /// The declared shape of `Swift-1.5-Qwen3.8-27B` and `OrcaCyber-Nano-1.0`:
+    /// 65 entries, full attention on 3, 7, ... 63 and on the MTP block 64.
+    fn declared_65() -> Vec<bool> {
+        let mut mask = vec![true; 65];
+        for i in [
+            3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 51, 55, 59, 63, 64,
+        ] {
+            mask[i] = false;
+        }
+        mask
+    }
+
+    #[test]
+    fn a_mask_that_covers_the_mtp_block_is_truncated_to_the_decoder() {
+        let got = trim_mtp_entry(declared_65(), 64, 1).expect("accepted");
+        assert_eq!(got.len(), 64);
+        let full: Vec<usize> = got
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| !**r)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            full,
+            [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 51, 55, 59, 63]
+        );
+    }
+
+    #[test]
+    fn a_mask_of_the_decoder_length_is_kept_as_it_is() {
+        let got = trim_mtp_entry(declared_65()[..64].to_vec(), 64, 1).expect("accepted");
+        assert_eq!(got.len(), 64);
+        assert!(!got[63]);
+        // A file with no MTP block keeps its own 64-entry mask.
+        let got = trim_mtp_entry(declared_65()[..64].to_vec(), 64, 0).expect("accepted");
+        assert_eq!(got.len(), 64);
+    }
+
+    #[test]
+    fn any_other_length_is_still_rejected() {
+        // One entry short, one entry long, and the same lengths with no MTP
+        // block to explain them.
+        assert!(trim_mtp_entry(vec![true; 63], 64, 1).is_none());
+        assert!(trim_mtp_entry(vec![true; 66], 64, 1).is_none());
+        assert!(trim_mtp_entry(vec![true; 63], 64, 0).is_none());
+        assert!(trim_mtp_entry(vec![true; 65], 64, 0).is_none());
+    }
 }
