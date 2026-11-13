@@ -425,6 +425,11 @@ impl<'a> GpuEngine<'a> {
                         mark(&mut self.trace, l, "ssm_step")?;
                         s.recurrent()?;
                     }
+                    if drop.doubled(Stage::SsmRec) {
+                        // The same launch again at the same site: its marginal
+                        // cost is what the site costs, not what the kernel does.
+                        s.step_rec()?;
+                    }
                     if !drop.dropped(Stage::SsmGemv) {
                         mark(&mut self.trace, l, "ssm_out")?;
                         s.output_gemv()?;
@@ -456,6 +461,9 @@ impl<'a> GpuEngine<'a> {
                     }
                     if !drop.dropped(Stage::AttnReduce) {
                         mark(&mut self.trace, l, "attn_core")?;
+                        attn.attention_at(l, attn.q_buf().as_ptr(), attn.attn_out().as_ptr(), pos)?;
+                    }
+                    if drop.doubled(Stage::AttnReduce) {
                         attn.attention_at(l, attn.q_buf().as_ptr(), attn.attn_out().as_ptr(), pos)?;
                     }
                     if !drop.dropped(Stage::QGate) || !drop.dropped(Stage::AttnGemv) {
@@ -503,6 +511,9 @@ impl<'a> GpuEngine<'a> {
                     }
                     if !drop.dropped(Stage::AttnReduce) {
                         mark(&mut self.trace, l, "attn_core")?;
+                        deep_attention(l, cfg, attn, dk, pos)?;
+                    }
+                    if drop.doubled(Stage::AttnReduce) {
                         deep_attention(l, cfg, attn, dk, pos)?;
                     }
                     if !drop.dropped(Stage::QGate) || !drop.dropped(Stage::AttnGemv) {

@@ -129,13 +129,22 @@ impl Stage {
     }
 }
 
-/// A set of stages to drop. Cheap to copy; one bit per [`Stage`].
+/// A set of stages to drop, plus the stages a cell runs *twice*. Cheap to
+/// copy; one bit per [`Stage`] in each word.
+///
+/// The second word is the "same launch, one more time" control: the marginal
+/// cost of a repeated launch at the same site, in the same surroundings,
+/// separates a kernel that is expensive from a site that is expensive to
+/// reach. Nothing sets it in the shipped path.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub struct Ablate(u32);
+pub struct Ablate {
+    bits: u32,
+    twice: u32,
+}
 
 impl Ablate {
     pub const fn none() -> Ablate {
-        Ablate(0)
+        Ablate { bits: 0, twice: 0 }
     }
 
     /// Everything except the projection GEMVs: the isolated weight stream.
@@ -163,17 +172,26 @@ impl Ablate {
     }
 
     pub fn drop(&mut self, s: Stage) {
-        self.0 |= s.bit();
+        self.bits |= s.bit();
     }
 
     /// Add a stage back to a set that already drops it. `drop` only sets bits,
     /// so the "one stage back" cells need this to undo `gemv_only`.
     pub fn keep(&mut self, s: Stage) {
-        self.0 &= !s.bit();
+        self.bits &= !s.bit();
+    }
+
+    /// Run this stage's launch a second time in the same place.
+    pub fn twice(&mut self, s: Stage) {
+        self.twice |= s.bit();
+    }
+
+    pub fn doubled(self, s: Stage) -> bool {
+        self.twice & s.bit() != 0
     }
 
     pub fn dropped(self, s: Stage) -> bool {
-        self.0 & s.bit() != 0
+        self.bits & s.bit() != 0
     }
 
     /// True when any launch of the attention block's non-GEMV part is dropped,
@@ -189,7 +207,7 @@ impl Ablate {
     }
 
     pub fn is_none(self) -> bool {
-        self.0 == 0
+        self.bits == 0 && self.twice == 0
     }
 
     /// The dropped stages, in table order, for a log line.
@@ -207,6 +225,17 @@ impl Ablate {
     pub fn parse(spec: &str) -> Result<Ablate, String> {
         let mut a = Ablate::none();
         for word in spec.split(',').map(str::trim).filter(|w| !w.is_empty()) {
+            // `name*2`: the stage runs, and its launch runs a second time at
+            // the same site. Cells that start from `gemv_only` need the keep.
+            if let Some(base) = word.strip_suffix("*2") {
+                let s = Stage::ALL
+                    .iter()
+                    .find(|s| s.name() == base)
+                    .ok_or_else(|| format!("unknown ablation stage {base}"))?;
+                a.keep(*s);
+                a.twice(*s);
+                continue;
+            }
             match word {
                 "none" => {}
                 "all" => a = Ablate::all(),

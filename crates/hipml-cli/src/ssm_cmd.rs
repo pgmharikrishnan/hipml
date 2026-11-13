@@ -148,6 +148,7 @@ fn bench(launcher: &Launcher, inputs: &[hipml_core::tensor::Tensor]) -> Result<(
     let gemv = layer.gemv_reps(REPS)?;
     let wout = layer.output_gemv_reps(REPS)?;
     let rec = layer.recurrent_reps(REPS)?;
+    let recur = layer.recurrence_reps(REPS)?;
     let full = layer.step_reps(REPS)?;
 
     let state_bytes = layer.state_bytes();
@@ -169,6 +170,7 @@ fn bench(launcher: &Launcher, inputs: &[hipml_core::tensor::Tensor]) -> Result<(
         ("gemv, input projections (4)", gemv),
         ("gemv, output projection", wout),
         ("recurrent (conv/l2/gdn/norm)", rec),
+        ("  of which the gdn recurrence", recur),
         ("full layer", full),
     ] {
         println!(

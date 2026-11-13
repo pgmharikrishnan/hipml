@@ -234,6 +234,18 @@ impl<'a> SsmGpuLayer<'a> {
         self.time_reps(reps, || self.recurrent())
     }
 
+    /// The delta-net recurrence alone, back-to-back: the kernel `ssm_rec` prices
+    /// by removal in `decode-ablate`, isolated from the other four launches.
+    pub fn recurrence_reps(&self, reps: usize) -> Result<f64, String> {
+        self.time_reps(reps, || self.recurrence())
+    }
+
+    /// One projection GEMV of this layer, back-to-back, for a GEMV:recurrence
+    /// ratio at the layer's own shapes.
+    pub fn projection_reps(&self, reps: usize) -> Result<f64, String> {
+        self.time_reps(reps, || self.gemvs())
+    }
+
     pub fn output_gemv_reps(&self, reps: usize) -> Result<f64, String> {
         self.time_reps(reps, || self.output_gemv())
     }

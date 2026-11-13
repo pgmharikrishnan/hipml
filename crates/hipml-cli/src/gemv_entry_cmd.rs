@@ -257,7 +257,12 @@ pub fn run(args: &[String]) -> i32 {
         }
         let mut best = f64::MAX;
         let mut best_rows: Vec<(usize, usize, f64)> = Vec::new();
+        // Wall time of the same launches: the event spans below exclude the
+        // gap between one kernel finishing and the next starting, so the
+        // difference is that gap and nothing else.
+        let mut best_wall = f64::MAX;
         for _ in 0..a.reps {
+            let wall0 = Instant::now();
             for (idx, it) in items.iter().enumerate() {
                 if let Err(e) = marks[idx].0.record(l.stream()) {
                     eprintln!("gemv-entries: {e}");
@@ -291,15 +296,22 @@ pub fn run(args: &[String]) -> i32 {
                 sum += ms;
                 rows.push((it.m, it.bytes, ms));
             }
+            let wall = wall0.elapsed().as_secs_f64() * 1e3;
+            if wall < best_wall {
+                best_wall = wall;
+            }
             if sum < best {
                 best = sum;
                 best_rows = rows;
             }
         }
         println!(
-            "\n{entry}: {:.3} ms, {:.1} GB/s{}",
+            "\n{entry}: {:.3} ms spans, {:.3} ms wall ({:+.3} gap), {:.1} GB/s spans, {:.1} GB/s wall{}",
             best,
+            best_wall,
+            best_wall - best,
             total as f64 / (best / 1e3) / 1e9,
+            total as f64 / (best_wall / 1e3) / 1e9,
             if a.check {
                 format!(", {} of {} tensors differ", bad, items.len())
             } else {
@@ -502,8 +514,10 @@ fn run_batched(a: &Args, model: &Model, items: &[Item<'_>], total: usize, ty: Te
         }
     }
     let mut best = f64::MAX;
+    let mut best_wall = f64::MAX;
     let mut best_rows: Vec<(usize, usize, f64)> = Vec::new();
     for _ in 0..a.reps {
+        let wall0 = Instant::now();
         for (idx, it) in items.iter().enumerate() {
             if let Err(e) = marks[idx].0.record(l.stream()) {
                 eprintln!("gemv-entries: {e}");
@@ -536,15 +550,24 @@ fn run_batched(a: &Args, model: &Model, items: &[Item<'_>], total: usize, ty: Te
             sum += ms;
             rows.push((it.m, it.bytes, ms));
         }
+        let wall = wall0.elapsed().as_secs_f64() * 1e3;
+        if wall < best_wall {
+            best_wall = wall;
+        }
         if sum < best {
             best = sum;
             best_rows = rows;
         }
     }
     println!(
-        "\n{name}_b b={b}: {:.3} ms, {:.1} GB/s",
+        "\n{name}_b b={b}: {:.3} ms spans, {:.3} ms wall ({:+.3} gap, {} launches, {:.2} us each), {:.1} GB/s spans, {:.1} GB/s wall",
         best,
-        total as f64 / (best / 1e3) / 1e9
+        best_wall,
+        best_wall - best,
+        items.len(),
+        (best_wall - best) * 1e3 / items.len() as f64,
+        total as f64 / (best / 1e3) / 1e9,
+        total as f64 / (best_wall / 1e3) / 1e9
     );
     // Same 16-row block the `_b` kernels use, so the grid column is the real one.
     let mut agg: std::collections::BTreeMap<usize, (usize, f64, usize)> =
