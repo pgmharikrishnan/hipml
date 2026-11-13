@@ -18,7 +18,26 @@ use std::time::Instant;
 
 impl<'a> SsmGpuLayer<'a> {
     /// The four input projections.
+    ///
+    /// They share `x` and have no ordering between them, so when every weight
+    /// is a format the job kernel carries they go out as one launch over the
+    /// device job list `plan_proj_jobs` built at load. Otherwise this is the
+    /// four-launch path, unchanged.
     pub fn gemvs(&self) -> Result<(), String> {
+        if let Some((jobs, tiles)) = &self.proj_jobs {
+            let mut p_jobs = jobs.as_ptr();
+            let mut v_n = 4i32;
+            let mut params: [*mut c_void; 2] = [
+                &mut p_jobs as *mut _ as *mut c_void,
+                &mut v_n as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: ((*tiles).max(1) as u32, 4, 1),
+                block: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            return self.k_jobs.launch(cfg, self.stream, &mut params);
+        }
         let d = &self.dims;
         self.gemv(&self.wqkv, &self.x, &self.qkv, d.conv_ch, d.n_embd)?;
         self.gemv(&self.wgate, &self.x, &self.z, d.inner(), d.n_embd)?;
@@ -232,6 +251,18 @@ impl<'a> SsmGpuLayer<'a> {
 
     pub fn recurrent_reps(&self, reps: usize) -> Result<f64, String> {
         self.time_reps(reps, || self.recurrent())
+    }
+
+    /// The delta-net recurrence alone, back-to-back: the kernel `ssm_rec` prices
+    /// by removal in `decode-ablate`, isolated from the other four launches.
+    pub fn recurrence_reps(&self, reps: usize) -> Result<f64, String> {
+        self.time_reps(reps, || self.recurrence())
+    }
+
+    /// One projection GEMV of this layer, back-to-back, for a GEMV:recurrence
+    /// ratio at the layer's own shapes.
+    pub fn projection_reps(&self, reps: usize) -> Result<f64, String> {
+        self.time_reps(reps, || self.gemvs())
     }
 
     pub fn output_gemv_reps(&self, reps: usize) -> Result<f64, String> {

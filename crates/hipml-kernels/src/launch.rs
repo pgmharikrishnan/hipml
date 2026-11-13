@@ -55,8 +55,9 @@ pub(crate) mod device {
     #[path = "graph_launch.rs"]
     mod graph_launch;
     pub use graph_launch::{
-        gemv_job_tiles, GemvJob, GEMV_B_IQ3S, GEMV_B_IQ4NL, GEMV_B_IQ4XS, GEMV_B_Q3K, GEMV_B_Q4K,
-        GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80, GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80,
+        gemv_job_kind, gemv_job_tiles, GemvJob, GEMV_B_IQ3S, GEMV_B_IQ4NL, GEMV_B_IQ4XS,
+        GEMV_B_Q3K, GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80, GEMV_JOB_IQ4XS, GEMV_JOB_Q4K,
+        GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80,
     };
     #[path = "prefill_launch.rs"]
     mod prefill_launch;
@@ -608,7 +609,7 @@ pub(crate) mod device {
 #[cfg(feature = "hip")]
 pub use device::{gemm_rows_f32, prefill_resident, prefill_resident_slices, prefill_xhalf};
 #[cfg(feature = "hip")]
-pub use device::{gemv_job_tiles, GemvJob, Launcher, ReadJob};
+pub use device::{gemv_job_kind, gemv_job_tiles, GemvJob, Launcher, ReadJob};
 #[cfg(feature = "hip")]
 pub use device::{
     prefill_entry_for_half, prefill_gu_entry, prefill_has_gu, prefill_has_silu, prefill_has_xhalf,
@@ -621,7 +622,7 @@ pub use device::{
     GEMV_B_Q80,
 };
 #[cfg(feature = "hip")]
-pub use device::{GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80};
+pub use device::{GEMV_JOB_IQ4XS, GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80};
 
 /// Without the `hip` feature the launcher exists but refuses to run, so callers
 /// need no conditional compilation of their own.

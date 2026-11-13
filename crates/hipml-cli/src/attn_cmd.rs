@@ -32,6 +32,9 @@ struct Args {
     chunk_splits: usize,
     /// `--chunk-kv TYPE`: q8 (default) or q4 cache format.
     chunk_kv: hipml_core::kv::KvDtype,
+    /// Time only the decode core (the split kernel plus its reduce) at each
+    /// depth, isolated from the projections and the front end.
+    core: bool,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -42,6 +45,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
     let mut chunk = None;
     let mut chunk_splits = 1usize;
     let mut chunk_kv = hipml_core::kv::KvDtype::Q8;
+    let mut core = false;
     let mut i = 0;
     while i < args.len() {
         let need = |i: usize| -> Result<&str, String> {
@@ -89,6 +93,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 reps = need(i)?.parse().map_err(|e| format!("bad --reps: {e}"))?;
                 i += 2;
             }
+            "--core" => {
+                core = true;
+                i += 1;
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -100,6 +108,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         chunk,
         chunk_splits,
         chunk_kv,
+        core,
     })
 }
 
@@ -182,6 +191,8 @@ fn run(args: &[String], parity: bool) -> i32 {
 
     if parity {
         parity_run(&launcher, &l)
+    } else if a.core {
+        core_run(&launcher, &l, &a)
     } else if let Some((pos0, tok)) = a.chunk {
         match attn_chunk_bench::run(
             &launcher,
@@ -428,6 +439,103 @@ fn verdict(r: Result<hipml_core::Stats, hipml_core::Stats>) -> (bool, hipml_core
         Ok(s) => (true, s),
         Err(s) => (false, s),
     }
+}
+
+/// Time the decode core alone: the split kernel and its reduce, back-to-back,
+/// with the cache geometry the decode step uses (`n_ctx = depth + 208`). The
+/// append is timed separately and as a chain, because in the token the core
+/// always follows it.
+#[cfg(feature = "hip")]
+fn core_run(l: &Launcher, m: &Loaded, a: &Args) -> i32 {
+    let cfg = &m.cfg;
+    println!(
+        "\n{:<8} {:>8} {:>10} {:>12} {:>12} {:>12}",
+        "depth", "n_ctx", "splits", "core_us", "append_us", "chain_us"
+    );
+    for &depth in &a.depths {
+        let n_ctx = depth + 208;
+        let layer = match AttnLayer::new(l, &m.w, cfg, n_ctx) {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("attn: depth {depth}: {e}");
+                return 1;
+            }
+        };
+        if let Err(e) = layer.zero_kv() {
+            eprintln!("attn: zero: {e}");
+            return 1;
+        }
+        #[cfg(feature = "hip")]
+        if let Err(e) = l.set_step(depth, depth + 1, 0) {
+            eprintln!("attn: step: {e}");
+            return 1;
+        }
+        let (q, out) = (layer.q_buf().as_ptr(), layer.attn_out().as_ptr());
+        let (k, v) = (layer.k_buf().as_ptr(), layer.v_buf().as_ptr());
+        // Warm both paths, then time each with one sync.
+        if let Err(e) = layer.attention_at(l, q, out, depth) {
+            eprintln!("attn: core warm: {e}");
+            return 1;
+        }
+        if l.synchronize().is_err() {
+            return 1;
+        }
+        let t0 = Instant::now();
+        for _ in 0..a.reps {
+            if let Err(e) = layer.attention_at(l, q, out, depth) {
+                eprintln!("attn: core: {e}");
+                return 1;
+            }
+        }
+        if l.synchronize().is_err() {
+            return 1;
+        }
+        let core = t0.elapsed().as_secs_f64() * 1e6 / a.reps as f64;
+
+        let t0 = Instant::now();
+        for _ in 0..a.reps {
+            if let Err(e) = layer.append_at(l, k, v) {
+                eprintln!("attn: append: {e}");
+                return 1;
+            }
+        }
+        if l.synchronize().is_err() {
+            return 1;
+        }
+        let append = t0.elapsed().as_secs_f64() * 1e6 / a.reps as f64;
+
+        let t0 = Instant::now();
+        for _ in 0..a.reps {
+            if let Err(e) = layer.append_at(l, k, v) {
+                eprintln!("attn: append: {e}");
+                return 1;
+            }
+            if let Err(e) = layer.attention_at(l, q, out, depth) {
+                eprintln!("attn: core: {e}");
+                return 1;
+            }
+        }
+        if l.synchronize().is_err() {
+            return 1;
+        }
+        let chain = t0.elapsed().as_secs_f64() * 1e6 / a.reps as f64;
+        println!(
+            "{:<8} {:>8} {:>10} {:>12.2} {:>12.2} {:>12.2}",
+            depth,
+            n_ctx,
+            n_ctx.div_ceil(32).min(64),
+            core,
+            append,
+            chain
+        );
+    }
+    0
+}
+
+#[cfg(not(feature = "hip"))]
+fn core_run(_l: &Launcher, _m: &Loaded, _a: &Args) -> i32 {
+    eprintln!("attn: --core needs the hip feature");
+    1
 }
 
 fn bench_run(l: &Launcher, m: &Loaded, a: &Args) -> i32 {

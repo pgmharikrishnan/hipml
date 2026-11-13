@@ -43,7 +43,7 @@ pub use launch::{
     prefill_should_split, prefill_split_scratch_cap, prefill_xhalf,
 };
 #[cfg(feature = "hip")]
-pub use launch::{gemv_job_tiles, GemvJob, ReadJob};
+pub use launch::{gemv_job_kind, gemv_job_tiles, GemvJob, ReadJob};
 pub use launch::{
     prefill_entry_for, prefill_half, prefill_path, prefill_slices, prefill_v2,
     q5_tile_prefill_enabled, set_prefill_half, set_prefill_path, PrefillPath,
@@ -54,7 +54,7 @@ pub use launch::{
     GEMV_B_Q80,
 };
 #[cfg(feature = "hip")]
-pub use launch::{GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80};
+pub use launch::{GEMV_JOB_IQ4XS, GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80};
 
 /// Every resident weight format the batched decode can serve: `_b` kind id,
 /// the GEMV entry that reads its blocks, and its matrix kind.

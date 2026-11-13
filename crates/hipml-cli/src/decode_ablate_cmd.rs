@@ -238,6 +238,26 @@ fn cells() -> Vec<Cell> {
             label: "-kv_append",
             drop: only("kv_append"),
         },
+        // The same launch a second time at the same site. The delta against
+        // the cell above it is what one more launch costs where it runs; a
+        // second copy that is cheap means the site is expensive, not the
+        // kernel.
+        Cell {
+            label: "gemv+attn_reduce*2",
+            drop: only("gemv_only,attn_reduce*2"),
+        },
+        Cell {
+            label: "gemv+ssm_rec*2",
+            drop: only("gemv_only,ssm_rec*2"),
+        },
+        Cell {
+            label: "attn_reduce2_only",
+            drop: only("all,attn_reduce*2"),
+        },
+        Cell {
+            label: "ssm_rec2_only",
+            drop: only("all,ssm_rec*2"),
+        },
         Cell {
             label: "-attn_reduce",
             drop: only("attn_reduce"),

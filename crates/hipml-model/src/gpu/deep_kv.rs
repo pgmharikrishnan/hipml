@@ -72,9 +72,19 @@ impl DeepKv {
     /// tok/s, against 28.34 at 128 splits; at 16K 256 splits beat 64 (1.72 vs
     /// 2.98 ms for the 16 layers). At 100K both policies cap at 256, so this
     /// only recovers the short and mid depths.
+    ///
+    /// The `seq/64` policy is a floor on the *number of positions a split
+    /// walks*, not a target: below 1K it leaves the warp kernel with one to
+    /// sixteen tasks, i.e. one block for most of a 200-token run, and a block
+    /// that walks the whole prefix serially. The fine policy adds one split per
+    /// 8 positions up to 128, so the block count tracks the work while the
+    /// coarse policy still owns every depth at or above 8K (128 splits at 8K,
+    /// 256 at 16K and beyond), which is where it was measured.
     pub(super) fn splits(&self, seq: usize) -> usize {
         if self.kernel >= 4 {
-            (seq / 64).clamp(1, WARP_SPLITS)
+            let fine = (seq / 8).clamp(1, 128);
+            let coarse = (seq / 64).clamp(1, WARP_SPLITS);
+            fine.max(coarse)
         } else {
             (seq / 64).clamp(1, STAGED_SPLITS)
         }

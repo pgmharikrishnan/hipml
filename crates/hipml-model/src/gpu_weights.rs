@@ -144,6 +144,23 @@ impl<'a> Proj<'a> {
         self.gemv_on(l, "stream", x, y)
     }
 
+    /// This projection as one entry of a `gemv_jobs` list, or `None` when the
+    /// format has no job body. The body is the same tile function the
+    /// standalone entry runs, so a row written this way is bit-identical.
+    pub(crate) fn job(&self, x: &Buffer, y: &Buffer) -> Option<(hipml_kernels::GemvJob, usize)> {
+        let kind = hipml_kernels::gemv_job_kind(self.entry)?;
+        let job = hipml_kernels::GemvJob {
+            w: self.w.device_ptr(),
+            x: x.as_ptr() as usize,
+            y: y.as_ptr() as usize,
+            m: self.rows as i32,
+            k: self.cols as i32,
+            kind,
+            pad: 0,
+        };
+        Some((job, hipml_kernels::gemv_job_tiles(kind, self.rows)))
+    }
+
     /// The same matvec on a chosen stream ("stream" or "side"), so two
     /// independent projections can share the machine.
     pub(crate) fn gemv_on(

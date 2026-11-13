@@ -23,9 +23,12 @@ pub struct GraphTiming {
 pub fn launches_per_token(n_layer: usize, is_recr: &[bool]) -> usize {
     let mut n = 1; // embedding dequant
     for &recr in is_recr.iter().take(n_layer) {
-        n += 1; // attn_norm rmsnorm
-        n += if recr { 12 } else { 13 };
-        n += 7;
+        // attn_norm, the block, then the ffn. The GDN block's four input
+        // projections are one job-list launch and the attention block's q/k/v
+        // are one (12 -> 9 and 13 -> 11); ffn gate+up is one as well (7 -> 6).
+        n += 1;
+        n += if recr { 9 } else { 11 };
+        n += 6;
     }
     n + 2
 }

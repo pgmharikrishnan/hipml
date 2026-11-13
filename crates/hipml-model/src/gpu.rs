@@ -91,6 +91,10 @@ struct Block<'a> {
     up: Proj<'a>,
     down: Proj<'a>,
     kind: BlockKind<'a>,
+    /// `ffn_gate` and `ffn_up` read the same `t` and have no ordering between
+    /// them, so when both formats have a job body they are one launch. Planned
+    /// by `plan_ffn_jobs` once `t` exists; `None` keeps the two launches.
+    ffn_jobs: Option<(Buffer, usize)>,
 }
 
 /// Attention-cache choice. `F32` is the short-depth oracle path; `Q8`/`Q4` use
@@ -182,6 +186,27 @@ pub struct GpuEngine<'a> {
     cols: Option<columns::Cols>,
 }
 
+/// The one-launch job list for a block's `ffn_gate` + `ffn_up` pair, or `None`
+/// when either format has no job body (then the block keeps its two launches).
+fn ffn_pair_jobs(
+    gate: &Proj<'_>,
+    up: &Proj<'_>,
+    x: &Buffer,
+    y_gate: &Buffer,
+    y_up: &Buffer,
+) -> Result<Option<(Buffer, usize)>, String> {
+    let (Some((g, g_tiles)), Some((u, u_tiles))) = (gate.job(x, y_gate), up.job(x, y_up)) else {
+        return Ok(None);
+    };
+    let jobs = [g, u];
+    let bytes = unsafe {
+        std::slice::from_raw_parts(jobs.as_ptr() as *const u8, std::mem::size_of_val(&jobs[..]))
+    };
+    let buf = Buffer::alloc(bytes.len().div_ceil(4))?;
+    buf.upload_bytes(0, bytes)?;
+    Ok(Some((buf, g_tiles.max(u_tiles))))
+}
+
 /// Blocks the device argmax reduces over before the one-block fold. 64 blocks
 /// is one wave on this card and turns the 993 KB logit pass into a single sweep.
 const ARGMAX_PARTS: usize = 64;
@@ -256,6 +281,7 @@ impl<'a> GpuEngine<'a> {
                 up,
                 down,
                 kind,
+                ffn_jobs: None,
             });
         }
 
@@ -267,7 +293,7 @@ impl<'a> GpuEngine<'a> {
             Ok(v) => Ablate::parse(&v)?,
             Err(_) => Ablate::none(),
         };
-        Ok(GpuEngine {
+        let mut eng = GpuEngine {
             model,
             cfg: cfg.clone(),
             n_ctx,
@@ -293,7 +319,21 @@ impl<'a> GpuEngine<'a> {
             trace: None,
             prefix: None,
             cols: None,
-        })
+        };
+        // The attention blocks' q/k/v job lists need the block input buffer,
+        // which is allocated above; binding them here keeps every pointer in
+        // the list fixed for the life of the engine (and out of graph capture).
+        for i in 0..eng.layers.len() {
+            if let BlockKind::Full { attn, .. } = &mut eng.layers[i].kind {
+                attn.bind_qkv_input(&eng.t)?;
+            }
+            let pair = {
+                let b = &eng.layers[i];
+                ffn_pair_jobs(&b.gate, &b.up, &eng.t, &eng.gate, &eng.up)?
+            };
+            eng.layers[i].ffn_jobs = pair;
+        }
+        Ok(eng)
     }
 
     pub fn new_state(&self) -> GpuState {
@@ -425,6 +465,11 @@ impl<'a> GpuEngine<'a> {
                         mark(&mut self.trace, l, "ssm_step")?;
                         s.recurrent()?;
                     }
+                    if drop.doubled(Stage::SsmRec) {
+                        // The same launch again at the same site: its marginal
+                        // cost is what the site costs, not what the kernel does.
+                        s.step_rec()?;
+                    }
                     if !drop.dropped(Stage::SsmGemv) {
                         mark(&mut self.trace, l, "ssm_out")?;
                         s.output_gemv()?;
@@ -456,6 +501,9 @@ impl<'a> GpuEngine<'a> {
                     }
                     if !drop.dropped(Stage::AttnReduce) {
                         mark(&mut self.trace, l, "attn_core")?;
+                        attn.attention_at(l, attn.q_buf().as_ptr(), attn.attn_out().as_ptr(), pos)?;
+                    }
+                    if drop.doubled(Stage::AttnReduce) {
                         attn.attention_at(l, attn.q_buf().as_ptr(), attn.attn_out().as_ptr(), pos)?;
                     }
                     if !drop.dropped(Stage::QGate) || !drop.dropped(Stage::AttnGemv) {
@@ -505,6 +553,9 @@ impl<'a> GpuEngine<'a> {
                         mark(&mut self.trace, l, "attn_core")?;
                         deep_attention(l, cfg, attn, dk, pos)?;
                     }
+                    if drop.doubled(Stage::AttnReduce) {
+                        deep_attention(l, cfg, attn, dk, pos)?;
+                    }
                     if !drop.dropped(Stage::QGate) || !drop.dropped(Stage::AttnGemv) {
                         mark(&mut self.trace, l, "attn_wo")?;
                     }
@@ -527,10 +578,18 @@ impl<'a> GpuEngine<'a> {
             }
 
             if !drop.dropped(Stage::FfnGemv) {
+                // `ffn_up` keeps its trace mark even when the pair is one
+                // launch: the row then reads as the tail of `ffn_gate`, which
+                // is what the token does, and `gpu-profile` keeps its shape.
                 mark(&mut self.trace, l, "ffn_gate")?;
-                block.gate.gemv(l, &self.t, &self.gate)?;
+                match &block.ffn_jobs {
+                    Some((jobs, tiles)) => l.gemv_jobs(jobs, 2, *tiles)?,
+                    None => block.gate.gemv(l, &self.t, &self.gate)?,
+                }
                 mark(&mut self.trace, l, "ffn_up")?;
-                block.up.gemv(l, &self.t, &self.up)?;
+                if block.ffn_jobs.is_none() {
+                    block.up.gemv(l, &self.t, &self.up)?;
+                }
             }
             if !drop.dropped(Stage::Ew) {
                 mark(&mut self.trace, l, "ffn_act")?;

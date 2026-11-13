@@ -26,14 +26,29 @@ pub const GEMV_JOB_Q4K: i32 = 0;
 pub const GEMV_JOB_Q6K: i32 = 1;
 pub const GEMV_JOB_Q5K: i32 = 2;
 pub const GEMV_JOB_Q80: i32 = 3;
+pub const GEMV_JOB_IQ4XS: i32 = 4;
 
-/// Tiles a job occupies (8 rows per tile for the K-quants, one row for Q8_0).
+/// Tiles a job occupies: 8 rows a tile for the K-quants, 16 for IQ4_XS (its own
+/// `GJ_IQ4X_ROWS_PER_TILE`), one row for Q8_0. Must match `gemv_jobs.hip`.
 pub fn gemv_job_tiles(kind: i32, m: usize) -> usize {
-    if kind == GEMV_JOB_Q80 {
-        m
-    } else {
-        (m + 7) / 8
+    match kind {
+        GEMV_JOB_Q80 => m,
+        GEMV_JOB_IQ4XS => (m + 15) / 16,
+        _ => (m + 7) / 8,
     }
+}
+
+/// The job kind for a resident GEMV entry, or `None` when the job kernel
+/// carries no body for that format.
+pub fn gemv_job_kind(entry: &str) -> Option<i32> {
+    Some(match entry {
+        "gemv_q4_k" | "gemv_q4_k_r1" => GEMV_JOB_Q4K,
+        "gemv_q6_k" | "gemv_q6_k_r1" => GEMV_JOB_Q6K,
+        "gemv_q5_k" => GEMV_JOB_Q5K,
+        "gemv_q8_0" => GEMV_JOB_Q80,
+        "gemv_iq4_xs" => GEMV_JOB_IQ4XS,
+        _ => return None,
+    })
 }
 
 /// The embedding-row kernel for a resident block format: the same decoder as
