@@ -26,7 +26,9 @@ measured peak by a byte (section 5) because the path was already dead.
 The excess is structural, and it is the same three things in every cell: a
 **second KV cache and SSM state** for the single-sequence engine that serves
 prefill and speculation, a **prefix snapshot** (two are live at peak), and the
-**MTP drafter** (its own weights plus a full-context f32 KV). llama-server has
+**MTP path** — a full-context f32 KV, one recurrent-state snapshot per draft and
+the verify path's scratch, but *not* the block's weights, which are inline in
+the model file and already in the resident-weights row (§3). llama-server has
 one cache, no drafter and no snapshot of that kind. Per-kernel scratch — the
 256-token chunk, split-K partials, the fp16 alpha/beta copies — is *smaller*
 than llama's own compute buffers and is not the gap. Section 3 closes the
@@ -93,8 +95,69 @@ Two measured ablations on cell a price the two largest hipml-only items:
 | `--prefix-mb 1` | 19,951.0 | **−641.5** |
 | no `--mtp` | 20,091.3 | **−501.2** |
 
-The rest is allocation-site arithmetic. For cell a it sums to 20,009.1 MiB
-against a measured 20,592.5, so 583.4 MiB (2.8%) is HIP allocation rounding,
+### The sidecar adds nothing; what the MTP path costs
+
+`Model::load_sidecar` uploads only the tensors whose names are not already
+resident, and returns only what it uploaded
+(`crates/hipml-model/src/lib.rs:380-430`):
+
+```rust
+for info in &infos {
+    if self.index.contains_key(&info.name) {
+        continue;
+    }
+```
+
+`Model::load` has no block filter — it uploads every tensor in the file
+(`lib.rs:265-311`) — and this file carries the MTP block inline.
+`Qwen3.8-27B-UD-Q4_K_M.gguf` is an 866-tensor file, the count the stock family
+has with `block_count` 65 = 64 decoder + 1 MTP and `nextn_predict_layers` 1
+([`../native-qwen.md`](../native-qwen.md), "Architecture config"); the private
+fine-tune, which has no inline block, has 851. The difference is 15 tensors,
+exactly the 15 `blk.64.*` names `MtpGpu::new` reads
+(`crates/hipml-model/src/gpu/mtp.rs:94-131`), and `mtp_blk(cfg)` returns
+`cfg.n_layer` = 64 (`mtp.rs:29-31`), so the sidecar's block and the inline block
+collide by name.
+
+Measured, not inferred: with the sidecar loaded and MTP running, the stock
+file's recorded serve banner reads
+
+```
+hipml serve on http://127.0.0.1:8093 | 866 tensors, 15.65 GiB resident + 0.00 GiB drafter
+```
+
+(`bench/release/server/hipml_a/server.log:1`; that cell's `result.json` records
+1,681 spec steps), while the fine-tune reads `851 tensors, 16.01 GiB resident +
+0.25 GiB drafter` (`bench/serve/results/wp51/hipml_b/server.log:1`).
+`load_sidecar` adds **0 bytes** on a file that already has `blk.64`, and
+0.25 GiB — the block itself — only on the fine-tune. The sidecar file is
+1,369,590,656 B because it also carries the target's `token_embd`, `output` and
+`output_norm`, which `load_sidecar` skips by name on both files. The 253.7 MiB
+row this note used to carry was that fine-tune number: it is not a cost on this
+file, and llama.cpp holds the same weights (15.42 GiB resident on both sides,
+[`../benchmarks.md`](../benchmarks.md)), so it is not a delta against it either.
+
+What the MTP path does cost is its runtime state, and the `no --mtp` ablation
+measures the whole of it. Two pieces are computable from the code: the drafter's
+f32 KV, `2 × n_ctx × (4 kv heads × 256) × 4 B` = 256.0 MiB at 32,768
+(`crates/hipml-kernels/src/attn_gpu.rs:320-322`), and one verify snapshot
+column, a full 48-layer recurrent state = 149.6 MiB
+(`crates/hipml-model/src/gpu/columns.rs:145-155`). Together they leave 95.6 MiB
+of the 501.2: the speculative path's own scratch, which is the engine's
+four-column tile, allocated on the first speculative step with `cap =
+max(rows, 4)` (`columns.rs:478-500`), and the prompt-hidden capture, `prompt ×
+5,120 × 4 B` = 47.3 MiB at this bench's 2,423-token prompt
+(`crates/hipml-model/src/gpu/spec.rs:263`). This note does not itemise the
+remainder further.
+
+At three drafts the same three terms are 256.0 + 3 × 149.6 + 95.6 = 800.4
+against a measured 801 (21,072 − 20,271), and the d1 → d3 difference — 299.8
+measured against 2 × 149.6 = 299.2 computed — is the two extra snapshot columns.
+**501.2 and 801 are the same path at drafts 1 and 3, not a contradiction; 509.7
+was `253.7 + 256.0`, the block's resident bytes counted a second time.**
+
+The rest is allocation-site arithmetic. For cell a it sums to 20,000.6 MiB
+against a measured 20,592.5, so 591.9 MiB (2.9%) is HIP allocation rounding,
 the driver and runtime, not a buffer:
 
 | cell a, MiB | |
@@ -110,19 +173,32 @@ the driver and runtime, not a buffer:
 | batch KV split-K scratch | 6.0 |
 | prefill chunk scratch (256 tokens) | 200.2 |
 | prefix snapshots, 2 live at peak | 641.5 |
-| MTP drafter weights | 253.7 |
-| MTP f32 KV, 1 × 32,768 | 256.0 |
+| MTP drafter f32 KV, 1 × 32,768 | 256.0 |
+| MTP verify snapshot, 1 column | 149.6 |
+| MTP verify scratch + capture (residual to the 501.2) | 95.6 |
 | batch per-slot activations + logits | 1.4 |
 | batch SSM scratch | 8.1 |
-| **accounted** | **20,009.1** |
-| allocator rounding + runtime | 583.4 |
+| **accounted** | **20,000.6** |
+| allocator rounding + runtime | 591.9 |
 | **measured peak** | **20,592.5** |
 
-The same table for b and c differs only in the per-slot rows (KV × slots, SSM
-state × slots, slot scratch, and the drafter KV at the cell's ctx). Those two
-close to 23,733.0 / 24,658.1 against 24,284.9 / 25,286.9.
+The blk.64 weights are not a row here: they are inside the 15,788.9 MiB of
+resident weights, because the file carries them and `Model::load` uploads every
+tensor in it.
 
-Laid against llama, the delta decomposes to within 6 MiB of rounding:
+The same table for b and c differs in the per-slot rows (KV × slots, SSM state
+× slots, slot scratch) and in the drafter KV at the cell's ctx. b and c run
+`--drafts 1`, so the drafter's f32 KV is resident there too, 128.0 / 64.0 MiB,
+but no speculative step was priced in those cells: the snapshot columns and the
+four-column tile are allocated on the first speculative step
+(`columns.rs:478-500`, `spec.rs:263,278`) and whether one ran inside the b/c
+peak is not measured. Counting the KV alone, those two close to 23,479.3 /
+24,404.4 against 24,284.9 / 25,286.9, leaving 805.6 / 882.5 MiB (3.3% / 3.5%)
+unattributed.
+
+Laid against llama, the delta decomposes as follows. Every row is measured or
+computed except the last, which is the remainder this note does not attribute —
+2.9–3.5% of each cell's peak:
 
 | delta vs llama, MiB | a | b | c |
 |---|---|---|---|
@@ -130,12 +206,17 @@ Laid against llama, the delta decomposes to within 6 MiB of rounding:
 | second SSM state (same engine) | +149.6 | +149.6 | +149.6 |
 | SSM alpha/beta fp16 copies | +90.0 | +90.0 | +90.0 |
 | prefix snapshots (2 live) | +641.5 | +641.5 | +641.5 |
-| MTP drafter (weights + f32 KV) | +509.7 | +381.7 | +317.7 |
+| MTP drafter f32 KV (computed) | +256.0 | +128.0 | +64.0 |
+| MTP verify path (measured at a; not priced at b/c) | +245.2 | — | — |
 | batch per-slot activations + SSM scratch | +9.5 | +76.1 | +152.2 |
 | hipml scratch less llama compute buffer | −274.3 | −639.5 | −633.1 |
-| allocator rounding + runtime | +583.4 | +551.8 | +628.8 |
-| **sum** | **+2,797.4** | **+1,795.2** | **+1,618.7** |
+| unattributed (allocator, driver, runtime, b/c verify) | +598.0 | +805.6 | +882.5 |
+| **sum** | **+2,803.5** | **+1,795.3** | **+1,618.7** |
 | measured | +2,803.5 | +1,795.3 | +1,618.7 |
+
+Cell a's remainder is 591.9 in the allocation table above and 598.0 here
+because the two tables derive the scratch row independently; the 6.1 MiB was
+already in the first version of this note.
 
 "hipml scratch less llama compute buffer" is derived: hipml's chunk, split-K and
 alpha/beta scratch is 488.2 / 512.2 / 500.2 MiB, while llama's peak leaves
@@ -144,13 +225,13 @@ remainder is its graph compute buffers and any recurrent state; this note does
 not separate them.
 
 So the answer to "which part" is: **the duplicate engine, the prefix snapshot
-and the drafter.** In cell a the duplicate engine's 1,088.0 MiB of KV is never
-read — `sched/run.rs` builds `GpuEngine` and `BatchEngine` unconditionally, and a
-one-slot cell is served from the former. Deleting that allocation when `slots`
-is 1 (or making the batch engine lazy) would put cell a at ~19,348 MiB, within
-1.6 GiB of llama with the drafter, and within ~1.0 GiB without it. That is a
-scheduler change, outside this slice; cells b and c use the batch engine, so
-they would not move.
+and the MTP path's KV and verify scratch.** In cell a the duplicate engine's
+1,088.0 MiB of KV is never read — `sched/run.rs` builds `GpuEngine` and
+`BatchEngine` unconditionally, and a one-slot cell is served from the former.
+Deleting that allocation when `slots` is 1 (or making the batch engine lazy)
+would put cell a at ~19,348 MiB, within 1.6 GiB of llama with the drafter, and
+within ~1.0 GiB without it. That is a scheduler change, outside this slice;
+cells b and c use the batch engine, so they would not move.
 
 ## 4. Prefix cache: what it costs and what it buys
 
@@ -224,8 +305,9 @@ Prefill is unchanged as well, because the tile kernel is the same kernel:
 
 (Decode in those runs: 31.22 / 30.64 base, 31.22 / 30.65 after.)
 
-The MTP drafter is worth +60% on cell a's decode (29.77 → 47.56 tok/s) for its
-501.2 MiB. That is the trade already in the tree, not one this slice made.
+The MTP path is worth +60% on cell a's decode (29.77 → 47.56 tok/s) for its
+501.2 MiB at one draft. That is the trade already in the tree, not one this
+slice made.
 
 ## 6. What was tried and what was left
 

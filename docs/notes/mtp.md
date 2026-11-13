@@ -24,7 +24,9 @@ loads those tensors into the **target's** resident tensor table, so the drafter
 shares the target's launcher, stream and memory ordering; its own `token_embd`,
 `output` and `output_norm` are skipped and the target's Q4_K embedding and Q6_K
 head are reused. Drafter weights are **253.6 MiB** (Q4_K/Q6_K blocks), against
-16.0 GiB resident for the target.
+16.0 GiB resident for the target. That is what the sidecar adds on this
+fine-tune, which has no inline block: the stock and UD files carry `blk.64`
+themselves, so there `load_sidecar` skips all 15 names and adds 0 bytes.
 
 `MtpGpu` runs one block per drafted token:
 

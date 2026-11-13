@@ -263,7 +263,9 @@ llama.cpp has no equivalent switch; all its numbers are its production path.
   across.
 - **Peak VRAM is whole-process WDDM dedicated usage.** It includes prefill
   scratch (chunk 2048 on the CLI, chunk 512 in serve), the prefix cache and, on
-  the MTP rows, the drafter. It is not a weights-versus-KV decomposition.
+  the MTP rows, the drafter's KV cache and verify scratch. The MTP block's
+  weights are inline in the model file and resident on both engines, so they are
+  not a delta. It is not a weights-versus-KV decomposition.
 - **Load time is not the same quantity.** hipml's is engine load (tensor upload
   plus graph build); llama.cpp's is process start to model loaded, read from its
   own log. hipml serve prints no load timestamp.
