@@ -96,7 +96,9 @@ resident block type, including the Unsloth UD formats: the tile's five
 UD-only entries (Q5_K, IQ4_XS, IQ4_NL, Q3_K, IQ3_S) are what keep a UD file
 off the exact `_b` GEMV at 16 slots. It is not bit-identical to single-stream
 decode at 4+ rows. `HIPML_BATCH_TRACE=1` names the kernel each projection
-actually took, once per shape. The server says which path served a reply:
+actually took and the route it took (`route=exact` / `route=skinny`), once per
+shape; both routes print a line, so the entry name or the `route=` word is what
+distinguishes them, not the width. The server says which path served a reply:
 
 | header | meaning |
 |---|---|
