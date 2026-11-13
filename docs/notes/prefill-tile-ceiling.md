@@ -37,6 +37,14 @@ It does **not** change the shipped kernel: it adds one default-off probe switch
 assembly is unchanged by it. Its subject is the two gfx1201 matrix instructions
 the tile does not use.
 
+Section 11 was measured on `704ce53`, under the `prefill-kloop` lock, one hold,
+three interleaved rounds. It changes **no kernel source at all**: every variant
+in it is a `-D` on the shipped `prefill_wmma2.hip`, so the shipped binary is
+untouched by construction and its gates are the ones section 10.8 records. It
+follows section 10.4's finding that the staging phase is a dependency chain and
+not a byte count, and asks the one question sections 5.1 and 10 left open: who
+does the decoding, and how long the k-block is.
+
 ## 0. Question and answer
 
 Question: what limits the prefill GEMM on UD-Q4_K_M, and does any tile change
@@ -45,9 +53,10 @@ raise it enough to beat llama.cpp's 1,354 tok/s at 8K?
 Answer: the tile is pinned at **one block per CU**, so its **serialised
 staging phase (worth 25-34% of every GEMM) cannot overlap the matrix work**.
 The compute-only floor is 147-149 TFLOPS on gate/up and 167 TFLOPS on down; the
-shipped tiles reach 97-114 TFLOPS. Nothing about the shape, the prefetch depth
-or the IQ4 decoders can be changed to recover the gap, and the staging-free
-bound is 1,410-1,460 tok/s at 8K (section 7).
+shipped tiles reach 97-114 TFLOPS. Nothing about the shape, the prefetch depth,
+the IQ4 decoders, who does the decoding, or the k-block length can be changed to
+recover the gap, and the staging-free bound is 1,410-1,460 tok/s at 8K
+(section 7).
 
 The phase cannot be *hidden*, but it can be made shorter, and that is what this
 branch does: the staging body is cut to about half its instructions (section
@@ -913,3 +922,177 @@ The gates agree, on `1473a9c` + this branch, one lock hold, UD file asserted at
 
 Both `oracle-gate` maxima are the *same values* sections 6 and 9 report, which
 is the expected result for a change that does not alter the accumulation order.
+
+## 11. Who does the decoding, and how long the k-block is (probe, not shipped)
+
+Section 10.4 established that the staging phase is a dependent
+`load -> decode -> convert -> store` chain rather than a byte count: halving the
+staged bytes with the fp8 tile left the phase where it was. Sections 1-9 only
+ever changed how many buffers the chain writes into and how the tile is shaped.
+This section asks the two questions that leaves open, and answers both with a
+no:
+
+* **warp specialisation** — give some warps the decoder and the rest the matrix
+  work, handshake on the *same* single-buffered LDS, so the footprint stays at
+  30,720 B and occupancy is untouched;
+* **a longer k-block** — `KW=64`, so each barrier covers two 32-value decoder
+  passes and the chain per barrier is deeper and more independent.
+
+Neither fits. Both fail on the same accounting, and the reason is worth stating
+plainly because it explains why the tile has been stuck across four attempts:
+the two levers the tile actually has — barrier cadence and decoder-chain depth —
+are the *same* knob, `KW`, and they pull in opposite directions.
+
+Nothing here changes a line of `prefill_wmma2.hip`. Every variant is a `-D` on
+the shipped source, so the shipped binary and its gates are the ones section
+10.8 records; the kernel is untouched and the accumulator order with it.
+
+### 11.1 The measurement
+
+`704ce53`, `prefill-kloop` lock, one hold, Q4_K, 2,048 tokens, 3 rounds of 3
+reps each, every binary interleaved in that hold. `PWW2_PROBE_NO_W=1` removes
+the weight fetch, decoder and store, so `shipped - NO_W` is the weight-staging
+phase; `NO_X` is the same for the activation tile. The shipped build in this
+hold reads 3.056 / 3.093 ms (119.5 / 118.0 TF), which is section 10's hold to
+within 0.1%, so the two compare directly.
+
+| build | gate/up ms / TFLOPS | down ms / TFLOPS | vs shipped |
+|---|---:|---:|---:|
+| shipped, `KW=32` | 3.056 / 119.5 | 3.093 / 118.0 | — |
+| `KW=64` | 3.272 / 111.6 | 3.266 / 111.8 | **+7.1% / +5.6%** |
+| `WT=32 WR=128` | 3.128 / 116.7 | 3.163 / 115.4 | +2.4% / +2.3% |
+| 4 warps on the grid, 128 threads | **43.283** / 8.4 | **40.881** / 8.9 | **+1316% / +1222%** |
+
+Per-round spread on the shipped row is 0.5%, on `KW=64` 0.3-0.9%, on
+`WT=32` 0.5-1.5%; only the 128-thread row is outside the between-hold drift of
++-3-5%, and it is outside it by two orders of magnitude. One cell in the phase
+table is a median rather than a mean because one of its rounds is an outlier:
+`NO_X` at down read 2.661 / 2.652 / 3.383. `NO_STAGE` was taken too and is not
+used for anything here - it read 2.763 / 2.488 / 2.559 at gate/up, the same
+allocation instability section 3 records for that build.
+
+| phase | shipped gate/up | `KW=64` gate/up | shipped down | `KW=64` down |
+|---|---:|---:|---:|---:|
+| weight staging (`shipped - NO_W`) | 0.665 ms | **0.965 (+45%)** | 0.647 ms | **0.948 (+46%)** |
+| activation staging (`shipped - NO_X`) | 0.433 ms | **0.743 (+72%)** | 0.432 ms | **0.694 (+61%)** |
+| no weight staging (`NO_W` build) | 2.391 ms = 152.7 TF | **2.307 (−3.5%)** | 2.446 ms = 149.2 TF | **2.318 (−5.2%)** |
+| fragment LDS reads (`shipped - NO_FRAG`) | 0.056 ms | — | 0.113 ms | — |
+
+### 11.2 Warp specialisation: the accumulator budget, measured
+
+The arithmetic was in section 5.1 as a remark and is now a measurement. A
+256x128 block holds 256*128 = 32,768 f32 accumulators. With 8 warps (256
+threads) that is 128 f32 per thread; with 4 MMA warps it is **256 f32 per
+thread**, and 256 VGPRs is the whole per-thread register file at one resident
+block. There is no count between 4 and 8 warps that tiles a 256x128 grid.
+
+That case is measurable on the shipped source, because `PWW2_WT`/`PWW2_WR` set
+the warp grid and `PWW2_THREADS` sets the block. `-DPWW2_THREADS=128
+-DPWW2_WT=64 -DPWW2_WR=128` is exactly 4 warps covering the 256x128 grid, with
+the producer warps' work simply absent:
+
+| build | VGPRs | VGPR spill slots | scratch/lane | LDS | gate/up |
+|---|---:|---:|---:|---:|---:|
+| shipped, 8 warps, 128 accumulators | 183-193 | 0 | 0 | 30,720 | 3.056 ms |
+| 4 warps, 256 accumulators | **256 (capped)** | **617-751** | **1.1-1.2 KB** | 30,720 | **43.28 ms** |
+
+All nine `_w2h` entries cap at 256 VGPRs and spill 617-751 slots. This is not a
+tuning result: the accumulators alone are the file. Adding the producer warps
+back would leave the MMA warps' register demand exactly as measured, so the
+handshake never gets a chance to pay for itself - the block that would run it is
+already 14x slower before it stages anything.
+
+The single-buffer half of the idea fails for a reason that is not about
+registers. A producer warp must write bytes no consumer is reading, and with one
+k-block in one buffer those bytes do not exist: the only ways to create them are
+a second buffer (section 5.1, `PF=1`-`PF=5`, -11 to -29%) or a k-block split
+into sub-tiles, which needs `PWW2_KQ >= 1` and therefore a 32-value granularity
+- at which point "overlap without a second buffer" is `KW=64`, measured next.
+Holding the tile's fragments in registers to free the LDS is the third route and
+is arithmetic-dead the same way as the 4-warp case: 2 k-steps x 8 fragments x
+16 B = 64 VGPRs on top of the 128 accumulator VGPRs, which is the same 255-cap
+wall the `KW=64` entries below run into with only its staging state doubled.
+
+### 11.3 A longer k-block makes the chain worse, not deeper
+
+`KW=64` is the one k-block length that fits: the two tiles become 36,864 B and
+18,432 B, 55,296 B in total, still inside the 64 KB budget for one block. It
+halves the barrier count per k value, which is the lever section 10 names as the
+compute-side constraint, and it doubles the decoder passes per barrier, which is
+the lever this section was opened for. It does the first and undoes the second:
+
+* the compute floor moves the way section 10 predicts - `NO_W` goes 2.391 ->
+  2.307 ms at gate/up and 2.446 -> 2.318 at down, **-3.5% and -5.2%**, which is
+  what halving the barrier cadence is worth on this tile;
+* weight staging goes 0.665 -> 0.965 ms (+45%) and activation staging 0.433 ->
+  0.743 ms (+72%). The chain is *not* more independent with two passes per
+  barrier; it is longer and it holds twice the live decoder state.
+
+The register accounting says which of those two it is:
+
+| build | VGPRs, nine `_w2h` entries | at the 255 cap | LDS/block |
+|---|---|---:|---:|
+| shipped `KW=32` | 183-193 | 0 of 9 | 30,720 B |
+| `KW=64` | **205-255** | **4 of 9** | 55,296 B |
+| `WT=32 WR=128` | 184-193 | 0 of 9 | 30,720 B |
+
+`wraw` and the staged activation run are indexed by `PWW2_KQ`, so `KW=64`
+doubles both arrays' live sets and four entries land on the hard 255 cap, where
+the allocator has to give up the fragment software pipeline that section 5.1
+already identified as the thing it pays register pressure out of. The 128x128
+tile - the only shape that keeps the registers - was measured and lost in
+section 5 for the unrelated reason that it doubles the weight sweeps.
+
+So the two levers are one knob. `KW` up buys 3.5-5.2% of compute and costs 45-72%
+of staging; `KW` down buys staging and costs compute. At the shipped 3.056 ms
+the trade is 0.61 ms of staging lost for 0.08 ms of compute gained at gate/up
+(0.56 ms for 0.13 ms at down), and the measured net is +7.1% / +5.6%.
+
+`WT=32 WR=128` is the third row because it is the only re-partition of the same
+tile that makes the activation rows warp-private (each warp then reads exactly
+the 32 token rows it staged), which is the precondition for ever dropping the
+activation half of the barrier. It is register-neutral and LDS-neutral and it is
+still 2.3-2.4% slower - ten fragment loads per k-step instead of eight, and a
+worse weight-fragment LDS pattern - so the private-rows route starts 2.4% in
+debt and would have to recover more than the whole activation staging phase
+(14%) to clear the bar.
+
+### 11.4 Occupancy did not change
+
+LDS per block is 30,720 B for the shipped tile, `WT=32` and the 128-thread
+build, and 55,296 B for `KW=64`. gfx1201 has 64 KB of LDS per CU: 30,720 B
+would allow two blocks (61,440 B) and 55,296 B would not, and **none of them
+gets a second block either way**, because two blocks of 256 threads is 128
+VGPRs per thread and the shipped build already needs 183-193 for its
+accumulators alone. **Every variant here is one block per CU, 8 warps, 2 warps
+per SIMD - unchanged from the shipped tile.** The 128-thread build is the only
+one whose warp count per SIMD moved (4 warps, 1 per SIMD) and that is a side
+effect of the experiment, not the cause of its 43 ms; the spills are.
+
+### 11.5 Verdict
+
+| question | answer |
+|---|---|
+| can warps be specialised to overlap the chain on one buffer? | **no** - 4 warps on the grid is 256 accumulators/thread, measured at 43.28 ms against 3.056, 617-751 spill slots |
+| does a longer k-block deepen the chain into overlap? | **no** - staging +45-46% (weight) and +61-72% (activation), no-weight-staging floor -3.5% / -5.2%, net +7.1% / +5.6% |
+| does the tile's own re-partition open the private-rows route? | **no** - `WT=32 WR=128` is 2.3-2.4% slower at identical LDS and registers |
+
+This is the fourth measured negative on this tile and it is consistent with the
+other three: section 5 changed the buffer count, section 9 changed the launch
+count, section 10 changed the operand width, and this section changed who does
+the decoding and how much of it one barrier covers. None of them moves the
+staging phase, because the phase is a latency chain that has nowhere to go at
+one block per CU with two warps per SIMD, and none of them can be made to move
+the phase by adding occupancy: that needs <=128 VGPRs per thread and the
+accumulators are 128 on their own (section 10.5).
+
+What the section adds to the model is the coupling in 11.3 and one number that
+bounds the compute side. Fragment LDS reads cost 0.056 ms at gate/up and
+0.113 ms at down - 2-4% of the GEMM - so the fragment software pipeline is not
+where the compute phase's headroom is. `KW=64` then puts a price on the barrier
+part of it: halving the barrier count is worth **3.5-5.2%**, which is the entire
+compute-side headroom this tile has and is smaller than the staging phase it has
+to be traded against. Note that the `NO_W` build the -3.5%/-5.2% is read from
+still carries the activation staging (0.433 ms at gate/up), so it is a
+weight-staging-free build and not the issue ceiling; the register-only ceiling
+stays at the 171-182 TF of sections 3 and 10.2.
