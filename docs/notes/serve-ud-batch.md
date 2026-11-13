@@ -8,7 +8,8 @@ Base `6ec4491` (origin/main), branch `feat/pro-1491-serve-ud`. Box: R9700
 Sections 0–6 are that slice. Sections 7–9 are the follow-up slice
 (`06e4433`, branch `feat/1491-serve-parity`, same box, model, KV type and
 port, lock label `serve-parity`): the one-slot step, the Q5_K tile's rate, and
-the per-slot MTP plan.
+the per-slot MTP plan. Section 10 is the lone-slot follow-up
+(`0123ecb`, branch `agent/ownboard-1491-oneslot`, lock label `serve-oneslot`).
 
 ## 0. Question and answer
 
@@ -410,3 +411,148 @@ the exact GEMV and still reproduces the published ids. On the stock file the
 same skinny check reports `TOKENS DIFFER` at B=16, which is the behaviour
 [`../reproduce.md`](../reproduce.md) already documents for that file: neither
 skinny result is a gate, and the exact path is the one `--check` validates.
+
+## 10. The lone slot: the cache-shaped attention run, and the GDN chain
+
+Sections 7–9 closed most of the one-slot gap but left cell a at 29.70 tok/s
+against the CLI's 31.1 on the same prompt. This slice (`0123ecb`, branch
+`agent/ownboard-1491-oneslot`, same box, model, q8 KV and port, lock label
+`serve-oneslot`) attributes the last millisecond and removes it. Cell a is
+**30.98 tok/s (32.28 ms)** in a ten-wave interleaved A/B, 99.6% of the CLI's
+31.08 on the same session. The 31.5 line is **not met**: the CLI itself measures
+31.08 today, so the remaining 1.3% is the weight stream both engines share, not
+a server path.
+
+### 10.1 What one slot actually pays
+
+The attribution is untraced end-to-end, not the stage trace: `HIPML_SERVE_SPLIT`
+adds a sync per bucket and inflated the same step from 33.7 to 44.3 ms, so every
+bucket in a traced run is a different run. The comparable numbers are wall
+times of whole steps.
+
+| one slot, 2,423-token prompt, 64 tokens | tok/s | ms/token |
+| --- | ---: | ---: |
+| server cell a, ctx 32,768, base | 29.68 | 33.68 |
+| server, ctx 2,495, base | 30.61 | 32.67 |
+| CLI `generate --device --kv q8 --ctx 32,768` | 31.08 | 32.18 |
+| CLI, ctx 2,495 | 31.11 | 32.14 |
+
+The 32K cache costs the base server 1.01 ms and the CLI nothing: the CLI's
+`deep_kv::splits(seq)` is derived from the live sequence, the batched kernel's
+`per = ceil(stride / splits)` from the cache. The gap was one kernel choice, not
+scheduling (7.1 already showed the server adds ~0.2 ms between steps).
+
+One measurement note: the CLI control must pass `--kv q8`. The default is f32,
+and f32 KV at 32K reads 42.2 ms/token against 33.2 at ctx 2,495 — a real cache
+effect, but not the server's configuration.
+
+### 10.2 The staged run is sized by the cache
+
+`attn_decode_batch` launched the staged `_b` kernel with `splits` from the live
+position and a run of `ceil(stride / splits)` cache rows. At 2,423 tokens in a
+32K cache that is 37 runs of 886 rows: three live runs, 12 blocks on 64 CUs, and
+the reduce reads 34 dead partials. The single-stream engine's whole-group warp
+kernel (`attn_decode_kv_w2`, the same one `DeepKv` picks for q8 at head_dim 256)
+partitions over the live sequence and takes its split count from it.
+
+At `slots == 1`, q8, head_dim 256 and a GQA group ≤ 8, the batch launcher now
+calls that kernel through `launch_kv::launch_cols_ptrs` (selector 4,
+`attn_decode_kv_w2_b`) with one split per 32 live positions, clamped to 256 and
+to the allocated scratch:
+
+```rust
+let live = (live_seq / 32).clamp(1, WARP_SPLITS).min(splits);
+```
+
+The caller states the live length: `forward.rs` passes
+`positions.max() + 1` for a plain step, and `mtp.rs` passes 0, which keeps the
+staged path for the verify group — its columns share one cache and one split
+count, which is the property the staged kernel provides. `HIPML_ATTN_STAGED=1`
+opts out.
+
+### 10.3 The GDN recurrence had the same shape
+
+`gdn_ar_b` takes `grid.y` as the slot, so a lone slot ran one block per value
+head with no striping and none of the four-row unroll the single-stream step got
+in section 7 (`ssm_ops::recurrence`, 1.178 → 0.193 ms over 48 layers). At
+`slots == 1` the layer now launches `gdn_ar_f32` with the slot-0 state, conv
+window and gate pointers and eight stripes — the same fma chain spelled out
+explicitly, so the slot's result is unchanged. `HIPML_GDN_STAGED=1` opts out.
+
+### 10.4 Attribution, and what did not ship
+
+Two-wave cell a sweeps in one session, staged base 29.71:
+
+| variant | tok/s |
+| --- | ---: |
+| staged attention, staged GDN | 29.71 |
+| warp attention, `live/64` | 30.85 |
+| warp attention, 96 splits | 31.11 |
+| warp attention, 112 / 128 / 256 splits | 31.04 / 31.03 / 30.29 |
+| `w4_b` (kernel 5) instead of `w2_b` | 30.83 |
+| 96 splits + staged GDN | 30.57 |
+| 96 splits + GDN stripes 4 / 16 / 24 / 32 | 31.05–31.14 |
+
+So attention is worth ~1.1 tok/s, the split policy ~0.3, and the GDN route
+~0.5. The shipped policy is one split per 32 live positions (75 at this
+length), inside the measured 64–128 plateau. `w4_b` and splits 112/128/256 were
+worse and are not in the diff; the GDN stripe count is the single-stream
+policy's 8, since 4–32 are indistinguishable here.
+
+The fused attention front end (`attn_front_f32`) was considered for `rows == 1`
+and rejected before implementation: it reads `pos[0..4]`, while the batch's
+`pos_buf` holds two ints per slot. Matching the layouts would be a batch-buffer
+change, not a dispatch entry.
+
+### 10.5 Results
+
+`bench/serve/serve_bench.py --engine hipml --tokens 64`, base `0123ecb` and the
+branch interleaved per cell in one lock hold, branch at the card's rep counts
+(a 10, b 6, c 3), 64 tokens per request, q8 KV, no drafter. Cell a is the exact
+path (`batch == 1` routes the GEMV to the stream entry); b and c are the
+approximate WMMA tile, as labelled.
+
+| cell | slots | ctx/slot | path | before | after | vs before | peak VRAM |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| a | 1 | 32,768 | exact | 29.681 | **30.978** | 1.044x | 20,091 MiB both |
+| b | 8 | 16,384 | skinny | 130.562 | 130.658 | 1.001x | 24,110 MiB both |
+| c | 16 | 8,192 | skinny | 220.569 | 220.675 | 1.000x | 25,201 MiB both |
+
+Zero request errors in every cell (50, 48 and 48 requests). Cell a's p50/min
+across its 50 requests is 30.978/30.934 (0.14%); b and c move by 0.08% and
+0.05%, below the run-to-run spread of the same binary, so those two cells are
+**indistinguishable**, as expected — neither change is on their path.
+
+MTP is unchanged. Cell a with `--mtp` at the default drafts 1 reads 47.19 on
+both builds (two interleaved passes of 15 requests each: base 47.10/47.19,
+branch 47.13/47.19), and at drafts 3, which reproduces the note's 51.84 line,
+base 52.13 against branch 52.06, peak 20,892 MiB, 0 errors. The verify group
+still takes the staged attention and the staged GDN chain.
+
+### 10.6 Where the residual sits
+
+The token is 32.28 ms, and the same prompt's CLI token is 32.18: the server and
+the CLI now pay the same attention and GDN. The weight stream is ~24.5 ms of
+it, and the per-launch kernel-handle lookups are ~0.5 ms in both engines. The
+card's 31.5 tok/s needs 31.75 ms, which is 0.43 ms below today's CLI; closing it
+means changing the shared weight stream, not the one-slot path, and is out of
+this change's scope.
+
+### 10.7 Gates
+
+| gate | result |
+| --- | --- |
+| `parity --deep` | 74 passed, 0 failed, 1 skipped |
+| `batch-bench --check` UD B=8 / B=16 exact | all slots 16/16 ids against B=1 |
+| `spec-bench` drafts 0–3 | 128/128 token-exact, drafts 0 baseline 31.32 tok/s |
+| `oracle-gate` UD / stock | PASS 20/20 each (0.1086 / 0.1481 max) |
+| `generate --ids 760,6511,314,9338,369 --tokens 20 --device` UD | exactly the published 12 ids |
+| `serve` sixteen conversations at ctx 32,768 | all 16 replies byte-identical to base `0123ecb`, sha1 per reply (`bench/serve/probe_ids.py`) |
+| serve cell a with MTP, drafts 3 | 52.06 tok/s against base 52.13 |
+| `cargo test --workspace` | 0 failed |
+| `cargo fmt --all -- --check` | clean |
+
+The lone-slot routes are exact by construction: the warp kernel is the
+single-stream kernel on the same rows, and the GDN kernel is the same
+contraction. The 16-conversation sha1 identity is the end-to-end check that no
+id moved.

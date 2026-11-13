@@ -294,6 +294,9 @@ impl<'a> MtpBatch<'a> {
             self.kv.ml_slot(),
             qw,
             b,
+            // The MTP group shares one cache; the staged kernel's split count
+            // is the group's, so it keeps the staged path.
+            0,
         )?;
         self.attn
             .out_rows(l, &self.aout, &self.gate_b, &self.y, b)?;

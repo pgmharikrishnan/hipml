@@ -126,6 +126,10 @@ impl<'a> BatchEngine<'a> {
                         dk.ml_slot(),
                         qw,
                         b,
+                        // A plain step knows where its rows sit: the lone-slot
+                        // route in the launcher uses the live length, exactly
+                        // as the single-stream engine does.
+                        positions.iter().copied().max().unwrap_or(0) + 1,
                     )?;
                     stage!(3);
                     f.attn.out_rows(l, &f.out, &f.gate, &f.y, b)?;
