@@ -70,7 +70,7 @@ spread, the cell is not a result.
 | CLI decode @0 tok/s | **33.15** (30.17 ms) | 32.24 (31.01 ms) | **+2.8%** | 0.13% / 1.0% |
 | CLI decode @8,192 tok/s | **31.98** (31.27 ms) | 31.41 (31.84 ms) | **+1.8%** | 0.35% / 0.42% |
 | serve a, 1 slot, aggregate tok/s | 31.64 | **32.12** | −1.5% | 0.3% / 0.5% |
-| serve a, TTFT p50 / p95 ms | 2,500 / 2,512 | **1,921 / 1,936** | +30.1% / +29.8% | — |
+| serve a, TTFT p50 / p95 ms | 2,124 / 2,129 † | **1,921 / 1,936** | +10.6% / +10.0% | — |
 | serve b, 8 slots, aggregate tok/s | **132.37** | 109.42 | **+21.0%** | 0.7% / 12.0% |
 | serve b, TTFT p50 / p95 ms | **489 / 491** | 563 / 1,252 | −13.2% / −60.8% | — |
 | serve c, 16 slots, aggregate tok/s | 222.13 | **234.61** | −5.3% | 0.7% / 11.2% |
@@ -79,11 +79,16 @@ spread, the cell is not a result.
 | MTP `spec-bench` d0→d1→d2→d3 tok/s, q8 | 33.30 → 51.75 → 60.58 → **63.57** | no such harness | — | — |
 | peak VRAM, CLI @512 MiB | 17,031 | **15,546** | +9.6% | 0 |
 | peak VRAM, CLI @8,192 MiB | 18,395 | **15,809** | +16.4% | 0 |
-| peak VRAM, serve a / b / c MiB | 20,091 / 24,110 / 25,201 | **16,728 / 21,417 / 22,608** | +20.1% / +12.6% / +11.5% | 0 |
-| peak VRAM, MTP serve a d3 MiB | 20,892 | **18,624** | +12.2% | 0 |
+| peak VRAM, serve a / b / c MiB | 20,271 / 24,528 / 25,466 † | **16,728 / 21,417 / 22,608** | +21.2% / +14.5% / +12.6% | 0 |
+| peak VRAM, MTP serve a d3 MiB | 21,072 † | **18,624** | +13.1% | 0 |
 | resident weight bytes | 15.42 GiB, 866 tensors | 15.42 GiB, 27.32 B params | equal | — |
 | streamed bytes/token | 15,484,418,048 B (14.42 GiB) | not printed | — | — |
 | load time | 6.17 / 6.42 s engine load | 6.89 / 7.00 / 7.05 s start→loaded (8.25 s with drafter) | level | — |
+
+† The serve cell a TTFT and the serve peak-VRAM rows were re-measured at the
+512-token default after the table's session; every other row is that session.
+At the earlier 256 default the same cells read 2,500 / 2,512 ms (+30.1% /
++29.8%) and 20,091 / 24,110 / 25,201 MiB, with MTP d3 at 20,892 MiB.
 
 The MTP rows are final for this session. The d3 verify runs the exact batched
 GEMV, so 52.32 against 62.33 is an exact-path comparison on both sides (see the
@@ -150,13 +155,15 @@ path.
 ## Caveats
 
 - **The serve prefill chunk is not the CLI chunk.** These serve rows were
-  measured at the server's default `--chunk 256`; the CLI prefills at 2,048.
-  llama-server has no chunk knob and runs `-b 2048 -ub 512`. The tile is the
-  whole TTFT gap: cell a's 2,500 ms for a 2,423-token prompt is 10 tiles, and
-  the same request at `--chunk 2048` is 2,026 ms (+5.5% against llama instead
-  of +30.1%), with b and c unchanged and cell c's peak up 1,229 MiB. The
-  default was not moved because every larger tile flips one greedy id in the
-  16-conversation probe — see
+  measured at the server's default `--chunk 512`; the CLI prefills at 2,048.
+  llama-server has no chunk knob and runs `-b 2048 -ub 512`, so 512 is its own
+  ubatch. The earlier default was 256: cell a's 2,500 ms for a 2,423-token
+  prompt was 10 tiles and +30.1% against llama, and at 512 the same request is
+  2,124 ms (+10.6%), with b and c unchanged and cell c's peak up 179 MiB. The
+  larger tile flips one greedy id in the 16-conversation probe at token 5, on a
+  0.008–0.018 nat tie; that was accepted as a trade — both branches are equally
+  likely under the model and `oracle-gate` passes at every chunk — and 512 was
+  chosen because it is llama's own ubatch. See
   [`notes/serve-prefill-chunk.md`](notes/serve-prefill-chunk.md). Do not read
   the serve TTFT gap as a prefill-quality gap, and do not re-pin the harness to
   a chunk: it measures the default.
@@ -212,7 +219,7 @@ path.
   tok/s at 64. The full decomposition is in
   [`notes/mtp.md`](notes/mtp.md#the-one-slot-serve-cell-and-the-cli-like-for-like).
 - **Peak VRAM is whole-process WDDM dedicated usage.** It includes prefill
-  scratch (chunk 2048 on the CLI, chunk 256 in serve), the prefix cache and, on
+  scratch (chunk 2048 on the CLI, chunk 512 in serve), the prefix cache and, on
   the MTP rows, the drafter. It is not a weights-versus-KV decomposition.
 - **Load time is not the same quantity.** hipml's is engine load (tensor upload
   plus graph build); llama.cpp's is process start to model loaded, read from its

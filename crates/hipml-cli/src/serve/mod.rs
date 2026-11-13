@@ -60,15 +60,22 @@ fn parse(args: &[String]) -> Result<Args, String> {
         port: 8093,
         ctx: 32768,
         slots: 16,
-        // The prefill tile. 256 is measured, not arbitrary: each extra tile
-        // costs cell a ~59 ms of fixed time (2,495 ms of TTFT at 256 against
-        // 2,026 ms at 2,048 for a 2,423-token prompt), and cells b and c are
-        // flat across the range. But every tile above 256 flips one greedy id
-        // in the 16-conversation probe, at a 0.008-0.018 nat tie, and 256 is
-        // the branch llama.cpp takes there. Do not raise it without re-running
-        // `bench/serve/probe_exact.py` at the new value and diffing the ids;
-        // docs/notes/serve-prefill-chunk.md has the sweep and the trade.
-        chunk: 256,
+        // The prefill tile. 512 is llama-server's own `-ub 512`, so the
+        // single-slot latency comparison is like-for-like instead of hipml
+        // having chosen a smaller chunk. It is measured: cell a's TTFT p50
+        // falls 2,494 -> 2,124 ms for +179 MiB of prefill scratch at 16 slots,
+        // and cells b and c stay flat (486 -> 488, 735 -> 738 ms; b's goodput
+        // within 0.4%, c's -0.3%). Every chunk above 256 flips one reply of
+        // sixteen at token 5 in `probe_exact`'s d0 fixture, on a 0.008-0.018
+        // nat tie: both branches are equally likely under the model and
+        // `oracle-gate` passes at every chunk, so this is an accepted trade,
+        // not an accident. 2,048 buys 3% more TTFT for +1,229 MiB and beats
+        // llama on a parameter llama does not set; it was declined. Before
+        // raising it again, re-run `bench/serve/probe_exact.py --ctx 32768` at
+        // the new value and diff the ids, then re-sweep the cells in
+        // docs/notes/serve-prefill-chunk.md; the sweep there records what a
+        // further raise buys: 65 ms at 1,024 and 97 ms at 2,048.
+        chunk: 512,
         drafts: 1,
         prefix_entries: 16,
         prefix_mb: 2048,
@@ -166,7 +173,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
 fn help() {
     eprintln!(
         "hipml serve --gguf PATH [--mtp PATH] [--port 8093] [--host 127.0.0.1]\n\
-         \x20           [--ctx 32768] [--slots 16] [--chunk 256] [--drafts 1]\n\
+         \x20           [--ctx 32768] [--slots 16] [--chunk 512] [--drafts 1]\n\
          \x20           [--prefix-entries 16] [--prefix-mb 2048]\n\
          \x20           [--max-queue N] [--max-conns 64]\n\
          \n\
