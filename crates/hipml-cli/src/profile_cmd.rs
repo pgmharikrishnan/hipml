@@ -308,6 +308,33 @@ pub fn profile(args: &[String]) -> i32 {
             100.0,
             launches / n
         );
+        if hipml_hip::probe::span_enabled() {
+            let krows = hipml_hip::probe::kernel_report();
+            let ktotal: f64 = krows.iter().map(|r| r.span_us).sum();
+            println!(
+                "per-kernel, depth {depth} ({n} tokens, ranked by GPU time):\n  \
+                 {:<24} {:>10} {:>7} {:>7} {:>9}",
+                "kernel", "ms/token", "share", "launch", "us/launch"
+            );
+            for r in krows.iter().take(30) {
+                let ms = r.span_us / 1e3 / n as f64;
+                println!(
+                    "  {:<24} {:10.3} {:6.1}% {:7} {:9.2}",
+                    r.name,
+                    ms,
+                    r.span_us / ktotal * 100.0,
+                    r.launches / n,
+                    r.span_us / r.launches.max(1) as f64
+                );
+            }
+            println!(
+                "  {:<24} {:10.3} {:6.1}% {:7}",
+                "sum",
+                ktotal / 1e3 / n as f64,
+                100.0,
+                krows.iter().map(|r| r.launches).sum::<usize>() / n
+            );
+        }
     }
     0
 }

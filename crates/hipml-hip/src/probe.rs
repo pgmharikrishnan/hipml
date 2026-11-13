@@ -14,6 +14,12 @@
 //! kernel-bound and needs no further look. Recording is a queue operation, so
 //! the order of work is unchanged, and nothing is recorded unless the flag is
 //! set.
+//!
+//! `HIPML_KERNEL_SPAN=1` adds the other axis: an event pair around *every*
+//! launch, folded into one row per kernel name by [`kernel_report`]. That is
+//! two events per launch, so it costs more than the stage table and is only
+//! worth it when the question is which kernel, not which stage. Both can be on
+//! at once.
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -31,6 +37,17 @@ struct Timeline {
 
 thread_local! {
     static TIMELINE: RefCell<Option<Timeline>> = const { RefCell::new(None) };
+    static SPANS: RefCell<Spans> = const { RefCell::new(Spans { ev: Vec::new(), names: Vec::new(), next: 0, open: false, failed: 0 }) };
+}
+
+struct Spans {
+    /// Two events per recorded launch: `ev[2*i]` opens, `ev[2*i+1]` closes.
+    /// Kept and reused across tokens so a launch costs no allocation.
+    ev: Vec<Event>,
+    names: Vec<String>,
+    next: usize,
+    open: bool,
+    failed: usize,
 }
 
 /// 0 = unset, 1 = on, 2 = off. Read once and kept, because this is on the path
@@ -65,6 +82,68 @@ pub fn count_launch() {
                 *n += 1;
             }
         }
+    });
+}
+
+/// 0 = unset, 1 = on, 2 = off, for [`span_enabled`].
+static SPAN_STATE: AtomicU8 = AtomicU8::new(0);
+
+/// True when every launch is being bracketed by events.
+pub fn span_enabled() -> bool {
+    match SPAN_STATE.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = std::env::var("HIPML_KERNEL_SPAN")
+                .map(|v| v != "0")
+                .unwrap_or(false);
+            SPAN_STATE.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+/// Open a launch span. Paired with [`span_end`] on the same thread.
+pub fn span_begin(name: &str, stream: &Stream) {
+    SPANS.with(|s| {
+        let s = &mut *s.borrow_mut();
+        let i = s.next;
+        while s.ev.len() < 2 * i + 2 {
+            match Event::new() {
+                Ok(e) => s.ev.push(e),
+                Err(_) => {
+                    s.failed += 1;
+                    return;
+                }
+            }
+        }
+        if s.ev[2 * i].record(stream).is_err() {
+            s.failed += 1;
+            return;
+        }
+        if i == s.names.len() {
+            s.names.push(name.to_string());
+        } else {
+            s.names[i].clear();
+            s.names[i].push_str(name);
+        }
+        s.open = true;
+    });
+}
+
+/// Close the span opened by the last [`span_begin`].
+pub fn span_end(stream: &Stream) {
+    SPANS.with(|s| {
+        let s = &mut *s.borrow_mut();
+        if !s.open {
+            return;
+        }
+        s.open = false;
+        let i = s.next;
+        if s.ev[2 * i + 1].record(stream).is_err() {
+            s.failed += 1;
+        }
+        s.next += 1;
     });
 }
 
@@ -106,6 +185,55 @@ pub struct StageRow {
     pub name: &'static str,
     pub span_us: f64,
     pub launches: usize,
+}
+
+/// One row of the per-launch fold: everything one kernel name cost in a token.
+#[derive(Clone, Debug, Default)]
+pub struct KernelRow {
+    pub name: String,
+    pub span_us: f64,
+    pub launches: usize,
+}
+
+/// Fold the per-launch spans by kernel name, largest first. The caller must
+/// have synchronised the stream first.
+pub fn kernel_report() -> Vec<KernelRow> {
+    SPANS.with(|s| {
+        let s = &mut *s.borrow_mut();
+        let mut rows: Vec<KernelRow> = Vec::new();
+        for i in 0..s.next {
+            let span = match s.ev[2 * i].since(&s.ev[2 * i + 1]) {
+                Ok(ms) => ms as f64 * 1e3,
+                Err(_) => {
+                    s.failed += 1;
+                    0.0
+                }
+            };
+            let name = &s.names[i];
+            match rows.iter_mut().find(|r| &r.name == name) {
+                Some(r) => {
+                    r.span_us += span;
+                    r.launches += 1;
+                }
+                None => rows.push(KernelRow {
+                    name: name.clone(),
+                    span_us: span,
+                    launches: 1,
+                }),
+            }
+        }
+        if s.failed > 0 {
+            eprintln!("kernel span: {} event pairs failed", s.failed);
+        }
+        s.next = 0;
+        s.open = false;
+        rows.sort_by(|a, b| {
+            b.span_us
+                .partial_cmp(&a.span_us)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        rows
+    })
 }
 
 /// Fold the timeline. The caller must have synchronised the stream first.
