@@ -41,7 +41,9 @@ pub fn launches_per_token(n_layer: usize, is_recr: &[bool]) -> usize {
             // kv_append, split, reduce, q_gate, wo
             11
         };
-        n += 7; // residual, rmsnorm, gate, up, silu, down, residual
+        // residual, rmsnorm, gate+up (one job-list launch), silu, down,
+        // residual
+        n += 6;
     }
     n + 2 // output rmsnorm, lm_head
 }
