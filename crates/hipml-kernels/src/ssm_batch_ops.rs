@@ -125,7 +125,50 @@ impl<'a> SsmGpuLayer<'a> {
         }
 
         // delta-net recurrence
-        {
+        //
+        // One slot is not a batch here either. In the batched kernel `grid.y` is
+        // the slot, so a lone slot runs one block per value head with no
+        // striping and none of the four-row unroll the single-stream step got
+        // (`ssm_ops::recurrence`, 1.178 -> 0.193 ms for 48 layers). The state,
+        // the conv window and the gates are the same buffers at slot 0, so the
+        // lone slot can run that kernel: same pointers, same `n_v`/`n_k`/`sd`,
+        // same fma chain (the single-stream kernel spells the batched kernel's
+        // contraction out explicitly, so a slot's result is unchanged).
+        if slots == 1 && std::env::var_os("HIPML_GDN_STAGED").is_none() {
+            // The single-stream policy: eight stripes, clamped to the rows a
+            // head actually has.
+            let split = 8usize.min(d.head_v).max(1);
+            let k = self.module.kernel("gdn_ar_f32")?;
+            let mut p_s = s_state.as_ptr();
+            let mut p_q = conv.as_ptr();
+            let mut p_k = unsafe { (conv.as_ptr() as *mut u8).add(d.key_dim() * 4) as *mut c_void };
+            let mut p_v =
+                unsafe { (conv.as_ptr() as *mut u8).add(2 * d.key_dim() * 4) as *mut c_void };
+            let mut p_g = g.as_ptr();
+            let mut p_beta = beta_sig.as_ptr();
+            let mut p_out = o.as_ptr();
+            let mut v_nv = n_v;
+            let mut v_nk = d.n_k as i32;
+            let mut v_sd = d.head_v as i32;
+            let mut params: [*mut c_void; 10] = [
+                &mut p_s as *mut _ as *mut c_void,
+                &mut p_q as *mut _ as *mut c_void,
+                &mut p_k as *mut _ as *mut c_void,
+                &mut p_v as *mut _ as *mut c_void,
+                &mut p_g as *mut _ as *mut c_void,
+                &mut p_beta as *mut _ as *mut c_void,
+                &mut p_out as *mut _ as *mut c_void,
+                &mut v_nv as *mut _ as *mut c_void,
+                &mut v_nk as *mut _ as *mut c_void,
+                &mut v_sd as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: (d.n_v as u32, split as u32, 1),
+                block: (128, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            k.launch(cfg, stream, &mut params)?;
+        } else {
             let k = self.module.kernel("gdn_ar_b")?;
             let mut p_s = s_state.as_ptr();
             let mut p_q = conv.as_ptr();

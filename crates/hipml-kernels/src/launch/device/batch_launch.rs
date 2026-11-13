@@ -7,6 +7,15 @@
 
 use super::*;
 
+/// Split-count ceiling for the whole-group warp entry. The same 256 that
+/// `deep_kv` uses for the single-stream engine; both policies are measurements
+/// (see `deep_kv::MAX_SPLITS`).
+const WARP_SPLITS: usize = 256;
+
+/// `launch_kv` selector for `attn_decode_kv_w2`, the whole-group warp kernel.
+/// `DeepKv::new` picks it for a q8 cache at head_dim 256 with a GQA group <= 8.
+const WARP_KERNEL_Q8: usize = 4;
+
 impl Launcher {
     /// Quantize `slots` K/V rows straight into `slots` contiguous caches.
     #[allow(clippy::too_many_arguments)]
@@ -118,7 +127,64 @@ impl Launcher {
         ml_slot: usize,
         q_slot: usize,
         slots: usize,
+        live_seq: usize,
     ) -> Result<(), String> {
+        if n_kv == 0 || n_heads % n_kv != 0 {
+            return Err(format!(
+                "n_heads {n_heads} is not a multiple of n_kv {n_kv}"
+            ));
+        }
+        // One active slot is not a batch. The staged `_b` kernel partitions its
+        // key range over the cache *stride* (it is built for a grid that is
+        // fixed when the graph is captured), so a 2.4K sequence in a 32K cache
+        // launches runs of `stride/splits` rows with all but the first few dead
+        // and the reduce reading every dead run's partial. The whole-group warp
+        // `_b` kernel partitions over the live sequence and takes its split
+        // count from it: at one slot it is the single-stream engine's own
+        // kernel and policy (`deep_kv::splits`), so the batch engine's lone slot
+        // pays the same attention as the CLI instead of a 32K-shaped one.
+        //
+        // `live_seq` is the caller's statement that these rows are a plain
+        // decode step at a known position; 0 keeps the staged path (the verify
+        // and MTP groups, whose columns share one cache and one split count).
+        let group = n_heads / n_kv;
+        let one = live_seq > 0
+            && slots == 1
+            && dtype == 0
+            && head_dim == 256
+            && group <= 8
+            && std::env::var_os("HIPML_ATTN_STAGED").is_none();
+        if one {
+            // One split per 32 live positions: the warp kernel is one warp per
+            // (KV head, split), so a 2.4K sequence gets ~75 splits, 150 blocks
+            // on 64 CUs and 32 rows per warp. The single-stream rule (one per
+            // 64) leaves that shape at 37 splits and half the card idle; the
+            // measured plateau is 64-128 splits at this length and the cap
+            // binds from 8K up, where more splits already won (deep_kv).
+            let live = (live_seq / 32).clamp(1, WARP_SPLITS).min(splits);
+            return crate::launch_kv::launch_cols_ptrs(
+                &self.module,
+                &self.stream,
+                WARP_KERNEL_Q8,
+                pos.as_ptr(),
+                q.as_ptr(),
+                k_cache,
+                v_cache,
+                part_acc.as_ptr(),
+                part_ml.as_ptr(),
+                out.as_ptr(),
+                n_heads,
+                n_kv,
+                head_dim,
+                stride,
+                scale,
+                live,
+                1,
+                acc_slot,
+                ml_slot,
+                q_slot,
+            );
+        }
         self.attn_decode_rows_ptr(
             dtype,
             pos.as_ptr(),
