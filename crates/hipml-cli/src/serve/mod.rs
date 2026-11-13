@@ -60,6 +60,14 @@ fn parse(args: &[String]) -> Result<Args, String> {
         port: 8093,
         ctx: 32768,
         slots: 16,
+        // The prefill tile. 256 is measured, not arbitrary: each extra tile
+        // costs cell a ~59 ms of fixed time (2,495 ms of TTFT at 256 against
+        // 2,026 ms at 2,048 for a 2,423-token prompt), and cells b and c are
+        // flat across the range. But every tile above 256 flips one greedy id
+        // in the 16-conversation probe, at a 0.008-0.018 nat tie, and 256 is
+        // the branch llama.cpp takes there. Do not raise it without re-running
+        // `bench/serve/probe_exact.py` at the new value and diffing the ids;
+        // docs/notes/serve-prefill-chunk.md has the sweep and the trade.
         chunk: 256,
         drafts: 1,
         prefix_entries: 16,
