@@ -307,6 +307,31 @@ with `HIPML_BATCH_SKINNY=1 HIPML_BATCH_SKINNY_TRACE=1` on `spec-bench --drafts
 3`: no `[skinny]` line is printed. The non-bit-identical tile at B>=4 is the
 exact defect the review-4 audit fixed; the exact route must stay.
 
+**The trace prints both routes, so read the route word.** A later serve run with
+`HIPML_BATCH_TRACE=1` and `--drafts 3` prints `b=4` lines and was read as "the
+verify is on the approximate tile, exactly at the threshold". It was not: the
+lines name `gemv_q5_k_b`, `gemv_q6_k_b`, `gemv_iq4_xs_b` and so on — the exact
+`_b` entries — and the verify prints no `[skinny]` line and no `gemm_skinny_*`
+entry at any draft count. The batch engine in the same process does take the
+tile at four or more slots (`gemm_skinny_*`, `route=skinny`); both shapes are
+real and both are in
+[`serve-ud-batch.md`](serve-ud-batch.md) §1. The route is now printed on the
+line (`route=exact` / `route=skinny`) so that reading a bare `b=4` cannot
+repeat the mistake:
+
+```
+[batch] gemv_q6_k_b m=17408  k=5120 b=4 route=exact
+[batch] gemv_q6_k_b m=248320 k=5120 b=4 route=exact
+```
+
+**The gate that would have caught a real regression.** `spec-bench` passed
+128/128 through the review-4 defect because it never set the server's flag. It
+now installs `serve`'s dispatch (`HIPML_BATCH_SKINNY=1` unless
+`HIPML_BATCH_LEGACY=1`) and exits 1 if any drafts row is not token-exact, so the
+CLI gate and the server run the same decision. `bench/serve/probe_exact.py` is
+the end-to-end check: `serve` plain against `serve` at drafts 1, 2 and 3, the
+same 16 conversations at ctx 32,768, ids compared one for one.
+
 ## What is not verified / not done
 
 * The prose ≥48 / JSON ≥53 tok/s targets are **not met** (42.6 / 50.1, before

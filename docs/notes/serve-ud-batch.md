@@ -36,17 +36,68 @@ the 1-slot route change below took cell a's plain cell from 26.13 to 28.37
 
 The tracer is `HIPML_BATCH_TRACE=1` (`graph_launch.rs::trace_route`): it prints
 one line per `(entry, m, k, batch)` the first time a batched projection takes
-it, so a long server run prints a table rather than a firehose.
+it, so a long server run prints a table rather than a firehose. **Both routes
+print a line**, and `route=` names which one ran. A server run therefore shows
+two different shapes, and they are the two things this note is about.
+
+**The batch engine at four or more rows takes the tile.** `serve` sets
+`HIPML_BATCH_SKINNY=1` for the whole process, and the skinny condition reads
+that variable directly (`graph_launch.rs:201-204`), so cell c at 16 slots is
+`gemm_skinny_*` / `route=skinny`:
 
 ```
-[batch] gemv_q5_k_b    m=17408 k=5120 b=16
-[batch] gemv_iq4_xs_b  m=5120  k=5120 b=16
-[batch] gemv_iq4_nl_b  m=5120  k=5120 b=16
-[batch] gemv_q4_k_b    m=5120  k=5120 b=16
-[batch] gemv_q6_k_b    m=248320 k=5120 b=16
-[batch] gemv_q3_k_b    m=5120  k=5120 b=16
-[batch] gemv_iq3_s_b   m=5120  k=5120 b=16
-[batch] gemv_q8_0_b    ...      b=16
+[batch] gemm_skinny_q5_k    m=10240  k=5120 b=16 route=skinny
+[batch] gemm_skinny_iq4_xs  m=17408  k=5120 b=16 route=skinny
+[batch] gemm_skinny_iq4_nl  m=5120   k=17408 b=16 route=skinny
+[batch] gemm_skinny_q4_k    m=5120   k=5120 b=16 route=skinny
+[batch] gemm_skinny_q6_k    m=248320 k=5120 b=16 route=skinny
+[batch] gemm_skinny_q3_k    m=17408  k=5120 b=16 route=skinny
+[batch] gemm_skinny_iq3_s   m=17408  k=5120 b=16 route=skinny
+[batch] gemm_skinny_q8_0    m=48     k=5120 b=16 route=skinny
+```
+
+The batch shrinks as slots retire, and every width from four up is still the
+tile: cell c prints `b=16`, `15`, `14`; cell b prints `b=8`, `7`, `6`. At `b=2`
+and `b=1` the route is exact instead: the tile needs four rows, and those two
+widths are the MTP verify at one draft and the single-stream kernel.
+
+**The MTP verify never takes the tile, at any draft count.** The verify is a
+`forward_columns` call, which holds `exact_scope()` because `skinny_on()` reads
+`HIPML_SKINNY` and not `HIPML_BATCH_SKINNY` (`columns.rs:220`); `gemv_batched_at`
+refuses the tile while that scope is held. Drafts 1, 2 and 3 are 2, 3 and 4
+columns:
+
+```
+[batch] gemv_q5_k_b   m=10240  k=5120 b=2 route=exact
+[batch] gemv_q6_k_b   m=17408  k=5120 b=3 route=exact
+[batch] gemv_q6_k_b   m=248320 k=5120 b=4 route=exact
+```
+
+Those three lines come from three servers, one per draft count; a single server
+prints the width it was started with. Cell c's `b=2` lines are the same thing
+seen from the other side: the first request is verified alone before the other
+fifteen join it.
+
+**The trap.** `b=4` is not by itself evidence of the tile. Both routes print at
+every width, so a `b=4` line naming `gemv_*_b` is the exact `_b` kernel and a
+`b=4` line naming `gemm_skinny_*` is the tile; `route=` says the same thing in
+one word. Reading the bare `b=` value, or reading the presence of a line, is
+what turns the exact verify into a false alarm.
+
+For the record, the diagnosis below was made at base `6ec4491`, before the five
+UD entries existed. There the flag was already on and the tile was still
+unreachable, so the same cell printed the exact `_b` entries for all eight
+formats — that is the defect, not what serve prints now:
+
+```
+[batch] gemv_q5_k_b    m=17408  k=5120 b=16 route=exact
+[batch] gemv_iq4_xs_b  m=5120   k=5120 b=16 route=exact
+[batch] gemv_iq4_nl_b  m=5120   k=5120 b=16 route=exact
+[batch] gemv_q4_k_b    m=5120   k=5120 b=16 route=exact
+[batch] gemv_q6_k_b    m=248320 k=5120 b=16 route=exact
+[batch] gemv_q3_k_b    m=5120   k=5120 b=16 route=exact
+[batch] gemv_iq3_s_b   m=5120   k=5120 b=16 route=exact
+[batch] gemv_q8_0_b    ...      ...    b=16 route=exact
 ```
 
 The decision that produced it was a static match:

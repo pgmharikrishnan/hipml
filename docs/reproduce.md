@@ -105,6 +105,25 @@ Drafts 0/1/2/3 should read 29.15 / 43.07 / 47.84 / 45.59 tok/s, with 128/128
 exact on every row. The release MTP cells use f32 KV; MTP at q8 KV is
 implemented but was not measured.
 
+`spec-bench` installs the dispatch `serve` installs (`HIPML_BATCH_SKINNY=1`,
+unless `HIPML_BATCH_LEGACY=1`), so the `exact` column is the server's verify and
+not just the CLI's, and a row that is not token-exact exits 1. `HIPML_SKINNY=1`
+still opts into the WMMA tile and turns the exit-code check off, because that
+path is documented to change tokens.
+
+The end-to-end gate is the server itself:
+
+```powershell
+python bench\serve\probe_exact.py --exe .\target\release\hipml.exe `
+  --gguf $env:HIPML_GGUF --mtp $env:HIPML_MTP_GGUF --ctx 32768 --tokens 128
+```
+
+It starts `serve` once with speculation off and once per draft count, sends the
+same 16 conversations to each, and compares the ids `/completion` returns. Any
+difference exits 1. This is the check the review-4 audit needed: `spec-bench`
+passed 128/128 while the server's drafts=3 output drifted, because the drift
+came from a process-wide flag the CLI never set.
+
 ## 3. Batched decode
 
 ```powershell
@@ -138,8 +157,10 @@ On the UD file the tile also covers Q5_K, IQ4_XS, IQ4_NL, Q3_K and IQ3_S, so
 `HIPML_SKINNY=1` is worth 1.42x at B=8 and 2.31x at B=16 there (the exact path is
 unchanged). Q5_K is a third of the file's bytes, so a missing Q5_K entry alone
 is enough to put the batch back on the exact GEMV: `HIPML_BATCH_TRACE=1` prints
-one `[batch] <entry> m=<rows> k=<k> b=<slots>` line per route, and is how that
-was caught. `hipml skinny-bench --ud` gives the per-format tile rate.
+one `[batch] <entry> m=<rows> k=<k> b=<slots> route=<exact|skinny>` line per
+route, and is how that was caught. Read the `route=` word: both routes print a
+line, so the line's presence says nothing about which kernel ran.
+`hipml skinny-bench --ud` gives the per-format tile rate.
 
 ## 4. Head-to-head matrix
 

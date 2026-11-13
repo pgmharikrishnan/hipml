@@ -96,7 +96,9 @@ resident block type, including the Unsloth UD formats: the tile's five
 UD-only entries (Q5_K, IQ4_XS, IQ4_NL, Q3_K, IQ3_S) are what keep a UD file
 off the exact `_b` GEMV at 16 slots. It is not bit-identical to single-stream
 decode at 4+ rows. `HIPML_BATCH_TRACE=1` names the kernel each projection
-actually took, once per shape. The server says which path served a reply:
+actually took and the route it took (`route=exact` / `route=skinny`), once per
+shape; both routes print a line, so the entry name or the `route=` word is what
+distinguishes them, not the width. The server says which path served a reply:
 
 | header | meaning |
 |---|---|
@@ -107,6 +109,12 @@ A lone request, and every MTP verify, always take the exact path.
 `HIPML_BATCH_LEGACY=1` forces exact for everything; it costs 28% at 8 slots
 (107.46 against 149.43 tok/s) and still beats llama.cpp's 97.54 tok/s there,
 but at 16 slots the exact path is 107.33 against llama.cpp's 227.89.
+
+The verify's exactness is gated twice: `spec-bench` runs with this server's
+dispatch and exits 1 if any drafts row is not token-exact, and
+`bench/serve/probe_exact.py` starts the real server plain and at drafts 1-3 and
+compares the ids of 16 conversations. The trace names the route on every line
+(`route=exact` / `route=skinny`) because both routes print one.
 
 Batched attention partitions each slot's KV cache into split-K runs whose count
 comes from the cache's row count and the slot count, never from the live
