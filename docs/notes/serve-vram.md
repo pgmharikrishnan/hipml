@@ -259,14 +259,24 @@ All gates on the after binary, one hold, 876 s:
 
 ## 8. Reproduction
 
-```
-C:\hipml-vram\build.cmd            # HIP_PATH=C:\rocm-sdk\_rocm_sdk_core, HIPML_ARCH=gfx1201
-powershell C:\models\gpu-lock.ps1 acquire "vram"
-python temp\vram_probe.py --cell a --reps 3 ^
-  --model C:\models\Qwen3.8-27B-UD-Q4_K_M.gguf ^
-  --mtp   C:\models\mtp-Qwen3.8-27B-Q4_0.gguf ^
-  --hipml C:\hipml-vram\hipml-after.exe --out C:\hipml-vram\temp\after-a
-powershell C:\models\gpu-lock.ps1 release "vram"
+```powershell
+$env:HIP_PATH   = "C:\rocm-sdk\_rocm_sdk_core"   # the directory with bin\ and lib\
+$env:HIPML_ARCH = "gfx1201"
+$env:PATH       = "$env:HIP_PATH\bin;$env:PATH"
+
+$MODELS   = "<models>"        # the directory holding the two gguf files
+$BUILD    = "<build.cmd>"     # builds hipml with the variables above
+$HIPML    = "<hipml.exe>"     # the binary under test
+$OUT      = "<out-dir>"       # one subdirectory per probe
+$GPU_LOCK = "<gpu-lock.ps1>"  # acquire <label> / release <label>
+
+& $BUILD
+& powershell -NoProfile -File $GPU_LOCK acquire "vram"
+python temp\vram_probe.py --cell a --reps 3 `
+  --model "$MODELS\Qwen3.8-27B-UD-Q4_K_M.gguf" `
+  --mtp   "$MODELS\mtp-Qwen3.8-27B-Q4_0.gguf" `
+  --hipml $HIPML --out "$OUT\after-a"
+& powershell -NoProfile -File $GPU_LOCK release "vram"
 ```
 
 The probe writes the ambient `HIPML_GGUF` / `HIPML_MTP_GGUF` /
