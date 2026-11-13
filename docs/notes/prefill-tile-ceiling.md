@@ -31,6 +31,12 @@ the right block layout, so the numbers are the tile's own cost: the decoder
 runs, its arithmetic result does not matter. `-DPWW2_PROBE_*` switches remove
 one half of the tile at a time; they are preprocessor-only and default off.
 
+Section 10 was measured on `1473a9c` + this branch, under the `iu4-probe` lock.
+It does **not** change the shipped kernel: it adds one default-off probe switch
+(`PWW2_W8`) and two probes, and section 10.5 shows the shipped build's gfx1201
+assembly is unchanged by it. Its subject is the two gfx1201 matrix instructions
+the tile does not use.
+
 ## 0. Question and answer
 
 Question: what limits the prefill GEMM on UD-Q4_K_M, and does any tile change
@@ -654,3 +660,256 @@ get it loses 33-165% because it doubles the weight sweeps. What is left after
 this slice is the same residue §7 named, minus one launch per layer: the
 compute-side gap (149-154 TF against 171-188 TF), and roughly 1 ms per
 layer-chunk of launch/accounting that one launch per pair did not remove.
+
+## 10. The gfx1201 int4 and fp8 matrix instructions (probe, not shipped)
+
+Sections 1-9 treat the staging phase as bytes moved into LDS and then
+dequantised to fp16. Two gfx1201 matrix instructions the tile does not use take
+*narrower* operands, which is the one thing that would cut those bytes rather
+than hide them: `v_wmma_f32_16x16x16_fp8_fp8` halves them and
+`v_wmma_i32_16x16x32_iu4` quarters them per FLOP. Both are native on this chip
+(`llvm-mc -mcpu=gfx1201`, AMD LLVM 22.0.0git, HIP 7.2.53211) and both were built
+into the shipped tile. **They are faster, the staging phase does not move, two
+blocks per CU still do not fit, and neither can be used without changing the
+tokens.** This section is the measurement of each of those.
+
+### 10.1 What the ISA actually gives
+
+| instruction | gfx1201 | work | operand bytes/lane | FLOPs |
+|---|---|---:|---:|---:|
+| `v_wmma_f32_16x16x16_f16` (shipped) | native | 16x16x16 | A 16, B 16 | 8,192 |
+| `v_wmma_f32_16x16x16_fp8_fp8` | native | 16x16x16 | A 8, B 8 | 8,192 |
+| `v_wmma_i32_16x16x32_iu4` | native | 16x16x32 | A 8, B 8 | 16,384 |
+
+The four fp8 pairings (`fp8_fp8`, `fp8_bf8`, `bf8_fp8`, `bf8_bf8`) and both iu4
+shapes (`16x16x32`, `16x16x16`) assemble; there is no `16x16x32` fp8 form, and
+`v_wmma_f32_32x16x128_f4` is rejected as `instruction not supported on this
+GPU` (gfx1250 only). There is no `rocWMMA` in this SDK and no builtin for the
+fp8 form, so the tile emits its encoding directly through inline asm; the iu4
+form does have one,
+`__builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12(bool negA, int2 a, bool negB,
+int2 b, int8 acc, bool clamp)`.
+
+Two consequences decide the rest of the section, and both follow from the
+operand widths rather than from any measurement:
+
+* **There is no mixed fp8 x fp16 or i4 x f16 form.** The instruction takes both
+  operands in the narrow type, so an fp8 weight tile forces an fp8 activation
+  tile, and an int4 weight tile forces an int4 activation tile. The activation
+  is the high-precision side of the GEMM and is not quantised today.
+* **iu4 accumulates in int32 and its scale changes every 32 k values**, which
+  is exactly one `KW` step. The int32 result therefore cannot be carried across
+  the k loop and scaled once; each 16x16x32 result has to be converted and
+  folded into an f32 accumulator per k-tile, and Q4_K's `-dmin*mn` term needs a
+  separate `sum(x)` correction per block.
+
+### 10.2 Issue rate
+
+Register-only, 8 independent accumulators per warp, no LDS traffic
+(`scripts/probes/probe_wmma_int4_fp8.cpp`, 1024 blocks x 4096 iterations, 6
+reps; the first rep of each row is the clock ramp):
+
+| instruction | TFLOPS |
+|---|---:|
+| fp16 16x16x16 | 171.3 - 182.3 |
+| fp8 16x16x16 | 351.1 - 382.5 |
+| iu4 16x16x32 | 627.3 - 740.7 |
+
+So the matrix pipe retires the fp8 form at **2.0x** and the int4 form at
+**3.7-4.2x** the fp16 form's FLOPs. The fp16 row reproduces the 171-188 TF
+ceiling section 3 quotes, which is what makes the other two rows comparable.
+
+One row of that probe is reported as invalid rather than as a result: a fourth
+kernel that adds the per-block int-to-float rescale reads *faster* than plain
+iu4 (764-803 TF) because resetting the int32 accumulator each iteration breaks
+the dependency chain the other rows carry. It measures the chain, not the
+epilogue, and it is not used for anything below.
+
+### 10.3 The fp8 tile at the real shapes
+
+`PWW2_W8=1` stages both LDS tiles as OCP fp8 (E4M3) and multiplies with
+`v_wmma_f32_16x16x16_fp8_fp8`; `PWW2_W8=0` is the shipped fp16 tile. Same
+source, same decoder, same k order, same 256x128 shape, so the only difference
+is the staged type and the multiply. Interleaved in one lock hold, 3
+invocations of 3 reps each, 2048 tokens, Q4_K:
+
+| shape | fp16 ms / TFLOPS | fp8 ms / TFLOPS | delta |
+|---|---:|---:|---:|
+| gate/up 17408x5120 | 3.056 / 3.101 / 3.020 — 119.4 / 117.7 / 120.9 | 2.661 / 2.689 / 2.670 — 137.2 / 135.8 / 136.8 | **+14.4%** |
+| down 5120x17408 | 3.107 / 3.083 / 3.094 — 117.5 / 118.4 / 118.0 | 2.843 / 2.839 / 2.842 — 128.4 / 128.6 / 128.5 | **+8.9%** |
+
+The deltas are the interleaved comparison and are outside the +-3-5% between-hold
+drift. This hold's fp16 tile reads 119.4 / 118.0 TF where section 2's earlier
+hold read 113.9 / 108.7; cross-hold absolute numbers are not comparable, and the
+card's "current tile" figure is the 113.9 / 108.7 pair.
+
+Register and LDS accounting, from the compiled gfx1201 assembly of the same
+probe (`amdhsa_group_segment_fixed_size`, `num_vgpr` on the nine `_w2h`
+entries, which are the ones the engine launches):
+
+| build | LDS/block | VGPRs, `_w2h` set |
+|---|---:|---:|
+| shipped fp16 | 30,720 B | 183 - 193 |
+| fp8 | **15,360 B** | **164 - 200** |
+
+The staged footprint halves exactly. The register count is mostly lower - eight
+of the nine entries drop, by 2 to 27, median 191 -> 171 - but not uniformly:
+`iq4_xs` rises 192 -> 200, because its decoder already held its register budget
+and the fp8 conversion adds to it. Register pressure was never the binding
+constraint here, so the rise costs nothing.
+
+A second A/B after the switch was scoped to the `_w2h` entries reproduced the
+table: fp8 gate/up 134.0 / 137.0 TF against fp16 119.9 / 120.5, down 127.5 /
+128.7 against 117.5 / 117.6, same hold. The 3-invocation means above are the
+sample used for the deltas.
+
+### 10.4 Where the win came from, and why staging did not move
+
+This is the part that contradicts the hypothesis this section opened with.
+`PWW2_PROBE_NO_W=1` removes the weight fetch, the decoder and the weight store;
+the difference from the shipped build is the weight-staging phase's wall clock.
+
+| shape | build | shipped ms | no weight staging ms | staging phase |
+|---|---|---:|---:|---:|
+| gate/up | fp16 | 3.059 | 2.389 | 0.670 ms |
+| gate/up | fp8 | 2.673 | 2.019 | **0.654 ms** |
+| down | fp16 | 3.095 | 2.436 | 0.659 ms |
+| down | fp8 | 2.841 | 2.075 | **0.766 ms** |
+
+**Halving the staged bytes did not shorten the staging phase.** It is flat on
+gate/up (-2.4%, inside noise) and 16% *worse* on down. The whole gain is on the
+other side of the barrier: the staging-free column goes 2.389 -> 2.019 ms on
+gate/up and 2.436 -> 2.075 on down, -16% and -15%, which is the fp8 multiply
+retiring the same 16x16x16 tile at twice the issue rate over half the LDS
+fragment bytes.
+
+Two mechanisms explain the flat phase. The weight half of it is a dependent
+`load -> decode -> convert -> store` chain, not a store-bandwidth problem, so
+the bytes the store writes are not what the phase waits on; that is the same
+finding section 5.1 reached from the other direction when a 21% tax appeared
+before any overlap was created. The activation half gets *worse* under fp8: the
+shipped tile copies raw fp16 bytes into LDS with no conversion at all, and the
+fp8 tile has to convert each of them, which is why the down shape - whose k is
+17,408 rather than 5,120, so its activation stream is 3.4x larger - is the one
+that pays.
+
+### 10.5 Two blocks per CU: still no
+
+LDS is no longer the obstacle: 15,360 B per block means two blocks fit the
+64 KB budget with room to spare. The accumulator budget is, and it is
+arithmetic rather than a tuning result. A block's accumulators are `TT * RT`
+f32 values over `PWW2_THREADS` threads, so the shipped 256x128 shape is
+256*128/256 = **128 f32 per thread = 128 VGPRs**, and two resident blocks of
+256 threads get 65,536/512 = **128 VGPRs per thread** in total. The accumulators
+alone consume the entire two-block allowance before a single staging or address
+register, whatever the staged type is. The fp8 build's 164-200 VGPRs is already
+a lower register count than 183-193 on eight of nine entries and it is nowhere
+near 128.
+
+The shapes that do fit two blocks are the ones section 5 already measured and
+lost with: 128x128 has 64 accumulators, and it was `not faster in the same hold`
+because halving the rows per block doubles the weight sweeps. Nothing about the
+fp8 instruction changes that trade, and it is moot for the reason in 10.6.
+
+### 10.6 Accuracy: the instruction is unusable, not merely lossy
+
+`scripts/probes/probe_prefill_fp8_acc.cpp` runs the shipped tile and the fp8
+tile over identical bytes and compares both against an f64 host reference built
+from the exact dequantised weights and the exact fp16 activation values the
+kernel reads. `kind 3` is fp16 weights (no decoder, so the residual is purely
+the staged representation); `kind 0` is Q4_K blocks with the model's scale
+range. 3 reps per cell, one lock hold.
+
+| weights | m x k | tokens | fp16 max abs / rel | fp8 max abs / rel |
+|---|---|---:|---:|---:|
+| fp16 | 512 x 5120 | 8 | 1.57e-5 / 1.5e-6 | 0.376 / **3.7e-2** |
+| fp16 | 512 x 5120 | 64 | 2.86e-5 / 2.2e-6 | 0.464 / **3.5e-2** |
+| fp16 | 256 x 17408 | 8 | 2.45e-4 / 1.2e-5 | 0.676 / **3.4e-2** |
+| Q4_K | 512 x 5120 | 8 | 9.39e-2 / 2.0e-4 | 17.2 / **3.7e-2** |
+| Q4_K | 512 x 5120 | 64 | 0.120 / 1.9e-4 | 19.7 / **3.1e-2** |
+| Q4_K | 256 x 17408 | 8 | 0.171 / 1.9e-4 | 28.1 / **3.2e-2** |
+
+The fp16 tile reproduces the host GEMM to 2e-4 relative on Q4_K and 1.5e-6 on
+fp16 weights, which is what validates the reference. The fp8 tile is **3-4%
+relative on every cell, 150-2000x the fp16 tile's residual**, and it is the same
+3.5% with the decoder removed (`kind 3`), so it is the E4M3 *representation* and
+not the quantised format's interaction with it. 3 mantissa bits is the precision
+floor; a per-block scale moves *range*, and range is not the problem - the Q4_K
+values land between roughly 0 and 15 with the bulk around 1, well inside E4M3's
+2^-9..448 - so no scaling recovers the mantissa.
+
+For scale: `oracle-gate`'s whole-model prefill budget on this fixture is
+`max |gpu - cpu| = 0.1086` over 64 layers. One GEMM at 3.2-3.7% relative (max abs
+17-28 on a matrix whose largest output is 471-888) is orders of magnitude past
+that, so the greedy stream cannot survive it. The card's rule applies: a fast
+path that changes tokens is a different product decision, and it was not taken.
+
+The int4 route is worse on both counts, so it was not built into the tile:
+
+* its activation operand must be int4 (10.1), and per-32-block symmetric 4-bit
+  quantisation of both operands costs **7.4-10.8% relative** on the same data
+  and against the same reference (`probe_prefill_fp8_acc.cpp` reports it beside
+  every fp8 cell; 8.0-10.8% on the Q4_K cells) - two to three times the fp8
+  error, and that is the best case, before the per-block int32 rescale and the
+  `sum(x)` correction the real tile would also carry;
+* the per-32-block int32 rescale plus Q4_K's `sum(x)` correction is extra
+  structure the fp16 tile does not have, for an instruction whose issue rate is
+  3.7-4.2x fp16's but whose *tile* would still be bound by the same staging
+  phase that did not move in 10.4.
+
+Its issue rate is reported above because the card asked for it; it is not a
+candidate.
+
+### 10.7 Verdict, and what it means for the 1,500 target
+
+Three of the card's stop conditions are met:
+
+| question | answer |
+|---|---|
+| does either instruction beat the current tile's TFLOPS? | **yes** — fp8 +14.4% / +8.9% at the real shapes, interleaved |
+| do two blocks per CU fit at <=128 VGPRs? | **no** — the 128 accumulator VGPRs are the whole two-block allowance |
+| does the accuracy cost change the output stream? | **yes** — 3.2-3.7% relative per GEMM against 2e-4 |
+
+The model for what it would have been worth, using section 6/9's bucket shares
+and this hold's probe rates: the ffn's three GEMMs go from 9.19 to 8.18 ms per
+layer-chunk, i.e. 1.01 ms of the 10.65 ms bucket, 4.2% of the 8K wall; the
+projection buckets at a similar fraction add about 1.3%; so **about 5.5%, or
+1,335 -> ~1,408 tok/s**. That clears llama.cpp's 1,354 and misses the card's
+1,500, so even accepting a token-changing path would not have bought the
+target. It is arithmetic, not a run: the path was not taken to end to end.
+
+What the two instructions did establish is narrower and still useful. The
+staging phase is not a byte-count problem - halving the staged bytes left it
+where it was - so the next attempt at it should be aimed at the decoder's
+dependency chain and the activation conversion, not at the width of the tile.
+And the matrix unit has 2-4x of issue rate the shipped tile cannot reach because
+the k loop is not shaped to feed it.
+
+The residue this branch keeps is `PWW2_W8` (default 0, probe-only) and the two
+probes. Section 10.8 records that the shipped build is unchanged by them.
+
+### 10.8 The shipped build is unchanged
+
+The switch is default-off, and that was verified rather than assumed. Compiling
+`probe_prefill_tiles.cpp` against `1473a9c`'s `prefill_wmma2.hip` and against
+this branch's with `PWW2_W8=0` produces **280,986 lines of gfx1201 assembly in
+both, differing in 30 lines, all of them the per-TU `__hip_cuid_*` symbol name**
+(`clang -S`, `Compare-Object` over the two files). That is the same check
+section 8 records for `PF=0`.
+
+The gates agree, on `1473a9c` + this branch, one lock hold, UD file asserted at
+16,564,259,744 B and sha256 `1BCE504D...7DC529`, binary asserted
+`built with hip feature: true`:
+
+| gate | result |
+| --- | --- |
+| greedy 12 ids, UD | `[11751, 13, 198, 760, 6511, 314, 9564, 369, 19241, 13, 198, 760]`, byte-identical |
+| `parity prefill --deep` | 15 passed, 0 failed |
+| `parity --deep` | 74 passed, 0 failed, 1 skipped |
+| `oracle-gate` UD, 20 steps | PASS 20/20, prefill max abs **0.1086** at 101748 |
+| `oracle-gate` stock Q4_K_M, 20 steps | PASS 20/20, prefill max abs **0.1481** at 34114 |
+| `cargo test --workspace` | clean |
+| `cargo fmt --all -- --check` | clean |
+
+Both `oracle-gate` maxima are the *same values* sections 6 and 9 report, which
+is the expected result for a change that does not alter the accumulation order.
