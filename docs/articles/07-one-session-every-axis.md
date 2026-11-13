@@ -28,9 +28,12 @@ absolute error against the CPU reference at 0.1086 on the UD file (index
 decimals and the same index as the previous session, on a different tree.
 `parity --deep` passes 74 cases; `parity prefill --deep` passes 15;
 `batch-bench --slots 16 --check` reproduces the single-row path on all 16 slots,
-16 ids each; `spec-bench` is 128 of 128 token-exact at q8 and again at f32. A
-cell that had failed a gate would not have been timed, which is the only reason
-a timing table means anything.
+16 ids each; `spec-bench` is 128 of 128 token-exact at q8 and again at f32, and
+it now installs the server's dispatch and exits non-zero on any drafts row that
+is not exact; and `serve` with speculation on reproduces `serve` plain id for
+id — 48 replies across drafts 1, 2 and 3 at 32,768 context, compared one for
+one. A cell that had failed a gate would not have been timed, which is the only
+reason a timing table means anything.
 
 **The hashes were asserted before and after.** The binary and all three model
 files were hashed at the start of the window and re-hashed after the last cell;
@@ -58,7 +61,7 @@ Spread is max−min over the cell, as a percentage of the median.
 | serve 1 slot | 31.64 tok/s, TTFT p50 2,500 ms | **32.12, 1,921 ms** | −1.5% | 0.3% / 0.5% |
 | serve 8 slots | **132.37, TTFT 489 ms** | 109.42, 563 ms | **+21.0%** | 0.7% / 12.0% |
 | serve 16 slots | 222.13, TTFT 742 ms | **234.61, 1,123 ms** | −5.3% | 0.7% / 11.2% |
-| MTP serve, drafts 3 *(pending)* | 52.32 | **62.33** | **−16.1%** | 1.0% / 1.7% |
+| MTP serve, drafts 3 | 52.32 | **62.33** | **−16.1%** | 1.0% / 1.7% |
 | `spec-bench` d0→d3 (q8) | 33.30 → 51.75 → 60.58 → **63.57** | no harness | — | — |
 | peak VRAM, CLI @8,192 | 18,395 MiB | **15,809 MiB** | +16.4% | 0 |
 | peak VRAM, serve 16 slots | 25,201 MiB | **22,608 MiB** | +11.5% | 0 |
@@ -142,15 +145,23 @@ llama-at-default is llama-at-3, and the d3 row is depth-matched. Acceptance is
 nearly equal: 0.699 for hipml's serve path at three drafts against llama's 0.712
 median. The drafts are not worse; the step that verifies them is more expensive.
 
-There is a second, unresolved point about that row. The batch trace reports a
-width of 4 at three drafts — exactly the threshold where the projection path
-switches from the exact batched GEMV to the approximate tile — and widths of 2
-and 3, both exact, at one and two drafts. The batching note records the
-opposite: the verify pass is exact by construction, because
-`HIPML_BATCH_SKINNY` is ignored for MTP verify. Those two statements cannot both
-be right. Whether the trace's label or the dispatch is wrong is being settled
-now, and that contradiction — not the throughput gap — is why the row is marked
-pending rather than quoted as final.
+There is a second point about that row, and it settles the row rather than
+qualifying it. The batch trace reports a width of 4 at three drafts — exactly
+the threshold where the projection path switches from the exact batched GEMV to
+the approximate tile — and widths of 2 and 3 at one and two drafts, so the row
+was once read as sitting on the approximate path at the one depth that matters.
+It is not. `serve` sets only `HIPML_BATCH_SKINNY`, while `skinny_on()` reads
+`HIPML_SKINNY`, so `exact_scope` is held on the verify columns and the verify
+runs the exact `gemv_*_b` entries at every draft count: the run's own trace
+names `gemv_q5_k_b`, `gemv_q6_k_b` and `gemv_iq4_xs_b` at b=2, 3 and 4, and the
+`gemm_skinny_*` tile appears only at b=6, 7, 8, 14, 15 and 16 — the serve
+cells, not the verify. A control run that forces `HIPML_SKINNY=1` onto the tile
+does diverge, 1 of 48 replies at drafts 3 with the first differing id at
+position 5, while drafts 1 and 2 stay exact, so the protection is load-bearing
+and intact. That misreading is why the trace now prints `route=exact` or
+`route=skinny` on every line, and why `spec-bench` now exits 1 on a drafts row
+that is not exact. 52.32 against 62.33 is therefore a clean exact-path
+comparison, and the gap is per-step cost rather than an approximate kernel.
 
 **hipml's serve MTP loses about 11 tok/s against its own kernel path.** The CLI
 `spec-bench` at three drafts is 63.57 tok/s at q8; the serve cell at the same
@@ -216,12 +227,14 @@ corrected:
 - Time to first token is not a prefill number; only the CLI rows are prefill
   like-for-like.
 - Cells b and c run hipml's approximate WMMA tile at batch widths 8 and 16, while
-  llama.cpp runs its production kernel. Cell a and the MTP plain step are the
-  only exact-path hipml serve rows.
+  llama.cpp runs its production kernel. Cell a, the MTP plain step and the MTP
+  verify are the only exact-path hipml serve rows.
 
-And one cell is still moving: the MTP rows are pending re-measurement while the
-serve-path exactness of the three-draft verify step is settled. Until then,
-52.32 against 62.33 is what this session measured, not a final number.
+And the MTP row is now settled on the point that once made it provisional: the
+three-draft verify holds `exact_scope`, so 52.32 against 62.33 compares the
+exact path on both sides and its −16.1% is per-step cost, not a kernel
+substitution. What it does not say is why that step costs more; that is the open
+item.
 
 ## Where the numbers come from
 
