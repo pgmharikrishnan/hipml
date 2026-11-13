@@ -36,7 +36,10 @@ were byte-identical to before it.
   on both models, `parity --deep` 74 cases, `parity prefill --deep` 15 cases,
   `batch-bench --slots 16 --check` 16/16 on every slot, and `spec-bench`
   128/128 exact at q8 and again at f32. All were run on the binary that was
-  then timed, before any cell.
+  then timed, before any cell. Two later gates cover the server rather than the
+  CLI: `serve` with speculation on reproduces `serve` plain id for id, 48
+  replies across drafts 1, 2 and 3 at ctx 32,768, and `spec-bench` now installs
+  serve's dispatch and exits non-zero on any drafts row that is not exact.
 - **Identical inputs.** Both engines received byte-identical token ids, recorded
   as `ids_sha256` in every result file.
 - **Reps.** CLI rows are 3 reps in each of 2 separate processes, so 6 values.
@@ -72,19 +75,21 @@ spread, the cell is not a result.
 | serve b, TTFT p50 / p95 ms | **489 / 491** | 563 / 1,252 | −13.2% / −60.8% | — |
 | serve c, 16 slots, aggregate tok/s | 222.13 | **234.61** | −5.3% | 0.7% / 11.2% |
 | serve c, TTFT p50 / p95 ms | **742 / 744** | 1,123 / 2,550 | −34.0% / −70.8% | — |
-| MTP serve a, 3 drafts, tok/s *(pending re-measurement)* | 52.32 | **62.33** | **−16.1%** | 1.0% / 1.7% |
+| MTP serve a, 3 drafts, tok/s | 52.32 | **62.33** | **−16.1%** | 1.0% / 1.7% |
 | MTP `spec-bench` d0→d1→d2→d3 tok/s, q8 | 33.30 → 51.75 → 60.58 → **63.57** | no such harness | — | — |
 | peak VRAM, CLI @512 MiB | 17,031 | **15,546** | +9.6% | 0 |
 | peak VRAM, CLI @8,192 MiB | 18,395 | **15,809** | +16.4% | 0 |
 | peak VRAM, serve a / b / c MiB | 20,091 / 24,110 / 25,201 | **16,728 / 21,417 / 22,608** | +20.1% / +12.6% / +11.5% | 0 |
-| peak VRAM, MTP serve a d3 MiB *(pending)* | 20,892 | **18,624** | +12.2% | 0 |
+| peak VRAM, MTP serve a d3 MiB | 20,892 | **18,624** | +12.2% | 0 |
 | resident weight bytes | 15.42 GiB, 866 tensors | 15.42 GiB, 27.32 B params | equal | — |
 | streamed bytes/token | 15,484,418,048 B (14.42 GiB) | not printed | — | — |
 | load time | 6.17 / 6.42 s engine load | 6.89 / 7.00 / 7.05 s start→loaded (8.25 s with drafter) | level | — |
 
-The two MTP rows are **pending re-measurement**: the serve-path exactness of the
-d3 verify step is still open (see the caveats), so these figures are what this
-session measured, not a final result.
+The MTP rows are final for this session. The d3 verify runs the exact batched
+GEMV, so 52.32 against 62.33 is an exact-path comparison on both sides (see the
+caveats). A later tree, once the trace learned to print its route, re-measured
+the same serve cell at **52.74 tok/s**; that is a separate run on a different
+build and is not part of this single-session table.
 
 ### What the spread does to the reading
 
@@ -137,7 +142,7 @@ The server labels its own batch path. Widths observed per `server.log`:
 | serve b plain | `b=8` (33) plus `b=7`, `b=6`, `b=2`, `b=1` tails | **approximate** WMMA tile at b=8 |
 | serve c plain | `b=16` (33) plus `b=15`, `b=14`, `b=2`, `b=1` tails | **approximate** WMMA tile at b=16 |
 | MTP d1 / d2 (serve a) | `b=1` + `b=2` / `b=3` | **exact** batched GEMV |
-| MTP d3 (serve a) | `b=1` + `b=4` | **disputed** — see the caveat below |
+| MTP d3 (serve a) | `b=1` + `b=4` | **exact** batched GEMV |
 
 llama.cpp has no equivalent switch; every one of its numbers is its production
 path.
@@ -152,8 +157,9 @@ path.
 - **TTFT is not a prefill number.** It includes HTTP, admission, queueing and
   the first token. Only the CLI rows are prefill like-for-like.
 - **Cells b and c run the approximate tile.** hipml's batched path uses the WMMA
-  tile at b=8 and b=16, approximate by design; cell a and the MTP plain step are
-  the only exact-path hipml serve rows. llama.cpp's MTP is exact by construction.
+  tile at b=8 and b=16, approximate by design; cell a, the MTP plain step and
+  the MTP verify are the exact-path hipml serve rows. llama.cpp's MTP is exact
+  by construction.
 - **llama's b and c medians are the middle of a noisy distribution.** Its
   per-wave aggregates swing 11–12% (b: 101.7–114.9, and 102.8–115.1 on a re-run;
   c: 211.4–237.8), while hipml's same cells swing 0.7%. The wave sequences
@@ -168,13 +174,22 @@ path.
   tokens per step, so llama-at-default is llama-at-3. hipml's d1 and d2 rows have
   no llama counterpart. Acceptance is nearly equal (0.699 against 0.712), which
   makes the gap per-step cost rather than draft quality.
-- **The d3 MTP verify path is disputed, and that is why the row is pending.**
-  The batch trace reports width 4 at three drafts — the approximate-tile
-  threshold — and widths 2 and 3, both exact, at one and two drafts.
-  [`notes/serve-ud-batch.md`](notes/serve-ud-batch.md) §8 records the verify pass
-  as exact by construction (`HIPML_BATCH_SKINNY` is ignored for MTP verify).
-  Both cannot be right; whether the trace label or the dispatch is wrong is
-  unresolved.
+- **The d3 MTP verify path is exact, and the row is final.** The batch trace
+  reports width 4 at three drafts — the approximate-tile threshold — and
+  widths 2 and 3 at one and two drafts, which is why the row was once read as
+  sitting on the approximate path at d3. It does not: `serve` sets only
+  `HIPML_BATCH_SKINNY` while `skinny_on()` reads `HIPML_SKINNY`, so
+  `exact_scope` holds the verify columns and the verify runs the exact
+  `gemv_*_b` entries at every draft count
+  ([`notes/serve-ud-batch.md`](notes/serve-ud-batch.md) §8). The run's own
+  trace names `gemv_q5_k_b`, `gemv_q6_k_b` and `gemv_iq4_xs_b` at b=2, 3 and 4,
+  with no `gemm_skinny_*` line at any draft count; the tile appears at b=6, 7,
+  8, 14, 15 and 16, which is serve cells b and c. A control run with
+  `HIPML_SKINNY=1` forced on does diverge — 1 of 48 replies at drafts 3, first
+  differing id at position 5, drafts 1 and 2 still exact — so the protection
+  is load-bearing. The trace now prints `route=exact` / `route=skinny` on every
+  line, because both routes print one, and `spec-bench` exits 1 on a drafts row
+  that is not exact.
 - **llama.cpp's MTP exactness was not verified.** Its speculative ids were not
   diffed against its own plain greedy; hipml's `spec-bench` exactness does not
   transfer to it.
