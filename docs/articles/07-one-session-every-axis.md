@@ -58,14 +58,19 @@ Spread is max−min over the cell, as a percentage of the median.
 | CLI prefill @8,192 | 1,326.1 | **1,352.5** | −1.9% | 0.5% / 0.9% |
 | CLI decode @0 | **33.15 tok/s / 30.17 ms** | 32.24 / 31.01 | **+2.8%** | 0.13% / 1.0% |
 | CLI decode @8,192 | **31.98 / 31.27 ms** | 31.41 / 31.84 | **+1.8%** | 0.35% / 0.42% |
-| serve 1 slot | 31.64 tok/s, TTFT p50 2,500 ms | **32.12, 1,921 ms** | −1.5% | 0.3% / 0.5% |
+| serve 1 slot | 31.64 tok/s, TTFT p50 2,124 ms † | **32.12, 1,921 ms** | −1.5% | 0.3% / 0.5% |
 | serve 8 slots | **132.37, TTFT 489 ms** | 109.42, 563 ms | **+21.0%** | 0.7% / 12.0% |
 | serve 16 slots | 222.13, TTFT 742 ms | **234.61, 1,123 ms** | −5.3% | 0.7% / 11.2% |
 | MTP serve, drafts 3 | 52.32 | **62.33** | **−16.1%** | 1.0% / 1.7% |
 | `spec-bench` d0→d3 (q8) | 33.30 → 51.75 → 60.58 → **63.57** | no harness | — | — |
 | peak VRAM, CLI @8,192 | 18,395 MiB | **15,809 MiB** | +16.4% | 0 |
-| peak VRAM, serve 16 slots | 25,201 MiB | **22,608 MiB** | +11.5% | 0 |
+| peak VRAM, serve 16 slots | 25,466 MiB † | **22,608 MiB** | +12.6% | 0 |
 | streamed bytes/token | 15,484,418,048 B | not printed | — | — |
+
+† The serve one-slot TTFT and serve-16-slot VRAM rows are re-measured at the
+512-token default the server now ships; the rest of the table is the
+single-session matrix. At the earlier 256 default they read 2,500 ms (+30.1%)
+and 25,201 MiB (+11.5%).
 
 ## The verdict, axis by axis
 
@@ -98,17 +103,18 @@ separable too. hipml is flat from 512 to 8,192; llama gains about 11% over the
 same range.
 
 **Lost: one-slot serve.** 31.64 against 32.12, −1.5% — 0.48 tok/s. The latency
-is worse by more: median time to first token 2,500 ms against 1,921, +30%. That
-gap is at least partly the 256-token chunk the serve harness pins hipml to, not
-decode; the mechanics are below.
+is worse by more: median time to first token 2,124 ms against 1,921, +10.6%, at
+the server's 512-token default. That default is llama-server's own ubatch; the
+earlier 256-token default accounted for another 19.5 points of the gap. The
+mechanics are below.
 
 **Lost: MTP at matched depth.** 52.32 against 62.33, −16.1%, with acceptance
 nearly equal. The mechanics are below.
 
 **Lost: memory, on every cell.** Peak VRAM is 17,031 against 15,546 MiB at 512
-tokens (+9.6%), 18,395 against 15,809 at 8,192 (+16.4%), and 20,091 / 24,110 /
-25,201 against 16,728 / 21,417 / 22,608 across the three serve cells (+20.1% /
-+12.6% / +11.5%). Peak VRAM is identical across reps on both engines, so this is
+tokens (+9.6%), 18,395 against 15,809 at 8,192 (+16.4%), and 20,271 / 24,528 /
+25,466 against 16,728 / 21,417 / 22,608 across the three serve cells (+21.2% /
++14.5% / +12.6%). Peak VRAM is identical across reps on both engines, so this is
 the one axis with no measurement noise at all. It is the q8 KV layout plus the
 recurrent state plus, in serve, a second KV/SSM engine, a prefix snapshot and
 the drafter.
@@ -170,12 +176,17 @@ depth is 52.32. Different harness, different chunk, different prompt, and a
 serve overhead. It is a warning not to read either number across, and an open
 item rather than a result.
 
-**Part of the one-slot TTFT gap is the chunk.** The serve harness pins hipml to a
-256-token prefill chunk and llama-server has no chunk knob. hipml's CLI prefill
-at chunk 2048 is 1,346 tok/s, and its one-slot TTFT of 2,500 ms for a
-2,423-token prompt implies about 969 tok/s. Time to first token is also not a
-prefill number — it includes HTTP, admission, queueing and the first token — so
-the gap is visible in TTFT, not proof of cause.
+**The one-slot TTFT gap was the chunk, and the chunk is now 512.** The serve
+default used to be a 256-token prefill chunk and llama-server has no chunk
+knob, so hipml was choosing a smaller tile than the reference. At 256 the
+one-slot TTFT was 2,500 ms for a 2,423-token prompt, about 969 tok/s implied;
+at 512 it is 2,124 ms, +10.6% against llama's 1,921. The 256-token tile was 10
+tiles where 512 is 5, and the measured difference is 372 ms. 512
+is llama-server's `-ub 512`, so the comparison is like-for-like; raising it
+further flips one greedy reply of sixteen at token 5 on a 0.008–0.018 nat tie,
+which was accepted as a trade. Time to first token is still not a prefill
+number — it includes HTTP, admission, queueing and the first token — so the
+remaining 10.6% is not all prefill either.
 
 ## Decode is finished as a bandwidth problem
 
@@ -205,7 +216,7 @@ It does not say the engine is faster. It wins four axes, loses four and ties
 one, and the four it wins are three narrow ones and one wide one: 2.8%, 1.8% and
 10.8% on the medians (10.2% on the warm prefill set), and 21% at eight slots.
 Against that it loses 1.9% on long-context prefill, 1.5% on one-slot throughput
-with a 30% worse median TTFT, 16.1% on MTP at matched depth, and 9.6% to 20.1%
+with a 10.6% worse median TTFT, 16.1% on MTP at matched depth, and 9.6% to 21.2%
 on peak VRAM in every cell. Any summary that leads with "faster than llama.cpp"
 without those four is not this table.
 
@@ -219,11 +230,10 @@ measurement. It is consistent with the decode-path work that landed in between.
 Readers comparing the two should treat the older decode column as superseded by
 this table; the older prefill columns stand.
 
-Three of the comparisons are not like-for-like and are stated rather than
-corrected:
+Three comparisons need a note rather than a correction:
 
-- The serve prefill chunk is 256 tokens against the CLI's 2,048, and llama-server
-  has no chunk knob.
+- The serve prefill chunk is 512 tokens against the CLI's 2,048; 512 is
+  llama-server's own ubatch, so this one is like-for-like.
 - Time to first token is not a prefill number; only the CLI rows are prefill
   like-for-like.
 - Cells b and c run hipml's approximate WMMA tile at batch widths 8 and 16, while
