@@ -94,7 +94,13 @@ impl Launcher {
     /// operator can see which kernel a slot count actually reaches. Once per
     /// `(entry, m, k, batch)` rather than per step, so a long server run prints
     /// a table and not a firehose.
-    fn trace_route(entry: &'static str, m: usize, k: usize, batch: usize) {
+    ///
+    /// The line names the route as well as the entry. Both routes are traced,
+    /// so "a line was printed" says nothing about which one ran: at drafts 3 the
+    /// MTP verify is a `b=4` batch on the exact `gemv_*_b` kernels, and reading
+    /// the bare line as "b>=4 therefore the approximate tile" is a mistake this
+    /// word exists to prevent.
+    fn trace_route(entry: &'static str, m: usize, k: usize, batch: usize, route: &str) {
         use std::sync::{Mutex, OnceLock};
         type Seen = Mutex<Vec<(&'static str, usize, usize, usize)>>;
         static SEEN: OnceLock<Seen> = OnceLock::new();
@@ -110,7 +116,7 @@ impl Launcher {
             return;
         }
         seen.push(key);
-        eprintln!("[batch] {entry} m={m} k={k} b={batch}");
+        eprintln!("[batch] {entry} m={m} k={k} b={batch} route={route}");
     }
 
     /// `y[b][row] = W[row,:] . x[b][:]` for `batch` rows, one weight pass.
@@ -198,7 +204,7 @@ impl Launcher {
             && (std::env::var_os("HIPML_BATCH_SKINNY").is_some() || crate::skinny_on());
         if skinny {
             if let Some(entry) = Self::skinny_for_kind(kind) {
-                Self::trace_route(entry, m, k, batch);
+                Self::trace_route(entry, m, k, batch, "skinny");
                 let mut base = 0usize;
                 while base < batch {
                     let r = (batch - base).min(16);
@@ -233,7 +239,7 @@ impl Launcher {
         // kernel `batch-bench --check` already measures every slot against.
         if batch == 1 {
             let entry = crate::stream_entry(name);
-            Self::trace_route(entry, m, k, batch);
+            Self::trace_route(entry, m, k, batch, "exact");
             return self.run_quant_resident_ptr(
                 entry,
                 w,
@@ -254,7 +260,7 @@ impl Launcher {
             "gemv_iq3_s" => ("gemv_iq3_s_b", 16, 1024, 256),
             other => return Err(format!("{other}: no batched GEMV kernel")),
         };
-        Self::trace_route(entry, m, k, batch);
+        Self::trace_route(entry, m, k, batch, "exact");
         let kernel = self.module.kernel(entry)?;
         // The `_b` kernels cover at most 8 rows, so the exact path takes one
         // pass per 8-row group (`HIPML_BATCH_LEGACY` at any B, or B < 4 where

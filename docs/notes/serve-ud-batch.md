@@ -36,18 +36,21 @@ the 1-slot route change below took cell a's plain cell from 26.13 to 28.37
 
 The tracer is `HIPML_BATCH_TRACE=1` (`graph_launch.rs::trace_route`): it prints
 one line per `(entry, m, k, batch)` the first time a batched projection takes
-it, so a long server run prints a table rather than a firehose.
+it, so a long server run prints a table rather than a firehose. Both routes are
+traced, and `route=` names which one ran:
 
 ```
-[batch] gemv_q5_k_b    m=17408 k=5120 b=16
-[batch] gemv_iq4_xs_b  m=5120  k=5120 b=16
-[batch] gemv_iq4_nl_b  m=5120  k=5120 b=16
-[batch] gemv_q4_k_b    m=5120  k=5120 b=16
-[batch] gemv_q6_k_b    m=248320 k=5120 b=16
-[batch] gemv_q3_k_b    m=5120  k=5120 b=16
-[batch] gemv_iq3_s_b   m=5120  k=5120 b=16
-[batch] gemv_q8_0_b    ...      b=16
+[batch] gemv_q5_k_b    m=17408  k=5120 b=16 route=exact
+[batch] gemv_iq4_xs_b  m=5120   k=5120 b=16 route=exact
+[batch] gemv_iq4_nl_b  m=5120   k=5120 b=16 route=exact
+[batch] gemv_q4_k_b    m=5120   k=5120 b=16 route=exact
+[batch] gemv_q6_k_b    m=248320 k=5120 b=16 route=exact
+[batch] gemv_q3_k_b    m=5120   k=5120 b=16 route=exact
+[batch] gemv_iq3_s_b   m=5120   k=5120 b=16 route=exact
+[batch] gemv_q8_0_b    ...      ...    b=16 route=exact
 ```
+
+On the opt-in tile the same shapes print `gemm_skinny_*` with `route=skinny`.
 
 The decision that produced it was a static match:
 

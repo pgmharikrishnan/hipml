@@ -138,6 +138,16 @@ pub fn bench(args: &[String]) -> i32 {
             return 2;
         }
     };
+    // Run with the dispatch `serve` installs, so this bench is a gate for the
+    // server's verify and not just the CLI's. `serve` sets
+    // `HIPML_BATCH_SKINNY=1` process-wide, which is what once routed the
+    // 4-column verify onto the non-bit-identical WMMA tile; `forward_columns`
+    // holds `exact_scope` to keep it exact. `HIPML_BATCH_LEGACY=1` mirrors
+    // serve's opt-out, and `HIPML_SKINNY=1` still opts into the tile.
+    let serve_dispatch = std::env::var_os("HIPML_BATCH_LEGACY").is_none();
+    if serve_dispatch {
+        std::env::set_var("HIPML_BATCH_SKINNY", "1");
+    }
     let prompt = match crate::device_cmd::read_ids_file(&a.ids_file) {
         Ok(p) => p,
         Err(e) => {
@@ -304,6 +314,41 @@ pub fn bench(args: &[String]) -> i32 {
             .count();
         let first_diff = r.ids.iter().zip(&base).position(|(a, b)| a != b);
         exact.push((r.drafts, same, n, first_diff));
+    }
+
+    // The gate: with the server's dispatch installed, speculation must
+    // reproduce plain decode id for id and for the same length. The WMMA tile
+    // is opt-in (`HIPML_SKINNY=1`) and documented to change tokens, so on that
+    // path the column is reported and the exit code stays 0.
+    let inexact: Vec<usize> = rows
+        .iter()
+        .skip(1)
+        .filter(|r| r.ids.len() != base.len() || r.ids.iter().zip(&base).any(|(a, b)| a != b))
+        .map(|r| r.drafts)
+        .collect();
+    let require_exact = !hipml_kernels::skinny_on();
+    if !a.json {
+        println!(
+            "dispatch: {} (serve's HIPML_BATCH_SKINNY=1; the verify holds exact_scope), \
+             exactness {}",
+            if serve_dispatch {
+                "batched engine on"
+            } else {
+                "HIPML_BATCH_LEGACY=1"
+            },
+            if require_exact {
+                "required"
+            } else {
+                "not required: HIPML_SKINNY=1"
+            },
+        );
+    }
+    if require_exact && !inexact.is_empty() {
+        eprintln!(
+            "spec-bench: FAIL: drafts {:?} are not token-exact against plain decode",
+            inexact
+        );
+        return 1;
     }
 
     if a.json {

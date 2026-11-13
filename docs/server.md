@@ -108,6 +108,12 @@ A lone request, and every MTP verify, always take the exact path.
 (107.46 against 149.43 tok/s) and still beats llama.cpp's 97.54 tok/s there,
 but at 16 slots the exact path is 107.33 against llama.cpp's 227.89.
 
+The verify's exactness is gated twice: `spec-bench` runs with this server's
+dispatch and exits 1 if any drafts row is not token-exact, and
+`bench/serve/probe_exact.py` starts the real server plain and at drafts 1-3 and
+compares the ids of 16 conversations. The trace names the route on every line
+(`route=exact` / `route=skinny`) because both routes print one.
+
 Batched attention partitions each slot's KV cache into split-K runs whose count
 comes from the cache's row count and the slot count, never from the live
 position (`attn_splits` in `gpu/batch/kv.rs`). A position-derived count on a 32K
