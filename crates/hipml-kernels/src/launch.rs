@@ -845,10 +845,9 @@ pub fn prefill_half() -> bool {
 }
 
 /// Q5_K prefill route: the dequant-in-shared tile kernel (`prefill_q5_k`) is
-/// the default. `HIPML_Q5K_COPY_GB` is also read by the resident loader, which
-/// copies the Q5_K blocks to fp16 when the file's total fits in the budget it
-/// names; setting it to exactly `0` keeps the old batched-GEMV fallback as well,
-/// so the two prefill routes can be measured without a rebuild.
+/// the default. Setting `HIPML_Q5K_COPY_GB` to exactly `0` keeps the old
+/// batched-GEMV fallback, so the two prefill routes can be measured without a
+/// rebuild. The name is historical: there is no fp16 copy to budget any more.
 pub fn q5_tile_prefill_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
