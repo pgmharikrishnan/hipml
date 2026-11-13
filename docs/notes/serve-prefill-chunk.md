@@ -46,11 +46,17 @@ across them).
 Round-to-round spread is ≤0.15% on every TTFT cell and ≤0.4% on every tok/s
 cell, so these differences are results, not noise.
 
-**The 469 ms is per-tile fixed cost, not prefill throughput.** A 2,423-token
-prompt is 10 tiles at 256 and 2 at 2,048. Fitting the four points gives
-**≈59 ms per extra tile** (intercept 1,909 ms, i.e. the floor including HTTP,
-admission and the first token). Cell a's TTFT at 2,048 is 2,026 ms against
-llama-server's 1,921 — **+5.5%** instead of +30.1%. The CLI's 1,346 tok/s
+**The 469 ms is per-tile fixed cost, not prefill throughput — but the cost is
+not constant per tile.** A 2,423-token prompt is 10 tiles at 256 and 2 at
+2,048. The measured steps are 2,495 → 2,123 ms going from 256 to 512 (369–372 ms
+across the two rounds, about 74 ms/tile), then 2,123 → 2,058 over 1,024 (65 ms
+over 2 tiles, about 33 ms/tile), and 2,058 → 2,026 over 2,048 (32 ms over 1
+tile). The first halving carries most of the cost and the curve then flattens
+near 32 ms/tile, so no single per-tile figure describes it. A linear fit over
+the four points returns **≈59 ms per extra tile** (intercept 1,909 ms); it is
+reported only to show that it fails — 74, 33 and 32 ms/tile is not a line — and
+must not be quoted as the tile's cost. Cell a's TTFT at 2,048 is 2,026 ms
+against llama-server's 1,921 — **+5.5%** instead of +30.1%. The CLI's 1,346 tok/s
 prefill for the same 2,423 tokens is 1,800 ms, which leaves 226 ms of HTTP and
 first-token in the 2,026 — the server and the CLI prefill at the same rate once
 the tile stops being 256 tokens.
@@ -151,9 +157,9 @@ every chunk.
 Two things this does not establish. The probe is 16 conversations at one
 context; a wider sweep would put a number on how often a tie like this is
 reachable (one in sixteen replies here, at one position in 128 tokens). And the
-59 ms per tile is a property of the prefill tile kernel, which this slice was
-told not to touch — if the per-tile fixed cost came down, 256 would stop
-costing 469 ms and the trade would disappear.
+per-tile cost is a property of the prefill tile kernel, which this slice was
+told not to touch — if it came down, 256 would stop costing 469 ms and the
+trade would disappear.
 
 ## 4. The harness
 

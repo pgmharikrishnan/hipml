@@ -62,7 +62,7 @@ Spread is max−min over the cell, as a percentage of the median.
 | CLI decode @0 | **33.22 tok/s / 30.10 ms** | 32.26 / 30.99 | **+3.0%** | 0.35% / 1.1% |
 | CLI decode @8,192 | **31.99 / 31.26 ms** | 31.48 / 31.77 | **+1.6%** | 0.24% / 0.84% |
 | serve 1 slot | 31.64 tok/s, TTFT p50 2,130 ms | **32.17, 1,918 ms** | −1.7% | 0.6% / 0.2% |
-| serve 8 slots | **131.96, TTFT 488 ms** | 114.51 (re-run 105.89), 548 ms | **+15.2%** (+24.6%) | 0.6% / 7.9%–11.0% |
+| serve 8 slots | **131.96, TTFT p50 488 ms** | 114.51 (re-run 105.89), 548 ms | **+15.2%** (+24.6%) | 0.6% / 7.9%–11.0% |
 | serve 16 slots | 222.42, TTFT 738 ms | **215.70** (re-run 229.45), 1,055 ms | +3.1% / −3.1% | 0.2% / 18.1%–6.0% |
 | MTP serve, drafts 3 | 52.36 | **62.36** | **−16.0%** | 0.8% / 0.7% |
 | `spec-bench` d0→d3 (q8) | 33.28 → 51.77 → 60.52 → **63.66** | no harness | — | — |
@@ -180,11 +180,17 @@ used to be a 256-token prefill chunk and llama-server has no chunk knob, so
 hipml was choosing a smaller tile than the reference. At 256 the one-slot TTFT
 was 2,500 ms for a 2,423-token prompt; at 512 it is 2,130 ms, +11.0% against
 llama's 1,918, where the gap was +30.1%. 512 is llama-server's own `-ub 512`, so
-the physical tile is now matched, and the measured difference is 370 ms over 5
-tiles. What is left is one tile of fixed cost per prefill tile, about 59 ms
-each. Time to first token is still not a prefill number — it includes HTTP,
-admission, queueing and the first token — so the remaining 11.0% is not all
-prefill either, and it is still a loss.
+the physical tile is now matched. The sweep puts the cost of that change at
+370 ms going from 256 to 512 — five tiles — and the cost does not stay constant
+per tile: the next halving, to 1,024, saves only 66 ms over two tiles, and the
+last, to 2,048, another 32 ms over one. The first step carries most of it and
+the curve then flattens near 32 ms a tile, so no single per-tile figure
+describes it. A linear fit over the four sweep points returns ≈59 ms per tile,
+and it is worth keeping only as a fit that fails: 74, 33 and 32 ms per tile is
+not a line. What is left against llama is 212 ms, 11.0%, and that is a residual,
+not a per-tile law. Time to first token is still not a prefill number — it
+includes HTTP, admission, queueing and the first token — so the remaining 11.0%
+is not all prefill either, and it is still a loss.
 
 ## Decode is finished as a bandwidth problem
 
@@ -205,8 +211,8 @@ weight, and less per-step overhead in the roughly one fifth that is not the
 stream. Neither is a rewrite of the matrix-vector multiply.
 
 It is also why the prefill win does not transfer. A prefill tile holds a weight
-tile in shared memory and multiplies 256 prompt tokens against it; a decode GEMV
-reads the same bytes once and throws them away.
+tile in shared memory and multiplies a chunk of prompt tokens against it; a
+decode GEMV reads the same bytes once and throws them away.
 
 ## What this does not say
 

@@ -173,9 +173,9 @@ That is why the +3.0% at depth 0 is the last few percent and not a new regime:
 both engines sit at roughly four fifths of the same DRAM wall. The remaining
 levers are bytes per weight and per-step overhead. It is also why the prefill
 win does not transfer — a prefill tile keeps a weight tile in shared memory and
-multiplies 256 prompt tokens against it, while a decode GEMV reads the same
-bytes once and discards them. The measurement history, including the 633.6 GB/s
-fp32 GEMV result that established the memory path, is in
+multiplies a chunk of prompt tokens against it, while a decode GEMV reads the
+same bytes once and discards them. The measurement history, including the
+633.6 GB/s fp32 GEMV result that established the memory path, is in
 [`notes/roofline-log.md`](notes/roofline-log.md).
 
 ## Which path each serve cell took
