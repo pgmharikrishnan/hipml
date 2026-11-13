@@ -20,8 +20,16 @@ They contain no machine paths and are cited by the notes in `docs/notes/`.
 | `probe_wmma_cmp.cpp` | the same GEMM through WMMA and through plain `v_mfma`/FMA paths |
 | `probe_wmma_gemm.cpp` | a full quantized GEMV/GEMM tile through WMMA, end to end |
 | `probe_prefill_tiles.cpp` | the shipped prefill tile per format at the real ffn shapes, and its staging split through `PWW2_PROBE_*` |
+| `probe_wmma_int4_fp8.cpp` | register-only issue rate of the gfx1201 fp8 and int4 matrix instructions against the fp16 one |
+| `probe_prefill_fp8_acc.cpp` | the fp8 staging tile against an f64 host reference, to price its accuracy |
 | `probe_wmma_layout.cpp` | fragment layout and bank-conflict behaviour of the WMMA load/store |
 | `probe_norm.cpp` | the decode's `rmsnorm_f32` at 5,120 floats: µs per launch, independent and chained, and the GB/s one launch gets |
+
+`probe_prefill_tiles.cpp` builds the tile with `-DPWW2_W8=1` to stage the two
+LDS tiles as fp8 and multiply with `v_wmma_f32_16x16x16_fp8_fp8`; `-DPWW2_W8=0`
+is the shipped fp16 tile and is the only setting the engine can reach. Section
+10 of [`prefill-tile-ceiling.md`](../../docs/notes/prefill-tile-ceiling.md) has
+the A/B and why the fp8 path is a probe and not a route.
 
 ## The decode ablation harness
 

@@ -74,6 +74,19 @@
 #ifndef PWW2_TOKFAST
 #define PWW2_TOKFAST 0
 #endif
+// W8: stage the two LDS tiles as OCP fp8 (E4M3) instead of fp16 and multiply
+// with `v_wmma_f32_16x16x16_fp8_fp8`. That instruction takes 8 B per lane per
+// operand against fp16's 16 B for the same 16x16x16 work, so both staged tiles
+// halve. It is a probe switch: the instruction exists on gfx1201 (the builtin
+// does not, so the encoding is emitted directly), and whether the halved
+// staging beats the fp16 tile at the real shapes is what
+// `scripts/probes/probe_prefill_tiles.cpp` measures with `-DPWW2_W8=1`. Default
+// 0 is the shipped fp16 tile, and the fp8 path is not reachable from the
+// engine: `docs/notes/prefill-tile-ceiling.md` section 10 records that it is
+// 3.2-3.7% relative per GEMM and therefore changes the tokens.
+#ifndef PWW2_W8
+#define PWW2_W8 0
+#endif
 // Probe-only switches: split the loop's cost into staging, fragment reads and
 // matrix work. They default to 0 and the shipped kernel is unaffected.
 // `NO_X`/`NO_W` drop one half of the staging phase (the fp16 activation tile or
@@ -128,6 +141,49 @@ static_assert(PWW2_KW % 32 == 0 && PWW2_KW <= 128, "k tile must be 32..128");
 typedef _Float16 __attribute__((ext_vector_type(8))) pww2_h8;
 typedef float __attribute__((ext_vector_type(8))) pww2_f8;
 typedef unsigned int __attribute__((ext_vector_type(4))) pww2_u4;
+
+#if PWW2_W8
+#include <hip/hip_fp8.h>
+// One LDS tile element, and one lane's operand fragment: 8 elements of the
+// k-tile, which is 16 B as fp16 and 8 B as fp8. `PWW2_XS`/`PWW2_WS` stay in
+// elements, so only the byte footprint halves.
+typedef unsigned char pww2_t;
+typedef unsigned int __attribute__((ext_vector_type(2))) pww2_frag;
+typedef unsigned char __attribute__((ext_vector_type(8))) pww2_b8;
+
+// No `__builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_*` in this SDK, so the
+// instruction is emitted with the encoding `llvm-mc -mcpu=gfx1201` gives for
+// `v_wmma_f32_16x16x16_fp8_fp8 v[0:7], v[8:9], v[10:11], v[0:7]`.
+static __device__ __forceinline__ pww2_f8 pww2_wmma_fp8(pww2_f8 acc, pww2_frag a,
+                                                        pww2_frag b)
+{
+    asm volatile("v_wmma_f32_16x16x16_fp8_fp8 %0, %1, %2, %0" : "+v"(acc) : "v"(a), "v"(b));
+    return acc;
+}
+
+static __device__ __forceinline__ pww2_b8 pww2_to_fp8(const float* v)
+{
+    pww2_b8 r;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const float2 f = make_float2(v[2 * i], v[2 * i + 1]);
+        const __hip_fp8x2_storage_t p =
+            __hip_cvt_float2_to_fp8x2(f, __HIP_SATFINITE, __HIP_E4M3);
+        r[2 * i] = (unsigned char)(p & 0xFFu);
+        r[2 * i + 1] = (unsigned char)(p >> 8);
+    }
+    return r;
+}
+#else
+typedef _Float16 pww2_t;
+typedef pww2_h8 pww2_frag;
+#endif
+
+// The fp8 probe runs the serial loop only: `PWW2_PF=4` slices its staging into
+// its own fragment copies, and every pipelined depth lost at this tile anyway
+// (docs/notes/prefill-tile-ceiling.md section 5.1).
+static_assert(!(PWW2_W8 && PWW2_PF), "the fp8 probe switch is PF=0 only");
+static_assert(!(PWW2_W8 && PWW2_PROBE_NO_FRAG), "NO_FRAG keeps fp16 fragments");
 
 static __device__ __forceinline__ void pww2_ld8b(const unsigned char* p, unsigned& lo,
                                                  unsigned& hi)
@@ -425,14 +481,16 @@ static __device__ __forceinline__ void pww2_body_impl(
     int ks)
 {
     static_assert(!(SILU && (SPLIT || NS)), "the SwiGLU epilogue needs the single-pass shape");
+    static_assert(!PWW2_W8 || XHALF,
+                  "the fp8 probe switch stages the fp16 activation tile only");
     const int z = SPLIT ? (int)blockIdx.z : 0;
     const int kb = NS ? z * ks : (SPLIT ? (z ? ks : 0) : 0);
     const int ke = NS ? ((kb + ks < k) ? kb + ks : k) : (SPLIT ? (z ? k : ks) : k);
     float* __restrict__ out =
         NS ? (z ? scratch + (size_t)(z - 1) * tokens * m : y)
            : (SPLIT ? (z ? scratch : y) : y);
-    __shared__ __align__(16) _Float16 shx[PWW2_BUF * PWW2_TT * PWW2_XS];
-    __shared__ __align__(16) _Float16 shw[PWW2_BUF * PWW2_RT * PWW2_WS];
+    __shared__ __align__(16) pww2_t shx[PWW2_BUF * PWW2_TT * PWW2_XS];
+    __shared__ __align__(16) pww2_t shw[PWW2_BUF * PWW2_RT * PWW2_WS];
 
     const int tid = threadIdx.x;
     const int lane = tid & 31;
@@ -531,7 +589,7 @@ static __device__ __forceinline__ void pww2_body_impl(
 #endif
     };
 
-    auto commit_x = [&](_Float16* xs, int base) {
+    auto commit_x = [&](pww2_t* xs, int base) {
         (void)base;
 #if PWW2_PROBE_NO_X
         (void)xs;
@@ -543,8 +601,21 @@ static __device__ __forceinline__ void pww2_body_impl(
                 const int idx = q * PWW2_XP + p;
                 const int rl = p * (XHALF ? PWW2_XROW_H : PWW2_XROW) + xt;
                 if (XHALF) {
+#if PWW2_W8
+                    // The activation tile converts too: the fp8 multiply has no
+                    // fp16 operand form. Eight halves in, eight fp8 out.
+                    const pww2_h8 hv = *reinterpret_cast<const pww2_h8*>(&xh[idx]);
+                    float f[8];
+#pragma unroll
+                    for (int i = 0; i < 8; ++i) f[i] = (float)hv[i];
+                    *reinterpret_cast<pww2_b8*>(xs + rl * PWW2_XS + q * 32 + xc) = pww2_to_fp8(f);
+#else
                     *reinterpret_cast<pww2_u4*>(xs + rl * PWW2_XS + q * 32 + xc) = xh[idx];
+#endif
                 } else {
+                    // The fp8 switch stages the fp16 activation tile only: the
+                    // engine's tile is the `_w2h` one, so the f32-activation
+                    // path stays on fp16 (see the static_assert below).
                     const float4 v = xf[idx];
                     __half2* dst = reinterpret_cast<__half2*>(xs + rl * PWW2_XS + q * 32 + xc);
                     dst[0] = __floats2half2_rn(v.x, v.y);
@@ -554,7 +625,7 @@ static __device__ __forceinline__ void pww2_body_impl(
 #endif
     };
 
-    auto commit_w = [&](_Float16* ws, int base) {
+    auto commit_w = [&](pww2_t* ws, int base) {
 #if PWW2_PROBE_NO_W
         (void)ws;
         (void)base;
@@ -577,15 +648,20 @@ static __device__ __forceinline__ void pww2_body_impl(
 #else
                 pww2_dequant8<KIND>(wraw[idx], base + q * 32 + d_q * 8, v);
 #endif
+#if PWW2_W8
+                *reinterpret_cast<pww2_b8*>(ws + rl * PWW2_WS + q * 32 + d_q * 8) =
+                    pww2_to_fp8(v);
+#else
                 pww2_h8 hv;
 #pragma unroll
                 for (int i = 0; i < 8; ++i) hv[i] = (_Float16)v[i];
                 *reinterpret_cast<pww2_h8*>(ws + rl * PWW2_WS + q * 32 + d_q * 8) = hv;
+#endif
             }
 #endif
     };
 
-    auto stage = [&](_Float16* xs, _Float16* ws, int base) {
+    auto stage = [&](pww2_t* xs, pww2_t* ws, int base) {
 #if PWW2_PROBE_NO_STAGE
         (void)xs; (void)ws; (void)base;
 #else
@@ -596,7 +672,7 @@ static __device__ __forceinline__ void pww2_body_impl(
 #endif
     };
 
-    auto compute_kk = [&](const _Float16* xs, const _Float16* ws, int kk) {
+    auto compute_kk = [&](const pww2_t* xs, const pww2_t* ws, int kk) {
 #if PWW2_PROBE_NO_COMPUTE
         (void)xs; (void)ws; (void)kk;
 #elif PWW2_PROBE_NO_FRAG
@@ -609,25 +685,29 @@ static __device__ __forceinline__ void pww2_body_impl(
                 acc[idx] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a0[i], b0[j], acc[idx]);
             }
 #else
-        pww2_h8 a[PWW2_NTG];
-        pww2_h8 b[PWW2_NRG];
+        pww2_frag a[PWW2_NTG];
+        pww2_frag b[PWW2_NRG];
 #pragma unroll
         for (int i = 0; i < PWW2_NTG; ++i)
-            a[i] = *reinterpret_cast<const pww2_h8*>(xs + xoff + i * 16 * PWW2_XS + kk * 16);
+            a[i] = *reinterpret_cast<const pww2_frag*>(xs + xoff + i * 16 * PWW2_XS + kk * 16);
 #pragma unroll
         for (int j = 0; j < PWW2_NRG; ++j)
-            b[j] = *reinterpret_cast<const pww2_h8*>(ws + boff + j * 16 * PWW2_WS + kk * 16);
+            b[j] = *reinterpret_cast<const pww2_frag*>(ws + boff + j * 16 * PWW2_WS + kk * 16);
 #pragma unroll
         for (int i = 0; i < PWW2_NTG; ++i)
 #pragma unroll
             for (int j = 0; j < PWW2_NRG; ++j) {
                 const int idx = i * PWW2_NRG + j;
+#if PWW2_W8
+                acc[idx] = pww2_wmma_fp8(acc[idx], a[i], b[j]);
+#else
                 acc[idx] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a[i], b[j], acc[idx]);
+#endif
             }
 #endif
     };
 
-    auto compute = [&](const _Float16* xs, const _Float16* ws) {
+    auto compute = [&](const pww2_t* xs, const pww2_t* ws) {
 #pragma unroll
         for (int kk = 0; kk < PWW2_KW / 16; ++kk) compute_kk(xs, ws, kk);
     };
@@ -901,6 +981,12 @@ static __device__ __forceinline__ void pww2_body_slice(
     pww2_body_impl<KIND, XHALF, true, true>(w, x, y, scratch, nullptr, nullptr, m, k, tokens, ks);
 }
 
+// The f32-activation entries (`_w2`) are the shipped tile's other input form.
+// The fp8 probe switch only exists for the fp16-activation `_w2h` tile, which is
+// what the engine's chunked prefill launches and what the probe measures, so
+// these five are not compiled when `PWW2_W8` is on: an fp8 tile cannot take an
+// fp32 activation without a conversion stage that was not built.
+#if !PWW2_W8
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q4_k_w2(const unsigned char* __restrict__ w,
                                            const float* __restrict__ x,
                                            float* __restrict__ y, int m, int k, int tokens)
@@ -935,6 +1021,7 @@ extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) pref
 {
     pww2_body<3, false>(w, x, y, m, k, tokens);
 }
+#endif   // !PWW2_W8
 
 extern "C" __global__ void __launch_bounds__(PWW2_THREADS, PWW2_MIN_BLOCKS) prefill_q4_k_w2h(const unsigned char* __restrict__ w,
                                             const void* __restrict__ x,
