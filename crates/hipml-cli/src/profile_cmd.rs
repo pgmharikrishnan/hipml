@@ -33,13 +33,13 @@ pub fn launches_per_token(n_layer: usize, is_recr: &[bool]) -> usize {
     for &recr in is_recr.iter().take(n_layer) {
         n += 1; // attn_norm rmsnorm
         n += if recr {
-            // qkv, gate, alpha, beta, gates, conv, silu, 2x l2norm, gdn,
-            // gate_norm, out
-            12
+            // qkv/gate/alpha/beta (one job-list launch), gates, conv, silu,
+            // 2x l2norm, gdn, gate_norm, out
+            9
         } else {
-            // q/k/v, qg_split, 2x head norm, 2x rope, kv_append, split, reduce,
-            // q_gate, wo
-            13
+            // q/k/v (one job-list launch), qg_split, 2x head norm, 2x rope,
+            // kv_append, split, reduce, q_gate, wo
+            11
         };
         n += 7; // residual, rmsnorm, gate, up, silu, down, residual
     }

@@ -235,6 +235,7 @@ pub struct SsmGpuLayer<'a> {
     pub(crate) k_gdn: Kernel<'a>,
     pub(crate) k_gate_norm: Kernel<'a>,
     pub(crate) k_gates: Kernel<'a>,
+    pub(crate) k_jobs: Kernel<'a>,
 
     pub(crate) wqkv: SsmWeight<'a>,
     pub(crate) wgate: SsmWeight<'a>,
@@ -265,6 +266,14 @@ pub struct SsmGpuLayer<'a> {
     pub(crate) out: Buffer,
     pub(crate) conv_state: Buffer,
     pub(crate) s_state: Buffer,
+
+    /// The four input projections share `x` and have no ordering between them,
+    /// so they can be one launch over a device job list instead of four. The
+    /// list is built once: every pointer in it is a buffer this layer owns and
+    /// never moves. `None` when a weight format has no job body, which keeps the
+    /// four-launch path for the f32 parity layer and for formats the job kernel
+    /// does not carry.
+    pub(crate) proj_jobs: Option<(Buffer, usize)>,
 }
 
 impl<'a> SsmGpuLayer<'a> {
@@ -295,7 +304,7 @@ impl<'a> SsmGpuLayer<'a> {
         check("wout", w.wout.len(), n_embd * inner)?;
 
         let zeros = |n: usize| Buffer::from_host(&vec![0.0f32; n]);
-        Ok(SsmGpuLayer {
+        let mut layer = SsmGpuLayer {
             dims,
             stream,
             module,
@@ -306,6 +315,7 @@ impl<'a> SsmGpuLayer<'a> {
             k_gdn: module.kernel("gdn_ar_f32")?,
             k_gate_norm: module.kernel("ssm_gate_norm_f32")?,
             k_gates: module.kernel("ssm_gates_f32")?,
+            k_jobs: module.kernel("gemv_jobs")?,
 
             wqkv: SsmWeight::F32(Buffer::from_host(w.wqkv)?),
             wgate: SsmWeight::F32(Buffer::from_host(w.wgate)?),
@@ -332,7 +342,10 @@ impl<'a> SsmGpuLayer<'a> {
             out: zeros(n_embd)?,
             conv_state: zeros((dims.d_conv - 1) * dims.conv_ch)?,
             s_state: zeros(dims.n_v * dims.head_v * dims.head_v)?,
-        })
+            proj_jobs: None,
+        };
+        layer.plan_proj_jobs()?;
+        Ok(layer)
     }
 
     /// A layer whose five projection matrices are the resident GGUF tensors.
@@ -362,7 +375,7 @@ impl<'a> SsmGpuLayer<'a> {
         check("norm", w.norm.len(), dims.head_v)?;
 
         let zeros = |n: usize| Buffer::from_host(&vec![0.0f32; n]);
-        Ok(SsmGpuLayer {
+        let mut layer = SsmGpuLayer {
             dims,
             stream,
             module,
@@ -373,6 +386,7 @@ impl<'a> SsmGpuLayer<'a> {
             k_gdn: module.kernel("gdn_ar_f32")?,
             k_gate_norm: module.kernel("ssm_gate_norm_f32")?,
             k_gates: module.kernel("ssm_gates_f32")?,
+            k_jobs: module.kernel("gemv_jobs")?,
 
             wqkv: SsmWeight::Quant(w.wqkv.0, w.wqkv.1),
             wgate: SsmWeight::Quant(w.wgate.0, w.wgate.1),
@@ -399,7 +413,52 @@ impl<'a> SsmGpuLayer<'a> {
             out: zeros(n_embd)?,
             conv_state: zeros((dims.d_conv - 1) * dims.conv_ch)?,
             s_state: zeros(dims.n_v * dims.head_v * dims.head_v)?,
-        })
+            proj_jobs: None,
+        };
+        layer.plan_proj_jobs()?;
+        Ok(layer)
+    }
+
+    /// Build the one-launch job list for the four input projections, if every
+    /// one of them is a resident block format the job kernel carries.
+    ///
+    /// The list is a device buffer because the kernel reads it there; nothing
+    /// in it changes per token, so this is one upload per layer per model load,
+    /// not one per token.
+    fn plan_proj_jobs(&mut self) -> Result<(), String> {
+        let d = self.dims;
+        let mut jobs = Vec::with_capacity(4);
+        let mut tiles = 1usize;
+        for (w, m, y) in [
+            (&self.wqkv, d.conv_ch, &self.qkv),
+            (&self.wgate, d.inner(), &self.z),
+            (&self.alpha_w, d.n_v, &self.alpha_raw),
+            (&self.beta_w, d.n_v, &self.beta_raw),
+        ] {
+            let SsmWeight::Quant(buf, entry) = w else {
+                return Ok(());
+            };
+            let Some(kind) = crate::gemv_job_kind(entry) else {
+                return Ok(());
+            };
+            jobs.push(crate::GemvJob {
+                w: buf.device_ptr(),
+                x: self.x.as_ptr() as usize,
+                y: y.as_ptr() as usize,
+                m: m as i32,
+                k: d.n_embd as i32,
+                kind,
+                pad: 0,
+            });
+            tiles = tiles.max(crate::gemv_job_tiles(kind, m));
+        }
+        let bytes = unsafe {
+            std::slice::from_raw_parts(jobs.as_ptr() as *const u8, std::mem::size_of_val(&jobs[..]))
+        };
+        let buf = Buffer::alloc(bytes.len().div_ceil(4))?;
+        buf.upload_bytes(0, bytes)?;
+        self.proj_jobs = Some((buf, tiles));
+        Ok(())
     }
 
     pub fn dims(&self) -> SsmDims {

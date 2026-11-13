@@ -21,11 +21,23 @@
 #define GJ_Q6K 1
 #define GJ_Q5K 2
 #define GJ_Q80 3
+#define GJ_IQ4XS 4
 
 // One row per warp, 8 rows per block for the three K-quant formats: the `_r1`
 // geometry WP16 measured as the faster one at these row counts. Q8_0 keeps its
 // one-row-per-block shape, so its tile count is its row count.
 #define GJ_ROWS_PER_TILE 8
+
+// IQ4_XS brings its own tile geometry from gemv_iq4_xs.hip (16 rows a block,
+// two a warp) and a 2,048-float x stage, which is exactly `sx` below. The host's
+// `gemv_job_tiles` must use the same row count: a mismatch either re-streams a
+// tail row from idle blocks or leaves rows unrun.
+#define GJ_IQ4X_RPW 2
+#define GJ_IQ4X_ROWS_PER_TILE (8 * GJ_IQ4X_RPW)
+#ifdef IQ4X_ROW_TILE
+static_assert(GJ_IQ4X_ROWS_PER_TILE == IQ4X_ROW_TILE,
+              "the IQ4_XS job tile must be the entry's own row tile");
+#endif
 
 struct HipmlGemvJob {
     const unsigned char* w;
@@ -71,6 +83,16 @@ __device__ __forceinline__ void q80_row(
     int m,
     int k,
     int row);
+template <int RPW>
+static __device__ __forceinline__ void iq4x_tile(
+    const unsigned char* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int m,
+    int k,
+    float* __restrict__ sx,
+    float* __restrict__ scb,
+    int tile);
 
 extern "C" __global__ void gemv_jobs(
     const HipmlGemvJob* __restrict__ jobs,
@@ -84,12 +106,15 @@ extern "C" __global__ void gemv_jobs(
     // Every job shares the grid, so a block past its own job's row space must
     // retire before it touches memory: the clamped tail row would otherwise be
     // re-streamed by thousands of idle blocks of a wider neighbour.
+    const int rows_per_tile = (job.kind == GJ_IQ4XS) ? GJ_IQ4X_ROWS_PER_TILE
+                                                      : GJ_ROWS_PER_TILE;
     const int need = (job.kind == GJ_Q80)
         ? job.m
-        : (job.m + GJ_ROWS_PER_TILE - 1) / GJ_ROWS_PER_TILE;
+        : (job.m + rows_per_tile - 1) / rows_per_tile;
     if (tile >= need) return;
 
     __shared__ __align__(16) float sx[2048];
+    __shared__ __align__(16) float scb[16];
     switch (job.kind) {
     case GJ_Q4K:
         q4k_tile<1, false, false>(job.w, job.x, job.y, job.m, job.k, sx, tile);
@@ -104,6 +129,9 @@ extern "C" __global__ void gemv_jobs(
         for (int row = tile; row < job.m; row += gridDim.x) {
             q80_row(job.w, job.x, job.y, job.m, job.k, row);
         }
+        break;
+    case GJ_IQ4XS:
+        iq4x_tile<GJ_IQ4X_RPW>(job.w, job.x, job.y, job.m, job.k, sx, scb, tile);
         break;
     }
 }

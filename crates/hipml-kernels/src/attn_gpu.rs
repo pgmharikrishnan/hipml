@@ -173,6 +173,13 @@ mod imp {
         part_acc: Buffer,
         part_ml: Buffer,
         pub dims: LayerDims,
+        /// The q/k/v projections share the block input and have no ordering
+        /// between them, so they can go out as one launch over a device job
+        /// list instead of three. The list is built by `bind_qkv_input` once
+        /// the engine knows the input buffer (it is allocated after the
+        /// layers), so the pointers in it never move. `None` keeps the
+        /// three-launch path for formats the job kernel does not carry.
+        qkv_jobs: Option<(Buffer, usize)>,
     }
 
     impl<'a> AttnLayer<'a> {
@@ -237,6 +244,7 @@ mod imp {
                 part_acc: Buffer::alloc(n_head * MAX_SPLITS * hd)?,
                 part_ml: Buffer::alloc(n_head * MAX_SPLITS * 2)?,
                 dims,
+                qkv_jobs: None,
             })
         }
 
@@ -305,6 +313,7 @@ mod imp {
                 part_acc: Buffer::alloc(n_head * MAX_SPLITS * hd)?,
                 part_ml: Buffer::alloc(n_head * MAX_SPLITS * 2)?,
                 dims,
+                qkv_jobs: None,
             })
         }
 
@@ -477,9 +486,51 @@ mod imp {
         /// drop the front end, or the other way round (`gpu/ablate.rs`).
         pub fn qkv_gemvs(&self, l: &Launcher, x: &Buffer) -> Result<(), String> {
             let d = self.dims;
+            if let Some((jobs, tiles)) = &self.qkv_jobs {
+                return l.gemv_jobs(jobs, 3, *tiles);
+            }
             self.gemv(l, &self.wq, x, &self.qg, 2 * d.n_head * d.head_dim)?;
             self.gemv(l, &self.wk, x, &self.k, d.width)?;
             self.gemv(l, &self.wv, x, &self.v, d.width)
+        }
+
+        /// Build the one-launch job list for q/k/v, once the engine's block
+        /// input buffer exists. A format the job kernel does not carry leaves
+        /// the list empty, so `qkv_gemvs` keeps its three launches.
+        pub fn bind_qkv_input(&mut self, x: &Buffer) -> Result<(), String> {
+            let d = self.dims;
+            let mut jobs = Vec::with_capacity(3);
+            let mut tiles = 1usize;
+            for (w, m, y) in [
+                (&self.wq, 2 * d.n_head * d.head_dim, &self.qg),
+                (&self.wk, d.width, &self.k),
+                (&self.wv, d.width, &self.v),
+            ] {
+                let Some(kind) = crate::gemv_job_kind(w.entry()?) else {
+                    self.qkv_jobs = None;
+                    return Ok(());
+                };
+                jobs.push(crate::GemvJob {
+                    w: w.data.as_ptr() as usize,
+                    x: x.as_ptr() as usize,
+                    y: y.as_ptr() as usize,
+                    m: m as i32,
+                    k: d.n_embd as i32,
+                    kind,
+                    pad: 0,
+                });
+                tiles = tiles.max(crate::gemv_job_tiles(kind, m));
+            }
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    jobs.as_ptr() as *const u8,
+                    std::mem::size_of_val(&jobs[..]),
+                )
+            };
+            let buf = Buffer::alloc(bytes.len().div_ceil(4))?;
+            buf.upload_bytes(0, bytes)?;
+            self.qkv_jobs = Some((buf, tiles));
+            Ok(())
         }
 
         /// Split, q/k head norm and M-RoPE only — the front end's own launches.
