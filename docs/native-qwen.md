@@ -55,12 +55,15 @@ nine; what differs is *how*, and that is the whole of the cost:
   four IQ/small-K formats had no entry and every batched projection fell back to
   the exact `_b` GEMV, which is why 16 slots on UD ran at 97.42 tok/s against
   216.88 for the stock file. With the entries, 16 slots reach 201.59 on the
-  approximate tile; the follow-up's Q5_K load-order rewrite took it to
-  **220.65** (2.27x its own baseline); the exact path is unchanged at 96.87.
+  approximate tile; the follow-up's Q5_K load-order rewrite took it to 220.65
+  (2.27x its own baseline), and the re-verification on `409f4ad` measures
+  **222.13** tok/s in cell c; the exact path is 96.87.
   See [`notes/serve-ud-batch.md`](notes/serve-ud-batch.md).
-- Still unmeasured on a UD file: contexts beyond 8,192 tokens with batching,
-  MTP over a batch, and the cache gates; the 64-row f32-tile `prefill_iq4_*`
-  entries are wired but the default WMMA path selects `_w2h` instead.
+- Batching runs past 8,192 tokens per slot on a UD file: cell b is 8 slots at
+  16,384 tokens each and cell c is 16 slots at 8,192, with the prefix cache
+  restoring 2,396 of the 2,423-token prompt. Still unmeasured: MTP over a batch,
+  and `cache-gate` on a UD file. The 64-row f32-tile `prefill_iq4_*` entries are
+  wired but the default WMMA path selects `_w2h` instead.
 
 ## Architecture config (read from the GGUF by `hipml load`)
 
@@ -194,18 +197,26 @@ wavelengths…" (32 ids, identical on rerun).
 
 ```
 resident: 15.42 GiB in 866 tensors; 14.42 GiB streamed/token; q8 KV 0.268 GiB at 8,192
-                          prefill tok/s            decode tok/s
-depth 0 (--prefill 512)     1,186.27 (512 tok)       29.20
-depth 8,192                 1,207.27 (8,192 tok)     28.43
-
-with HIPML_EXPAND_SMALL_QUANTS=1 (the old F32 expansion):
-depth 0 (--prefill 512)     1,059.21                 27.58
-depth 8,192                 1,086.31                 26.93
-
-with HIPML_Q5K_COPY_GB=0 (no Q5_K tile kernel, batched GEMV instead):
-depth 0                       289.76                  27.62
-depth 8,192                   297.68                  26.92
 ```
+
+The current numbers are the re-verification on `409f4ad`: one binary, one
+session, 3 reps in each of 2 separate processes, llama.cpp build 11820 in the
+same window on the same ids. The full table, its spreads and its caveats are in
+[`benchmarks.md`](benchmarks.md).
+
+| cell | hipml | llama.cpp | Δ |
+| --- | ---: | ---: | ---: |
+| prefill @512 tok/s | 1,346.1 | 1,215.2 | +10.8% |
+| prefill @8,192 tok/s | 1,326.1 | 1,352.5 | −1.9% |
+| decode @0 tok/s | 33.15 | 32.24 | +2.8% |
+| decode @8,192 tok/s | 31.98 | 31.41 | +1.8% |
+
+The two build-flag comparisons that established the Q5_K tile — the old F32
+expansion of Q3_K and IQ3_S (`HIPML_EXPAND_SMALL_QUANTS=1`) and the
+batched-GEMV fallback (`HIPML_Q5K_COPY_GB=0`) — were measured on an earlier
+tree and are not re-run here; they are recorded in
+[`notes/serve-ud-batch.md`](notes/serve-ud-batch.md) and
+[`notes/prefill-tile-ceiling.md`](notes/prefill-tile-ceiling.md).
 
 Serving Q3_K and IQ3_S in block form is worth 1.19 GiB of residency and a few
 percent on both axes: the four tensors stream 9.31× fewer bytes per token, and
@@ -218,10 +229,9 @@ The Q5_K dequant-in-shared tile kernel is the whole prefill difference on this
 file: 3.0× / 3.7× over the batched-GEMV fallback, with the same last id at both
 depths (220 and 292).
 
-The stock `Qwen3.8-27B-Q4_K_M.gguf` is unchanged by all of this — same oracle
-gate (`PASS 20/20`, `max |gpu - cpu| = 0.1481 at 34114`, the published value)
-and prefill 1,000.31 / 1,235.14 tok/s with decode 30.06 / 29.21 tok/s at depths
-0 and 8,192.
+The stock `Qwen3.8-27B-Q4_K_M.gguf` passes the same gate — `PASS 20/20`,
+`max |gpu - cpu| = 0.1481 at 34114`, the published value. Its speed was measured
+on the earlier release tree; the current head-to-head is the UD table above.
 `Qwen3.8-27B-UD-Q6_K_XL.gguf` is not measured in this tree, but needs no format
 of its own: Q6_K embedding rows and the Q5_K attention/prefill entries it was
 missing both exist now.
@@ -291,24 +301,19 @@ Only mismatch found: two leading system turns. hipml rejects
              {"role":"user","content":"hi"}]}
 ```
 
-## Native-model speed
+## llama.cpp's settings
 
-Same fixture and harness as `bench/` (`job.py`, 3 cold reps, 33 generated
-tokens, q8/q8_0 KV, no cache reuse), **stock Q4_K_XL**, `prose_explanation`,
-llama.cpp only:
+llama.cpp is build 11820, commit `d7725699`. It ran with
 
-| depth | prompt | prefill tok/s (median) | decode tok/s (median) | TTFT (median) | peak VRAM |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 373 | 1,006.6 | 30.20 | 371 ms | 16,485 MiB |
-| 8,192 | 8,192 | 1,284.7 | 29.50 | 6,389 ms | 16,760 MiB |
+```
+-ngl 99 -c <ctx> --parallel <slots> -ctk q8_0 -ctv q8_0
+--no-webui --no-cache-idle-slots
+```
 
-Reps: prefill 870.4 / 1,006.6 / 1,029.3 and 1,284.7 / 1,287.7 / 1,279.2;
-decode 29.71 / 30.21 / 30.20 and 29.44 / 29.57 / 29.50.
-llama.cpp build `11820`, commit `d7725699`, `-ngl 99`.
-
-hipml's own stock numbers are in
-[`benchmarks.md`](benchmarks.md) (1,198 / 1,252 tok/s prefill, 29.2 / 28.8
-decode); the UD files are measured above.
+and with no `-fa`, `-b` or `-ub` flag, so the build defaults applied (`-fa
+auto`, which resolves to on, `-b 2048`, `-ub 512`). Its cells were measured in
+the same session and the same window as hipml's, on the same token ids; the
+numbers are in [`benchmarks.md`](benchmarks.md) and are not repeated here.
 
 ## Commands
 
@@ -332,16 +337,33 @@ python bench/job.py --engine llama --prompt prose_explanation --depth 0 --reps 3
   --model <HIPML_GGUF>
 ```
 
-## Checks on this tree
+## Checks
+
+Re-run on `409f4ad`, the tree the table above was timed on, before any cell:
+
+| check | result |
+| --- | --- |
+| `hipml probe` | `built with hip feature: true` |
+| greedy ids, "The capital of France is" (UD) | 12/12 identical |
+| `hipml parity --deep` | 74 passed, 0 failed, 1 skipped (`sample_top_p_f32`) |
+| `hipml parity prefill --deep` | 15 passed, 0 failed, 0 skipped |
+| `hipml oracle-gate` (UD-Q4_K_M, 20 steps, chunk 2048, q8) | PASS, 20/20, max abs 0.1086 at 101748 |
+| `hipml oracle-gate` (stock Q4_K_M, 20 steps) | PASS, 20/20, max abs 0.1481 at 34114 |
+| `hipml batch-bench --slots 16 --check` (UD, q8) | 16/16 ids on all 16 slots, "all slots reproduce the B=1 path" |
+| `hipml spec-bench` drafts 0–3, q8 | 128/128 exact on every row |
+| `hipml spec-bench` drafts 0–3, f32 | 128/128 exact on every row |
+
+The same binary is the one timed. Both oracle gates reproduce the reference
+max-error to four decimal places and the same index on this tree, so the
+prefill path is numerically unchanged.
+
+Load, tokenizer and template checks, from the tree where UD support landed:
 
 | check | result |
 | --- | --- |
 | `cargo test --workspace` | local and gpu-host: all pass (0 failed) |
 | `cargo check --workspace --features hip` | clean |
-| `hipml parity --deep` | 56 passed, 0 failed, 1 skipped |
 | `hipml oracle-gate` (fine-tune, 169 ids, chunk 2048) | PASS, 20/20 ids identical |
-| `hipml oracle-gate` (stock Q4_K_M, 169 ids, chunk 2048) | PASS, 20/20, max abs 0.1481 at 34114 |
-| `hipml oracle-gate` (UD-Q4_K_M, 169 ids, chunk 2048) | PASS, 20/20, max abs 0.1019 at 29832 |
 | Fine-tune generation after the config change | 64 layers, 8 tokens emitted |
 | Q4_K_XL load checks | 866/866 byte-identical, embeddings 5120/5120 exact |
 | UD-Q4_K_M load checks | 866/866 byte-identical, embeddings 5120/5120 exact |
@@ -356,8 +378,9 @@ The fine-tune still reports 64 layers and generates, so subtracting
 - 128-token greedy parity and logit margins on a stock file: the 20-step
   oracle gate above is the only published logit comparison.
 - `UD-Q6_K_XL` end to end; it needs no new format, but it was not run here.
-- Anything past 8,192 tokens on a UD file: batching, MTP, prefix cache and the
-  KV/SSM cache gates are measured on the stock model only.
+- MTP over a batch, and `cache-gate` on a UD file. Batched decode past 8,192
+  tokens per slot and the prefix cache are now measured on UD (cells b and c),
+  but the cache gate itself was not re-run there.
 - Chat-template branches specific to the stock template: developer-role
   messages, merged multi-system turns (one reproducer above), and the stricter
   tool-argument mapping rule. The committed template fixture passes, but these
