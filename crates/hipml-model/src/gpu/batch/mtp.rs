@@ -218,11 +218,9 @@ impl<'a> MtpBatch<'a> {
         let ff = cfg.n_ff;
         let l = self.attn_launcher();
         let mut pos_bytes = vec![0u8; 8 * b];
-        let mut maxpos = 0usize;
         for (i, &p) in positions.iter().enumerate() {
             pos_bytes[i * 8..i * 8 + 4].copy_from_slice(&(p as i32).to_le_bytes());
             pos_bytes[i * 8 + 4..i * 8 + 8].copy_from_slice(&((p as i32) + 1).to_le_bytes());
-            maxpos = maxpos.max(p + 1);
         }
         self.pos.upload_bytes_async(0, &pos_bytes, l.stream())?;
 
@@ -259,7 +257,9 @@ impl<'a> MtpBatch<'a> {
             positions,
             &self.pos,
         )?;
-        let split = (maxpos / 64).clamp(1, crate::gpu::deep_kv::MAX_SPLITS);
+        // Same split geometry as a plain step: the count is a property of the
+        // cache, not of this column's position.
+        let split = self.kv.splits;
         l.kv_encode_batch(
             self.kv.dtype.id(),
             &self.k,

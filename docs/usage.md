@@ -37,6 +37,8 @@ silent fallback to somebody else's disk.
 | `HIPML_SKINNY` | `1` opts the batched decode into the WMMA tile (approximate, not bit-identical) | unset = the exact `_b` path |
 | `HIPML_BATCH_LEGACY` | `1` forces the server's batched path to the exact `_b` kernels | unset = the tile at four or more slots |
 | `HIPML_BATCH_TRACE` | `1` prints one `[batch] <entry> m=<rows> k=<k> b=<slots>` line per batched route, once per shape | unset = silent |
+| `HIPML_SERVE_STEP_LOG` | `1` prints one line per batched serve step: the weight pass's wall time and the wall gap since the previous step began | unset = silent |
+| `HIPML_SERVE_SPLIT` | `1` prints the engine's syncing stage buckets every 16 serve steps | unset = silent |
 | `HIPML_BENCH_OUT` | raw bench output root | `<repo>/bench/out/<tool>` |
 | `HIPML_GPU_LOCK` | optional lock script taking `acquire <label>`, `release <label>`, `status` | unset = no locking |
 | `HIPML_BENCH_HOST` | ssh host for the remote bench | unset = run locally |

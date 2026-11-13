@@ -36,12 +36,12 @@ with a row offset and an explicit state pointer.
 ## Exactness argument
 
 A verify column is the same row-wise kernel invocation as a plain batched step
-on the same input, except that the attention split count is chosen from the
-slot's own position (so a column at position `p` uses the same fixed cache
-partition a plain step at `p` uses). The projections, norms, residual adds, FFN,
-head and argmax are the same launches as `BatchEngine::forward`. The GDN chain
-is the same `*_cols_*` kernels the single-stream verify proved bit-identical to
-the plain recurrence.
+on the same input, except that attention uses the cache's own split count (a
+fixed partition of the cache in cache positions, so a column at position `p`
+reads the same rows a plain step at `p` reads). The projections, norms, residual
+adds, FFN, head and argmax are the same launches as `BatchEngine::forward`. The
+GDN chain is the same `*_cols_*` kernels the single-stream verify proved
+bit-identical to the plain recurrence.
 
 The bench checks the real condition: every slot's 256-token stream equals that
 slot's stream from the plain batched run, token for token, in the same GEMV mode

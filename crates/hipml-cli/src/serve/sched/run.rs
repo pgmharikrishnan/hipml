@@ -60,6 +60,31 @@ pub fn run(
     // Batch resets with no successful step between them: a device that cannot
     // finish one weight pass is not coming back on its own.
     let mut reset_streak = 0u32;
+    // Measurement hooks, off unless set. `HIPML_SERVE_STEP_LOG=1` prints one
+    // line per batched step: the weight pass's own wall time and the wall gap
+    // since the previous step began. `HIPML_SERVE_SPLIT=1` prints the engine's
+    // syncing stage buckets every 16 steps. Both are how the one-slot
+    // attribution in `docs/notes/serve-ud-batch.md` was measured; neither
+    // changes a step when unset.
+    let step_log = std::env::var_os("HIPML_SERVE_STEP_LOG").is_some();
+    let mut step_started = std::time::Instant::now();
+    let split_log = std::env::var_os("HIPML_SERVE_SPLIT").is_some();
+    const SPLIT_NAMES: [&str; 9] = [
+        "embed",
+        "attn_proj",
+        "attn_kv",
+        "attn_out",
+        "ssm_proj",
+        "ssm_rec",
+        "ssm_out",
+        "ffn",
+        "final",
+    ];
+    const SPLIT_EVERY: u64 = 16;
+    let mut split_prev = [0.0f64; 9];
+    if split_log {
+        batch.trace = true;
+    }
 
     // Device-level failure: drain every open stream with an error, give the
     // connection threads a moment to write it, then let the process exit so a
@@ -360,6 +385,19 @@ pub fn run(
         let order: Vec<usize> = batch.active_slots().to_vec();
         if !order.is_empty() {
             faults.tick();
+            if split_log && batch_steps > 0 && batch_steps % SPLIT_EVERY == 0 {
+                let cur = batch.stages;
+                let mut line = String::new();
+                for i in 0..9 {
+                    line.push_str(&format!(
+                        "{}={:.3} ",
+                        SPLIT_NAMES[i],
+                        (cur[i] - split_prev[i]) * 1e3 / SPLIT_EVERY as f64
+                    ));
+                }
+                eprintln!("split step {batch_steps}: {line}");
+                split_prev = cur;
+            }
             let toks: Vec<u32> = order
                 .iter()
                 .map(|&s| slots[s].as_ref().expect("active slot has a job").feed)
@@ -368,7 +406,21 @@ pub fn run(
             let stepped = if batch_fault_all || batch_fault_at == Some(batch_steps) {
                 Err("injected batch-step failure (HIPML_FAULT_BATCH)".to_string())
             } else {
-                batch.forward(&toks)
+                let t0 = step_log.then(std::time::Instant::now);
+                let gap = t0.map(|t| t.duration_since(step_started).as_secs_f64() * 1e3);
+                if let Some(t) = t0 {
+                    step_started = t;
+                }
+                let r = batch.forward(&toks);
+                if let (Some(t), Some(gap)) = (t0, gap) {
+                    eprintln!(
+                        "step {} b={} gap {gap:.3} ms forward {:.3} ms",
+                        batch_steps,
+                        toks.len(),
+                        t.elapsed().as_secs_f64() * 1e3
+                    );
+                }
+                r
             };
             let ids = match stepped {
                 Ok(ids) => {
