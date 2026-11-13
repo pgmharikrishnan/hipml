@@ -452,7 +452,71 @@ mod imp {
             self.gemv(l, &self.wq, x, &self.qg, 2 * d.n_head * d.head_dim)?;
             self.gemv(l, &self.wk, x, &self.k, d.width)?;
             self.gemv(l, &self.wv, x, &self.v, d.width)?;
+            self.front(l)
+        }
 
+        /// The front end between the projections and the attention: split,
+        /// q/k head norm, M-RoPE.
+        ///
+        /// The fused decoder kernel does all five in one launch (`attn_front`),
+        /// block per head. The separate kernels stay for shapes outside its
+        /// window and for the parity cases that target them one at a time; the
+        /// two are bit-identical, so `HIPML_ATTN_FRONT_SPLIT=1` also selects
+        /// the five-launch form for an A/B.
+        fn front(&self, l: &Launcher) -> Result<(), String> {
+            let d = self.dims;
+            if d.head_dim > 256 || std::env::var_os("HIPML_ATTN_FRONT_SPLIT").is_some() {
+                self.split_qg(l)?;
+                return self.norm_and_rope(l);
+            }
+            let kernel = self.module_kernel(l, "attn_front_f32")?;
+            let mut p_qg = self.qg.as_ptr();
+            let mut p_q = self.q.as_ptr();
+            let mut p_gate = self.gate.as_ptr();
+            let mut p_k = self.k.as_ptr();
+            let mut p_qn = self.q_norm.as_ptr();
+            let mut p_kn = self.k_norm.as_ptr();
+            let mut nh = d.n_head as i32;
+            let mut nkv = d.n_kv as i32;
+            let mut hd = d.head_dim as i32;
+            let mut nrot = d.n_rot as i32;
+            let mut s0 = d.sections[0] as i32;
+            let mut s1 = d.sections[1] as i32;
+            let mut s2 = d.sections[2] as i32;
+            let mut s3 = d.sections[3] as i32;
+            let mut p_pos = l.mrope_pos();
+            let mut base = d.rope_base;
+            let mut eps = d.eps;
+            let mut params: [*mut c_void; 17] = [
+                &mut p_qg as *mut _ as *mut c_void,
+                &mut p_q as *mut _ as *mut c_void,
+                &mut p_gate as *mut _ as *mut c_void,
+                &mut p_k as *mut _ as *mut c_void,
+                &mut p_qn as *mut _ as *mut c_void,
+                &mut p_kn as *mut _ as *mut c_void,
+                &mut nh as *mut _ as *mut c_void,
+                &mut nkv as *mut _ as *mut c_void,
+                &mut hd as *mut _ as *mut c_void,
+                &mut nrot as *mut _ as *mut c_void,
+                &mut s0 as *mut _ as *mut c_void,
+                &mut s1 as *mut _ as *mut c_void,
+                &mut s2 as *mut _ as *mut c_void,
+                &mut s3 as *mut _ as *mut c_void,
+                &mut p_pos as *mut _ as *mut c_void,
+                &mut base as *mut _ as *mut c_void,
+                &mut eps as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: ((d.n_head + d.n_kv) as u32, 1, 1),
+                block: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            kernel.launch(cfg, &l.stream, &mut params)
+        }
+
+        /// The joint q|gate projection split into `q` and `gate`.
+        fn split_qg(&self, l: &Launcher) -> Result<(), String> {
+            let d = self.dims;
             let split = self.module_kernel(l, "qg_split_f32")?;
             let mut p_qg = self.qg.as_ptr();
             let mut p_q = self.q.as_ptr();
@@ -471,8 +535,7 @@ mod imp {
                 block: (256, 1, 1),
                 shared_mem_bytes: 0,
             };
-            split.launch(cfg, &l.stream, &mut params)?;
-            self.norm_and_rope(l)
+            split.launch(cfg, &l.stream, &mut params)
         }
 
         /// Batched Q/K/V projections for `rows` x-vectors: one pass over each
