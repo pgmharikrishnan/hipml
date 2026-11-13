@@ -66,7 +66,16 @@ pub fn run(
     // syncing stage buckets every 16 steps. Both are how the one-slot
     // attribution in `docs/notes/serve-ud-batch.md` was measured; neither
     // changes a step when unset.
+    //
+    // `HIPML_SERVE_SPEC_LOG=1` is the same for the lone speculative step: the
+    // step-to-step wall period and the step's own draft/verify/rollback
+    // buckets. The difference between the two is everything outside the engine
+    // (the token channel, the HTTP write, the loop) per step. It is how
+    // `docs/notes/mtp.md` attributed the one-slot MTP cell.
     let step_log = std::env::var_os("HIPML_SERVE_STEP_LOG").is_some();
+    let spec_log = std::env::var_os("HIPML_SERVE_SPEC_LOG").is_some();
+    let mut spec_steps: u64 = 0;
+    let mut spec_started = std::time::Instant::now();
     let mut step_started = std::time::Instant::now();
     let split_log = std::env::var_os("HIPML_SERVE_SPLIT").is_some();
     const SPLIT_NAMES: [&str; 9] = [
@@ -316,7 +325,12 @@ pub fn run(
                 let step = match mtp.as_mut() {
                     Some(d) => {
                         let sp = spec.as_mut().expect("checked");
-                        engine.spec_step(
+                        let t0 = spec_log.then(std::time::Instant::now);
+                        let gap = t0.map(|t| t.duration_since(spec_started).as_secs_f64() * 1e3);
+                        if let Some(t) = t0 {
+                            spec_started = t;
+                        }
+                        let r = engine.spec_step(
                             d,
                             &mut sp.st,
                             &mut sp.snaps,
@@ -324,7 +338,22 @@ pub fn run(
                             sp.job.drafts,
                             &sp.job.stop_ids,
                             &mut sp.stats,
-                        )
+                        );
+                        if let (Some(_), Ok(step), Some(gap)) = (t0, r.as_ref(), gap) {
+                            spec_steps += 1;
+                            eprintln!(
+                                "spec step {} b={} gap {gap:.3} ms step {:.3} ms \
+                                 draft {:.3} verify {:.3} rollback {:.3} emit {}",
+                                spec_steps,
+                                1 + sp.job.drafts,
+                                (step.draft_s + step.verify_s + step.rollback_s) * 1e3,
+                                step.draft_s * 1e3,
+                                step.verify_s * 1e3,
+                                step.rollback_s * 1e3,
+                                step.ids.len()
+                            );
+                        }
+                        r
                     }
                     None => Err("MTP drafter is not loaded".to_string()),
                 };
