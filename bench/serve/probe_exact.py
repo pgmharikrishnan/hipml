@@ -61,6 +61,8 @@ def run_serve(args, drafts, port):
     """One server, all 16 conversations, in order. Returns [[ids], ...]."""
     cmd = [args.exe, "serve", "--gguf", args.gguf, "--port", str(port),
            "--ctx", str(args.ctx), "--slots", "1", "--prefix-entries", "16"]
+    if args.chunk:
+        cmd += ["--chunk", str(args.chunk)]
     if drafts:
         cmd += ["--mtp", args.mtp, "--drafts", str(drafts)]
     log = open(f"probe_exact_d{drafts}.log", "w")
@@ -94,6 +96,12 @@ def main():
     ap.add_argument("--tokens", type=int, default=128)
     ap.add_argument("--drafts", default="1,2,3")
     ap.add_argument("--port", type=int, default=8093)
+    ap.add_argument("--chunk", type=int, default=None,
+                    help="serve --chunk (default: the server's own default). "
+                         "Pass it to compare a fixed chunk across builds.")
+    ap.add_argument("--dump", default="",
+                    help="write the ids per draft as JSON, so two runs (two "
+                         "chunks) can be diffed id for id")
     a = ap.parse_args()
 
     runs = {}
@@ -104,6 +112,9 @@ def main():
         for i, ids in enumerate(runs[d]):
             print("drafts %d chat %d sha1 %s len %d" % (d, i, sha(ids), len(ids)),
                   flush=True)
+    if a.dump:
+        with open(a.dump, "w", encoding="utf-8") as f:
+            json.dump({str(d): ids for d, ids in runs.items()}, f)
 
     base = runs[0]
     bad = 0

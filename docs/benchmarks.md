@@ -149,11 +149,17 @@ path.
 
 ## Caveats
 
-- **The serve prefill chunk is not the CLI chunk.** `serve_bench.py` pins hipml
-  to `--chunk 256`; llama-server has no chunk knob. hipml's CLI prefill at chunk
-  2048 is 1,346 tok/s, and its one-slot TTFT of 2,500 ms for a 2,423-token
-  prompt implies about 969 tok/s. Do not read the serve TTFT gap as a
-  prefill-quality gap.
+- **The serve prefill chunk is not the CLI chunk.** These serve rows were
+  measured at the server's default `--chunk 256`; the CLI prefills at 2,048.
+  llama-server has no chunk knob and runs `-b 2048 -ub 512`. The tile is the
+  whole TTFT gap: cell a's 2,500 ms for a 2,423-token prompt is 10 tiles, and
+  the same request at `--chunk 2048` is 2,026 ms (+5.5% against llama instead
+  of +30.1%), with b and c unchanged and cell c's peak up 1,229 MiB. The
+  default was not moved because every larger tile flips one greedy id in the
+  16-conversation probe — see
+  [`notes/serve-prefill-chunk.md`](notes/serve-prefill-chunk.md). Do not read
+  the serve TTFT gap as a prefill-quality gap, and do not re-pin the harness to
+  a chunk: it measures the default.
 - **TTFT is not a prefill number.** It includes HTTP, admission, queueing and
   the first token. Only the CLI rows are prefill like-for-like.
 - **Cells b and c run the approximate tile.** hipml's batched path uses the WMMA

@@ -42,6 +42,7 @@ PORT_LLAMA = 8092
 MODEL = None
 MTP = None
 DRAFTS = 1
+CHUNK = None
 HIPML = None
 LLAMA = None
 
@@ -142,8 +143,14 @@ def start_hipml(cell, out_dir):
         cmd += ["--mtp", MTP]
     cmd += ["--port", str(PORT_HIPML),
             "--ctx", str(cell["ctx"]), "--slots", str(cell["slots"]),
-            "--chunk", "256", "--drafts", str(DRAFTS),
+            "--drafts", str(DRAFTS),
             "--prefix-entries", "16", "--prefix-mb", "2048"]
+    # The prefill chunk is a tuned server constant, and this script used to pin
+    # it to 256. That pinned the value under test: a cell measured here could
+    # never show a better default. Leave it unset so the cell measures what a
+    # user gets, and pass --chunk only to sweep the parameter deliberately.
+    if CHUNK:
+        cmd += ["--chunk", str(CHUNK)]
     log = open(os.path.join(out_dir, "server.log"), "w", encoding="utf-8")
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
     return proc, log, cmd, PORT_HIPML
@@ -345,6 +352,9 @@ def main():
     ap.add_argument("--engine", required=True, choices=["hipml", "llama"])
     ap.add_argument("--drafts", type=int, default=1,
                     help="hipml serve --drafts (1..3); ignored for llama")
+    ap.add_argument("--chunk", type=int, default=None,
+                    help="hipml serve --chunk (default: the server's own "
+                         "default, so a cell measures what a user gets)")
     ap.add_argument("--cell", required=True, choices=sorted(CELLS))
     ap.add_argument("--tokens", type=int, default=64)
     ap.add_argument("--reps", type=int, default=0, help="override the cell's wave count")
@@ -364,8 +374,9 @@ def main():
     ap.add_argument("--request-timeout", type=int, default=900)
     args = ap.parse_args()
 
-    global DRAFTS
+    global DRAFTS, CHUNK
     DRAFTS = args.drafts
+    CHUNK = args.chunk
     MODEL = _paths.model(args.model)
     MTP = _paths.mtp_model(args.mtp)
     HIPML = _paths.hipml_exe(args.hipml)
