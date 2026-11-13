@@ -195,10 +195,16 @@ path.
   transfer to it.
 - **`spec-bench` has no llama.cpp counterpart.** Those rows are hipml-only;
   llama.cpp's only MTP evidence here is the one serve cell.
-- **hipml's serve path costs it about 11 tok/s against its own kernel path at
-  d3** (52.32 serve against 63.57 `spec-bench`). Different harness, different
-  chunk, different prompt and a 64-token stream, so this is not a measurement of
-  the serve overhead — it is a warning not to read either number across.
+- **The 52.32 against 63.57 at d3 is the prompt, not the serve path.** Measured
+  like for like, the CLI and the server charge the same step: 52.76 against
+  52.48 tok/s on cell a's own prompt, context, stream length and draft count
+  (ms/step 56.89 against 56.55). `spec-bench`'s 63.57 is a 169-token prompt at
+  a 313-token cache whose acceptance is 0.946/0.829/0.931; cell a's prose
+  accepts 0.818/0.667/0.917 and pays a 32K cache, which is 3.1 and 0.7 of the
+  4.0 ms per token between them. A 64-token stream does not flatter the server
+  either: `ms/step` is identical at 64 and 128, and the CLI loses the same 8
+  tok/s at 64. The full decomposition is in
+  [`notes/mtp.md`](notes/mtp.md#the-one-slot-serve-cell-and-the-cli-like-for-like).
 - **Peak VRAM is whole-process WDDM dedicated usage.** It includes prefill
   scratch (chunk 2048 on the CLI, chunk 256 in serve), the prefix cache and, on
   the MTP rows, the drafter. It is not a weights-versus-KV decomposition.

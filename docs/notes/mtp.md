@@ -464,3 +464,135 @@ binary, and the kernels are byte-identical. Serve cell a — one request at a
 time, 32K context, 5 conversations, 15 requests — lands at 51.84 tok/s p50 with
 0 errors and a 3.12 s TTFT, against 51.91 for the tree it is based on.
 
+## The one-slot serve cell and the CLI, like for like
+
+Cell a reads 52.5 tok/s at drafts 3 where `spec-bench` reads 63.7 on the same
+box, model and KV. The two rows differ in harness, prompt, chunk and stream
+length, so the first question is whether the 11 tok/s is the serve path at all.
+
+It is not. Measured in one lock hold on `6795fce`, UD-Q4_K_M (16,564,259,744 B),
+`mtp-Qwen3.8-27B-Q4_0.gguf`, q8 KV, greedy, drafts 3. The CLI rows are
+`spec-bench --ctx 32768 --chunk 256 --kv q8 --tokens N` on the same prompt ids
+the server tokenizes (`hipml chat --ids-out` on the cell's own messages), one
+process per prompt.
+
+| harness | prompt | ctx | stream | ms/step | tok/step | tok/s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| CLI | p2_math_169 (169) | 313 | 128 | 53.85 | 3.432 | **63.74** |
+| CLI | p2_math_169 | 249 | 64 | 54.13 | 3.000 | 55.42 |
+| CLI | cell a u0 (2,425) | 32,768 | 64 | 56.40 | 2.864 | 50.77 |
+| CLI | cell a u0 | 32,768 | 128 | 57.10 | 2.761 | 48.35 |
+| CLI, 5 cell-a prompts | cell a | 32,768 | 64 | 56.89 | — | 52.76 (median) |
+| serve cell a | cell a | 32,768 | 64 | 56.55 | — | **52.48** |
+| serve cell a | cell a | 32,768 | 128 | — | — | 48.16 |
+
+`tok/step` is not quoted for the server rows: `spec-bench` counts the tokens it
+streams, while the server's counter includes the tokens a step produced past
+`max_tokens`, which the client never sees. Its `ms/step` and the client's tok/s
+are both exact. The 64-token `p2_math` row and the 128-token cell-a row were
+taken on `6795fce` before the measurement hook below existed; the rest on the
+final build, and the two agree — the 5-prompt median is 52.76 against 52.65.
+
+Both directions move the wrong way for the "serve is slow" reading. The CLI at
+a 64-token stream drops to 55.42 on `p2_math` (from 63.74 at 128) and to 50.77
+on the cell-a prompt; serve at a 128-token stream drops to 48.16. **ms/step is
+what the engine charges and it does not move with stream length**: 53.85 against
+54.13 on `p2_math`, 56.40 against 57.10 on the cell-a prompt, 56.55 in the
+server. Only `tok/step` moves, and only because a shorter reply samples a
+different stretch of acceptance.
+
+### The 15.7 against 19.1 ms per token
+
+Per token, at drafts 3: `p2_math` 53.85 / 3.432 = **15.69 ms**; cell a's own
+prompt 56.40 / 2.864 = **19.69 ms** in the CLI and 56.55 / 3.03 = 18.7 in the
+server. Splitting the CLI's 4.00 ms on the same harness (so the difference can
+only be workload):
+
+| item | ms/token | evidence |
+| --- | ---: | --- |
+| 32K cache instead of 313 | 0.74 | 56.40 − 53.85 = 2.55 ms/step |
+| acceptance on this prompt | 3.11 | 53.85 × (1/2.864 − 1/3.432) |
+| interaction | 0.15 | remainder |
+| **serve path** | **0.00** | 56.55 against 56.89 ms/step, −0.1% |
+
+The cell-a prompt accepts 0.818 / 0.667 / 0.917 against `p2_math`'s
+0.946 / 0.829 / 0.931; at a fixed step cost that alone is 3.1 ms per token.
+The 32K cache costs 2.6 ms per step of a four-column verify and 0.5 ms of a
+plain one, which is the split-geometry fix in
+[`serve-ud-batch.md`](serve-ud-batch.md) §7 still holding. Nothing is left for
+the server: **52.48 against 52.76 for the same prompt, context, stream length
+and draft count is 0.5%**, and `spec-bench`'s 63.7 was never a number the serve
+cell could be read against.
+
+### Inside the serve step
+
+`HIPML_SERVE_SPEC_LOG=1` (new, off unless set, the spec counterpart of
+`HIPML_SERVE_STEP_LOG`) prints the step-to-step wall period and the step's own
+draft/verify/rollback buckets. 104 steps over the five requests, 315 streamed
+tokens, one slot, ctx 32,768:
+
+| bucket | ms/step | share |
+| --- | ---: | ---: |
+| draft (3 MTP blocks) | 10.34 | 18.3% |
+| verify (4 columns) | 45.60 | 80.6% |
+| rollback + drafter KV rewrite | 0.61 | 1.1% |
+| scheduler, token channel, HTTP/SSE, detokenise | 0.00–0.10 | ≤0.2% |
+| **step-to-step wall** | **56.55** | |
+
+At 3.03 streamed tokens per step that is 18.7 ms per token, against the client's
+19.05 — the difference is the first token, which prefill produces. The hook is
+inert when unset (`spec_log` is false, so the step takes the same branch it did
+before) and the cell measures 53.07 tok/s with it on against 52.48 with it off,
+the same one-percent run-to-run spread the cell shows between reps.
+
+The gap between consecutive step starts is the step's own buckets to within
+0.1 ms on every request, so the scheduler and the streaming write cost nothing
+measurable. That is the same verdict §7.1 reached for the plain batched step
+(~0.2 ms) and it holds for the speculative one.
+
+### The batched verify against four single-stream launches
+
+The remaining 45.6 ms of verify is the weight pass plus ~7.6 ms of attention,
+GDN chain, norms, head and argmax. `gemv-entries --batch N --reps 20`, one
+launch per tensor over every resident tensor of the format, GPU spans:
+
+| format | GB | b=1 | b=2 | b=3 | b=4 | 4 × b=1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Q4_K | 2.427 | 4.121 | 4.548 | 5.215 | 5.871 | 16.48 |
+| Q5_K | 5.230 | 9.081 | 9.028 | 11.000 | 12.118 | 36.32 |
+| Q6_K | 1.804 | 2.920 | 2.962 | 3.087 | 3.380 | 11.68 |
+| IQ4_XS | 5.696 | 9.310 | 10.351 | 13.479 | 14.649 | 37.24 |
+| IQ4_NL | 0.431 | 0.757 | 0.909 | 0.971 | 1.124 | 3.03 |
+| **sum** | **15.59** | **26.19** | | | **37.14** | **104.75** |
+
+Milliseconds. One b=4 launch costs **37.1 ms against 104.8 ms for four
+single-stream launches** — 2.8x cheaper, 9.3 against 26.2 ms per token. The
+b=4 route is already the fast one; sending the verify through the single-stream
+entries would add ~68 ms to a 56.6 ms step. Every row also reports `0/N differ
+from gemv_*_r1` at b=2, 3 and 4, so the batched entries the verify holds are
+bit-identical to the plain step's.
+
+So the hypothesis that a four-column verify pays a per-step penalty "that has
+nothing to do with drafting" is not supported: the step is 81% verify, the
+verify is 81% weight pass, and the batched weight pass is the cheapest route
+available at four rows. What is left against llama.cpp's 62.33 on the same cell
+is the row scaling of that pass — 37.1 ms at b=4 where the same 15.6 GB reads in
+26.2 ms at b=1, the 10.9 ms excess this note's four-row section already probed
+with five levers and no winner. It is kernel arithmetic, not a dispatch choice,
+and it is out of this slice.
+
+### Measured, on the shipped tree
+
+One lock hold, 3 reps per cell, 64 tokens per request, no drafter for b and c;
+"before" is the line this note's table above records.
+
+| cell | slots | ctx/slot | before | this run | peak VRAM |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| a, plain | 1 | 32,768 | 31.64 | **31.68** | 20,091 MiB |
+| a, drafts 3 | 1 | 32,768 | 52.32 | **52.48** | 20,892 MiB |
+| b | 8 | 16,384 | 132.37 | **132.43** | 24,110 MiB |
+| c | 16 | 8,192 | 222.13 | **223.03** | 25,201 MiB |
+
+Zero request errors; rep spread 0.19 (b), 0.66 (c) and 0.29 (a plain) tok/s.
+The diff adds one measurement hook and no engine change, which is why the cells
+sit on their previous numbers.
