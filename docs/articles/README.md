@@ -13,4 +13,4 @@ headline table is in [`../benchmarks.md`](../benchmarks.md).
 | 05 | [Serving eight sessions on one 32 GB card: 125 tok/s, a 16-slot tie, and a cache that could not keep its promise](05-serving-8-agents-on-one-card.md) | continuous batching, the prefix cache, and the hit that was not the hit asked for |
 | 06 | [What is inside a dynamic quant: nine tensor types in one Q4_K_M file](06-whats-inside-unsloth-dynamic-quants.md) | what the `UD-` label means, the IQ formats, and the residency trap |
 | 07 | [One session, one binary, every axis: four wins, four losses, one tie](07-one-session-every-axis.md) | one window, one build, every axis at once, with the losses in the same table |
-| 08 | [Eight files, six axes, one session — and the axis we lose on all eight](08-eight-files-six-axes-one-session.md) | sixteen files, five speed cells and peak VRAM, with the memory loss on every file that runs |
+| 08 | [Eight files, six axes, one session — and the two axes we lose on every file](08-eight-files-six-axes-one-session.md) | sixteen files, five speed cells and peak VRAM, with the memory loss on every file that runs |
