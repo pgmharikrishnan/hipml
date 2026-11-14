@@ -264,6 +264,12 @@ state rows). Two changes:
   (state row, token) — the state rows are the inner loop, so `expf` was being
   recomputed per row.
 
+The wrapper exists per body, so a new selector needs its own:
+`attn_decode_kv_s2_b` is the same `grid.y`-per-column form around the
+three-heads-per-warp body, added when that body became the q8 selector at a GQA
+group of 8 (`docs/notes/moe.md` §8.12). Without it the verify falls back to one
+launch and one position upload per column and loses 13%.
+
 Measured separately on `column-bench --cols 4` (q8 unless stated):
 
 | stage / measure | before | attention fix only | both fixes |

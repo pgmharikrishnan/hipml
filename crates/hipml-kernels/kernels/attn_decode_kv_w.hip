@@ -311,5 +311,10 @@ KVW_ENTRY(attn_decode_kv_s4, 4, false)
 
 KVW_ENTRY_B(attn_decode_kv_w2_b, 2, true)
 KVW_ENTRY_B(attn_decode_kv_w4_b, 4, true)
+// The three-heads-per-warp body needs the same batched form: a verify pass over
+// several columns must run the body the one-column step runs, or its columns
+// stop matching the plain stream and fall back to one launch and one position
+// upload per column.
+KVW_ENTRY_B(attn_decode_kv_s2_b, 2, false)
 
 #undef KVW_ENTRY_B
