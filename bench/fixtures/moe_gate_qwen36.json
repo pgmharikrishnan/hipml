@@ -1,0 +1,10 @@
+{
+  "format": "hipml-moe-gate/1",
+  "model": "Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf",
+  "model_bytes": 22853663008,
+  "llama_cpp": "llama.cpp build 11820, commit d7725699, rocm-gfx120x",
+  "command": "llama-server -m <file> -ngl 99 -c 4096 --host 127.0.0.1 --port 8092 -np 1; POST /completion {\"prompt\":\"Write a short paragraph about the water cycle.\",\"n_predict\":64,\"temperature\":0.0,\"top_k\":1,\"seed\":0,\"cache_prompt\":false,\"return_tokens\":true}",
+  "prompt": "Write a short paragraph about the water cycle.",
+  "prompt_ids": [7734, 264, 2716, 13901, 883, 279, 2919, 10458, 13],
+  "reference_ids": [271, 248068, 198, 90700, 8340, 25, 271, 16, 13, 220, 2972, 1847, 7355, 279, 5952, 64700, 198, 262, 348, 256, 31819, 25, 9664, 10458, 13, 198, 262, 348, 256, 14606, 25, 10382, 13901, 13, 271, 17, 13, 220, 2972, 27382, 1386, 5141, 73182, 64700, 198, 262, 348, 256, 3437, 369, 279, 2919, 10458, 30, 1049, 579, 279, 18677, 6977, 314, 2919, 383, 11, 3294]
+}

@@ -99,7 +99,7 @@ mod imp {
         }
 
         fn entry(&self) -> Result<&'static str, String> {
-            Ok(crate::stream_entry(match self.kind {
+            Ok(match self.kind {
                 Kind::F32 => "gemv_f32",
                 Kind::Q4K => "gemv_q4_k",
                 Kind::Q6K => "gemv_q6_k",
@@ -111,7 +111,10 @@ mod imp {
                 Kind::IQ4NL => "gemv_iq4_nl",
                 Kind::Q3K => "gemv_q3_k",
                 Kind::IQ3S => "gemv_iq3_s",
-            }))
+                // BF16 is read on the host only; the two BF16 tensors in a
+                // qwen35moe file are MTP router rows, not attention weights.
+                Kind::BF16 => return Err("BF16 has no GEMV kernel".to_string()),
+            })
         }
 
         fn data_bytes(&self) -> &ByteBuffer {

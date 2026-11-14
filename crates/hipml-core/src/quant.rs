@@ -31,6 +31,9 @@ pub const Q6_K_BYTES: usize = 210;
 pub const Q8_0_VALUES: usize = 32;
 /// Bytes per Q8_0 block: d(2) + qs(32).
 pub const Q8_0_BYTES: usize = 34;
+/// Bytes per BF16 value. BF16 is not a block format: one value, two bytes,
+/// the top half of an f32.
+pub const BF16_BYTES: usize = 2;
 /// Values per IQ4_NL block.
 pub const IQ4_NL_VALUES: usize = 32;
 /// Bytes per IQ4_NL block: d(2) + qs(16).
@@ -153,10 +156,31 @@ pub fn f16_to_f32(bits: u16) -> f32 {
     f32::from_bits(out)
 }
 
+/// BF16 bit pattern to f32.
+///
+/// BF16 is the top 16 bits of an f32, so widening is a shift and the low 16
+/// mantissa bits are zero — that is the only rounding the format has.
+/// `ggml_bf16_to_fp32` in upstream `ggml-impl.h` is the same shift.
+pub fn bf16_to_f32(bits: u16) -> f32 {
+    f32::from_bits((bits as u32) << 16)
+}
+
+/// Dequantise one BF16 value (2 bytes -> 1 value).
+///
+/// BF16 has no block structure, so this is the degenerate case of the
+/// `dequant_*` family: one value per call, which is what `dequant_row` and
+/// `dot_row` use for a whole row.
+pub fn dequant_bf16(block: &[u8], out: &mut [f32]) {
+    assert_eq!(block.len(), BF16_BYTES, "BF16 value must be 2 bytes");
+    assert_eq!(out.len(), 1, "BF16 value must produce 1 output");
+    out[0] = bf16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+}
+
 /// A tensor type as it appears in a GGUF tensor-info record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TensorType {
     F32,
+    BF16,
     Q8_0,
     Q3K,
     Q4K,
@@ -181,6 +205,7 @@ impl TensorType {
             20 => TensorType::IQ4NL,
             21 => TensorType::IQ3S,
             23 => TensorType::IQ4XS,
+            30 => TensorType::BF16,
             other => TensorType::Unsupported(other),
         }
     }
@@ -188,6 +213,7 @@ impl TensorType {
     pub fn id(self) -> u32 {
         match self {
             TensorType::F32 => 0,
+            TensorType::BF16 => 30,
             TensorType::Q8_0 => 8,
             TensorType::Q3K => 11,
             TensorType::Q4K => 12,
@@ -203,6 +229,7 @@ impl TensorType {
     pub fn name(self) -> String {
         match self {
             TensorType::F32 => "F32".to_string(),
+            TensorType::BF16 => "BF16".to_string(),
             TensorType::Q8_0 => "Q8_0".to_string(),
             TensorType::Q3K => "Q3_K".to_string(),
             TensorType::Q4K => "Q4_K".to_string(),
@@ -219,6 +246,7 @@ impl TensorType {
     pub fn block_values(self) -> usize {
         match self {
             TensorType::F32 => 1,
+            TensorType::BF16 => 1,
             TensorType::Q8_0 => Q8_0_VALUES,
             TensorType::Q3K
             | TensorType::Q4K
@@ -235,6 +263,7 @@ impl TensorType {
     pub fn block_bytes(self) -> usize {
         match self {
             TensorType::F32 => 4,
+            TensorType::BF16 => BF16_BYTES,
             TensorType::Q8_0 => Q8_0_BYTES,
             TensorType::Q3K => Q3_K_BYTES,
             TensorType::Q4K => Q4_K_BYTES,

@@ -26,6 +26,7 @@ use crate::delta::{ssm_layer_f32, SsmState, SsmW};
 use crate::gguf::Gguf;
 use crate::mat::Mat;
 use crate::mmap::Map;
+use crate::moe::{moe_ffn_f32, DenseFfn, MoeW};
 use crate::ops::{residual_add_f32, rmsnorm_f32};
 
 pub struct FfnW {
@@ -34,10 +35,25 @@ pub struct FfnW {
     pub down: Mat,
 }
 
+impl FfnW {
+    pub fn forward(&self, x: &[f32]) -> Vec<f32> {
+        let gate = self.gate.gemv(x);
+        let up = self.up.gemv(x);
+        let act = crate::ops::silu_mul_f32(&gate, &up);
+        self.down.gemv(&act)
+    }
+}
+
+/// The FFN block: one dense SwiGLU, or the mixture-of-experts FFN.
+pub enum Ffn {
+    Dense(FfnW),
+    Moe(MoeW),
+}
+
 pub struct Layer {
     pub attn_norm: Vec<f32>,
     pub post_norm: Vec<f32>,
-    pub ffn: FfnW,
+    pub ffn: Ffn,
     pub attn: Option<FullAttnW>,
     pub ssm: Option<SsmW>,
 }
@@ -95,14 +111,68 @@ impl Model {
         for i in 0..cfg.n_layer {
             let attn_norm = read_f32_vec(g, &format!("blk.{i}.attn_norm.weight"))?;
             let post_norm = read_f32_vec(g, &format!("blk.{i}.post_attention_norm.weight"))?;
-            let ffn = FfnW {
-                gate: mat(g, &format!("blk.{i}.ffn_gate.weight"))?,
-                up: mat(g, &format!("blk.{i}.ffn_up.weight"))?,
-                down: mat(g, &format!("blk.{i}.ffn_down.weight"))?,
+            let ffn = if cfg.n_expert > 0 {
+                // One matrix per projection with the experts stacked along the
+                // row axis; expert e is the row range e*n_ff_exp.
+                let router = mat(g, &format!("blk.{i}.ffn_gate_inp.weight"))?;
+                let gate_exps = mat(g, &format!("blk.{i}.ffn_gate_exps.weight"))?;
+                let up_exps = mat(g, &format!("blk.{i}.ffn_up_exps.weight"))?;
+                let down_exps = mat(g, &format!("blk.{i}.ffn_down_exps.weight"))?;
+                expect(&router, cfg.n_expert, cfg.n_embd, "ffn_gate_inp")?;
+                expect(
+                    &gate_exps,
+                    cfg.n_expert * cfg.n_ff_exp,
+                    cfg.n_embd,
+                    "ffn_gate_exps",
+                )?;
+                expect(
+                    &up_exps,
+                    cfg.n_expert * cfg.n_ff_exp,
+                    cfg.n_embd,
+                    "ffn_up_exps",
+                )?;
+                expect(
+                    &down_exps,
+                    cfg.n_expert * cfg.n_embd,
+                    cfg.n_ff_exp,
+                    "ffn_down_exps",
+                )?;
+                let shexp = if cfg.has_shexp {
+                    let s = FfnW {
+                        gate: mat(g, &format!("blk.{i}.ffn_gate_shexp.weight"))?,
+                        up: mat(g, &format!("blk.{i}.ffn_up_shexp.weight"))?,
+                        down: mat(g, &format!("blk.{i}.ffn_down_shexp.weight"))?,
+                    };
+                    expect(&s.gate, cfg.n_ff_shexp, cfg.n_embd, "ffn_gate_shexp")?;
+                    expect(&s.up, cfg.n_ff_shexp, cfg.n_embd, "ffn_up_shexp")?;
+                    expect(&s.down, cfg.n_embd, cfg.n_ff_shexp, "ffn_down_shexp")?;
+                    Some(DenseFfn {
+                        gate: s.gate,
+                        up: s.up,
+                        down: s.down,
+                    })
+                } else {
+                    None
+                };
+                Ffn::Moe(MoeW {
+                    router,
+                    gate_inp_shexp: read_f32_vec(g, &format!("blk.{i}.ffn_gate_inp_shexp.weight"))?,
+                    gate_exps,
+                    up_exps,
+                    down_exps,
+                    shexp,
+                })
+            } else {
+                let f = FfnW {
+                    gate: mat(g, &format!("blk.{i}.ffn_gate.weight"))?,
+                    up: mat(g, &format!("blk.{i}.ffn_up.weight"))?,
+                    down: mat(g, &format!("blk.{i}.ffn_down.weight"))?,
+                };
+                expect(&f.gate, cfg.n_ff, cfg.n_embd, "ffn_gate")?;
+                expect(&f.up, cfg.n_ff, cfg.n_embd, "ffn_up")?;
+                expect(&f.down, cfg.n_embd, cfg.n_ff, "ffn_down")?;
+                Ffn::Dense(f)
             };
-            expect(&ffn.gate, cfg.n_ff, cfg.n_embd, "ffn_gate")?;
-            expect(&ffn.up, cfg.n_ff, cfg.n_embd, "ffn_up")?;
-            expect(&ffn.down, cfg.n_embd, cfg.n_ff, "ffn_down")?;
 
             let (attn, ssm) = if cfg.is_recr[i] {
                 let w = SsmW {
@@ -222,11 +292,11 @@ impl Model {
             let x1 = residual_add_f32(&block, &inp);
 
             let t = rmsnorm_f32(&x1, &l.post_norm, cfg.eps);
-            let gate = l.ffn.gate.gemv(&t);
-            let up = l.ffn.up.gemv(&t);
-            let act = crate::ops::silu_mul_f32(&gate, &up);
-            let down = l.ffn.down.gemv(&act);
-            x = residual_add_f32(&down, &x1);
+            let ffn = match &l.ffn {
+                Ffn::Dense(f) => f.forward(&t),
+                Ffn::Moe(m) => moe_ffn_f32(&t, m, cfg),
+            };
+            x = residual_add_f32(&ffn, &x1);
         }
 
         st.pos += 1;

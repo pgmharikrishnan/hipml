@@ -16,14 +16,15 @@ use crate::gguf::Gguf;
 use crate::mmap::Map;
 use crate::quant::{
     dequant_iq3_s, dequant_iq4_nl, dequant_iq4_xs, dequant_q3_k, dequant_q4_k, dequant_q5_k,
-    dequant_q6_k, dequant_q8_0, TensorType, IQ3_S_BYTES, IQ4_NL_BYTES, IQ4_XS_BYTES, Q3_K_BYTES,
-    Q4_K_BYTES, Q5_K_BYTES, Q6_K_BYTES, Q8_0_BYTES, QK_K,
+    dequant_q6_k, dequant_q8_0, TensorType, BF16_BYTES, IQ3_S_BYTES, IQ4_NL_BYTES, IQ4_XS_BYTES,
+    Q3_K_BYTES, Q4_K_BYTES, Q5_K_BYTES, Q6_K_BYTES, Q8_0_BYTES, QK_K,
 };
 
 /// Storage of one matrix, matching the GGUF tensor type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     F32,
+    BF16,
     Q3K,
     Q4K,
     Q5K,
@@ -41,6 +42,7 @@ impl Kind {
     pub fn of(ty: TensorType) -> io::Result<Kind> {
         Ok(match ty {
             TensorType::F32 => Kind::F32,
+            TensorType::BF16 => Kind::BF16,
             TensorType::Q3K => Kind::Q3K,
             TensorType::Q4K => Kind::Q4K,
             // Q5_K was out of scope, but Qwen3.8-27B stores blk.51/55.ffn_down
@@ -63,6 +65,7 @@ impl Kind {
     fn row_bytes(self, cols: usize) -> usize {
         match self {
             Kind::F32 => cols * 4,
+            Kind::BF16 => cols * BF16_BYTES,
             Kind::Q8_0 => cols / 32 * Q8_0_BYTES,
             Kind::IQ4NL => cols / 32 * IQ4_NL_BYTES,
             Kind::Q3K => cols / QK_K * Q3_K_BYTES,
@@ -191,7 +194,24 @@ impl Mat {
     /// Kernel: `gemv_quant_f32`, one block per output row; the host version
     /// splits rows across threads because a full model pass is 17 GB.
     pub fn gemv(&self, x: &[f32]) -> Vec<f32> {
+        self.gemv_range(0, self.rows, x)
+    }
+
+    /// `y[nrows] = W[row0..row0+nrows] · x` — the same arithmetic and the same
+    /// k order as [`Mat::gemv`], over a row range.
+    ///
+    /// A GGML `[ne0, ne1, n_expert]` tensor is `ne1 * n_expert` rows of `ne0`
+    /// values here, with the experts stacked along the row axis, so an expert
+    /// slice is a row range. That is how the MoE reference indexes
+    /// `ffn_{gate,up,down}_exps` without a second tensor type.
+    pub fn gemv_range(&self, row0: usize, nrows: usize, x: &[f32]) -> Vec<f32> {
         assert_eq!(x.len(), self.cols, "gemv: x must be cols");
+        assert!(
+            row0 + nrows <= self.rows,
+            "gemv: rows {row0}..{} beyond {}",
+            row0 + nrows,
+            self.rows
+        );
         let threads = match std::env::var("HIPML_THREADS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -202,11 +222,11 @@ impl Mat {
                 .unwrap_or(1),
         }
         .max(1)
-        .min(self.rows.max(1));
-        let chunk = self.rows.div_ceil(threads);
-        let mut y = vec![0.0f32; self.rows];
+        .min(nrows.max(1));
+        let chunk = nrows.div_ceil(threads);
+        let mut y = vec![0.0f32; nrows];
         std::thread::scope(|scope| {
-            let mut start = 0usize;
+            let mut start = row0;
             for out in y.chunks_mut(chunk) {
                 let s = start;
                 let len = out.len();
@@ -240,6 +260,12 @@ pub fn dequant_row(kind: Kind, bytes: &[u8], out: &mut [f32]) {
                     bytes[i * 4 + 2],
                     bytes[i * 4 + 3],
                 ]);
+            }
+        }
+        Kind::BF16 => {
+            for (i, o) in out.iter_mut().enumerate() {
+                *o =
+                    crate::quant::bf16_to_f32(u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]));
             }
         }
         Kind::Q8_0 => {
@@ -297,6 +323,15 @@ fn dot_row(kind: Kind, bytes: &[u8], cols: usize, x: &[f32]) -> f32 {
                     bytes[i * 4 + 2],
                     bytes[i * 4 + 3],
                 ]);
+                acc += w * v;
+            }
+            acc
+        }
+        Kind::BF16 => {
+            let mut acc = 0.0f32;
+            for (i, v) in x.iter().enumerate() {
+                let w =
+                    crate::quant::bf16_to_f32(u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]));
                 acc += w * v;
             }
             acc

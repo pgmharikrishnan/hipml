@@ -8,6 +8,7 @@
 use std::io::{self, Read, Seek};
 
 use crate::gguf::Gguf;
+use crate::quant::QK_K;
 
 /// Qwen3.5-style hybrid decoder configuration.
 #[derive(Clone, Debug)]
@@ -15,7 +16,25 @@ pub struct Config {
     pub arch: String,
     pub n_layer: usize,
     pub n_embd: usize,
+    /// Dense FFN width. For a mixture-of-experts file, which has no
+    /// `feed_forward_length`, this is `n_ff_exp * n_expert_used`: the widest
+    /// per-token FFN intermediate the decode path stages.
     pub n_ff: usize,
+    /// Routed experts per layer (`expert_count`); 0 for a dense file.
+    pub n_expert: usize,
+    /// Experts each token is routed to (`expert_used_count`); 0 for a dense
+    /// file.
+    pub n_expert_used: usize,
+    /// One expert's FFN width (`expert_feed_forward_length`); 0 for a dense
+    /// file.
+    pub n_ff_exp: usize,
+    /// Shared expert's FFN width (`expert_shared_feed_forward_length`); 0 for a
+    /// dense file.
+    pub n_ff_shexp: usize,
+    /// True when the file carries the shared-expert tensors. llama.cpp detects
+    /// the shared expert by tensor presence (`qwen35moe.cpp`, `ffn_up_shexp !=
+    /// nullptr`), and so does this.
+    pub has_shexp: bool,
     pub n_vocab: usize,
     pub n_head: usize,
     pub n_head_kv: usize,
@@ -75,7 +94,63 @@ impl Config {
         }
         let n_layer = n_layer_total - nextn_layers;
         let n_embd = u("embedding_length")?;
-        let n_ff = u("feed_forward_length")?;
+
+        // A mixture-of-experts file replaces `feed_forward_length` with the
+        // expert keys. The four are read together: a file that declares some
+        // of them and not others is malformed, and the error names the missing
+        // key instead of defaulting a width to zero.
+        const MOE_KEYS: [&str; 4] = [
+            "expert_count",
+            "expert_used_count",
+            "expert_feed_forward_length",
+            "expert_shared_feed_forward_length",
+        ];
+        let declared = MOE_KEYS
+            .iter()
+            .filter(|k| g.meta(&key(k)).is_some())
+            .count();
+        let (n_expert, n_expert_used, n_ff_exp, n_ff_shexp) = if declared == 0 {
+            (0, 0, 0, 0)
+        } else if declared == MOE_KEYS.len() {
+            (
+                u(MOE_KEYS[0])?,
+                u(MOE_KEYS[1])?,
+                u(MOE_KEYS[2])?,
+                u(MOE_KEYS[3])?,
+            )
+        } else {
+            let missing = MOE_KEYS
+                .iter()
+                .find(|k| g.meta(&key(k)).is_none())
+                .expect("a key is missing when the counts differ");
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "GGUF metadata {} is missing: the file declares {declared} of the {} MoE keys",
+                    key(missing),
+                    MOE_KEYS.len()
+                ),
+            ));
+        };
+        // llama.cpp detects the shared expert by tensor presence, not by a
+        // count key; `expert_shared_count` is absent from these files.
+        let has_shexp = n_expert > 0 && g.tensor("blk.0.ffn_up_shexp.weight").is_some();
+
+        let n_ff = if g.meta(&key("feed_forward_length")).is_some() {
+            u("feed_forward_length")?
+        } else if n_expert > 0 {
+            // No dense width to read: the widest per-token FFN intermediate is
+            // the experts the token uses, staged together.
+            n_ff_exp * n_expert_used
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "GGUF metadata {} is missing and the file declares no experts",
+                    key("feed_forward_length")
+                ),
+            ));
+        };
         let n_head = u("attention.head_count")?;
         let n_head_kv = u("attention.head_count_kv")?;
         let head_dim = u("attention.key_length")?;
@@ -135,11 +210,56 @@ impl Config {
             ));
         }
 
+        if n_expert > 0 {
+            if n_expert_used == 0 || n_expert_used > n_expert {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} {} must be 1..={n_expert}",
+                        key("expert_used_count"),
+                        n_expert_used
+                    ),
+                ));
+            }
+            if n_ff_exp == 0 || n_ff_exp % QK_K != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} {n_ff_exp} is not a positive multiple of {QK_K}",
+                        key("expert_feed_forward_length")
+                    ),
+                ));
+            }
+            if n_embd % QK_K != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} {n_embd} is not a multiple of {QK_K}",
+                        key("embedding_length")
+                    ),
+                ));
+            }
+            if has_shexp && n_ff_shexp == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "the file carries a shared expert but {} is 0",
+                        key("expert_shared_feed_forward_length")
+                    ),
+                ));
+            }
+        }
+
         Ok(Config {
             arch,
             n_layer,
             n_embd,
             n_ff,
+            n_expert,
+            n_expert_used,
+            n_ff_exp,
+            n_ff_shexp,
+            has_shexp,
             n_vocab,
             n_head,
             n_head_kv,
