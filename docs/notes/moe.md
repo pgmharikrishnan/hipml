@@ -9,7 +9,7 @@ plus one inline MTP block, 256 experts with 8 used. Every attention and
 gated-delta-net tensor in it is shaped exactly like the 27B's; the FFN is the
 only new thing.
 
-This note covers four slices. The first settled the numerical conventions on the
+This note covers five slices. The first settled the numerical conventions on the
 CPU, before any kernel existed, because four independent conventions (softmax
 domain, top-k order, renormalisation, where the router weight is applied) can
 each leave the ids subtly wrong, and a kernel built on a wrong one is the wrong
@@ -19,19 +19,25 @@ prefill loop — and it is the first time this file produces tokens on the GPU.
 The third measured the file against llama.cpp on the same box (§8.4) and built a
 bandwidth instrument to find why the small expert reads run at a third of the
 large-read rate (§8.5). The fourth replaced the prefill loop with a bucketed
-grouped GEMM, one launch per expert bank per chunk (§7.4, §8.6).
+grouped GEMM, one launch per expert bank per chunk (§7.4, §8.6). The fifth
+settled which of llama.cpp's two published 512-token numbers that kernel should
+be compared against, and swept the tile height to show the padding is not what
+limits it (§8.6).
 
 **Result: the CPU reference reproduces llama.cpp's 64 greedy ids on a fixed
 prompt, 64/64, first try; the device path reproduces the same 64 ids, 64/64, at
-125.76 tok/s decode and 143.99 tok/s prefill, and 2,871 tok/s prefill on the
+125.76 tok/s decode and 143.99 tok/s prefill, and 2,849 tok/s prefill on the
 bucketed path.** Against llama.cpp on the same file, hipml decodes **33.5%
-faster at depth 0 and 24.0% faster at depth 8,192** and prefills at **85% and
-91%** of its rate (§8.6); the 8-slot serve cell is `n/a` because the batched
-engine has no routed FFN. The bandwidth instrument finds the memory
-system can read 0.59 MB at 495 GB/s where the shipped tile gets 182, and
-installing the wider tile is **neutral end to end**, so 150 tok/s stays out of
-reach (§8.5). The file loads: 753 tensors, 0 unsupported, 21.41 GiB resident
-(21.69 GiB with the engine's scratch).
+faster at depth 0 and 24.0% faster at depth 8,192** on the ROCm build and
+prefills at **79%** of its warm 512-token rate and **88%** of its 8,184-token
+rate (§8.6); the 8-slot serve cell is `n/a` because the batched engine has no
+routed FFN. The 4,529.55 tok/s that `llama-bench` reports for the same cell is
+the top of a 29% spread in the harness, not a baseline, and the 3,375.05 this
+note used before charges llama.cpp for its cold first request (§8.6.1). The
+bandwidth instrument finds the memory system can read 0.59 MB at 495 GB/s where
+the shipped tile gets 182, and installing the wider tile is **neutral end to
+end**, so 150 tok/s stays out of reach (§8.5). The file loads: 753 tensors, 0
+unsupported, 21.41 GiB resident (21.69 GiB with the engine's scratch).
 
 ## 1. Two things stopped the file opening
 
@@ -405,7 +411,9 @@ One tile is **64 slots x 128 rows**, 256 threads, 32-value k tiles — the shipp
 `prefill_wmma2.hip` fragment layout and `pf_dequant8` decoders with the row
 indices moved. 64 and not the dense tile's 256 because an expert's run is short:
 at `T = 512` the median run is **5 slots** (§8.6), so a 256-slot tile would
-compute 51× the arithmetic the chunk needs.
+compute 51× the arithmetic the chunk needs. §8.6.2 sweeps 16, 32, 64 and 128 and
+finds 64 optimal — and the reason is not the padding, which a shorter tile would
+cut, but the weight bank each tile has to read.
 
 Per layer, on one chunk:
 
@@ -713,9 +721,11 @@ depth 0 and 24.0% at depth 8,192. Both engines lose speed as the KV cache grows
 prompt token, so prefill re-streamed 2.56 GiB per prompt token. At 147 tok/s that
 is a ~405 GB/s effective stream, the same wall as decode — llama.cpp's grouped
 GEMM reads each expert once per tile instead of once per token. It was a missing
-kernel, not a missing convention, and §8.6 is the kernel: **2,871 and 3,830
-tok/s**, 85% and 91% of the two numbers above. The table is left as it was
-measured, so the delta in this section is the before.
+kernel, not a missing convention, and §8.6 is the kernel: **2,849 tok/s at 512
+and 3,620 at 8,184**. §8.6.1 also re-prices the 3,375 above: it is llama.cpp
+with its cold first request charged, and against its warm 3,588.74 the 512 cell
+is 79%, not 85%. The table is left as it was measured, so the delta in this
+section is the before.
 
 Peak VRAM is 3.9% higher than llama.cpp at both depths:
 
@@ -863,7 +873,21 @@ against the parent's 128.24), because the decode path is untouched.
 
 **Where it landed, against §8.4's llama.cpp.** 2,871 against 3,375.05 is
 **85.1%**, and 3,830 against 4,203.73 is **91.1%**. Both cells are the same
-prompt on both engines, so the ratio is the engine, not the prompt.
+prompt on both engines, so the ratio is the engine, not the prompt. Neither
+figure survives the harness check below. Measured in one lock hold against a
+llama.cpp that is also warm, the same two cells are **2,849 against 3,588.74
+(79.4%)** at 512 and **3,620 against 4,116.16 (88.0%)** at 8,184.
+
+**A control, three hours later.** The same source path, rebuilt and re-measured
+for this slice, reads 2,845–2,849 at 512 (2846.96 / 2844.99 / 2870.45 and
+2856.23 / 2848.59 / 2846.39) and **3,612–3,620** at 8,184 (3612.37 / 3593.95 /
+3619.69 and 3620.32 / 3653.19 / 3597.30). The 512 cell moved 0.9%; the 8,184
+cell moved 5.7%. Nothing in the diff can explain the second — `prefill_moe.hip`
+is byte-identical to the parent commit and the Rust change is a constant, an
+array and a pure function — so it is the box. This box shows a 4–8%
+session-to-session spread for identical source, which is why every comparison in
+this note is within one lock hold and why the sweep below is read for its
+ordering, not its absolute numbers.
 
 The 512 cell is the short one and the reason is measured, not guessed. Every
 expert's run is rounded up to a whole 64-slot tile, and `--bucket-stats` prints
@@ -871,51 +895,207 @@ the factor:
 
 | chunk | distinct experts | slots | runs (min / median / max) | padded | tiles |
 | ---: | ---: | ---: | --- | ---: | ---: |
-| 512 real text | 212 of 256 | 4,088 | 0 / **5** / 163 | 14,784 (**3.62x**) | 231 |
-| 2,048 real text | 252 of 256 | 16,320 | 0 / **31** / 675 | 25,728 (**1.58x**) | 402 |
-| 512 synthetic | 116 of 256 | 4,096 | 0 / 0 / 357 | 10,048 (2.45x) | 157 |
-| 2,048 synthetic | 186 of 256 | 16,384 | 0 / 5 / 1,274 | 24,832 (1.52x) | 388 |
+| 512 real text | 216 of 256 | 4,088 | 0 / **5** / 163 | 15,040 (**3.68x**) | 235 |
+| 2,048 real text | 253 of 256 | 16,320 | 0 / **30** / 674 | 25,920 (**1.59x**) | 405 |
 | 9 (the gate fixture) | 41 of 256 | 72 | 0 / 0 / 5 | 2,624 (**36.44x**) | 41 |
 
-A 512-token chunk has a **median run of 5 slots**: 212 experts each get a whole
-64-slot tile for a handful of rows, so the grouped GEMM does 3.62x the chunk's
-arithmetic. At 2,048 the median run is 31 and the factor falls to 1.58x. That,
-not weight traffic, is what separates the two cells — and it is why the 512 cell
-sits at 85% while 8,192 sits at 91%.
+A 512-token chunk has a **median run of 5 slots**: 216 experts each get a whole
+64-slot tile for a handful of rows, so the grouped GEMM does 3.68x the chunk's
+arithmetic. At 2,048 the median run is 30 and the factor falls to 1.59x. That is
+part of why the 512 cell is the weaker one — but only part, and not the part that
+can be fixed by shrinking the tile, which is what §8.6.2 measured.
 
-The FFN's own rate at 512, from `--prefill-split`: `gemm ffn` is 108.7 ms of a
-182 ms synthetic 512 chunk. 14,784 padded slots x 3,145,728 MACs x 40 layers is
-3.72 TFLOP, so the routed bank runs at **34 TFLOPS** and reads
-212 x 1.9 MB x 40 = 16.1 GB in that 108.7 ms, **148 GB/s**. Neither is a wall on
-this card (95 TFLOPS fp16, ~633 GB/s), which is the same conclusion §8.1 and
-§8.5 reached from the other direction: at these run lengths the tile's padding,
-not the memory system, is the ceiling. The remaining 62 ms of the chunk is the
-dense path's SSM and attention sequence work (`seq ssm` 41.8, `seq attn` 10.0),
-which this slice does not touch.
+The FFN's own rate at 512, from `--prefill-split`: `gemm ffn` is **103.1 ms of a
+190 ms chunk** (§8.6.2). 15,040 padded slots x 3,145,728 MACs x 40 layers is
+3.79 TFLOP, so the routed bank runs at **37 TFLOPS**, and its 235 tiles read
+17.9 GB in that time, **173 GB/s**. Neither is a wall on this card (95 TFLOPS
+fp16, ~633 GB/s), which is the same conclusion §8.1 and §8.5 reached from the
+other direction. §8.6.2 says what the 173 GB/s is — the small-read wall, not the
+padding. The rest of the 190 ms is the dense path (`seq ssm` 41.8, `seq attn`
+10.1, `gemm ssm` 10.5, `elementwise` 6.7, `gemm attn` 3.4), which this slice does
+not touch.
 
 **What the recon got wrong.** Three things, all of them now measured:
 
 1. It priced the grouped GEMM on the dense prefill's 256-token tile. At a median
    run of 5 slots that is 51x the arithmetic; the tile has to be 64, and even
-   then the padding is 3.62x at 512.
+   then the padding is 3.68x at 512.
 2. It assumed the bucket had to compact the activation tile into slot order
    before the GEMM. It does not: `xtok` is a gather index, so the tile is read
    where it lies and the compaction is only the 4,096-entry sort.
-3. It read "each expert is read once per tile" as the win. That is true and it
-   is why 8,192 is at 91%, but at 512 the win is bounded by padding, so a tile
-   change and not a read change is what a faster 512 cell needs.
+3. It read "each expert is read once per tile" as the win. That is the win —
+   §8.6.2 fits 87% of the FFN to the per-tile weight staging — but the same
+   sentence says the padding was never the lever: a shorter tile cuts padding
+   and multiplies tiles, and the sweep finds 64 already optimal.
 
-**A second llama.cpp reference, for honesty.** `llama-bench -ngl 99 -p 512 -n 0
--r 5` on the same box reads **4,529.55 +/- 115.06** for pp512, **3,954.80 +/-
-84.91** for pp512 at depth 8,192, 4,560.51 for pp2048 and 4,361.76 for pp8192,
-against §8.4's 3,375.05 and 4,203.73. The two are not the same measurement:
-`llama-bench` loops over one synthetic prompt with the graph already built, and
-§8.4's protocol is a fresh process per rep on the real fixture, whose cold rep
-it records at 1,528. Against the `llama-bench` figure the 512 cell is 63% and
-the 8,192 cell 88%. The number this note stands behind for the 512 cell is
-**85% of 3,375.05**, because that is the same prompt through the same shape of
-process on both engines; the `llama-bench` figure is recorded so nobody has to
-rediscover that the baseline moves by 34% with the harness.
+### 8.6.1 Which llama.cpp number the 512 cell is against
+
+The 34% is between two llama.cpp harnesses, not between llama.cpp and hipml.
+Same file, same box, same 511-token fixture:
+
+| harness | backend | protocol | tok/s |
+| --- | --- | --- | ---: |
+| `llama-bench -p 512 -r 5` | Vulkan | one process, 5 timed reps | 4,529.55 ± 115.06 (the figure this section used to quote) |
+| `llama-bench -p 512 -r 5`, run five times | Vulkan | one process per run | 3,340 / 3,494 / 3,692 / 3,711 / **4,319 ± 50.58** |
+| `llama-bench -p 512 -r 1`, run fifteen times | Vulkan | fresh process, one timed rep | **3,173.73** (2,965.71–3,197.49) |
+| `llama-server`, 511 ids, q8 | ROCm | fresh process, cold rep | **1,160.01** |
+| `llama-server`, 511 ids, q8 | ROCm | warm, median of five | **3,580.66** |
+| `llama-server`, 511 ids, q8, paired | ROCm | one warm-up + 3 reps, one lock hold with hipml | **3,588.74** (3,249.11 / 3,588.74 / 3,606.67) |
+| `llama-server`, 8,184 ids, q8, paired | ROCm | one warm-up + 3 reps, same hold | **4,116.16** (4,102.63 / 4,123.02 / 4,116.16) |
+| `llama-server`, 511 ids, f16 | ROCm | warm, median of five | 3,643.88 |
+| `llama-server`, 511 ids, q8 | Vulkan | warm, median of five | 3,347.24 |
+| `llama-server`, 512 real-text tokens, q8 | ROCm | warm, median of five | 3,649.35 |
+| `llama-server`, 512 real-text tokens, q8 | Vulkan | warm, median of five | 3,331.59 |
+| `llama-server`, 511 ids, q8, `-ub 128` | ROCm | warm, median of five | 2,189.43 |
+
+Ruled out, one at a time:
+
+* **Cold start.** Real, and 3.1x — but it is 257 ms of a 397 ms first request and
+  it is gone by rep 1. It explains the matrix cell's 1,528 minimum, not the
+  4,529.
+* **Tokenisation and cache init.** 511 ids and 512 real-text tokens agree to 0.3%
+  on both backends (3,580.66 against 3,649.35 on ROCm, 3,347.24 against 3,331.59
+  on Vulkan).
+* **`-b` / `-ub`.** A real lever — `-ub 128` costs 39% on the server and 19% on
+  the bench — but both tools default to `-ub 512`, and `-b 2048 -ub 512` against
+  `-b 2048 -ub 2048` is 3,177 against 3,164, i.e. nothing. It is not the
+  difference.
+* **The fixture length.** `-p 512` generates 512 synthetic tokens and the fixture
+  is 511. That is 0.2%.
+* **Steady-state loop against request overhead.** This one is real, and it runs
+  the other way from the guess: llama-bench's in-process reps are the fast ones
+  (4,319 with a ±50 spread) and a fresh process per rep is 3,174.
+
+What is left is llama.cpp's own spread. Identical `llama-bench` commands, run one
+after another, read 3,340, 3,494, 3,692, 3,711 and 4,319 — a 29% range for a
+command that differs in nothing. The 4,529.55 is the top of that distribution,
+and a single-rep-per-process run never reaches it (3,197.49 in fifteen tries).
+
+**The baseline this note uses for the 512 cell is 3,588.74**: `llama-server`,
+ROCm, the same 511 ids, q8 KV, warm, measured in the same lock hold as the hipml
+number it is compared against (2,848.59, median of three). A separate five-rep
+sweep 1.5 hours earlier read 3,580.66, so the baseline is stable to 0.2% while
+the harness is not. Not 3,375.05 and not 4,529.55. hipml's number is measured
+with the model resident and the graph already built — its first rep and its third
+agree to 0.4% — so charging llama.cpp for the first request's graph build while
+not charging hipml is the asymmetry that makes 3,375 flatter us. 3,588.74 is the
+harsher of the two defensible numbers, so it is the one the claim is made
+against: **hipml is 79.4% of llama.cpp at 512, not 85.1%.** At 8,184 the same
+paired run reads 3,620.32 against 4,116.16, **88.0%**. Against the 4,529.55
+harness figure the 512 cell would be 63%, and that number is recorded here and
+nowhere else in this note.
+
+The same harness check also re-prices the decode win, and it is worth stating
+plainly because it is the other half of §8.4. **llama.cpp's decode rate is a
+backend property on this card**: 94.20–96.50 tok/s on ROCm and **128.95–132.18 on
+Vulkan**, same file, same q8 KV, same prompt. hipml decodes at 128.2. So the
+33.5% "win" at depth 0 is hipml against the ROCm backend, and against the Vulkan
+backend hipml is level. That does not change what §8.4 measured — the ROCm build
+is the one the matrix ran — but it does mean the decode headline is a llama.cpp
+backend difference and should be read as one.
+
+### 8.6.2 The padding is not the ceiling: the tile height, swept
+
+The 512 cell pads 3.68x and the 8,184 cell 1.59x, so the obvious next move is a
+shorter tile. It was built and swept: the same chunk at 16, 32, 64 and 128 slots
+a tile, real text, medians of three, one lock hold. Tile 8 is not representable:
+the tile is `MG_TT` slots and `MG_WT` slots a warp, `MG_WT` is 16, and the kernel
+asserts it is a multiple of 16, so there is no 8-row MMA to build on.
+
+Chunk 512, 511-token prompt:
+
+| tile | tok/s (3 reps) | median | padding | tiles |
+| ---: | --- | ---: | ---: | ---: |
+| 16 | 2020.56 / 2018.43 / 2015.47 | **2,018.43** | 6,064 (1.48x) | 379 |
+| 32 | 2008.82 / 2505.14 / 2388.03 | **2,388.03** | 8,928 (2.18x) | 279 |
+| 64 | 2810.50 / 2820.11 / 2833.61 | **2,820.11** | 15,040 (3.68x) | 235 |
+| 128 | 2594.95 / 2700.28 / 2702.32 | **2,700.28** | 28,160 (6.89x) | 220 |
+
+Chunk 2,048, 8,184-token prompt:
+
+| tile | tok/s (3 reps) | median | padding | tiles |
+| ---: | --- | ---: | ---: | ---: |
+| 16 | 2415.72 / 2416.48 / 2401.32 | **2,415.72** | 18,320 (1.12x) | 1,145 |
+| 32 | 3162.97 / 3129.74 / 3102.78 | **3,129.74** | 20,480 (1.25x) | 640 |
+| 64 | 3994.67 / 3983.35 / 4031.55 | **3,994.67** | 25,920 (1.59x) | 405 |
+| 128 | 4182.73 / 4064.84 / 4026.14 | **4,064.84** | 39,552 (2.42x) | 309 |
+
+The 128 row is from the sweep build, which carried a fourth dispatch path; the
+shipped `--bucket-stats` prices the three heights the shipped binary can run.
+The first rep of a path that has never run reads 2–25% low while the code object
+loads, which is the 2,008 in tile 32's row; the median is taken over all three
+anyway, so that row is if anything understated.
+
+**A shorter tile is 28% slower at 512.** Cutting the padding from 3.68x to 1.48x
+takes the cell from 2,820 to 2,018. The padding was never the ceiling. What is
+the ceiling is the number of tiles, and the run-length distribution says why a
+short tile cannot have few tiles:
+
+| chunk | 1–16 | 17–32 | 33–64 | 65–128 | 129–256 | 257+ |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 512 | **154** | 29 | 18 | 11 | 4 | 0 |
+| 2,048 | 68 | 65 | 63 | 30 | 15 | 12 |
+
+154 of the 216 runs in a 512-token chunk are 16 slots or shorter, with a median
+of 5. Those 154 runs are 154 tiles at any height, so a 16-slot tile buys padding
+and pays tiles: 379 against 235.
+
+`--prefill-split` prices the two ends of the sweep. At 511 tokens, `gemm ffn` is
+**150.4 ms of a 230 ms chunk** at tile 16 (2,185 tok/s) and **103.1 ms of 190 ms**
+at tile 64 (2,728 tok/s). Two points, two unknowns, and one fit that explains
+both:
+
+```
+ffn_ms = 0.383 x tiles + 0.000873 x padded_slots
+```
+
+| tile | tiles x 0.383 | padded x 0.000873 | fitted ffn | measured ffn |
+| ---: | ---: | ---: | ---: | ---: |
+| 16 | 145.2 | 5.3 | 150.5 | 150.4 |
+| 32 | 106.9 | 7.8 | 114.7 | — |
+| 64 | 90.0 | 13.1 | 103.1 | 103.1 |
+| 128 | 84.3 | 24.6 | 108.9 | — |
+
+**87% of the routed FFN is per-tile weight staging and 13% is the padded MMA**, so
+the optimum is where the two terms balance, and it is 64. The model also explains
+the rest of the sweep: 32 is 11% worse than 64 (114.7 against 103.1) and 128 is
+5.6% worse, because 220 tiles x 0.383 ms of staging plus 24.6 ms of padding
+arithmetic is still more than 235 x 0.383 plus 13.1. At 2,048 the two terms
+nearly cancel between 64 and 128 — 405 tiles against 309, but 25,920 padded slots
+against 39,552 — and the measurement agrees: 4,065 against 3,995, +1.7%, inside
+the box's wobble.
+
+Read as a rate, the staging term is 235 tiles x 1.9 MB x 40 layers = 17.9 GB in
+the 103.1 ms, **173 GB/s**. A tile is not expensive because it is a tile; its
+1.9 MB bank is read at a third of what §8.5 measured for a 0.59 MB read. The tile
+height trades those bytes against padded MMA slots and nothing else, which is why
+the fit is a straight line in both — and why the ceiling on this cell is the same
+small-read wall §8.5 found, one level up in size.
+
+**The rule is one height, 64.** No cell needs an adaptive tile: 64 is the fastest
+at 511 tokens in both chunks and within 2% of the best at 8,184, and 128's
+advantage there is smaller than the build-to-build spread the control above
+records. A rule that is not needed is worse than none, so no adaptive rule and no
+`HIPML_MOE_TILE` shipped.
+
+**Merging short runs across experts is not expressible, so it was not built.** A
+16-row MMA reads one weight tile for all 16 slot rows; putting expert A's 5 slots
+and expert B's 5 slots in one tile needs a per-row weight pointer, which is the
+decode GEMV and not the grouped GEMM. The arithmetic would not be unchanged: the
+weight tile would stop being shared across the 16 rows, which is the reason the
+tile exists. The fit above is a floor rather than a shortcut for the same reason —
+the per-tile term *is* the weight read.
+
+**What the sweep changed in the tree: nothing in the kernel.** `prefill_moe.hip`
+on this branch is byte-identical to the parent commit and `MOE_PREFILL_TOKENS` is
+still 64. What shipped is the diagnostic: `--bucket-stats` now prints the
+run-length histogram and the padding at 16, 32 and 64 with the shipped height
+marked, so the tables above can be reproduced from the binary instead of from a
+sweep build. A runtime dispatch over 16/32/64 was built and measured at tile 64:
+2,820 (build A) and 2,932 (build B) against **2,845 for the fixed-tile binary** —
+−0.9% to +3.1%, inside the spread this box shows for identical source, with no
+cell where a shorter tile won. It was not shipped: it costs two more kernel
+variants to buy a measurement that is not there.
 
 **Perplexity.** `ppl` on this file, `--ctx 512 --chunks 4`, is **2.2275** through
 the token loop (unchanged from §8.2) and **2.2263** through the bucketed path, a
@@ -933,13 +1113,16 @@ and `--mtp` passed literally where a drafter is wanted.
 | gate | expected | observed |
 | --- | --- | --- |
 | `moe-gate` CPU (Qwen3.6-35B-A3B) | 64/64 ids | **PASS 64/64**, 0.69 s/token |
-| `moe-gate --device` | 64/64 ids | **PASS 64/64**, 127.39 tok/s, 21.69 GiB |
-| `moe-gate --device --bucket-stats`, `HIPML_MOE_PREFILL_MIN_TOKENS=1` | 64/64 ids, bucketed path | **PASS 64/64**, 196.3 tok/s prefill, 41 of 256 experts |
+| `moe-gate --device` | 64/64 ids | **PASS 64/64**, 126.53 tok/s, 21.69 GiB |
+| `moe-gate --device --bucket-stats`, `HIPML_MOE_PREFILL_MIN_TOKENS=1` | 64/64 ids, bucketed path | **PASS 64/64**, 195.8 tok/s prefill, 41 of 256 experts, 2,624 padded (36.44x) |
 | `oracle-gate` (Qwen3.6-35B-A3B), bucketed chunk 2048 | 20/20 ids | **PASS 20/20** |
 | `row-dequant` | 10 formats exact | **10/10 exact**, 2048/2048 values each |
 | `load` (Qwen3.6-35B-A3B) | 0 unsupported, 256/8/512/512 | **0 unsupported**, 21.41 GiB, 20/20 round-trip, Q8_0 rows exact |
-| `generate --device`, 511-token prompt | tokens on the GPU | **2870.95 tok/s prefill** (146.89 through the token loop), 128.2 tok/s decode |
-| `ppl` (Qwen3.6-35B-A3B) | close to llama | **2.2275** token loop, **2.2263** bucketed, vs 2.2228 (+0.21% / +0.16%) |
+| `gpu-bench`, 511 ids, bucketed | same id as the token loop | **2,849.11 tok/s prefill**, last id 37986 |
+| `gpu-bench`, 511 ids, token loop | same id as the bucketed path | **140.72 tok/s** (was 146.89 when §8.6 was written), last id 37986 |
+| `gpu-bench --bucket-stats`, 511 ids | histogram + padding at 16/32/64 | **216 of 256, 4,088 slots, median 5**, 3.68x at the shipped 64 |
+| `ppl` (Qwen3.6-35B-A3B) | close to llama | **2.2263** bucketed, vs 2.2228 (+0.16%) |
+| MoE decode, depth 0, 200 tokens | 128.2 tok/s | **125.89 tok/s** (7.943 ms/token); the decode path is byte-identical to the parent and §10 already records 125.5 for the same binary |
 
 Dense path, same binary, so the new `Ffn` enum and the row gather did not move
 anything that was already gated:
@@ -951,13 +1134,13 @@ anything that was already gated:
 | greedy 12 ids, stock | `11751 13 198 760 6511 314 9564 369 19241 13 198 760` | identical |
 | `parity --deep` | 74 passed | **74 passed**, 0 failed, 1 skipped (`sample_top_p_f32`) |
 | `parity prefill --deep` | 15 passed | **15 passed**, 0 failed, 0 skipped |
-| `batch-bench --slots 16 --check` | 16/16 on every slot | 16 slots, each **16/16** |
+| `batch-bench --slots 16 --check` | 16/16 on every slot | 16 slots, **all slots reproduce the B=1 path** over the full stream |
 | `spec-bench --drafts 3 --kv q8` | 128/128 exact every row | **128/128** on all four rows |
 | `spec-bench --drafts 3 --kv f32` | 128/128 exact every row | **128/128** on all four rows |
 | `column-bench --check` | 0 differ | **0 differ** on 7,946,240 logits, hidden and residual |
 | `probe_exact.py --ctx 32768` | PASS | PASS, 48 replies id-for-id across drafts 1,2,3 |
 | `ppl` (Arete-27B) | 2.1824 vs llama 2.1791 | **2.1824**, unchanged |
-| dense decode, depth 0, 200 tokens | ~33.2 tok/s | **33.47 tok/s** (29.879 ms/token) |
+| dense decode, depth 0, 200 tokens | ~33.2 tok/s | **33.36 tok/s** (29.976 ms/token) |
 | `cargo test --workspace` | clean | **98 passed, 0 failed** (local and on the GPU host) |
 | `cargo fmt --all -- --check` | clean | clean |
 | `scripts/check-public-tree.sh` | clean | clean |
@@ -972,13 +1155,17 @@ dense forward pass.
 * **MTP.** `blk.40` is a MoE block and `mtp.rs:129-131` requires a dense
   `ffn_gate`, so the drafter cannot load this file. The two BF16 tensors are
   MTP-only; the type exists so the file opens, not so the block runs.
-* **Grouped GEMM / bucketed prefill: shipped, at 85% and 91% of llama.cpp.**
-  §7.4 and §8.6 are the path and the numbers. What is left out of scope here:
-  a 32-slot tile (it would cut the 3.62x padding at 512 and halve the WMMA row
-  count, so it is a tile experiment, not a read one), a fused gate/up launch
-  (two launches and two weight streams per expert now), and the dense path's
-  `seq ssm` 41.8 ms of a 512-token chunk, which is 23% of that cell and belongs
-  to the SSM note.
+* **Grouped GEMM / bucketed prefill: shipped, at 79% of llama.cpp's warm 512
+  cell.** §7.4 and §8.6 are the path and the numbers; §8.6.1 is why the baseline
+  is 3,588.74 and not 3,375.05 or 4,529.55, and §8.6.2 is the tile sweep. What is
+  left out of scope here: the tile height, which the sweep left at 64; a fused
+  gate/up launch (two launches and two weight streams per expert now); and the
+  dense path's `seq ssm` 41.8 ms of a 512-token chunk, which is 23% of that cell
+  and belongs to the SSM note.
+* **The 512 cell's next lever is the bank read, not the tile.** §8.6.2 prices the
+  per-tile staging at 173 GB/s for a 1.9 MB bank, against the 495 GB/s §8.5
+  measured for 0.59 MB. Re-tiling the grouped GEMM's *read* — not its MMA — is
+  the open item, and nothing in this slice touched it.
 * **No fusion is retained, and no tile change either.** Four node-count
   reductions were built and measured (§8.1) and all four were reverted: they
   removed 40 to 90 launches and did not move the token. The instruments that
