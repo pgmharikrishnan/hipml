@@ -189,15 +189,10 @@ extern "C" __global__ void moe_topk_f32(
     }
 }
 
-// One GEMV per selected expert, one launch: `grid.y` is the rank, `grid.x` the
-// row tile inside that expert's matrix.
-//
-// This is `gemv_jobs.hip` with the job's weight pointer resolved on the device:
-// the rank's expert id is only known after `moe_topk_f32`, so the base is
-// `w + ids[j] * stride` and the whole launch is capturable. `x_stride` is 0 for
-// gate/up (every rank reads the same activation row) and `n_ff_exp` for down
-// (rank j reads its own expert's SwiGLU output).
-extern "C" __global__ void moe_gemv(
+// One rank's row tile: resolve the expert on the device and run the tile body.
+// `j` is the top-k rank, `tile` the row tile inside that expert's matrix, and
+// `grid_x` the number of tiles the launch covers (the Q8_0 body strides by it).
+static __device__ __forceinline__ void moe_gemv_tile(
     const unsigned char* __restrict__ w,
     const int* __restrict__ ids,
     long long stride,
@@ -206,11 +201,11 @@ extern "C" __global__ void moe_gemv(
     float* __restrict__ y,
     int m,
     int k,
-    int kind)
+    int kind,
+    int j,
+    int tile,
+    int grid_x)
 {
-    const int j = blockIdx.y;
-    const int tile = blockIdx.x;
-
     const unsigned char* wj = w + (long long)ids[j] * stride;
     const float* xj = x + (long long)j * x_stride;
     float* yj = y + (long long)j * m;
@@ -233,7 +228,7 @@ extern "C" __global__ void moe_gemv(
         q5k_rows(wj, xj, yj, m, k, sx, tile);
         break;
     case MOE_GJ_Q80:
-        for (int row = tile; row < m; row += gridDim.x) {
+        for (int row = tile; row < m; row += grid_x) {
             q80_row(wj, xj, yj, m, k, row);
         }
         break;
@@ -241,6 +236,57 @@ extern "C" __global__ void moe_gemv(
         iq4x_tile<MOE_IQ4X_RPW>(wj, xj, yj, m, k, sx, scb, tile);
         break;
     }
+}
+
+// One GEMV per selected expert, one launch: `grid.y` is the rank, `grid.x` the
+// row tile inside that expert's matrix.
+//
+// This is `gemv_jobs.hip` with the job's weight pointer resolved on the device:
+// the rank's expert id is only known after `moe_topk_f32`, so the base is
+// `w + ids[j] * stride` and the whole launch is capturable. `x_stride` is 0 for
+// gate/up (every rank reads the same activation row) and `n_ff_exp` for down
+// (rank j reads its own expert's SwiGLU output).
+extern "C" __global__ void moe_gemv(
+    const unsigned char* __restrict__ w,
+    const int* __restrict__ ids,
+    long long stride,
+    const float* __restrict__ x,
+    long long x_stride,
+    float* __restrict__ y,
+    int m,
+    int k,
+    int kind)
+{
+    moe_gemv_tile(w, ids, stride, x, x_stride, y, m, k, kind, blockIdx.y,
+                  blockIdx.x, gridDim.x);
+}
+
+// The batched decode step: `grid.z` is the slot, so one launch serves every
+// slot's top-k ranks. Slot `s` reads its own ids (`ids + s * gridDim.y`), its
+// own activation row (`x + s * x_slot`) and writes its own output
+// (`y + s * y_slot`); the tile body is `moe_gemv`'s, unchanged, so slot `s` is
+// the same arithmetic the single-sequence path runs for that slot.
+//
+// `x_slot` is `n_embd` for gate/up and `n_used * n_ff_exp` for down, where each
+// rank reads its own expert's SwiGLU row; `y_slot` is `n_used * m`.
+extern "C" __global__ void moe_gemv_batch(
+    const unsigned char* __restrict__ w,
+    const int* __restrict__ ids,
+    long long stride,
+    const float* __restrict__ x,
+    long long x_stride,
+    long long x_slot,
+    float* __restrict__ y,
+    long long y_slot,
+    int m,
+    int k,
+    int kind)
+{
+    const int slot = blockIdx.z;
+    moe_gemv_tile(w, ids + (long long)slot * gridDim.y, stride,
+                  x + (long long)slot * x_slot, x_stride,
+                  y + (long long)slot * y_slot, m, k, kind, blockIdx.y,
+                  blockIdx.x, gridDim.x);
 }
 
 // `y[i] = ((w[0]*d[0][i] + w[1]*d[1][i]) + w[2]*d[2][i]) + …`, a left fold in

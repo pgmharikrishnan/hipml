@@ -742,12 +742,14 @@ request, three reps:
 | llama.cpp | 379.0 | 47.5 | 324 ms | 23,548 MiB |
 | hipml | **n/a** | — | — | 22,542 MiB |
 
-hipml's cell is `n/a` for a reason in the engine, not a missing measurement:
-`BatchEngine::new` refuses a MoE file — *"batch decode has no MoE FFN yet (256
-experts, 8 used): the batched engine runs a dense FFN per block; the
-single-sequence decode path does have the expert gather"* — so all 24 requests
-fail and there is nothing to compare. llama.cpp's cell fits (23,548 MiB of
-31.86 GiB) and is the number an 8-slot MoE server would have to beat.
+hipml's cell was `n/a` when this section was written, for a reason in the engine,
+not a missing measurement: `BatchEngine::new` refused a MoE file — *"batch decode
+has no MoE FFN yet (256 experts, 8 used): the batched engine runs a dense FFN per
+block; the single-sequence decode path does have the expert gather"* — so every
+request failed and there was nothing to compare. §8.7 is the batched FFN that
+removed the refusal, and the cell measured against llama.cpp's faster backend:
+**355.9 tok/s aggregate, 3.7% below the Vulkan build in the same hold and 6.1%
+below the 379.0 above.**
 
 ### 8.5 The bandwidth wall, measured
 
@@ -1104,6 +1106,180 @@ bucketed path is 20/20, and `moe-gate --device` with the path forced onto its
 9-token prompt is 64/64 with the routing diff at 34 identical / 3 rank-order /
 3 set-difference against the token loop's 30 / 8 / 2.
 
+### 8.7 Serving a mixture of experts
+
+§8.4's serve cell was `n/a` because `BatchEngine::new` refused a MoE file
+outright: every request failed before the model was reached and there was
+nothing to compare. This section is the batched FFN that removed the refusal,
+and what the cell measures now.
+
+#### 8.7.1 The batched step is the decode gather with the slot on `grid.z`
+
+`moe_gemv` already resolves `w + ids[j] * stride` on the device, so a batch needs
+one more index, not another body: `moe_gemv_batch` is `moe_gemv`'s tile function
+with `grid.z` as the slot. Slot `s` reads its own ids (`ids + s * gridDim.y`),
+its own activation row (`x + s * x_slot`) and writes its own output
+(`y + s * y_slot`); the dequant, the dot and the fold are `moe_gemv_tile`, shared
+by both kernels, so there is no second copy of the arithmetic to drift. The ids
+stay on the device, so the step is still capturable.
+
+The rest of the block follows the same rule. The router and the shared expert's
+gate dot are f32, so they take `gemv_f32_b` (`Proj::gemm_batched_f32`), whose
+reduction is `gemv_f32`'s; the shared expert's three block-format projections
+take the exact `_b` GEMV (`Proj::gemm_batched`); the top-k, the combine and the
+shared add are the `_rows` kernels the prefill tile already uses, one row per
+slot. `MoeBatch` is one scratch set shared by every layer, slot-major, sized
+`[slots * n_used]` rows for the routed tiles and `[slots]` for the per-slot
+scalars. `weight_bytes` counts what actually streams: the router and the shared
+expert once, the routed banks once per slot per rank.
+
+The rows path shares one body: `MoeBlock::forward_rows` is the bucketed grouped
+GEMM over any `[n_tok][n_embd]` tile, and both the prompt chunk and the
+multi-sequence row block call it, so a batched prefill and a single prompt cannot
+drift apart.
+
+Speculative verify is the one place with no MoE body: `verify.rs` returns
+`speculative verify has no MoE FFN (MTP is dense-only)`, because the drafter for
+this file does not load (§10).
+
+There was a second blocker behind the first, and it was not in the engine:
+`chat.rs` required every marker in a chat template, and Qwen3.6's template has no
+`reasoning_instructions`, so every request 400'd before the model was reached.
+`render` now treats that one marker as optional and emits no reasoning block when
+it is absent; every other marker is still required, so a template that is missing
+anything else still fails loudly. `cargo test -p hipml-core --test chat_render`
+is 9 passed.
+
+#### 8.7.2 Both shapes were measured, and the gather won
+
+A batch can route its FFN two ways: gather each slot's top-k experts (one launch
+per bank, `grid.z` = slot, an expert read once per slot per rank) or bucket all
+`slots * n_used` rows by expert and run the prefill's grouped GEMM over them (a
+distinct expert read once). The second reuses `MoeBlock::forward_rows` and was
+built and measured first, because "read each expert once" is what wins on a
+prompt.
+
+B=8, 32 tokens, a distinct stream per slot, the WMMA tile on (what `serve` runs
+at B≥4), one lock hold:
+
+| FFN shape | aggregate tok/s | ms/step | FFN stage of the step |
+| --- | ---: | ---: | ---: |
+| per-slot gather (`grid.z = B`) | **425.86** | **18.79** | 14.02 ms |
+| bucket across slots (grouped GEMM) | 217.50 | 36.78 | 31.66 ms |
+
+Both rows are one hold on one tree, which is why the bucket row exists at all; on
+the shipped tree (the bucket route removed) the gather cell re-measures at 422.47
+tok/s and 18.94 ms/step, the same path inside this box's spread.
+
+The bucket route is 1.96× slower here, and the reason is §8.6.2's: 8 slots × 8
+ranks is 64 rows over 256 experts, so the bucket is 41–64 runs of one or two
+rows and the tile pads each of them to 64. A 9-token prompt already pads 36.44×;
+64 scattered rows pad worse, and the grouped GEMM pays for it in tiles instead of
+in reads. The gather's 2.56 GiB × slots is a dense stream per bank, which is the
+shape this card's bandwidth likes. The bucket route is not behind a flag: it was
+removed from the tree, and the numbers above are the whole of it.
+
+#### 8.7.3 Scaling
+
+`batch-bench --gguf <moe> --slots B --tokens 32`, the same token in every slot,
+the exact `_b` dispatch (no `HIPML_BATCH_SKINNY`):
+
+| B | aggregate tok/s | ms/step | per stream |
+| ---: | ---: | ---: | ---: |
+| 1 | 125.88 | 7.94 | 125.88 |
+| 2 | 155.09 | 12.90 | 77.54 |
+| 4 | 172.15 | 23.24 | 43.04 |
+| 8 | 197.88 | 40.43 | 24.74 |
+| 16 | 203.46 | 78.64 | 12.72 |
+
+With the WMMA tile (`HIPML_BATCH_SKINNY=1`, which is what `serve` sets at B≥4):
+B=8 419.05, B=16 533.72, and B=8 on distinct streams 422.47. The exact path is
+the one the id gate runs; the tile is the one the server runs. At B=16 the exact
+step streams 11.13 GiB at 152 GB/s, against 2.56 GiB at 346 GB/s at B=1: the
+gather reads each expert once per slot, so the bytes grow with B and the wall
+§8.5 measured is what the growth meets.
+
+#### 8.7.4 Cell b, against the faster backend
+
+Cell b is 8 slots at 16K context, a 2,384-token prompt, 64 tokens a request,
+three reps, one lock hold, warm. The card's rule is llama.cpp's faster backend
+per cell, so the baseline here is the Vulkan build; §8.4's 379.0 was the ROCm
+build for the same cell and is quoted too, because it is the number the note
+priced.
+
+| engine | aggregate tok/s p50 (best rep) | per-stream p50 | TTFT p50 | peak VRAM |
+| --- | ---: | ---: | ---: | ---: |
+| llama.cpp Vulkan | 369.71 (369.94) | 46.29 | 190.0 ms | 22,971 MiB |
+| hipml | 355.93 (356.11) | 49.27 | 232.6 ms | 25,213.5 MiB |
+| llama.cpp ROCm | 328.86 (361.89) | 47.20 | 256.8 ms | 23,548 MiB |
+
+**hipml serves this file at 355.9 tok/s aggregate: 3.7% below the faster backend
+in the same hold and 6.1% below 379.0.** It is above the ROCm build's median by
+8.2%, though not above its best rep (361.9), which is why the cell is priced
+against the backend that is faster on its median. Per stream it is ahead of both
+(49.27 against 46.29 and 47.20) because the aggregate is spread over eight
+requests that finish at different times, and it pays for that in TTFT (232.6 ms
+against 190.0, +22.4%) and in VRAM (+9.8% over Vulkan, +7.1% over ROCm — the
+25,213.5 MiB is the routed FFN's scratch, `[slots * n_used]` tiles for 8 slots,
+on top of the dense path's).
+
+Nothing was tuned after the number was known: the cell is the engine as the gates
+left it, with `HIPML_BATCH_SKINNY` set by `serve` exactly as it is for a dense
+file. The spread across the three reps is 0.05% on hipml and 0.06% on Vulkan, so
+the 3.7% is the engine, not the box.
+
+#### 8.7.5 The per-slot id gate, and where it stops
+
+`batch-bench --check` replays a distinct token stream per slot through the
+batched engine and each slot's own stream through the single-sequence engine, and
+requires every id to match. `--sweep` rebuilds the engine at B = 1..=slots and
+replays each width, so a bug that only shows at one width cannot hide behind the
+capacity the benchmark happened to run at. On a dense file that gate passes at 16
+slots. On this file:
+
+| width | tokens | result |
+| --- | ---: | --- |
+| B=1..4, `--sweep` | 32 | every slot 32/32 |
+| B=5..16, `--sweep` | 16 | **slot 4 step 13: batch 382 vs single 290**, 15 of 16 slots clean; the same width at 32 tokens also breaks slot 15 at step 27 (362 vs 64) |
+
+The routed FFN is not the cause, and `--diff-slot` shows where it is. Feeding one
+slot's stream through both engines and diffing the whole logit vector per step
+(Qwen3.6-35B-A3B, B=5, slot 4):
+
+| step | logits differing (of 248,320) | max abs d | batch top | single top |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 0 | 0 | 470 | 470 |
+| 1 | 244,744 | 4.4e-5 | 198 | 198 |
+| 4 | 248,318 | 8.2e-2 | 279 | 279 |
+| 13 | 248,319 | 1.3e-1 | 382 | 290 |
+
+Step 0 is bit-identical: the embedding, 40 layers of routed FFN on the batch's own
+scratch, the final norm and the lm_head all reproduce the single-stream path
+exactly. Step 1 is the first step where a per-slot state is read (two keys in the
+cache, one SSM step) and it already differs by 4.4e-5, so the seed is upstream of
+the FFN. That is by design, not a bug in the gather: from B=2 the batched
+attention is the staged `_b` split-K over the cache stride, while the single
+stream uses the whole-group warp kernel at this file's head_dim — `batch_launch.rs`
+says so at its `one` branch, where the two engines share a kernel only at one
+slot (`HIPML_ATTN_STAGED` forces even that one onto the staged path).
+
+A dense file shows the same seed and does not care: Qwen3.8-27B at B=5 differs by
+2.2e-3 at step 1 and still matches 8/8 ids, Arete-27B by 2.6e-5. A MoE file
+amplifies it, because 4.4e-5 of router input is enough to reorder the last rank
+(§8.3 already reports 8 of 40 layers doing that between the CPU and GPU
+references), and one flip puts the two streams 8.2e-2 apart by step 4. From there
+it is a race between the divergence and the top-2 margin: at step 13 the margin
+is 2.6e-2 against the single stream's 8.1e-2, and the argmax flips.
+
+So the gate's honest statement: **the batched FFN is exact per slot — step 0 runs
+every layer of it on the batch's own scratch and is bit-identical, and
+`gemv-check` on the shared expert's three projections is 0 differ at 16 columns
+(8,192 / 8,192 / 32,768 values) — but the end-to-end per-slot id gate holds only
+at B=1..4, because from B=2 the batched step is not the single-stream step.**
+Making it hold at B=16 means giving the batch back its attention kernel, which is
+the batched engine's whole point on a dense file; that is the owner's call, and
+it is written here rather than papered over with a narrower gate.
+
 ## 9. Gates
 
 On the binary this branch ships, `--features hip`, model paths passed with
@@ -1122,7 +1298,12 @@ and `--mtp` passed literally where a drafter is wanted.
 | `gpu-bench`, 511 ids, token loop | same id as the bucketed path | **140.72 tok/s** (was 146.89 when §8.6 was written), last id 37986 |
 | `gpu-bench --bucket-stats`, 511 ids | histogram + padding at 16/32/64 | **216 of 256, 4,088 slots, median 5**, 3.68x at the shipped 64 |
 | `ppl` (Qwen3.6-35B-A3B) | close to llama | **2.2263** bucketed, vs 2.2228 (+0.16%) |
-| MoE decode, depth 0, 200 tokens | 128.2 tok/s | **125.89 tok/s** (7.943 ms/token); the decode path is byte-identical to the parent and §10 already records 125.5 for the same binary |
+| MoE decode, depth 0, 200 tokens | 128.2 tok/s, unchanged | **128.50 tok/s** (7.782 ms/token); the single-sequence decode path is untouched by this slice, and the 125.89 recorded here before is the same path on a slower run |
+| `gpu-bench`, 511 ids, chunk 512 | 2,849 tok/s | **2,853.14 tok/s**, last id 248046 |
+| `gpu-bench`, 8,184 ids, chunk 2048 | 3,620 tok/s | **3,777.16 tok/s**, last id 284 |
+| `batch-bench --slots 4 --tokens 32 --check --sweep` | every slot, every width | **B=1..=4 all reproduce the B=1 path** (4 slots × 32 ids) |
+| `batch-bench --slots 16 --tokens 16 --check --sweep` | every slot, every width | **15 of 16 slots; slot 4 step 13 (382 vs 290)** — §8.7.5 |
+| serve cell b, 8 slots | llama.cpp's faster backend, same hold | **355.9 tok/s** against Vulkan 369.7 (−3.7%) and 379.0 (−6.1%); §8.7.4 |
 
 Dense path, same binary, so the new `Ffn` enum and the row gather did not move
 anything that was already gated:
@@ -1140,7 +1321,7 @@ anything that was already gated:
 | `column-bench --check` | 0 differ | **0 differ** on 7,946,240 logits, hidden and residual |
 | `probe_exact.py --ctx 32768` | PASS | PASS, 48 replies id-for-id across drafts 1,2,3 |
 | `ppl` (Arete-27B) | 2.1824 vs llama 2.1791 | **2.1824**, unchanged |
-| dense decode, depth 0, 200 tokens | ~33.2 tok/s | **33.36 tok/s** (29.976 ms/token) |
+| dense decode, depth 0, 200 tokens | ~33.2 tok/s | **33.44 tok/s** (29.90 ms/token) |
 | `cargo test --workspace` | clean | **98 passed, 0 failed** (local and on the GPU host) |
 | `cargo fmt --all -- --check` | clean | clean |
 | `scripts/check-public-tree.sh` | clean | clean |
@@ -1180,10 +1361,13 @@ dense forward pass.
   `drop` argument to `MoeBlock::forward`; with nothing dropped it issues the
   same launches in the same order, and the token is byte-identical to the
   parent commit.
-* **Batch/serve and `column-bench`.** Both refuse a MoE file up front, naming
-  the reason: neither has a routed FFN body. The single-sequence decode path is
-  the one that does. This is why §8.4's 8-slot serve cell is `n/a` rather than a
-  measurement, and it is the first thing an 8-slot MoE server needs.
+* **Batch/serve.** The batched decode engine now serves a MoE file (§8.7): the
+  routed FFN runs as one gather launch per bank with the slot on `grid.z`, and
+  `column-bench` still refuses a MoE file, naming the reason. The per-slot id
+  gate holds at B=1..4 and not above, because the batched step is not the
+  single-stream step from B=2 (the batched attention kernel is a different one,
+  by design) and routing amplifies the difference — §8.7.5 is the measurement
+  and the decision that is owed.
 * **The bandwidth instrument prices reads, not kernels.** `bw-probe` has no
   dequant and no dot, so its 0.59 MB number is a ceiling the token never pays.
   §8.5's neutral A/B is the evidence that the two are not the same question. The

@@ -192,7 +192,15 @@ pub fn render(
         return Err(ChatError::BadConversation("no messages provided".into()));
     }
 
-    let reasoning = reasoning_instructions(opts)?;
+    let reasoning = if template.contains("reasoning_instructions") {
+        reasoning_instructions(opts)?
+    } else {
+        // A template with no reasoning-instruction branch cannot render one:
+        // emitting a system block the model was never trained to see would be
+        // wrong, so this template gets none. Qwen3.6's is Qwen3.8's template
+        // minus that branch; every other marker below is the same.
+        String::new()
+    };
     let contents: Vec<String> = messages
         .iter()
         .map(Message::content_text)
@@ -350,10 +358,13 @@ pub fn tojson(raw: &str) -> String {
 /// Reject a template this renderer was not written against. The markers are
 /// the branch points used above; they are all present in the Qwen3.8 template
 /// and absent from a plain ChatML template.
+///
+/// `reasoning_instructions` is the one optional marker: it is Qwen3.8's system
+/// reasoning block, and a template without that branch (Qwen3.6) has no block
+/// to emit. [`render`] checks for it separately and renders none when absent.
 fn validate_template(template: &str) -> Result<(), ChatError> {
     let required = [
         "render_content",
-        "reasoning_instructions",
         "preserve_thinking",
         "add_generation_prompt",
         "<|im_start|>",

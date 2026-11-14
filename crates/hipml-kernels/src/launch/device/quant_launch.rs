@@ -249,6 +249,54 @@ impl Launcher {
         kernel.launch(LaunchConfig::per_row(m, 256), stream, &mut params)
     }
 
+    /// `gemv_f32` over `rows` x-vectors: `y[t][row] = W[row]·x[t]`, one launch
+    /// for the whole batch (`gemv_f32_b`, slot on `grid.y`).
+    ///
+    /// The reduction is `gemv_f32`'s — the same 256-thread strided sum and the
+    /// same block-wide tree — so row `t` is bit-identical to the single-row
+    /// launch. It exists for the f32 projections a batched MoE FFN reads (the
+    /// router and the shared expert's gate dot), which have no block-format
+    /// `_b` kernel. `HIPML_BATCH_F32_LEGACY=1` restores the per-row loop.
+    pub fn gemv_f32_rows(
+        &self,
+        w: &ByteBuffer,
+        x: &Buffer,
+        y: &Buffer,
+        m: usize,
+        k: usize,
+        rows: usize,
+    ) -> Result<(), String> {
+        if rows > 1 && std::env::var_os("HIPML_BATCH_F32_LEGACY").is_none() {
+            let kernel = self.module.kernel("gemv_f32_b")?;
+            let mut p_w = w.as_ptr();
+            let mut p_x = x.as_ptr();
+            let mut p_y = y.as_ptr();
+            let mut v_m = m as i32;
+            let mut v_k = k as i32;
+            let mut v_xs = k as i32;
+            let mut params: [*mut c_void; 6] = [
+                &mut p_w as *mut _ as *mut c_void,
+                &mut p_x as *mut _ as *mut c_void,
+                &mut p_y as *mut _ as *mut c_void,
+                &mut v_m as *mut _ as *mut c_void,
+                &mut v_k as *mut _ as *mut c_void,
+                &mut v_xs as *mut _ as *mut c_void,
+            ];
+            let cfg = LaunchConfig {
+                grid: (m as u32, rows as u32, 1),
+                block: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            return kernel.launch(cfg, &self.stream, &mut params);
+        }
+        for r in 0..rows {
+            let px = unsafe { (x.as_ptr() as *mut u8).add(r * k * 4) };
+            let py = unsafe { (y.as_ptr() as *mut u8).add(r * m * 4) };
+            self.run_quant_resident_ptr("gemv_f32", w, px as *mut c_void, py as *mut c_void, m, k)?;
+        }
+        Ok(())
+    }
+
     /// Frozen-weight variant of `run_quant_reps`: `w` is already resident in
     /// VRAM, so only x is copied. This is the per-token vocabulary cost.
     pub fn run_quant_resident_reps(
