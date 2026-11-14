@@ -26,7 +26,7 @@ use crate::delta::{ssm_layer_f32, SsmState, SsmW};
 use crate::gguf::Gguf;
 use crate::mat::Mat;
 use crate::mmap::Map;
-use crate::moe::{moe_ffn_f32, DenseFfn, MoeW};
+use crate::moe::{moe_ffn_routed, DenseFfn, MoeW, Route};
 use crate::ops::{residual_add_f32, rmsnorm_f32};
 
 pub struct FfnW {
@@ -273,6 +273,29 @@ impl Model {
     /// [`Model::forward_token`] without the head: the residual stream after
     /// the last block, before `output_norm`. The MTP drafter reads this.
     pub fn forward_hidden(&self, token: u32, st: &mut State) -> Vec<f32> {
+        self.forward_hidden_routed(token, st, &mut Vec::new())
+    }
+
+    /// [`Model::forward_hidden`], also recording every layer's router decision.
+    ///
+    /// `routes` is appended to, one entry per MoE layer in block order; a dense
+    /// file appends nothing. This is the CPU side of the layer-by-layer routing
+    /// gate in `moe-gate --device`.
+    pub fn forward_hidden_routes(
+        &self,
+        token: u32,
+        st: &mut State,
+        routes: &mut Vec<Route>,
+    ) -> Vec<f32> {
+        self.forward_hidden_routed(token, st, routes)
+    }
+
+    fn forward_hidden_routed(
+        &self,
+        token: u32,
+        st: &mut State,
+        routes: &mut Vec<Route>,
+    ) -> Vec<f32> {
         let cfg = &self.cfg;
         let pos = st.pos;
         let mut x = self.w.tok_embd.row_f32(token as usize);
@@ -294,7 +317,14 @@ impl Model {
             let t = rmsnorm_f32(&x1, &l.post_norm, cfg.eps);
             let ffn = match &l.ffn {
                 Ffn::Dense(f) => f.forward(&t),
-                Ffn::Moe(m) => moe_ffn_f32(&t, m, cfg),
+                Ffn::Moe(m) => {
+                    let mut route = None;
+                    let out = moe_ffn_routed(&t, m, cfg, &mut route);
+                    if let Some(r) = route {
+                        routes.push(r);
+                    }
+                    out
+                }
             };
             x = residual_add_f32(&ffn, &x1);
         }

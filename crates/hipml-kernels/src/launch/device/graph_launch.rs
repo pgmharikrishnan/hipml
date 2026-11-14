@@ -51,23 +51,41 @@ pub fn gemv_job_kind(entry: &str) -> Option<i32> {
     })
 }
 
-/// The embedding-row kernel for a resident block format: the same decoder as
-/// the dequant entry, reading the row index from the step buffer.
-fn embed_row_entry(ty: hipml_core::quant::TensorType) -> Result<&'static str, String> {
+/// The `kind` selector `dequant_rows.hip` decodes a row with.
+///
+/// Every format the engine can dequantise has a body in that kernel, so this is
+/// a name lookup, not a capability list: a resident type that is not one of
+/// these has no decoder anywhere in the engine and could not have been loaded.
+/// It is one table because the previous shape — a kernel name per type — is
+/// what made a Q8_0 `token_embd` fail to load on a file whose every other
+/// tensor was fine.
+pub fn row_kind(ty: hipml_core::quant::TensorType) -> Result<i32, String> {
+    use hipml_core::quant::TensorType as T;
     Ok(match ty {
-        hipml_core::quant::TensorType::Q4K => "embed_q4_k_row",
-        hipml_core::quant::TensorType::Q6K => "embed_q6_k_row",
-        other => return Err(format!("{}: no embedding-row kernel", other.name())),
+        T::F32 => 0,
+        T::BF16 => 1,
+        T::Q8_0 => 2,
+        T::Q3K => 3,
+        T::Q4K => 4,
+        T::Q5K => 5,
+        T::Q6K => 6,
+        T::IQ4NL => 7,
+        T::IQ4XS => 8,
+        T::IQ3S => 9,
+        other => return Err(format!("{}: no row-dequant kernel", other.name())),
     })
 }
 
-/// The dequant kernel for one resident row of a block format.
-fn dequant_row_entry(ty: hipml_core::quant::TensorType) -> Result<&'static str, String> {
-    Ok(match ty {
-        hipml_core::quant::TensorType::Q4K => "dequant_q4_k_f32",
-        hipml_core::quant::TensorType::Q6K => "dequant_q6_k_f32",
-        other => return Err(format!("{}: no dequant kernel", other.name())),
-    })
+/// Blocks a row of `n_embd` values is decoded in, at
+/// [`crate::ROW_BLOCK_VALUES`] values a block.
+fn row_blocks(n_embd: usize) -> Result<usize, String> {
+    if n_embd == 0 || n_embd % ROW_BLOCK_VALUES != 0 {
+        return Err(format!(
+            "embedding row of {n_embd} values is not a whole number of \
+             {ROW_BLOCK_VALUES}-value blocks"
+        ));
+    }
+    Ok(n_embd / ROW_BLOCK_VALUES)
 }
 
 /// Batched-GEMV kind ids: the resident weight formats whose decode kernels
@@ -621,7 +639,7 @@ impl Launcher {
 
     /// Dequantise the embedding row named by `step[2]` into `out`: the step's
     /// token id, so a captured graph is replayed for a new token without
-    /// re-capturing. `ty` selects the block decoder (Q4_K or Q6_K).
+    /// re-capturing. `ty` selects the block decoder.
     pub fn embed_row_dev(
         &self,
         ty: hipml_core::quant::TensorType,
@@ -630,19 +648,21 @@ impl Launcher {
         out: &Buffer,
         n_embd: usize,
     ) -> Result<(), String> {
-        let nblocks = n_embd / hipml_core::quant::QK_K;
-        let kernel = self.module.kernel(embed_row_entry(ty)?)?;
+        let nblocks = row_blocks(n_embd)?;
+        let kernel = self.module.kernel("embed_row_any")?;
         let mut p_w = w.as_ptr();
         let mut p_out = out.as_ptr();
         let mut v_blocks = nblocks as i32;
         let mut v_row_bytes = row_bytes as i32;
         let mut p_step = self.step.as_ptr();
-        let mut params: [*mut c_void; 5] = [
+        let mut v_kind = row_kind(ty)?;
+        let mut params: [*mut c_void; 6] = [
             &mut p_w as *mut _ as *mut c_void,
             &mut p_out as *mut _ as *mut c_void,
             &mut v_blocks as *mut _ as *mut c_void,
             &mut v_row_bytes as *mut _ as *mut c_void,
             &mut p_step as *mut _ as *mut c_void,
+            &mut v_kind as *mut _ as *mut c_void,
         ];
         kernel.launch(
             LaunchConfig::per_row(nblocks, 256),
@@ -655,7 +675,7 @@ impl Launcher {
     /// device: the graph's `embed` step, with no host round-trip.
     ///
     /// `row_bytes` is the tensor's own row stride, so this works for any
-    /// `n_embd` that is a multiple of 256.
+    /// `n_embd` that is a whole number of 256-value blocks.
     pub fn embed_row(
         &self,
         ty: hipml_core::quant::TensorType,
@@ -679,15 +699,17 @@ impl Launcher {
         dst: usize,
         n_embd: usize,
     ) -> Result<(), String> {
-        let nblocks = n_embd / hipml_core::quant::QK_K;
-        let kernel = self.module.kernel(dequant_row_entry(ty)?)?;
+        let nblocks = row_blocks(n_embd)?;
+        let kernel = self.module.kernel("dequant_row_any")?;
         let mut p_w = unsafe { (w.as_ptr() as *mut u8).add(row * row_bytes) } as *mut c_void;
         let mut p_out = unsafe { (out.as_ptr() as *mut u8).add(dst * 4) } as *mut c_void;
         let mut v_blocks = nblocks as i32;
-        let mut params: [*mut c_void; 3] = [
+        let mut v_kind = row_kind(ty)?;
+        let mut params: [*mut c_void; 4] = [
             &mut p_w as *mut _ as *mut c_void,
             &mut p_out as *mut _ as *mut c_void,
             &mut v_blocks as *mut _ as *mut c_void,
+            &mut v_kind as *mut _ as *mut c_void,
         ];
         kernel.launch(
             LaunchConfig::per_row(nblocks, 256),

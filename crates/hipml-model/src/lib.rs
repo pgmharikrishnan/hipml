@@ -495,35 +495,32 @@ impl Model {
 
     /// Dequantise one vocabulary row (`token_embd.weight[token, :]`) on device.
     ///
-    /// One Q4_K super-block is 144 bytes / 256 values, so a k=5120 row is 20
-    /// blocks and 2880 bytes; only those bytes are read from VRAM. A UD dynamic
-    /// quant stores the table as Q6_K (210 bytes per super-block).
+    /// The row is a gather, not a matvec: only that row's bytes are read from
+    /// VRAM. Any format with a row decoder works — Q4_K and Q6_K are what the
+    /// first two files used, Q8_0 is what a large-vocabulary MoE file uses, and
+    /// a per-type allowlist here is what once rejected a file whose every other
+    /// tensor was fine.
     pub fn embedding_row(&self, token: u32) -> Result<Vec<f32>, String> {
         let t = self.require(TOKEN_EMBD)?;
         let ty = t.ty();
-        if ty != TensorType::Q4K && ty != TensorType::Q6K {
-            return Err(format!(
-                "{TOKEN_EMBD}: expected Q4_K or Q6_K, found {}",
-                ty.name()
-            ));
-        }
         let k = t.ne0();
         let rows = t.rows();
-        if k as usize % QK_K != 0 {
-            return Err(format!("{TOKEN_EMBD}: ne0 {k} is not a multiple of {QK_K}"));
+        if k as usize % hipml_kernels::ROW_BLOCK_VALUES != 0 {
+            return Err(format!(
+                "{TOKEN_EMBD}: ne0 {k} is not a multiple of {}",
+                hipml_kernels::ROW_BLOCK_VALUES
+            ));
         }
         if token as u64 >= rows {
             return Err(format!(
                 "{TOKEN_EMBD}: token {token} out of range (rows {rows})"
             ));
         }
-        let blocks = k as usize / QK_K;
+        let blocks = k as usize / hipml_kernels::ROW_BLOCK_VALUES;
         let row_bytes = t.nbytes / rows;
         let offset = token as u64 * row_bytes;
-        match ty {
-            TensorType::Q6K => self.launcher.dequant_q6_k(&t.buffer, offset, blocks),
-            _ => self.launcher.dequant_q4_k(&t.buffer, offset, blocks),
-        }
+        self.launcher
+            .dequant_row_typed(ty, &t.buffer, offset, blocks)
     }
 
     /// `logits = output.weight @ x` on device, with the weights already resident.

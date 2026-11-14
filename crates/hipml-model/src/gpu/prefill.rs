@@ -53,6 +53,10 @@ pub struct PrefillReport {
     pub ssm_seq_ms: f64,
     /// Per-token full-attention chain and its output projection.
     pub attn_seq_ms: f64,
+    /// The MoE token loop: a mixture-of-experts chunk runs one decode step per
+    /// prompt token, so its whole cost lands here rather than in the per-stage
+    /// buckets above.
+    pub token_loop_ms: f64,
     last: Option<Instant>,
 }
 
@@ -79,6 +83,7 @@ impl PrefillReport {
             + self.final_ms
             + self.ssm_seq_ms
             + self.attn_seq_ms
+            + self.token_loop_ms
     }
 }
 
@@ -331,6 +336,56 @@ impl<'a> GpuEngine<'a> {
         Ok(last)
     }
 
+    /// A mixture-of-experts chunk: the decode path once per token.
+    ///
+    /// Correct and slow by construction — every prompt token streams the whole
+    /// model, 613 MB of expert gather included, instead of the 9.6 MB/token a
+    /// bucketed grouped GEMM would read. That is the deferred fast path, and
+    /// `docs/notes/moe.md` carries its measured price.
+    ///
+    /// `capture` still works: `run_token` leaves the post-`output_norm` row in
+    /// `final_h`, so each token's row is copied into the capture buffer after
+    /// its step. That is what `ppl` reads.
+    fn forward_chunk_token_loop(
+        &mut self,
+        tokens: &[u32],
+        st: &mut GpuState,
+        rep: &mut Option<PrefillReport>,
+        capture: Option<&Buffer>,
+    ) -> Result<u32, String> {
+        let n = self.cfg.n_embd;
+        let pos0 = st.pos;
+        let t = Instant::now();
+        let n_tok = tokens.len();
+        for (i, &id) in tokens.iter().enumerate() {
+            // Only the last prompt token needs the vocabulary projection; the
+            // others still run `output_norm` so a capture has every row.
+            self.run_token(id, st, true, i + 1 == n_tok)?;
+            if let Some(cap) = capture {
+                let l = self.model.launcher();
+                self.final_h
+                    .copy_to_offset_on(cap, (pos0 + i) * n, n, l.stream())?;
+            }
+        }
+        if let Some(r) = rep.as_mut() {
+            r.token_loop_ms += t.elapsed().as_secs_f64() * 1e3;
+        }
+        let l = self.model.launcher();
+        if !self.ablate.dropped(Stage::Argmax) {
+            l.argmax_buf(
+                &self.logits,
+                &self.arg_v,
+                &self.arg_i,
+                &self.arg_out,
+                self.cfg.n_vocab,
+                ARGMAX_PARTS,
+            )?;
+        }
+        l.synchronize()?;
+        let bytes = self.arg_out.download_bytes(0, 4)?;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
     /// One chunk through the whole graph. `st.pos` advances by the chunk length.
     fn forward_chunk(
         &mut self,
@@ -352,6 +407,13 @@ impl<'a> GpuEngine<'a> {
         let pos0 = st.pos;
         if n_tok == 0 {
             return Err("empty chunk".to_string());
+        }
+        if self.cfg.n_expert > 0 {
+            // A mixture-of-experts chunk runs the decode path once per token:
+            // the routed gather has no chunked GEMM yet, and a per-token loop
+            // is the correct path that costs no new code. `docs/notes/moe.md`
+            // records what it costs (a whole weight stream per prompt token).
+            return self.forward_chunk_token_loop(tokens, st, rep, capture);
         }
         let cfg = self.cfg.clone();
         let n = cfg.n_embd;
@@ -438,6 +500,14 @@ impl<'a> GpuEngine<'a> {
                 r.lap(l, |r| &mut r.elementwise_ms);
             }
 
+            let (ffn_gate, ffn_up, ffn_down) = match &block.ffn {
+                Ffn::Dense { gate, up, down, .. } => (gate, up, down),
+                // `forward_chunk_capture` returns above when the model has
+                // experts, so a MoE block never reaches the chunked GEMMs.
+                Ffn::Moe(_) => {
+                    return Err("prefill: a MoE chunk must take the token loop".to_string())
+                }
+            };
             if ::hipml_kernels::prefill_v2() {
                 // One fp16 copy of the activation tile per projection: the same
                 // tile is staged once per output row tile inside the GEMM, so
@@ -456,41 +526,34 @@ impl<'a> GpuEngine<'a> {
                 // writes the gate tile. It declines (and the two launches run)
                 // when a tensor has no converted-activation tile, the format
                 // pair has no instantiation, or the shape is split-K's.
-                let acth =
-                    if block
-                        .up
-                        .gemm_half_gu(l, &block.gate, &c.xh, &c.act, &c.acth, n_tok)?
-                    {
+                let acth = if ffn_up.gemm_half_gu(l, ffn_gate, &c.xh, &c.act, &c.acth, n_tok)? {
+                    &c.acth
+                } else {
+                    gemm_v2(l, ffn_gate, &c.t, &c.xh, &c.gate, &c.sk, n_tok)?;
+                    // The `up` projection writes the swiGLU activation and its
+                    // fp16 copy from its own epilogue, which is where the gate
+                    // tile and the output rows already are.
+                    if ffn_up.gemm_half_silu(l, &c.xh, &c.gate, &c.act, &c.acth, n_tok)? {
                         &c.acth
                     } else {
-                        gemm_v2(l, &block.gate, &c.t, &c.xh, &c.gate, &c.sk, n_tok)?;
-                        // The `up` projection writes the swiGLU activation and its
-                        // fp16 copy from its own epilogue, which is where the gate
-                        // tile and the output rows already are.
-                        if block
-                            .up
-                            .gemm_half_silu(l, &c.xh, &c.gate, &c.act, &c.acth, n_tok)?
-                        {
-                            &c.acth
-                        } else {
-                            gemm_v2(l, &block.up, &c.t, &c.xh, &c.up, &c.sk, n_tok)?;
-                            l.silu_mul_buf(&c.gate, &c.up, &c.act, n_tok * cfg.n_ff)?;
-                            ::hipml_kernels::prefill_xhalf(
-                                l.module(),
-                                l.stream(),
-                                &c.act,
-                                &c.xh,
-                                n_tok * cfg.n_ff,
-                            )?;
-                            &c.xh
-                        }
-                    };
-                gemm_v2(l, &block.down, &c.act, acth, &c.down, &c.sk, n_tok)?;
+                        gemm_v2(l, ffn_up, &c.t, &c.xh, &c.up, &c.sk, n_tok)?;
+                        l.silu_mul_buf(&c.gate, &c.up, &c.act, n_tok * cfg.n_ff)?;
+                        ::hipml_kernels::prefill_xhalf(
+                            l.module(),
+                            l.stream(),
+                            &c.act,
+                            &c.xh,
+                            n_tok * cfg.n_ff,
+                        )?;
+                        &c.xh
+                    }
+                };
+                gemm_v2(l, ffn_down, &c.act, acth, &c.down, &c.sk, n_tok)?;
             } else {
-                block.gate.gemm(l, &c.t, &c.gate, n_tok)?;
-                block.up.gemm(l, &c.t, &c.up, n_tok)?;
+                ffn_gate.gemm(l, &c.t, &c.gate, n_tok)?;
+                ffn_up.gemm(l, &c.t, &c.up, n_tok)?;
                 l.silu_mul_buf(&c.gate, &c.up, &c.act, n_tok * cfg.n_ff)?;
-                block.down.gemm(l, &c.act, &c.down, n_tok)?;
+                ffn_down.gemm(l, &c.act, &c.down, n_tok)?;
             }
             if let Some(r) = rep.as_mut() {
                 r.lap(l, |r| &mut r.ffn_gemm_ms);
@@ -574,6 +637,12 @@ impl<'a> GpuEngine<'a> {
 
     /// Allocate (or grow) the chunk scratch. Called by `prefill_chunked`.
     fn ensure_chunk(&mut self, tokens: usize, deep: bool) -> Result<(), String> {
+        // A MoE chunk is the decode path per token, so it reads none of this
+        // scratch. Allocating it would add hundreds of MiB to a model whose
+        // whole point is that it streams 8 of 256 experts.
+        if self.cfg.n_expert > 0 {
+            return Ok(());
+        }
         let have = match &self.chunk {
             Some((cap, c)) => *cap >= tokens && (c.attn_splits > 1) == deep,
             None => false,

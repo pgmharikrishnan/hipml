@@ -9,6 +9,14 @@
 use hipml_core::parity::OpCase;
 use hipml_core::tensor::Tensor;
 
+/// Values one block of the embedding row-gather kernel covers: one K-quant
+/// super-block, eight Q8_0/IQ4_NL blocks, or 1 KiB / 512 B of an F32 / BF16 row.
+///
+/// Mirrors `DR_VALUES` in `dequant_rows.hip`. Defined here rather than beside
+/// the launcher so the host-side row arithmetic is the same number with and
+/// without the `hip` feature.
+pub const ROW_BLOCK_VALUES: usize = 256;
+
 /// Grid for the warp-per-output `gemm_rows_f32` kernel: one warp per
 /// `(token, output row)` pair, eight warps (256 threads) per block.
 ///
@@ -55,10 +63,13 @@ pub(crate) mod device {
     #[path = "graph_launch.rs"]
     mod graph_launch;
     pub use graph_launch::{
-        gemv_job_kind, gemv_job_tiles, GemvJob, GEMV_B_IQ3S, GEMV_B_IQ4NL, GEMV_B_IQ4XS,
+        gemv_job_kind, gemv_job_tiles, row_kind, GemvJob, GEMV_B_IQ3S, GEMV_B_IQ4NL, GEMV_B_IQ4XS,
         GEMV_B_Q3K, GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80, GEMV_JOB_IQ4XS, GEMV_JOB_Q4K,
         GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80,
     };
+    #[path = "moe_launch.rs"]
+    mod moe_launch;
+    pub use moe_launch::MOE_TOP_K_MAX;
     #[path = "prefill_launch.rs"]
     mod prefill_launch;
 
@@ -617,6 +628,8 @@ pub use device::{
     prefill_should_split, prefill_split_scratch_cap,
 };
 #[cfg(feature = "hip")]
+pub use device::{row_kind, MOE_TOP_K_MAX};
+#[cfg(feature = "hip")]
 pub use device::{
     GEMV_B_IQ3S, GEMV_B_IQ4NL, GEMV_B_IQ4XS, GEMV_B_Q3K, GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K,
     GEMV_B_Q80,
@@ -742,6 +755,16 @@ impl Launcher {
 
     pub fn dequant_q6_k(
         &self,
+        _w: &hipml_hip::ByteBuffer,
+        _byte_offset: u64,
+        _nblocks: usize,
+    ) -> Result<Vec<f32>, String> {
+        Err("hipml was built without the `hip` feature".to_string())
+    }
+
+    pub fn dequant_row_typed(
+        &self,
+        _ty: hipml_core::quant::TensorType,
         _w: &hipml_hip::ByteBuffer,
         _byte_offset: u64,
         _nblocks: usize,

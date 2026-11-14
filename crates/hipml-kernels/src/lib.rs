@@ -36,6 +36,12 @@ pub use attn_gpu::AttnLayer;
 pub mod launch_kv;
 pub use launch::Launcher;
 #[cfg(feature = "hip")]
+pub use launch::MOE_TOP_K_MAX;
+/// Values one block of the embedding row-gather kernel covers. Not feature
+/// gated: the loader's row arithmetic is host code and the probe checks it
+/// without a device.
+pub use launch::ROW_BLOCK_VALUES;
+#[cfg(feature = "hip")]
 pub use launch::{
     gemm_rows_f32, prefill_entry_for_half, prefill_gu_entry, prefill_has_gu, prefill_has_silu,
     prefill_has_xhalf, prefill_resident, prefill_resident_gu, prefill_resident_half,
@@ -43,7 +49,7 @@ pub use launch::{
     prefill_should_split, prefill_split_scratch_cap, prefill_xhalf,
 };
 #[cfg(feature = "hip")]
-pub use launch::{gemv_job_kind, gemv_job_tiles, GemvJob, ReadJob};
+pub use launch::{gemv_job_kind, gemv_job_tiles, row_kind, GemvJob, ReadJob};
 pub use launch::{
     prefill_entry_for, prefill_half, prefill_path, prefill_slices, prefill_v2,
     q5_tile_prefill_enabled, set_prefill_half, set_prefill_path, PrefillPath,
@@ -406,6 +412,20 @@ pub const KERNELS: &[KernelSpec] = &[
         entry: "dequant_q6_k_f32",
         // Same geometry for the Q6_K embedding rows of a UD dynamic quant.
         kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "dequant_row_any",
+        entry: "dequant_row_any",
+        // One 256-thread block per 256-value unit of one row; `kind` selects
+        // the format, so one entry covers every decoder the engine has.
+        kind: KernelKind::PerRow { block: 256 },
+    },
+    KernelSpec {
+        name: "embed_row_any",
+        entry: "embed_row_any",
+        // The same decode with the row index read from the captured step
+        // buffer, so the graph's embed needs no host argument.
+        kind: KernelKind::PerRow { block: 256 },
     },
     KernelSpec {
         name: "prefill_f32",
@@ -1120,6 +1140,38 @@ pub const KERNELS: &[KernelSpec] = &[
     },
     // One row per case: the op is the pair (partial pass, final fold), and the
     // parity case compares the single index it produces.
+    KernelSpec {
+        name: "moe_topk_f32",
+        entry: "moe_topk_f32",
+        // One block: softmax over every expert, k selection passes, then the
+        // renormalisation. Proved by `moe-gate --device` against the CPU router.
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "moe_gemv",
+        entry: "moe_gemv",
+        // grid.y is the top-k rank; the expert id is read on the device, so one
+        // launch gathers all k experts. Same row tile as `gemv_jobs`.
+        kind: KernelKind::RowTile {
+            rows: 8,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "moe_combine_f32",
+        entry: "moe_combine_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "moe_shared_add_f32",
+        entry: "moe_shared_add_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "sigmoid_f32",
+        entry: "sigmoid_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
     KernelSpec {
         name: "argmax_f32",
         entry: "argmax_part_f32",

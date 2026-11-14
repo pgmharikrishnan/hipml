@@ -314,6 +314,41 @@ impl Launcher {
         self.dequant_row("dequant_q6_k_f32", w, byte_offset, nblocks)
     }
 
+    /// Dequantise one row of any resident format with a row decoder
+    /// (`dequant_rows.hip`): the loader's embedding probe.
+    ///
+    /// `nblocks` counts 256-value blocks, which is one K-quant super-block,
+    /// eight Q8_0/IQ4_NL blocks, or 1 KiB / 512 B of an F32 / BF16 row.
+    pub fn dequant_row_typed(
+        &self,
+        ty: hipml_core::quant::TensorType,
+        w: &ByteBuffer,
+        byte_offset: u64,
+        nblocks: usize,
+    ) -> Result<Vec<f32>, String> {
+        let out = Buffer::alloc(nblocks * crate::ROW_BLOCK_VALUES)?;
+        let kernel = self.module.kernel("dequant_row_any")?;
+        let offset = usize::try_from(byte_offset)
+            .map_err(|_| "tensor offset does not fit in usize".to_string())?;
+        let mut p_w = unsafe { (w.as_ptr() as *mut u8).add(offset) } as *mut c_void;
+        let mut p_out = out.as_ptr();
+        let mut v_blocks = nblocks as i32;
+        let mut v_kind = crate::row_kind(ty)?;
+        let mut params: [*mut c_void; 4] = [
+            &mut p_w as *mut _ as *mut c_void,
+            &mut p_out as *mut _ as *mut c_void,
+            &mut v_blocks as *mut _ as *mut c_void,
+            &mut v_kind as *mut _ as *mut c_void,
+        ];
+        kernel.launch(
+            LaunchConfig::per_row(nblocks, 256),
+            &self.stream,
+            &mut params,
+        )?;
+        self.stream.synchronize()?;
+        out.to_host()
+    }
+
     fn dequant_row(
         &self,
         entry: &str,

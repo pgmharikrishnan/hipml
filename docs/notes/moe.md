@@ -9,15 +9,18 @@ plus one inline MTP block, 256 experts with 8 used. Every attention and
 gated-delta-net tensor in it is shaped exactly like the 27B's; the FFN is the
 only new thing.
 
-This slice is **CPU only**: no kernel, no forward-pass change, no prefill, no
-MTP. It settles the numerical conventions against llama.cpp before anyone
-writes a GPU kernel, because four independent conventions (softmax domain,
-top-k order, renormalisation, where the router weight is applied) can each leave
-the ids subtly wrong, and a kernel built on a wrong one is the wrong kernel.
+This note covers two slices. The first settled the numerical conventions on the
+CPU, before any kernel existed, because four independent conventions (softmax
+domain, top-k order, renormalisation, where the router weight is applied) can
+each leave the ids subtly wrong, and a kernel built on a wrong one is the wrong
+kernel. The second built the device path — a row gather for every format, an
+expert GEMV that resolves the gather on the device, device-side top-k, and a
+prefill loop — and it is the first time this file produces tokens on the GPU.
 
 **Result: the CPU reference reproduces llama.cpp's 64 greedy ids on a fixed
-prompt, 64/64, first try.** The file also loads: 753 tensors, 0 unsupported,
-21.41 GiB resident.
+prompt, 64/64, first try; the device path reproduces the same 64 ids, 64/64, at
+125.76 tok/s decode and 143.99 tok/s prefill.** The file loads: 753 tensors, 0
+unsupported, 21.41 GiB resident (21.69 GiB with the engine's scratch).
 
 ## 1. Two things stopped the file opening
 
@@ -220,27 +223,310 @@ feature: true`):
 | --- | ---: |
 | tensors | 753 |
 | tensor data | 22,842,671,616 B (21.27 GiB) |
-| read + upload | 7.12 s (3.21 GB/s) |
+| read + upload | 6.97 s (3.28 GB/s) |
 | resident delta | 22,991,470,592 B (21.41 GiB) |
 | BF16 tensors | 2, 1,052,672 B, supported |
 | unsupported | **none** |
 | round-trip | 20/20 byte-identical |
 
-The embedding probe is skipped for this file and says so: its
-`token_embd.weight` is Q8_0 and the device dequantisation probe has kernels for
-Q4_K and Q6_K only. The payload check above already covers it byte for byte.
-`lm_head` on the resident Q8_0 head runs at 124.9 GB/s.
+The five dtypes are all ones the engine already had; the two that carry the
+experts are Q5_K and Q4_K, which is why the 8-of-256 gather streams 613 MB per
+token and not the whole bank:
 
-## 7. Gates
+| dtype | tensors | bytes | GiB |
+| --- | ---: | ---: | ---: |
+| F32 | 368 | 104,624,640 | 0.10 |
+| BF16 | 2 | 1,052,672 | 0.00 |
+| Q8_0 | 260 | 2,614,820,864 | 2.44 |
+| Q6_K | 3 | 660,602,880 | 0.62 |
+| Q5_K | 40 | 7,381,975,040 | 6.88 |
+| Q4_K | 80 | 12,079,595,520 | 11.25 |
 
-Dense path, on the binary this branch ships, `--features hip`, model paths
-passed with `--gguf`, `HIPML_MTP_GGUF` removed from the process environment
-(not blanked) and `--mtp` passed literally where a drafter is wanted.
+The embedding probe now runs on this file. `token_embd.weight` is Q8_0, and the
+row gather decodes every format that has a decoder, so the loader's five probes
+are exact on the device against the host dequant — 2048/2048 values each,
+`max_abs 0.000e0`:
+
+```
+embedding rows (token_embd.weight [248320, 2048] Q8_0; device dequant vs CPU dequant):
+  token        exact/values      max_abs      max_rel
+  0               2048/2048      0.000e0      0.000e0
+  1               2048/2048      0.000e0      0.000e0
+  1234            2048/2048      0.000e0      0.000e0
+  100000          2048/2048      0.000e0      0.000e0
+  248319          2048/2048      0.000e0      0.000e0
+```
+
+`lm_head` on the resident Q8_0 head runs at 138.5 GB/s (3.900 ms for
+540,344,320 B).
+
+## 7. The device path
+
+Four pieces were needed, and only the first is about this file specifically.
+
+### 7.1 One row gather, every format
+
+`token_embd.weight` is a gather, not a matvec: the token id selects one row and
+nothing else is read. The old kernels (`embed_q4_k_row`, `embed_q6_k_row`)
+existed because the first two files happened to use those formats, and
+`GpuEngine::new` rejected everything else — which is how a Q8_0 embedding table,
+the commonest choice for a 248k vocabulary, stopped a 22.85 GB file from
+opening at all. A row gather has no shape constraint that could justify a
+per-type allowlist.
+
+`kernels/dequant_rows.hip` is one decoder with a `kind` selector:
+
+| kind | format | unit bytes per 256 values |
+| ---: | --- | ---: |
+| 0 | F32 | 1024 |
+| 1 | BF16 | 512 |
+| 2 | Q8_0 | 272 |
+| 3 | Q3_K | 110 |
+| 4 | Q4_K | 144 |
+| 5 | Q5_K | 176 |
+| 6 | Q6_K | 210 |
+| 7 | IQ4_NL | 144 |
+| 8 | IQ4_XS | 136 |
+| 9 | IQ3_S | 110 |
+
+One 256-thread block per 256-value unit, one value per thread; for the K-quants
+that unit is exactly one super-block. Two entries share the decoder:
+`dequant_row_any` takes the row address on the host (the loader's probe), and
+`embed_row_any` reads the row index from the captured step buffer, so the
+graph's embedding needs no host argument. `row_kind` in
+`launch/device/graph_launch.rs` maps a `TensorType` to a kind by name and is
+called in `GpuEngine::new` and `BatchEngine::new`, so a type with no decoder
+fails at load, naming the type, instead of at the first token.
+`ROW_BLOCK_VALUES` (256) is the host mirror of `DR_VALUES`.
+
+The proof is `hipml row-dequant`: for each format it builds deterministic block
+bytes with the same generators the host reference uses, dequantises one
+2048-value row on the device, and compares bit for bit. Every format is exact,
+which is the expected result — both sides walk the block in the same order and
+do the same f32 arithmetic:
+
+```
+  type       exact/values      max_abs       status
+  Q4_K          2048/2048      0.000e0 exact
+  Q5_K          2048/2048      0.000e0 exact
+  Q6_K          2048/2048      0.000e0 exact
+  Q3_K          2048/2048      0.000e0 exact
+  IQ3_S         2048/2048      0.000e0 exact
+  IQ4_XS        2048/2048      0.000e0 exact
+  Q8_0          2048/2048      0.000e0 exact
+  IQ4_NL        2048/2048      0.000e0 exact
+  F32           2048/2048      0.000e0 exact
+  BF16          2048/2048      0.000e0 exact
+PASS: every format decodes the same bits on device and host
+```
+
+It earned its keep immediately. The first IQ3_S arm read the sign of the second
+four-value group at the host's local index (`jj - 4`) instead of the thread's
+index (`jj`), so four of every eight values took the sign of a different value.
+`row-dequant` reported 1024/2048 differing, `HIPML_ROW_DEBUG=1` printed the
+first eight, and the split was exactly `jj < 4` against `jj >= 4`. The 4-bit
+grid itself is now `kernels/iq3s_grid.inc`, included by both `gemv_iq3_s.hip`
+and `dequant_rows.hip`, so the GEMV and the row decoder cannot index different
+tables.
+
+### 7.2 A block's FFN is an enum
+
+`Block` held three `Proj`s; it now holds `ffn: Ffn<'a>`, either
+`Dense { gate, up, down, jobs }` or `Moe(Box<MoeBlock>)`. An enum rather than
+three options because the shapes genuinely differ — a MoE layer has no
+`ffn_gate.weight` at all — and every caller has to name which one it means.
+`MoeBlock` (`gpu/moe.rs`) owns the router, the three `Experts` bank views, the
+shared expert, and one step's scratch. `Experts` is the same idea the CPU slice
+used (`Mat::gemv_range`): a base pointer plus one expert's byte `stride`.
+`Proj::vector` is the one place a 1-D tensor is a projection, for
+`ffn_gate_inp_shexp` whose "matrix" is `[1, n_embd]`.
+
+The batched engine and `column-bench` refuse a MoE file up front with a message
+that names the reason: neither has a routed FFN body. That is deliberate — a
+missing-tensor error from `Proj::of` would be the same failure with a worse
+explanation.
+
+### 7.3 Top-k and the gather stay on the device
+
+The requirement that decides the whole design: **no per-layer host readback**.
+`run_token` is captured once into a hipGraph, and a readback of the selected
+ids would end capture. So the router decision is device data end to end:
+
+1. `router.gemv` — the F32 `[256, 2048]` router, one GEMV to 256 logits.
+2. `moe_topk_f32` — one block: softmax over all 256, eight selection passes
+   (value descending, id ascending), renormalise by the sum clamped at
+   `6.103515625e-5`. Writes `ids[k]` (u32) and `weights[k]` (f32). Both stay
+   resident across steps. `MOE_TOP_K_MAX` is 1024 experts; a wider bank is
+   refused rather than read past the shared array.
+3. `moe_gemv` — one launch per bank. `grid.y` is the top-k rank and the kernel
+   resolves `w + ids[j] * stride` itself; `x_stride` is 0 for gate and up (all
+   ranks read the same activation) and `n_ff_exp` for down (each rank reads its
+   own). It is `gemv_jobs` with the job's weight pointer resolved on the device
+   and calls the same tile bodies (`q4k_tile`, `q6k_tile`, `q5k_rows`,
+   `q80_row`, `iq4x_tile`), so an expert row is bit-identical to the same row
+   through `gemv_jobs`. Those five formats are the ones an expert bank uses;
+   `MoeBlock::new` fails at load, naming the bank, if one has no body.
+4. `silu_mul_buf`, then `moe_combine_f32` — `((w0*d0 + w1*d1) + …)`, a left
+   fold in rank order, which is the convention §4.6 pinned.
+5. The shared expert: three dense GEMVs, `silu_mul`, `sigmoid_f32` over the
+   single `dot(x, ffn_gate_inp_shexp)` value, and `moe_shared_add_f32`. One
+   scalar, added outside the routed sum.
+
+`MoeBlock::route_host` exists for the routing gate and says so: it is a
+synchronising readback and nothing on the decode path calls it.
+
+### 7.4 Prefill is the decode path, once per token
+
+A routed chunk has no grouped GEMM, so `forward_chunk` hands a MoE model to
+`forward_chunk_token_loop`: one `run_token` per prompt token, in order, with
+`head = false` for all but the last. `head = false` still runs `output_norm`
+(so a capture has every row) and skips only the 540 MB `lm_head` projection,
+which is worth about 1 ms a token. `capture` still works — each token's row is
+copied into the capture buffer after its step, which is what `ppl` reads.
+`ensure_chunk` is a no-op for a MoE model: the chunk scratch would be hundreds
+of MiB that this path never touches.
+
+That makes a MoE layer 17 launches a token — residual, rmsnorm, and 15 in the
+FFN, of which 14 are the routed path — and the whole token 1,103. §8 reports
+what that costs.
+
+## 8. What the device path measures
+
+`moe-gate --device` runs the resident engine over the same 9 prompt ids and the
+same fixture, and the id stream is the gate:
+
+```
+resident:  21.27 GiB in 753 tensors on AMD Radeon AI PRO R9700 (upload 11.2s)
+moe-gate: qwen35moe (40 decoder layers, 256 experts, 8 used, expert ffn 512, shared expert 512, ffn 4096)
+graph:     40 layers, 2.56 GiB streamed/token, 0.8 MiB KV at ctx 81 (build 13857 ms)
+prefill:   9 ids in 0.06s (139.7 tok/s, one decode step per token)
+decode:    63 steps in 0.49s (127.70 tok/s)
+vram:      21.69 GiB resident of 31.86 GiB
+PASS: 64 / 64 ids identical to llama.cpp
+```
+
+The 169-token prompt `bench/fixtures/p2_math_169.ids` measures the loop without
+the gate's per-step bookkeeping, two reps:
+
+| rep | prefill | decode |
+| --- | ---: | ---: |
+| 0 | 143.15 tok/s (169 tokens in 1180.6 ms) | 126.21 tok/s (15 steps, 118.9 ms) |
+| 1 | **143.99 tok/s** (169 tokens in 1173.7 ms) | **125.76 tok/s** (15 steps, 119.3 ms, **7.95 ms/token**) |
+
+Prefill is faster than decode because the loop runs `lm_head` once for the
+whole prompt instead of once per token (§7.4).
+
+### 8.1 Against the roofline
+
+The recon projected **176 tok/s** at 4,096 context from 2.921 GB/token at
+514.6 GB/s (the engine's measured 80.4% of 640 GB/s), and **≈24.5 GB** peak
+VRAM. Measured: 125.76 tok/s, 21.69 GiB (23.29 GB).
+
+That is 71% of the prediction, and the profile says where it went rather than
+leaving it as "the gather is slow":
+
+| quantity | value |
+| --- | ---: |
+| streamed per token | 2,750,765,568 B (2.56 GiB) |
+| token, captured graph | 8.102 ms (warm 8.553 ms) |
+| effective bandwidth | 346 GB/s |
+| weight stream inside the token | 4.352 ms at **632 GB/s** |
+| overhead (launch + elementwise) | 3.749 ms |
+| launches/token | 1,103 |
+| launch cost (cached) | 2.605 µs, so a 2.873 ms floor |
+
+The GEMV stream inside the token runs at 632 GB/s — the sequential rate the
+engine already reaches, and above the 514.6 GB/s the projection assumed. The
+shortfall is the other 3.749 ms: 1,103 launches at 2.605 µs are 2.873 ms of it,
+35% of the token. The MoE FFN is 560 of those launches, and the trace puts it
+first:
+
+| stage | ms/token | share | launches | GB/s |
+| --- | ---: | ---: | ---: | ---: |
+| `ffn_moe` | 2.846 | 32.7% | 560 | 292.2 |
+| `ssm_proj` | 2.099 | 24.1% | 120 | 389.7 |
+| `lm_head` | 0.789 | 9.1% | 2 | 684.6 |
+| `ssm_out` | 0.627 | 7.2% | 30 | 426.6 |
+| `attn_qkv` | 0.606 | 7.0% | 20 | 478.2 |
+| `post_norm` | 0.459 | 5.3% | 40 | |
+| `ssm_step` | 0.295 | 3.4% | 150 | |
+| `residual_out` | 0.265 | 3.0% | 40 | |
+| `residual_in` | 0.238 | 2.7% | 40 | |
+| `attn_wo` | 0.219 | 2.5% | 20 | |
+| `attn_kv` | 0.134 | 1.5% | 10 | |
+| `attn_core` | 0.088 | 1.0% | 20 | |
+| `attn_norm` | 0.033 | 0.4% | 40 | |
+| `embed` | 0.019 | 0.2% | 1 | |
+| `out_norm` | −0.005 | −0.1% | 1 | |
+| sum | 8.712 | 100% | 1,094 | |
+
+So `ffn_moe`'s apparent 292 GB/s is not a gather-bandwidth problem: the stage is
+14 launches a layer, each a few microseconds of work, and the launch cost is
+most of its 2.846 ms. Fusing the router and the shared-expert scalars into
+`gemv_jobs`, and the 8 ranks of a bank into one launch, is the tuning the recon
+lists and this slice does **not** do — the number is reported, not chased.
+(The launch floor is measured with empty launches, so in a real token part of it
+hides behind execution; the split above is the profile's attribution, not
+something this slice proved kernel by kernel.)
+
+VRAM is also below the projection: 21.69 GiB with the engine's scratch at the
+gate's 81-token context. The KV cache grows with context, so that is a
+measurement, not a ceiling.
+
+### 8.2 Perplexity
+
+`hipml ppl` on an 849,455-token calibration corpus (`--ctx 512 --chunks 4`, f32
+KV, 1,020 scored positions) against `llama-perplexity` on the same tokens
+(`-c 512 -b 512 -ub 512 --ppl-stride 0 --chunks 4 -ngl 99`):
+
+| window | hipml | llama.cpp | delta |
+| ---: | ---: | ---: | ---: |
+| 1 | 2.2926 | 2.2821 | +0.46% |
+| 2 | 2.0091 | 2.0038 | +0.26% |
+| 3 | 2.1946 | 2.1856 | +0.41% |
+| 4 | **2.2275** | **2.2228** | **+0.21%** |
+
+The dense 27B on the same build is unchanged at 2.1824 against llama's 2.1791,
+so the device path did not move the dense number.
+
+### 8.3 The routing diagnostic
+
+`moe-gate --device` also diffs every layer's router decision against the CPU
+reference at the last prompt token. It is a diagnostic, not a gate — the id
+stream is the gate — and it reads:
+
+```
+routing:   40 layers; 30 identical, 8 rank-order only, 2 selected a different expert set
+routing:   worst |dweight| 5.580e-3 over shared expert ids
+```
+
+The two set differences are layer 3 and layer 5, each swapping the 8th-ranked
+expert (31→231, 236→139), and the eight "rank-order only" layers pick the same
+eight experts in a different order. That is what f32 router arithmetic looks
+like when the GPU GEMV and the CPU GEMV sum in a different order: the weights
+differ by at most 5.6e-3 and the ids do not. A convention error would move the
+whole set, not the last rank.
+
+## 9. Gates
+
+On the binary this branch ships, `--features hip`, model paths passed with
+`--gguf`, `HIPML_MTP_GGUF` removed from the process environment (not blanked)
+and `--mtp` passed literally where a drafter is wanted.
 
 | gate | expected | observed |
 | --- | --- | --- |
-| `moe-gate` (Qwen3.6-35B-A3B) | 64/64 ids | **PASS 64/64**, 0.69 s/token |
-| `load` (Qwen3.6-35B-A3B) | 0 unsupported, 256/8/512/512 | **0 unsupported**, 21.41 GiB, 20/20 round-trip |
+| `moe-gate` CPU (Qwen3.6-35B-A3B) | 64/64 ids | **PASS 64/64**, 0.69 s/token |
+| `moe-gate --device` | 64/64 ids | **PASS 64/64**, 127.70 tok/s, 21.69 GiB |
+| `row-dequant` | 10 formats exact | **10/10 exact**, 2048/2048 values each |
+| `load` (Qwen3.6-35B-A3B) | 0 unsupported, 256/8/512/512 | **0 unsupported**, 21.41 GiB, 20/20 round-trip, Q8_0 rows exact |
+| `generate --device`, 169-token prompt | tokens on the GPU | **143.99 tok/s prefill, 125.76 tok/s decode** |
+| `ppl` (Qwen3.6-35B-A3B) | close to llama | **2.2275** vs 2.2228 (+0.21%) |
+
+Dense path, same binary, so the new `Ffn` enum and the row gather did not move
+anything that was already gated:
+
+| gate | expected | observed |
+| --- | --- | --- |
 | `oracle-gate` UD, 20 steps, chunk 2048, q8 | PASS 20/20, 0.1086 at 101748 | PASS 20/20, **0.1086 at 101748** |
 | `oracle-gate` stock, 20 steps | PASS 20/20, 0.1481 at 34114 | PASS 20/20, **0.1481 at 34114** |
 | greedy 12 ids, stock | `11751 13 198 760 6511 314 9564 369 19241 13 198 760` | identical |
@@ -251,27 +537,38 @@ passed with `--gguf`, `HIPML_MTP_GGUF` removed from the process environment
 | `spec-bench --drafts 3 --kv f32` | 128/128 exact every row | **128/128** on all four rows |
 | `column-bench --check` | 0 differ | **0 differ** on 7,946,240 logits, hidden and residual |
 | `probe_exact.py --ctx 32768` | PASS | PASS, 48 replies id-for-id across drafts 1,2,3 |
+| `ppl` (Arete-27B) | 2.1824 vs llama 2.1791 | **2.1824**, unchanged |
 | `cargo test --workspace` | clean | clean (local and on the GPU host) |
 | `cargo fmt --all -- --check` | clean | clean |
 | `scripts/check-public-tree.sh` | clean | clean |
+| `scripts/check-doc-links.py` | all links resolve | 271 links in 52 files |
 
 The two oracle maxima are the same numbers every slice since the prefill-tile
 note reports, which is the expected result for a change that does not touch the
-forward pass.
+dense forward pass.
 
-## 8. What is not verified, and what is out of scope
+## 10. What is not verified, and what is out of scope
 
-* **MTP.** `blk.40` is a MoE block and `mtp.rs` requires a dense `ffn_gate`, so
-  the drafter cannot load this file. The two BF16 tensors are MTP-only; the type
-  exists so the file opens, not so the block runs.
-* **GPU decode and prefill.** No kernel, no forward-pass change, no
-  `GpuEngine::build` path for the expert bank. `Proj::of` would still reject a
-  3-D tensor, and `gpu.rs` still builds a dense FFN per block, so a GPU load of
-  this file stops there — by design.
+* **MTP.** `blk.40` is a MoE block and `mtp.rs:129-131` requires a dense
+  `ffn_gate`, so the drafter cannot load this file. The two BF16 tensors are
+  MTP-only; the type exists so the file opens, not so the block runs.
+* **Grouped GEMM / bucketed prefill.** A MoE chunk runs the decode path once per
+  prompt token (§7.4). That is correct and it is 143.99 tok/s, but it re-streams
+  the whole model per prompt token: a 2,000-token prompt takes about 14 s, where
+  the bucket-sort + grouped-GEMM path the recon describes would read each expert
+  once per tile.
+* **No tuning and no fusion.** The router, top-k, combine and shared-expert
+  scalar are separate launches; the 8 ranks of a bank are one launch but the
+  three banks are three. §8.1 names what that costs. Nothing here was tuned to
+  reach the 176 tok/s projection.
+* **Batch/serve and `column-bench`.** Both refuse a MoE file up front, naming
+  the reason: neither has a routed FFN body. The single-sequence decode path is
+  the one that does.
 * **One prompt, one seed, 64 ids.** The gate says the conventions are right; it
-  does not bound how often a near-tie would flip a token between this f32 CPU
-  reference and llama's GPU kernels. The margin print in `moe-gate` is the tool
-  for that if it ever happens.
+  does not bound how often a near-tie would flip a token between the f32 CPU
+  reference, this GPU path and llama's GPU kernels. The margin print in
+  `moe-gate` and the routing diff in §8.3 are the tools for that if it ever
+  happens.
 * **The load-bearing assumption** is that llama.cpp's MoE path on the ROCm
   backend and its CPU path agree on these ids. Only the GPU path was run; the
   box did not have the RAM for a CPU llama-server beside the loaded GPU model.

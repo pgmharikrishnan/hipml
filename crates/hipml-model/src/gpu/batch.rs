@@ -182,17 +182,26 @@ impl<'a> BatchEngine<'a> {
             let mut g = Gguf::open(model.path()).map_err(|e| format!("{e}"))?;
             Config::from_gguf(&mut g).map_err(|e| format!("config: {e}"))?
         };
+        // The batched path's FFN is three dense projections per block. A MoE
+        // file has no `ffn_gate.weight`, so this fails here, naming the reason,
+        // rather than at the first `Proj::of` with a missing-tensor message.
+        if cfg.n_expert > 0 {
+            return Err(format!(
+                "batch decode has no MoE FFN yet ({} experts, {} used): the batched \
+                 engine runs a dense FFN per block; the single-sequence decode path does \
+                 have the expert gather",
+                cfg.n_expert, cfg.n_expert_used
+            ));
+        }
         let l = model.launcher();
         let n = cfg.n_embd;
         let dims = SsmDims::from_config(&cfg);
         let embed = model
             .tensor(crate::TOKEN_EMBD)
             .ok_or_else(|| "model has no token_embd.weight".to_string())?;
-        if embed.ty() != hipml_core::quant::TensorType::Q4K
-            && embed.ty() != hipml_core::quant::TensorType::Q6K
-        {
-            return Err(format!("{}: expected Q4_K or Q6_K", crate::TOKEN_EMBD));
-        }
+        // A row gather works for every format with a row decoder; see
+        // `GpuEngine::new`.
+        hipml_kernels::row_kind(embed.ty())?;
         let embed = (
             embed.buffer(),
             (embed.nbytes() / embed.rows()) as usize,

@@ -43,11 +43,27 @@ impl<'a> GpuEngine<'a> {
     /// Streamed weight bytes per traced stage, so a trace can report GB/s.
     pub fn stage_bytes(&self) -> Vec<(&'static str, usize)> {
         let (mut gate, mut up, mut down) = (0usize, 0usize, 0usize);
+        let mut moe = 0usize;
         let (mut attn_bytes, mut ssm_proj, mut ssm_step) = (0usize, 0usize, 0usize);
         for l in &self.layers {
-            gate += l.gate.bytes();
-            up += l.up.bytes();
-            down += l.down.bytes();
+            match &l.ffn {
+                Ffn::Dense {
+                    gate: g,
+                    up: u,
+                    down: d,
+                    ..
+                } => {
+                    gate += g.bytes();
+                    up += u.bytes();
+                    down += d.bytes();
+                }
+                Ffn::Moe(m) => {
+                    // One row for the whole FFN: the router, the gather, the
+                    // combine and the shared expert are one stage, so its bytes
+                    // are the layer's entire MoE stream.
+                    moe += m.bytes();
+                }
+            }
             match &l.kind {
                 BlockKind::Full { attn, .. } => attn_bytes += attn.weight_bytes(),
                 BlockKind::Ssm(s) => {
@@ -65,6 +81,7 @@ impl<'a> GpuEngine<'a> {
             ("gate", gate),
             ("up", up),
             ("down", down),
+            ("moe", moe),
             ("attn", attn_bytes),
             ("ssm_proj", ssm_proj),
             ("ssm_step", ssm_step),

@@ -20,33 +20,8 @@ use hipml_core::config::Config;
 use hipml_core::gen::argmax_f32;
 use hipml_core::gguf::Gguf;
 use hipml_hip::{Buffer, LaunchConfig};
-use hipml_model::gpu::{GpuEngine, KvMode};
+use hipml_model::gpu::{launches_per_token, GpuEngine, KvMode};
 use hipml_model::Model;
-
-/// Launches one token issues, from the graph's structure.
-///
-/// Short (f32) path: 1 embedding dequant, then per layer
-/// `rmsnorm + block + residual + rmsnorm + gate/up/silu/down/residual`, then
-/// `output_norm + lm_head`.
-pub fn launches_per_token(n_layer: usize, is_recr: &[bool]) -> usize {
-    let mut n = 1; // embedding dequant
-    for &recr in is_recr.iter().take(n_layer) {
-        n += 1; // attn_norm rmsnorm
-        n += if recr {
-            // qkv/gate/alpha/beta (one job-list launch), gates, conv, silu,
-            // 2x l2norm, gdn, gate_norm, out
-            9
-        } else {
-            // q/k/v (one job-list launch), qg_split, 2x head norm, 2x rope,
-            // kv_append, split, reduce, q_gate, wo
-            11
-        };
-        // residual, rmsnorm, gate+up (one job-list launch), silu, down,
-        // residual
-        n += 6;
-    }
-    n + 2 // output rmsnorm, lm_head
-}
 
 pub fn profile(args: &[String]) -> i32 {
     let mut gguf = String::new();
@@ -153,7 +128,7 @@ pub fn profile(args: &[String]) -> i32 {
     }
     let readback_ms = t.elapsed().as_secs_f64() * 1e3 / 32.0;
 
-    let n_launch = launches_per_token(cfg.n_layer, &cfg.is_recr);
+    let n_launch = launches_per_token(cfg.n_layer, &cfg.is_recr, cfg.n_expert > 0);
     let _ = sink;
     let _ = id;
     println!("device:            {}", model.device_name());
@@ -268,6 +243,7 @@ pub fn profile(args: &[String]) -> i32 {
                 "ffn_gate" => bytes["gate"],
                 "ffn_up" => bytes["up"],
                 "ffn_down" => bytes["down"],
+                "ffn_moe" => bytes["moe"],
                 "attn_qkv" => bytes["attn"],
                 "ssm_proj" => bytes["ssm_proj"],
                 "ssm_out" => bytes["ssm_step"],

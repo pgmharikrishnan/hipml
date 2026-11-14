@@ -50,6 +50,8 @@ mod prefill_cmd;
 mod profile_cmd;
 mod quant_cmd;
 #[cfg(feature = "hip")]
+mod row_dequant_cmd;
+#[cfg(feature = "hip")]
 mod rows_cmd;
 #[cfg(feature = "hip")]
 mod serve;
@@ -170,6 +172,15 @@ fn main() {
         "gemv-bench" => std::process::exit(gemv_cmd::gemv_bench(&args[1..])),
         "mtp-accept" => std::process::exit(mtp_cmd::run(&args[1..])),
         "moe-gate" => std::process::exit(moe_gate::run(&args[1..])),
+        "row-dequant" => {
+            #[cfg(feature = "hip")]
+            std::process::exit(row_dequant_cmd::run(&args[1..]));
+            #[cfg(not(feature = "hip"))]
+            {
+                eprintln!("row-dequant needs a build with `--features hip`");
+                std::process::exit(2);
+            }
+        }
         "attn-parity" => std::process::exit(attn_cmd::parity(&args[1..])),
         "attn-bench" => std::process::exit(attn_cmd::bench(&args[1..])),
         "bench-kv" => std::process::exit(kv_cmds::bench_kv(&args[1..])),
@@ -293,6 +304,8 @@ fn help() {
          \x20           --depths 1024,8192,32768,100000 --reps 3\n\
          \x20 rows-check --gguf PATH [--slots N --prefix P --tail T --decode D]\n\
          \x20           multi-row tail prefill vs the single-sequence path\n\
+         \x20 row-dequant [--row N]  the embedding row gather on device vs the\n\
+         \x20           host reference, for every format it decodes\n\
          \x20 serve     HTTP server: continuous batching, MTP, prefix cache\n\
          \n\
          build with `--features hip` on a machine with the ROCm/HIP runtime.",
