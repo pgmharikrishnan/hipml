@@ -23,8 +23,13 @@ struct Args {
     depths: Vec<usize>,
     kv: KvMode,
     check: bool,
+    sweep: bool,
+    distinct: bool,
     split: bool,
     probe: bool,
+    /// Print the per-step logit agreement between this slot's batched row and
+    /// the single-sequence engine instead of the pass/fail id gate.
+    diff_slot: Option<usize>,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -36,8 +41,11 @@ fn parse(args: &[String]) -> Result<Args, String> {
         depths: vec![0],
         kv: KvMode::Q8,
         check: false,
+        sweep: false,
+        distinct: false,
         split: false,
         probe: false,
+        diff_slot: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -82,6 +90,14 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 a.check = true;
                 i += 1;
             }
+            "--sweep" => {
+                a.sweep = true;
+                i += 1;
+            }
+            "--distinct" => {
+                a.distinct = true;
+                i += 1;
+            }
             "--split" => {
                 a.split = true;
                 i += 1;
@@ -89,6 +105,14 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--probe" => {
                 a.probe = true;
                 i += 1;
+            }
+            "--diff-slot" => {
+                a.diff_slot = Some(
+                    need(i)?
+                        .parse()
+                        .map_err(|e| format!("bad --diff-slot: {e}"))?,
+                );
+                i += 2;
             }
             other => return Err(format!("unknown argument {other}")),
         }
@@ -184,10 +208,21 @@ pub fn run(args: &[String]) -> i32 {
 
     let n = a.tokens;
     eng.trace = a.split;
+    // `--distinct` feeds each slot its own token stream, so the routed FFN
+    // sees the routing pattern a real fleet produces instead of one expert set
+    // shared by every slot (which is the best case for a cache, and the reason
+    // the same-token default is not the number to price a gather against).
+    let vocab = eng.cfg.n_vocab as u32;
+    let stream = |b: usize, step: usize| (7 + b as u32 * 97 + step as u32 * 13) % vocab;
     let t = Instant::now();
     let mut last = vec![0u32; a.slots];
-    for _ in 0..n {
-        match eng.forward(&vec![1u32; active]) {
+    for step in 0..n {
+        let toks: Vec<u32> = if a.distinct {
+            (0..active).map(|b| stream(b, step)).collect()
+        } else {
+            vec![1u32; active]
+        };
+        match eng.forward(&toks) {
             Ok(ids) => last = ids,
             Err(e) => {
                 eprintln!("batch-bench: decode: {e}");
@@ -272,64 +307,25 @@ pub fn run(args: &[String]) -> i32 {
     );
 
     if a.check {
+        if let Some(slot) = a.diff_slot {
+            if let Err(e) = diff_logits(&mut eng, &mut single, n, active, slot) {
+                eprintln!("batch-bench: diff: {e}");
+                return 1;
+            }
+            return 0;
+        }
         if a.depths.iter().any(|d| *d != 0) {
             println!(
                 "check: token parity is only defined at depth 0 here (synthetic KV seeds differ)"
             );
         } else {
-            // Replay a token stream that differs per slot and per step, then
-            // run each slot's stream through a single-sequence engine. This
-            // catches state bleeding between slots, which a shared token would
-            // hide (all slots would then be identical by construction).
-            let vocab = eng.cfg.n_vocab as u32;
-            let stream = |b: usize, step: usize| (7 + b as u32 * 97 + step as u32 * 13) % vocab;
-            let mut batch_ids = vec![Vec::with_capacity(n); active];
-            if let Err(e) = eng
-                .reset_state()
-                .and_then(|_| eng.set_positions(&a.depths[..active]))
-            {
-                eprintln!("batch-bench: check reset: {e}");
-                return 1;
-            }
-            for step in 0..n {
-                let toks: Vec<u32> = (0..active).map(|b| stream(b, step)).collect();
-                match eng.forward(&toks) {
-                    Ok(ids) => {
-                        for (b, id) in ids.into_iter().enumerate() {
-                            batch_ids[b].push(id);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("batch-bench: check decode: {e}");
-                        return 1;
-                    }
-                }
-            }
-            let mut ok = true;
-            for b in 0..active {
-                if let Err(e) = single.reset_state() {
-                    eprintln!("batch-bench: check single reset: {e}");
+            let ok = match check_slots(&mut eng, &mut single, n, active) {
+                Ok(ok) => ok,
+                Err(e) => {
+                    eprintln!("batch-bench: check: {e}");
                     return 1;
                 }
-                let mut st = single.state_at(a.depths[0]);
-                for (step, want) in batch_ids[b].iter().enumerate() {
-                    match single.forward_token_id(stream(b, step), &mut st) {
-                        Ok(id) if id == *want => {}
-                        Ok(id) => {
-                            ok = false;
-                            println!("check slot {b} step {step}: batch {want} vs single {id} -> MISMATCH");
-                            break;
-                        }
-                        Err(e) => {
-                            eprintln!("batch-bench: check single: {e}");
-                            return 1;
-                        }
-                    }
-                }
-                if ok {
-                    println!("check slot {b}: {n}/{n} ids match the B=1 path");
-                }
-            }
+            };
             println!(
                 "check: {}",
                 if ok {
@@ -341,11 +337,152 @@ pub fn run(args: &[String]) -> i32 {
             if !ok {
                 return 1;
             }
+            // The gate the dense path has always had, at every slot count: a
+            // slot must produce the ids it would produce alone. `--sweep` builds
+            // a fresh engine at B = 1..=slots and replays each one, so a bug
+            // that only appears at some batch width cannot hide behind the
+            // capacity the benchmark happened to run at.
+            if a.sweep {
+                for b in 1..active {
+                    let mut e = match BatchEngine::new(&model, n_ctx, a.kv, b) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            eprintln!("batch-bench: sweep engine at B={b}: {e}");
+                            return 1;
+                        }
+                    };
+                    if let Err(e) = e.activate(b) {
+                        eprintln!("batch-bench: sweep activate at B={b}: {e}");
+                        return 1;
+                    }
+                    let ok_b = match check_slots(&mut e, &mut single, n, b) {
+                        Ok(ok) => ok,
+                        Err(e) => {
+                            eprintln!("batch-bench: sweep check at B={b}: {e}");
+                            return 1;
+                        }
+                    };
+                    println!(
+                        "sweep B={b}: {}",
+                        if ok_b {
+                            "all slots reproduce the B=1 path"
+                        } else {
+                            "TOKENS DIFFER"
+                        }
+                    );
+                    if !ok_b {
+                        return 1;
+                    }
+                }
+                println!("sweep: B=1..={active} all reproduce the B=1 path");
+            }
         }
     }
 
     vram_note(&eng, a.slots, 8192);
     0
+}
+
+/// Replay a token stream that differs per slot and per step through `eng`, then
+/// run each slot's stream through the single-sequence engine and compare ids.
+///
+/// Distinct streams catch state bleeding between slots, which a shared token
+/// would hide (all slots would then be identical by construction). Returns
+/// `Ok(true)` when every slot reproduces the B=1 ids over the whole stream.
+fn check_slots(
+    eng: &mut BatchEngine<'_>,
+    single: &mut GpuEngine<'_>,
+    n: usize,
+    active: usize,
+) -> Result<bool, String> {
+    let vocab = eng.cfg.n_vocab as u32;
+    let stream = |b: usize, step: usize| (7 + b as u32 * 97 + step as u32 * 13) % vocab;
+    let mut batch_ids = vec![Vec::with_capacity(n); active];
+    eng.reset_state()?;
+    eng.set_positions(&vec![0; active])?;
+    for step in 0..n {
+        let toks: Vec<u32> = (0..active).map(|b| stream(b, step)).collect();
+        let ids = eng.forward(&toks)?;
+        for (b, id) in ids.into_iter().enumerate() {
+            batch_ids[b].push(id);
+        }
+    }
+    let mut ok = true;
+    for b in 0..active {
+        single.reset_state()?;
+        let mut st = single.state_at(0);
+        let mut ok_b = true;
+        for (step, want) in batch_ids[b].iter().enumerate() {
+            let id = single.forward_token_id(stream(b, step), &mut st)?;
+            if id != *want {
+                ok = false;
+                ok_b = false;
+                println!("check slot {b} step {step}: batch {want} vs single {id} -> MISMATCH");
+                break;
+            }
+        }
+        if ok_b {
+            println!("check slot {b}: {n}/{n} ids match the B=1 path");
+        }
+    }
+    Ok(ok)
+}
+
+/// The same replay as [`check_slots`], but printing the full logit vector's
+/// agreement per step for one slot: how far apart the batch and the single
+/// stream are, and how much room the argmax had. Diagnostic only.
+fn diff_logits(
+    eng: &mut BatchEngine<'_>,
+    single: &mut GpuEngine<'_>,
+    n: usize,
+    active: usize,
+    slot: usize,
+) -> Result<(), String> {
+    let vocab = eng.cfg.n_vocab as usize;
+    let stream = |b: usize, step: usize| (7 + b as u32 * 97 + step as u32 * 13) % vocab as u32;
+    let mut batch: Vec<Vec<f32>> = Vec::with_capacity(n);
+    eng.reset_state()?;
+    eng.set_positions(&vec![0; active])?;
+    for step in 0..n {
+        let toks: Vec<u32> = (0..active).map(|b| stream(b, step)).collect();
+        eng.forward(&toks)?;
+        let lg = eng.logits_host()?;
+        batch.push(lg[slot * vocab..(slot + 1) * vocab].to_vec());
+    }
+    let top = |v: &[f32]| -> (usize, f32, f32) {
+        let mut best = (0usize, f32::NEG_INFINITY);
+        let mut second = f32::NEG_INFINITY;
+        for (i, &x) in v.iter().enumerate() {
+            if x > best.1 {
+                second = best.1;
+                best = (i, x);
+            } else if x > second {
+                second = x;
+            }
+        }
+        (best.0, best.1, second)
+    };
+    single.reset_state()?;
+    let mut st = single.state_at(0);
+    for (step, a) in batch.iter().enumerate() {
+        let lg = single.forward_token(stream(slot, step), &mut st)?;
+        let (mut diff, mut worst) = (0usize, 0.0f32);
+        for i in 0..vocab {
+            if a[i].to_bits() != lg[i].to_bits() {
+                diff += 1;
+                worst = worst.max((a[i] - lg[i]).abs());
+            }
+        }
+        let (ba, bv, b2) = top(a);
+        let (sa, sv, s2) = top(&lg);
+        println!(
+            "step {step:3}: batch {ba} ({bv:.6}, margin {:.2e}) | single {sa} ({sv:.6}, \
+             margin {:.2e}) | {diff} of {vocab} logits differ, max |d| {worst:.3e}",
+            bv - b2,
+            sv - s2
+        );
+    }
+    Ok(())
 }
 
 fn depth_label(d: &[usize]) -> String {
