@@ -118,6 +118,7 @@ Endpoints, headers, metrics and failure scopes: [`server.md`](server.md).
 | `hipml batch-bench --gguf … --slots 8 --check` | batched decode rows, exact path vs tile path |
 | `hipml ppl --gguf … --ids-file … [--ctx 512] [--chunk N]` | perplexity of a token corpus, in `llama-perplexity`'s convention, so the number can be diffed against its `Final estimate` |
 | `hipml gemv-entries --gguf … --kind Q4_K --batch 4` | one whole-type stream through the *batched* GEMV at `N` token rows, every row checked bit-for-bit against the one-row entry |
+| `hipml bw-probe [--launches N] [--flat-only\|--rows-only]` | read-only bandwidth at a fixed byte count: bytes per load × loads in flight × workgroups, with the empty-kernel floor subtracted |
 | `hipml cache-bench`, `bench-kv`, `rows-check`, `attn-bench`, `attn-parity`, `ssm`, `gdn-parity`, `prefill-bench`, `prefill-model`, `skinny-bench`, `column-bench`, `gemv-check`, `gemv-bench`, `bench`, `decode-bench`, `load`, `logits`, `matbench` | the individual pieces; `hipml help` lists them all |
 
 The like-for-like comparison against llama.cpp is the Python harness:

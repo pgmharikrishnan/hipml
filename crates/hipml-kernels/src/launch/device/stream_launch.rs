@@ -109,4 +109,88 @@ impl Launcher {
         ];
         kernel.launch(LaunchConfig::linear(blocks, 256), &self.stream, &mut params)
     }
+
+    /// The bandwidth probe's flat reader: `nbytes` bytes from `base`, `VEC`
+    /// bytes per load and `outstanding` independent loads per thread, as baked
+    /// into `entry` (`bw_flat_v16_o4` and friends).
+    pub fn bw_flat(
+        &self,
+        entry: &str,
+        buf: &ByteBuffer,
+        nbytes: usize,
+        base_bytes: usize,
+        vec: usize,
+        blocks: usize,
+        threads: usize,
+        out: &Buffer,
+    ) -> Result<(), String> {
+        let kernel = self.module.kernel(entry)?;
+        let mut p = buf.device_ptr() as *const std::ffi::c_void;
+        let mut nvec = (nbytes / vec) as u64;
+        let mut base = (base_bytes / vec) as u64;
+        let mut p_out = out.as_ptr();
+        let mut params: [*mut std::ffi::c_void; 4] = [
+            &mut p as *mut _ as *mut std::ffi::c_void,
+            &mut nvec as *mut _ as *mut std::ffi::c_void,
+            &mut base as *mut _ as *mut std::ffi::c_void,
+            &mut p_out as *mut _ as *mut std::ffi::c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (blocks.max(1) as u32, 1, 1),
+            block: (threads.max(32) as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        kernel.launch(cfg, &self.stream, &mut params)
+    }
+
+    /// The bandwidth probe's row reader: the GEMV's own geometry, `rpw` rows per
+    /// warp, at `VEC` bytes per load.
+    pub fn bw_rows(
+        &self,
+        entry: &str,
+        buf: &ByteBuffer,
+        rows: usize,
+        row_bytes: usize,
+        rpw: usize,
+        row0: usize,
+        blocks: usize,
+        threads: usize,
+        out: &Buffer,
+    ) -> Result<(), String> {
+        let kernel = self.module.kernel(entry)?;
+        let mut p = buf.device_ptr() as *const std::ffi::c_void;
+        let mut v_rows = rows as i32;
+        let mut v_rb = row_bytes as i32;
+        let mut v_rpw = rpw as i32;
+        let mut v_row0 = row0 as i32;
+        let mut p_out = out.as_ptr();
+        let mut params: [*mut std::ffi::c_void; 6] = [
+            &mut p as *mut _ as *mut std::ffi::c_void,
+            &mut v_rows as *mut _ as *mut std::ffi::c_void,
+            &mut v_rb as *mut _ as *mut std::ffi::c_void,
+            &mut v_rpw as *mut _ as *mut std::ffi::c_void,
+            &mut v_row0 as *mut _ as *mut std::ffi::c_void,
+            &mut p_out as *mut _ as *mut std::ffi::c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (blocks.max(1) as u32, 1, 1),
+            block: (threads.max(32) as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        kernel.launch(cfg, &self.stream, &mut params)
+    }
+
+    /// An empty kernel at the same grid, for the node cost on its own.
+    pub fn bw_empty(&self, blocks: usize, threads: usize, out: &Buffer) -> Result<(), String> {
+        let kernel = self.module.kernel("bw_empty")?;
+        let mut p_out = out.as_ptr();
+        let mut params: [*mut std::ffi::c_void; 1] =
+            [&mut p_out as *mut _ as *mut std::ffi::c_void];
+        let cfg = LaunchConfig {
+            grid: (blocks.max(1) as u32, 1, 1),
+            block: (threads.max(32) as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        kernel.launch(cfg, &self.stream, &mut params)
+    }
 }
