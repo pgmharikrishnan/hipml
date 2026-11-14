@@ -51,6 +51,24 @@ pub fn gemv_job_kind(entry: &str) -> Option<i32> {
     })
 }
 
+/// The `kind` selector the grouped expert GEMM (`prefill_moe.hip`) decodes a
+/// weight tile with. The ids are `pf_dequant8`'s (`prefill_common.inc`), which
+/// is a different numbering from `gemv_job_kind`'s: the prefill tile has no
+/// packed-fp16 (`halfw`) body because an expert bank is never fp16.
+pub fn moe_prefill_kind(entry: &str) -> Option<i32> {
+    Some(match entry {
+        "gemv_q4_k" | "gemv_q4_k_r1" => 0,
+        "gemv_q6_k" | "gemv_q6_k_r1" => 1,
+        "gemv_q8_0" => 2,
+        "gemv_q5_k" => 4,
+        "gemv_iq4_xs" => 5,
+        "gemv_iq4_nl" => 6,
+        "gemv_q3_k" => 7,
+        "gemv_iq3_s" => 8,
+        _ => return None,
+    })
+}
+
 /// The `kind` selector `dequant_rows.hip` decodes a row with.
 ///
 /// Every format the engine can dequantise has a body in that kernel, so this is

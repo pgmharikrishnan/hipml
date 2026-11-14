@@ -49,7 +49,10 @@ pub use launch::{
     prefill_should_split, prefill_split_scratch_cap, prefill_xhalf,
 };
 #[cfg(feature = "hip")]
-pub use launch::{gemv_job_kind, gemv_job_tiles, row_kind, GemvJob, ReadJob};
+pub use launch::{
+    gemv_job_kind, gemv_job_tiles, moe_prefill_kind, row_kind, GemvJob, ReadJob, MOE_PREFILL_ROWS,
+    MOE_PREFILL_THREADS, MOE_PREFILL_TOKENS,
+};
 pub use launch::{
     prefill_entry_for, prefill_half, prefill_path, prefill_slices, prefill_v2,
     q5_tile_prefill_enabled, set_prefill_half, set_prefill_path, PrefillPath,
@@ -1250,6 +1253,51 @@ pub const KERNELS: &[KernelSpec] = &[
     KernelSpec {
         name: "sigmoid_f32",
         entry: "sigmoid_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    // The chunked path. One block per prompt token for the router, one block
+    // for the counting sort, one launch for a whole expert bank for the GEMM.
+    KernelSpec {
+        name: "moe_topk_rows_f32",
+        entry: "moe_topk_rows_f32",
+        // One block per token: the same body as `moe_topk_f32`, one token's
+        // logits per block.
+        kind: KernelKind::PerRow { block: 256 },
+    },
+    KernelSpec {
+        name: "moe_bucket_f32",
+        entry: "moe_bucket_f32",
+        // One block: count, exclusive scan, scatter. The bank is <= 1,024 wide.
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "moe_prefill_gemm",
+        entry: "moe_prefill_gemm",
+        // grid.y is the expert; each block walks that expert's run of slots in
+        // 64-slot tiles. Geometry mirrors `MG_RT`/`MG_THREADS`.
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 64,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "moe_prefill_gemm_silu",
+        entry: "moe_prefill_gemm_silu",
+        kind: KernelKind::Prefill {
+            rows: 128,
+            tokens: 64,
+            block: 256,
+        },
+    },
+    KernelSpec {
+        name: "moe_combine_rows_f32",
+        entry: "moe_combine_rows_f32",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "moe_shared_add_rows_f32",
+        entry: "moe_shared_add_rows_f32",
         kind: KernelKind::Linear { block: 256 },
     },
     KernelSpec {

@@ -285,3 +285,193 @@ extern "C" __global__ void sigmoid_f32(
     if (i >= n) return;
     out[i] = 1.0f / (1.0f + expf(-x[i]));
 }
+
+// ---------------------------------------------------------------------------
+// The chunked path: route the whole prompt tile, bucket the slots by expert,
+// and let one grouped GEMM (`prefill_moe.hip`) read each expert once.
+//
+// The conventions are the ones above, unchanged: softmax over all 256, top-k by
+// value desc and id asc, renormalise by the selected sum clamped at the
+// smallest normal f16. `moe_topk_rows_f32` is `moe_topk_f32` with the router
+// logits of one token, so the two paths cannot drift apart by a convention.
+// ---------------------------------------------------------------------------
+
+// Softmax over every expert, top-k, renormalise: one block per prompt token.
+//
+// `logits` is `[n_tokens][n_expert]` (a tiled GEMM writes it), `ids` and
+// `weights` are `[n_tokens][k]`.
+extern "C" __global__ void moe_topk_rows_f32(
+    const float* __restrict__ logits,
+    int n_expert,
+    int k,
+    unsigned int* __restrict__ ids,
+    float* __restrict__ weights)
+{
+    __shared__ float sp[MOE_TOP_K_MAX];
+    __shared__ float sv[MOE_BLOCK];
+    __shared__ int si[MOE_BLOCK];
+    __shared__ double sd[MOE_BLOCK];
+
+    const int t = blockIdx.x;
+    const float* lg = logits + (size_t)t * n_expert;
+    unsigned int* idt = ids + (size_t)t * k;
+    float* wt = weights + (size_t)t * k;
+
+    const int tid = threadIdx.x;
+    const int nt = blockDim.x;
+
+    float mx = -INFINITY;
+    for (int i = tid; i < n_expert; i += nt) mx = fmaxf(mx, lg[i]);
+    sv[tid] = mx;
+    __syncthreads();
+    for (int off = MOE_BLOCK / 2; off > 0; off >>= 1) {
+        if (tid < off) sv[tid] = fmaxf(sv[tid], sv[tid + off]);
+        __syncthreads();
+    }
+    const float m = sv[0];
+    __syncthreads();
+
+    double s = 0.0;
+    for (int i = tid; i < n_expert; i += nt) {
+        const float p = expf(lg[i] - m);
+        sp[i] = p;
+        s += (double)p;
+    }
+    sd[tid] = s;
+    __syncthreads();
+    for (int off = MOE_BLOCK / 2; off > 0; off >>= 1) {
+        if (tid < off) sd[tid] += sd[tid + off];
+        __syncthreads();
+    }
+    const float scale = (float)(1.0 / sd[0]);
+    __syncthreads();
+    for (int i = tid; i < n_expert; i += nt) sp[i] *= scale;
+    __syncthreads();
+
+    for (int j = 0; j < k; ++j) {
+        float bv = -INFINITY;
+        int bi = 0x7FFFFFFF;
+        for (int i = tid; i < n_expert; i += nt) {
+            const float v = sp[i];
+            if (v > bv || (v == bv && i < bi)) {
+                bv = v;
+                bi = i;
+            }
+        }
+        sv[tid] = bv;
+        si[tid] = bi;
+        __syncthreads();
+        for (int off = MOE_BLOCK / 2; off > 0; off >>= 1) {
+            if (tid < off) {
+                const float ov = sv[tid + off];
+                const int oi = si[tid + off];
+                if (ov > sv[tid] || (ov == sv[tid] && oi < si[tid])) {
+                    sv[tid] = ov;
+                    si[tid] = oi;
+                }
+            }
+            __syncthreads();
+        }
+        if (tid == 0) {
+            idt[j] = (unsigned int)si[0];
+            wt[j] = sv[0];
+            sp[si[0]] = -INFINITY;
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        double sum = 0.0;
+        for (int j = 0; j < k; ++j) sum += (double)wt[j];
+        const float denom = fmaxf((float)sum, 6.103515625e-5f);
+        for (int j = 0; j < k; ++j) wt[j] = wt[j] / denom;
+    }
+}
+
+// Counting sort of `[n_tokens][n_used]` routing decisions into per-expert runs.
+//
+// `off[e]..off[e+1]` is expert `e`'s run; within a run `xtok[p]` is the
+// activation row (token) and `yslot[p]` the output row, which is the slot's
+// own token-major index `t * n_used + rank`. That second map is what makes the
+// combine a left fold in rank order without a second pass: the down projection
+// scatters each expert's rows straight into the token-major layout llama.cpp's
+// `ggml_mul_mat_id` writes, and `moe_combine_rows_f32` folds it.
+extern "C" __global__ void moe_bucket_f32(
+    const unsigned int* __restrict__ ids,
+    int n_tokens,
+    int n_used,
+    int n_expert,
+    unsigned int* __restrict__ off,
+    int* __restrict__ xtok,
+    int* __restrict__ yslot)
+{
+    __shared__ unsigned int cnt[MOE_TOP_K_MAX];
+    __shared__ unsigned int cur[MOE_TOP_K_MAX];
+
+    const int tid = threadIdx.x;
+    const int nt = blockDim.x;
+    const int n_slot = n_tokens * n_used;
+
+    for (int e = tid; e < n_expert; e += nt) cnt[e] = 0u;
+    __syncthreads();
+    for (int s = tid; s < n_slot; s += nt) atomicAdd(&cnt[ids[s]], 1u);
+    __syncthreads();
+
+    if (tid == 0) {
+        unsigned int acc = 0;
+        for (int e = 0; e < n_expert; ++e) {
+            off[e] = acc;
+            cur[e] = acc;
+            acc += cnt[e];
+        }
+        off[n_expert] = acc;
+    }
+    __syncthreads();
+
+    for (int s = tid; s < n_slot; s += nt) {
+        const int e = (int)ids[s];
+        const unsigned int p = atomicAdd(&cur[e], 1u);
+        xtok[p] = s / n_used;
+        yslot[p] = s;
+    }
+}
+
+// `y[t] = ((w[t][0]*d[t][0] + w[t][1]*d[t][1]) + ...)`, a left fold in top-k
+// rank order, for a whole chunk. `down` is `[n_tokens * n_used][n]` and the
+// fold is over the rank axis inside a token, which is the order the decode
+// path's `moe_combine_f32` uses.
+extern "C" __global__ void moe_combine_rows_f32(
+    float* __restrict__ y,
+    const float* __restrict__ down,
+    const float* __restrict__ weights,
+    int n,
+    int n_used,
+    int n_tokens)
+{
+    const int t = blockIdx.y;
+    if (t >= n_tokens) return;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float* d = down + (size_t)t * n_used * n;
+    const float* w = weights + (size_t)t * n_used;
+    float a = w[0] * d[i];
+    for (int j = 1; j < n_used; ++j) a += w[j] * d[(size_t)j * n + i];
+    y[(size_t)t * n + i] = a;
+}
+
+// `y[t] += shared[t] * scale[t]`: the shared expert's per-token sigmoid,
+// applied to its whole output row and added outside the routed sum.
+extern "C" __global__ void moe_shared_add_rows_f32(
+    float* __restrict__ y,
+    const float* __restrict__ shared,
+    const float* __restrict__ scale,
+    int n,
+    int n_tokens)
+{
+    const int t = blockIdx.y;
+    if (t >= n_tokens) return;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const size_t o = (size_t)t * n + i;
+    y[o] += shared[o] * scale[t];
+}

@@ -63,13 +63,15 @@ pub(crate) mod device {
     #[path = "graph_launch.rs"]
     mod graph_launch;
     pub use graph_launch::{
-        gemv_job_kind, gemv_job_tiles, row_kind, GemvJob, GEMV_B_IQ3S, GEMV_B_IQ4NL, GEMV_B_IQ4XS,
-        GEMV_B_Q3K, GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80, GEMV_JOB_IQ4XS, GEMV_JOB_Q4K,
-        GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80,
+        gemv_job_kind, gemv_job_tiles, moe_prefill_kind, row_kind, GemvJob, GEMV_B_IQ3S,
+        GEMV_B_IQ4NL, GEMV_B_IQ4XS, GEMV_B_Q3K, GEMV_B_Q4K, GEMV_B_Q5K, GEMV_B_Q6K, GEMV_B_Q80,
+        GEMV_JOB_IQ4XS, GEMV_JOB_Q4K, GEMV_JOB_Q5K, GEMV_JOB_Q6K, GEMV_JOB_Q80,
     };
     #[path = "moe_launch.rs"]
     mod moe_launch;
-    pub use moe_launch::MOE_TOP_K_MAX;
+    pub use moe_launch::{
+        MOE_PREFILL_ROWS, MOE_PREFILL_THREADS, MOE_PREFILL_TOKENS, MOE_TOP_K_MAX,
+    };
     #[path = "prefill_launch.rs"]
     mod prefill_launch;
 
@@ -620,7 +622,10 @@ pub(crate) mod device {
 #[cfg(feature = "hip")]
 pub use device::{gemm_rows_f32, prefill_resident, prefill_resident_slices, prefill_xhalf};
 #[cfg(feature = "hip")]
-pub use device::{gemv_job_kind, gemv_job_tiles, GemvJob, Launcher, ReadJob};
+pub use device::{
+    gemv_job_kind, gemv_job_tiles, moe_prefill_kind, GemvJob, Launcher, ReadJob, MOE_PREFILL_ROWS,
+    MOE_PREFILL_THREADS, MOE_PREFILL_TOKENS,
+};
 #[cfg(feature = "hip")]
 pub use device::{
     prefill_entry_for_half, prefill_gu_entry, prefill_has_gu, prefill_has_silu, prefill_has_xhalf,
