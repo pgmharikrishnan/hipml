@@ -50,8 +50,8 @@ pub use launch::{
 };
 #[cfg(feature = "hip")]
 pub use launch::{
-    gemv_job_kind, gemv_job_tiles, moe_prefill_kind, row_kind, GemvJob, ReadJob, MOE_PREFILL_ROWS,
-    MOE_PREFILL_THREADS, MOE_PREFILL_TOKENS,
+    gemv_job_kind, gemv_job_tiles, moe_prefill_kind, moe_prefill_padding, row_kind, GemvJob,
+    ReadJob, MOE_PREFILL_ROWS, MOE_PREFILL_THREADS, MOE_PREFILL_TILES, MOE_PREFILL_TOKENS,
 };
 pub use launch::{
     prefill_entry_for, prefill_half, prefill_path, prefill_slices, prefill_v2,

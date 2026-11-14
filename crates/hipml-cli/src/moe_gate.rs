@@ -581,20 +581,44 @@ pub(crate) fn print_bucket_stats(engine: &hipml_model::gpu::GpuEngine<'_>, n_tok
             );
             let top: Vec<String> = sorted.iter().take(8).map(|n| n.to_string()).collect();
             println!("bucket:    largest runs {top:?}");
-            // Every run is rounded up to a whole token tile, so this is the
-            // arithmetic the grouped GEMM actually does: a chunk whose runs are
-            // shorter than a tile pays for slots it does not have.
-            let tile = hipml_kernels::MOE_PREFILL_TOKENS;
-            let padded: usize = runs
-                .iter()
-                .map(|&r| (r as usize).div_ceil(tile) * tile)
-                .sum();
-            let real: usize = runs.iter().map(|&r| r as usize).sum();
+            // The run-length distribution: what a tile height is choosing
+            // between. Buckets are the tile boundaries, so a run's bucket is
+            // the tile it takes.
+            let mut hist = [0usize; 6];
+            for &r in &runs {
+                let i = match r {
+                    0 => continue,
+                    1..=16 => 0,
+                    17..=32 => 1,
+                    33..=64 => 2,
+                    65..=128 => 3,
+                    129..=256 => 4,
+                    _ => 5,
+                };
+                hist[i] += 1;
+            }
             println!(
-                "bucket:    {real} slots padded to {padded} ({:.2}x) in {} tiles of {tile}",
-                padded as f64 / real.max(1) as f64,
-                padded / tile
+                "bucket:    runs 1-16 {} | 17-32 {} | 33-64 {} | 65-128 {} | 129-256 {} | 257+ {}",
+                hist[0], hist[1], hist[2], hist[3], hist[4], hist[5]
             );
+            // Every run is rounded up to a whole slot tile, so this is the
+            // arithmetic the grouped GEMM actually does: a chunk whose runs are
+            // shorter than its tile pays for slots it does not have. One line
+            // per height, with the shipped one marked, so the sweep's padding
+            // column is a measurement and not a reconstruction.
+            let real: usize = runs.iter().map(|&r| r as usize).sum();
+            for tile in hipml_kernels::MOE_PREFILL_TILES {
+                let (padded, tiles) = hipml_kernels::moe_prefill_padding(&runs, tile);
+                println!(
+                    "bucket:    tile {tile:2}{}: {real} slots padded to {padded} ({:.2}x) in {tiles} tiles",
+                    if tile == hipml_kernels::MOE_PREFILL_TOKENS {
+                        " *"
+                    } else {
+                        "  "
+                    },
+                    padded as f64 / real.max(1) as f64
+                );
+            }
         }
         Err(e) => eprintln!("bucket stats: {e}"),
     }

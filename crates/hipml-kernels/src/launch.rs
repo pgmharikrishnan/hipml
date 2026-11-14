@@ -70,7 +70,8 @@ pub(crate) mod device {
     #[path = "moe_launch.rs"]
     mod moe_launch;
     pub use moe_launch::{
-        MOE_PREFILL_ROWS, MOE_PREFILL_THREADS, MOE_PREFILL_TOKENS, MOE_TOP_K_MAX,
+        moe_prefill_padding, MOE_PREFILL_ROWS, MOE_PREFILL_THREADS, MOE_PREFILL_TILES,
+        MOE_PREFILL_TOKENS, MOE_TOP_K_MAX,
     };
     #[path = "prefill_launch.rs"]
     mod prefill_launch;
@@ -623,8 +624,8 @@ pub(crate) mod device {
 pub use device::{gemm_rows_f32, prefill_resident, prefill_resident_slices, prefill_xhalf};
 #[cfg(feature = "hip")]
 pub use device::{
-    gemv_job_kind, gemv_job_tiles, moe_prefill_kind, GemvJob, Launcher, ReadJob, MOE_PREFILL_ROWS,
-    MOE_PREFILL_THREADS, MOE_PREFILL_TOKENS,
+    gemv_job_kind, gemv_job_tiles, moe_prefill_kind, moe_prefill_padding, GemvJob, Launcher,
+    ReadJob, MOE_PREFILL_ROWS, MOE_PREFILL_THREADS, MOE_PREFILL_TILES, MOE_PREFILL_TOKENS,
 };
 #[cfg(feature = "hip")]
 pub use device::{
