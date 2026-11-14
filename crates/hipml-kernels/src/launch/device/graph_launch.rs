@@ -296,14 +296,38 @@ impl Launcher {
             "gemv_iq3_s" => ("gemv_iq3_s_b", 16, 1024, 256),
             other => return Err(format!("{other}: no batched GEMV kernel")),
         };
+        // Q8_0's batched kernel is one block per output row and one thread per
+        // 32-value weight block, so a 256-thread launch only fills `k / 32`
+        // threads: at k = 2048 that is 64 of 256, three quarters of the block
+        // idle. The extra rows then lengthen the per-thread FMA chain instead
+        // of spreading over more parallel work, which is why B=4 used to cost
+        // the same as four separate launches (measured: 137 GB/s against 587
+        // at B=1, `gemv-bench output.weight`). Sizing the block to the work
+        // lets four times as many blocks sit on each CU. Every thread still
+        // owns exactly block `t`, so each row's sum order -- and its bits --
+        // is unchanged; `column-check` and `gemv-check` prove it.
+        let tid = match entry {
+            "gemv_q8_0_b" => (((k / 32).max(1) + 31) / 32 * 32).clamp(32, 256) as u32,
+            _ => tid,
+        };
         Self::trace_route(entry, m, k, batch, "exact");
         let kernel = self.module.kernel(entry)?;
         // The `_b` kernels cover at most 8 rows, so the exact path takes one
-        // pass per 8-row group (`HIPML_BATCH_LEGACY` at any B, or B < 4 where
-        // the tile pads R to 16 and loses).
+        // pass per group (`HIPML_BATCH_LEGACY` at any B, or B < 4 where the
+        // tile pads R to 16 and loses). Q8_0's row kernel is throughput-bound
+        // above two rows -- it streams 569 GB/s at B=2, 400 at B=3 and 252 at
+        // B=4, because the per-thread work grows with B while the block does
+        // not -- so four rows are two two-row passes: that reads the weight
+        // twice and is still 11% faster than one four-row pass. Three rows
+        // stay one pass, which beats a 2+1 split by 39%. Each row's sum order
+        // is independent of B, so either split is bit-identical.
+        let max_rows = match (entry, batch) {
+            ("gemv_q8_0_b", b) if b >= 4 => 2,
+            _ => 8,
+        };
         let mut base = 0usize;
         while base < batch {
-            let r = (batch - base).min(8);
+            let r = (batch - base).min(max_rows);
             let tile = if tid == 256 {
                 if r <= 4 {
                     1024
