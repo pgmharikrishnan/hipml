@@ -2,10 +2,10 @@
 
 Every number in the table below, and the identity that produced it, comes from
 **one session on one card**: a single binary built from tree `af132a4`, every
-axis measured between 2026-11-13T18:38:38Z and 19:35:33Z, against llama.cpp
-build 11820 (commit `d7725699`), whose binary is byte-identical to the one every
-earlier session used. Nothing is carried over from an earlier run. The model is
-`Qwen3.8-27B-UD-Q4_K_M.gguf` with q8-class KV on both engines.
+axis measured between 2026-11-13T18:38:38Z and 19:35:33Z, against llama.cpp's
+ROCm build 11820 (commit `d7725699`), whose binary is byte-identical to the one
+every earlier session used. Nothing is carried over from an earlier run. The
+model is `Qwen3.8-27B-UD-Q4_K_M.gguf` with q8-class KV on both engines.
 
 The stock-model release run in [`release-run.md`](release-run.md) is the earlier
 record of the release tree. The decode path this table measures changed
@@ -34,7 +34,7 @@ rows grafted onto it.
 | stock Q4_K_M (gates only) | `Qwen3.8-27B-Q4_K_M.gguf`, 16,810,714,336 B, sha256 `e00082f779fa385cee8c68a3ec8833a75778cc87272240b942f74e0b8243e520` |
 | GPU | AMD Radeon AI PRO R9700, gfx1201, 31.9 GiB (an iGPU, gfx1036, is also enumerated) |
 | driver / ROCm / OS | 32.0.32015.7029 / 7.2.1 / Windows 11 Pro build 26200 |
-| llama.cpp | build 11820, commit `d7725699`, sha256 `6f6bf5e975dd3d5efb314f61688a8ea3b2f6516b0503c28b3783887f47d00ab3` — byte-identical to the `409f4ad` session |
+| llama.cpp (ROCm) | build 11820, commit `d7725699`, sha256 `6f6bf5e975dd3d5efb314f61688a8ea3b2f6516b0503c28b3783887f47d00ab3` — byte-identical to the `409f4ad` session |
 | harness | `bench/job.py` and `bench/serve/serve_bench.py` as committed in `af132a4` |
 
 All three model hashes, the binary hash, the tree hash and the head were
@@ -283,14 +283,20 @@ llama.cpp has no equivalent switch; all its numbers are its production path.
   31.9 GiB. The only `error`-matching lines in any hipml `server.log` are
   connection aborts at keep-alive teardown; the harness recorded 0 failed
   requests in every cell.
-- **One GPU, one OS, one build.** gfx1201, Windows 11, llama.cpp build 11820
-  (`d7725699`). No second card, no Linux, no CUDA.
+- **One GPU, one OS, two llama.cpp builds.** gfx1201, Windows 11. Every
+  llama.cpp number here is the ROCm build 11820 (`d7725699`). A Vulkan build of
+  the same series is also installed on the card — 11836, `f5027fb21` — and the
+  two are not interchangeable: on decode the Vulkan build is 2.07% to 5.05%
+  faster than the ROCm build, and on prefill it is 13.69% to 33.48% slower.
+  "llama.cpp" without a backend is an ambiguous baseline; the check is in
+  [`articles/08-eight-files-six-axes-one-session.md`](articles/08-eight-files-six-axes-one-session.md).
+  No second card, no Linux, no CUDA.
 
 ## Reproduce it
 
 ```powershell
 $env:HIPML_GGUF   = "<UD-Q4_K_M.gguf>"
-$env:LLAMA_SERVER = "<llama-server.exe>"      # build 11820 to match
+$env:LLAMA_SERVER = "<llama-server.exe>"      # ROCm build, 11820 to match
 bash bench/run.sh --depth 0,8192 --reps 3
 python bench/serve/serve_bench.py --engine hipml --cell a --reps 10
 python bench/serve/serve_bench.py --engine llama --cell a --reps 10

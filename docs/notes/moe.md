@@ -697,7 +697,7 @@ interleaved per depth (hipml, llama, llama, hipml) so a drift in the box lands o
 both, three reps per process and six per cell, q8 KV on both, the same 512-token
 fixture. Peak VRAM comes from the same external WDDM sampler for both engines.
 hipml is `786b8c88…`, 3,111,424 B, `built with hip feature: true`; llama.cpp is
-`0.7.0-dev (build 11820, commit d7725699)` with `-ngl 99`.
+the ROCm build, `0.7.0-dev (build 11820, commit d7725699)`, with `-ngl 99`.
 
 | cell | hipml tok/s | llama.cpp tok/s | delta | ranges separate |
 | --- | ---: | ---: | ---: | --- |
