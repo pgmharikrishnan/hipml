@@ -62,6 +62,21 @@ pub enum Stage {
     Ew,
     LmHead,
     Argmax,
+    /// The routed FFN's router GEMV: one 2.1 MB F32 matvec to `n_expert`
+    /// logits (1 launch a layer).
+    MoeRouter,
+    /// The device softmax + top-k, on its own: one block, eight selection
+    /// passes, on the critical path once a layer.
+    MoeTopk,
+    /// The three routed bank GEMVs: gate, up, down (3 launches a layer).
+    MoeBank,
+    /// `silu(gate) * up` on the routed ranks (1 launch a layer).
+    MoeAct,
+    /// The rank-order fold of the weighted down rows (1 launch a layer).
+    MoeCombine,
+    /// The shared expert: three dense GEMVs, its SiLU, the gate dot, the
+    /// sigmoid and the add (7 launches a layer).
+    MoeShared,
 }
 
 /// The four launches between the Q/K/V projections and the output projection.
@@ -81,8 +96,19 @@ const SSM_SCAN: [Stage; 5] = [
     Stage::SsmGateNorm,
 ];
 
+/// The fourteen launches of a routed FFN, in the groups `MoeBlock::forward`
+/// issues them. A dense block has no such split; `FfnGemv` drops all of them.
+const MOE_FFN: [Stage; 6] = [
+    Stage::MoeRouter,
+    Stage::MoeTopk,
+    Stage::MoeBank,
+    Stage::MoeAct,
+    Stage::MoeCombine,
+    Stage::MoeShared,
+];
+
 impl Stage {
-    pub const ALL: [Stage; 17] = [
+    pub const ALL: [Stage; 23] = [
         Stage::Embed,
         Stage::AttnFront,
         Stage::KvAppend,
@@ -100,6 +126,12 @@ impl Stage {
         Stage::Ew,
         Stage::LmHead,
         Stage::Argmax,
+        Stage::MoeRouter,
+        Stage::MoeTopk,
+        Stage::MoeBank,
+        Stage::MoeAct,
+        Stage::MoeCombine,
+        Stage::MoeShared,
     ];
 
     pub fn name(self) -> &'static str {
@@ -121,6 +153,12 @@ impl Stage {
             Stage::Ew => "ew",
             Stage::LmHead => "lmhead",
             Stage::Argmax => "argmax",
+            Stage::MoeRouter => "moe_router",
+            Stage::MoeTopk => "moe_topk",
+            Stage::MoeBank => "moe_bank",
+            Stage::MoeAct => "moe_act",
+            Stage::MoeCombine => "moe_combine",
+            Stage::MoeShared => "moe_shared",
         }
     }
 
@@ -148,6 +186,10 @@ impl Ablate {
     }
 
     /// Everything except the projection GEMVs: the isolated weight stream.
+    ///
+    /// On a routed file the routed bank GEMVs and the shared expert stay, and
+    /// the router GEMV, the top-k, the routed `silu_mul` and the combine go: the
+    /// shared expert is one block of launches and is priced as a whole.
     pub fn gemv_only() -> Ablate {
         let mut a = Ablate::none();
         for s in [Stage::Embed, Stage::Norm, Stage::Ew, Stage::Argmax] {
@@ -157,6 +199,14 @@ impl Ablate {
             a.drop(s);
         }
         for s in SSM_SCAN {
+            a.drop(s);
+        }
+        for s in [
+            Stage::MoeRouter,
+            Stage::MoeTopk,
+            Stage::MoeAct,
+            Stage::MoeCombine,
+        ] {
             a.drop(s);
         }
         a
@@ -261,6 +311,11 @@ impl Ablate {
                         a.drop(s);
                     }
                     a.drop(Stage::SsmGemv);
+                }
+                "moe" => {
+                    for s in MOE_FFN {
+                        a.drop(s);
+                    }
                 }
                 other => {
                     let s = Stage::ALL

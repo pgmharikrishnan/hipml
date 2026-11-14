@@ -24,6 +24,7 @@ They contain no machine paths and are cited by the notes in `docs/notes/`.
 | `probe_prefill_fp8_acc.cpp` | the fp8 staging tile against an f64 host reference, to price its accuracy |
 | `probe_wmma_layout.cpp` | fragment layout and bank-conflict behaviour of the WMMA load/store |
 | `probe_norm.cpp` | the decode's `rmsnorm_f32` at 5,120 floats: µs per launch, independent and chained, and the GB/s one launch gets |
+| `probe_launch.cpp` | what one more node in the graph costs: N empty kernels, N = 64 … 4096, eager and captured, plus a single `hipGraphLaunch` |
 
 `probe_prefill_tiles.cpp` builds the tile with `-DPWW2_W8=1` to stage the two
 LDS tiles as fp8 and multiply with `v_wmma_f32_16x16x16_fp8_fp8`; `-DPWW2_W8=0`
@@ -38,6 +39,13 @@ launches and timing the rest, untraced, over N tokens. It is the counterpart of
 `probe_prefill_tiles.cpp`'s `PWW2_PROBE_*` switches for the token path: a stage
 that is not launched cannot be over-reported by an event, which is what happened
 to two earlier trace-based budgets ([`decode-residual-gemv.md`](../../docs/notes/decode-residual-gemv.md) §4).
+
+`--cells` takes a table label or any ablation spec, so a stage can be priced
+inside a confound: a dropped producer leaves its consumer reading whatever was
+there, and dropping the MoE top-k alone makes all eight routed ranks read expert
+0, which the L2 then serves seven times. Inside a spec `+` means "and", so
+`--cells full,-moe_bank,-moe_bank+moe_topk` is the pair that isolates the top-k
+kernel. [`moe.md`](../../docs/notes/moe.md) §8.3 has the table.
 
 The switches live in `crates/hipml-model/src/gpu/ablate.rs` and are default-off:
 `HIPML_ABLATE=a,b` seeds the set (so `gpu-bench` can reproduce one cell in a fresh
