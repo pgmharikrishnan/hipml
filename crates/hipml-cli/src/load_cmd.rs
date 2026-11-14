@@ -13,6 +13,8 @@ use hipml_model::verify::{
 };
 use hipml_model::{LoadReport, Model};
 
+use hipml_core::quant::TensorType;
+
 /// Fixed token ids for the embedding check, plus the vocabulary's last row.
 /// The last row used to be the literal 248319 ("the 248320-row
 /// vocabulary"); it now comes from the loaded embedding shape, so a model with
@@ -140,6 +142,20 @@ fn print_config(path: &Path) -> Result<(), String> {
         c.ssm_d_inner,
         c.ssm_head_v()
     );
+    if c.n_expert > 0 {
+        println!(
+            "  moe: {} experts, {} used, expert ffn {}, shared expert {}, ffn {}",
+            c.n_expert,
+            c.n_expert_used,
+            c.n_ff_exp,
+            if c.has_shexp {
+                c.n_ff_shexp.to_string()
+            } else {
+                "absent".to_string()
+            },
+            c.n_ff
+        );
+    }
     println!("  full-attention layers ({}): {:?}", full.len(), full);
     Ok(())
 }
@@ -252,6 +268,22 @@ fn print_embeddings(model: &Model, path: &Path, probes: &[u32]) -> Result<(), St
     let t = model
         .tensor(hipml_model::TOKEN_EMBD)
         .ok_or_else(|| format!("no tensor {}", hipml_model::TOKEN_EMBD))?;
+    // The probe dequantises the row on the device, and the only device
+    // dequantisation kernels are Q4_K and Q6_K. A Q8_0 embedding table (the
+    // qwen35moe file) has no such kernel, so the probe says it is skipped
+    // instead of failing the load: `round_trip` has already compared the
+    // payload byte for byte.
+    let ty = t.ty();
+    if ty != TensorType::Q4K && ty != TensorType::Q6K {
+        println!(
+            "\nembedding rows ({} {:?} {}): skipped, the device dequant probe \
+             covers Q4_K and Q6_K only",
+            t.name(),
+            t.shape(),
+            ty.name()
+        );
+        return Ok(());
+    }
     println!(
         "\nembedding rows ({} {:?} {}; device dequant vs CPU dequant):",
         t.name(),

@@ -77,12 +77,15 @@ file's header wins.
 2. Reference copies in docs/reference/ (MIT, documentation only)
 ===============================================================================
 
-docs/reference/ holds eleven unmodified llama.cpp source files:
+docs/reference/ holds twelve unmodified llama.cpp source files:
 
-    qwen35.cpp              delta-net-base.cpp      gated_delta_net_f32.c
-    models.h                llama-graph.cpp         llama-vocab.cpp
-    unicode.cpp             unicode.h               ggml-cpu-ops.cpp
-    ggml-quants.c           ggml-impl.h
+    qwen35.cpp              qwen35moe.cpp           delta-net-base.cpp
+    gated_delta_net_f32.c   models.h                llama-graph.cpp
+    llama-vocab.cpp         unicode.cpp             unicode.h
+    ggml-cpu-ops.cpp        ggml-quants.c           ggml-impl.h
+
+`qwen35moe.cpp` is from commit `d7725699` (build 11820), the revision the
+mixture-of-experts work is audited against; the rest are from tag `b12126`.
 
 They are Copyright (c) the ggml authors, licensed under the MIT License; the
 full text is docs/reference/LICENSE, and docs/reference/README.md says which

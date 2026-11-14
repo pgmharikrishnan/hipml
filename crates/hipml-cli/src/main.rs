@@ -37,6 +37,7 @@ mod gen_cmd;
 mod gpu_bench_cmd;
 mod kv_cmds;
 mod load_cmd;
+mod moe_gate;
 #[cfg(feature = "hip")]
 mod mtp_batch_cmd;
 mod mtp_cmd;
@@ -168,6 +169,7 @@ fn main() {
         #[cfg(feature = "hip")]
         "gemv-bench" => std::process::exit(gemv_cmd::gemv_bench(&args[1..])),
         "mtp-accept" => std::process::exit(mtp_cmd::run(&args[1..])),
+        "moe-gate" => std::process::exit(moe_gate::run(&args[1..])),
         "attn-parity" => std::process::exit(attn_cmd::parity(&args[1..])),
         "attn-bench" => std::process::exit(attn_cmd::bench(&args[1..])),
         "bench-kv" => std::process::exit(kv_cmds::bench_kv(&args[1..])),
@@ -278,6 +280,8 @@ fn help() {
          \x20 gpu-bench --gguf PATH [--prefill N] [--depth D --kv q8]\n\
          \x20 oracle-gate --gguf PATH --ids-file F --steps N  CPU oracle vs the\n\
          \x20           production chunked path, step by step (exit 1 on a real split)\n\
+         \x20 moe-gate --gguf PATH --fixture F  CPU MoE reference vs llama.cpp's\n\
+         \x20           greedy ids on the same prompt (exit 1 on any divergence)\n\
          \x20 splitk-gate --gguf PATH [--chunk 2048 --tails 40]  split-K ffn\n\
          \x20           scratch vs HIPML_SPLITK=0 at every chunk tail\n\
          \x20 gpu-profile --gguf PATH  launch cost, host round-trips, graph token\n\

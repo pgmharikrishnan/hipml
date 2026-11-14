@@ -186,6 +186,7 @@ fn supported(ty: TensorType) -> bool {
     matches!(
         ty,
         TensorType::F32
+            | TensorType::BF16
             | TensorType::Q4K
             | TensorType::Q5K
             | TensorType::Q6K
@@ -321,7 +322,7 @@ impl Model {
         // Fixed order so two runs print identical tables.
         let mut per_type = Vec::new();
         for name in [
-            "F32", "F16", "Q8_0", "Q6_K", "Q5_K", "Q4_K", "Q3_K", "Q2_K", "Q4_0", "IQ4_XS",
+            "F32", "F16", "BF16", "Q8_0", "Q6_K", "Q5_K", "Q4_K", "Q3_K", "Q2_K", "Q4_0", "IQ4_XS",
             "IQ4_NL", "IQ3_S",
         ] {
             let mut n = 0usize;

@@ -1,18 +1,20 @@
 # llama.cpp sources this module ports
 
-These eleven files are **unmodified copies** from llama.cpp, tag `b12126`
-(https://github.com/ggml-org/llama.cpp/tree/b12126), kept so the port can be
-audited line by line. They are © the ggml authors, MIT License (see `LICENSE`
-in this directory). They are not part of the hipml build, are not compiled or
-linked, and are **not** covered by hipml's Apache-2.0 license; `hipml-core` has
-no build dependency on them. Line numbers quoted in `docs/notes/` refer to
-these files as upstream published them, so the bodies are left byte-identical
-and carry no header of ours. See `NOTICE` at the repository root for the
-attribution and for what was derived from each one.
+These twelve files are **unmodified copies** from llama.cpp, tag `b12126`
+(https://github.com/ggml-org/llama.cpp/tree/b12126), except `qwen35moe.cpp`,
+which is from commit `d7725699` (build 11820) and is noted below. They are kept
+so the port can be audited line by line. They are © the ggml authors, MIT
+License (see `LICENSE` in this directory). They are not part of the hipml
+build, are not compiled or linked, and are **not** covered by hipml's
+Apache-2.0 license; `hipml-core` has no build dependency on them. Line numbers
+quoted in `docs/notes/` refer to these files as upstream published them, so the
+bodies are left byte-identical and carry no header of ours. See `NOTICE` at the
+repository root for the attribution and for what was derived from each one.
 
 | file | used for |
 |---|---|
 | `qwen35.cpp` | the architecture: layer loop, attention block, GDN block, FFN |
+| `qwen35moe.cpp` | `qwen35moe`: the MoE layer loop, `build_layer_ffn` and the shared expert (commit `d7725699`, path `src/models/qwen35moe.cpp`) |
 | `delta-net-base.cpp` | conv state, autoregressive gated delta net, recurrent attention |
 | `gated_delta_net_f32.c` | fused-kernel semantics and the state layout |
 | `models.h` | `build_gdn_l2_norm` |

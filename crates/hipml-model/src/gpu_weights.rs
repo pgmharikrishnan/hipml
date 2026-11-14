@@ -399,6 +399,63 @@ impl<'a> Proj<'a> {
     }
 }
 
+/// A 3-D expert tensor, viewed as `n_expert` slices of a `rows x cols` matrix.
+///
+/// `ffn_gate_exps` is `[n_embd, n_ff_exp, n_expert]` in GGML order and
+/// `ffn_down_exps` is `[n_ff_exp, n_embd, n_expert]`: the experts are stacked
+/// along the slowest axis, so expert `e` starts `e * stride` bytes into the
+/// payload and the slice is an ordinary `rows x cols` matrix in the same block
+/// format. That is the whole accessor — [`Proj`] stays 2-D on purpose, because
+/// a dense tensor with a third dimension is a shape error and must stay one.
+pub struct Experts<'a> {
+    w: &'a ByteBuffer,
+    entry: &'static str,
+    /// Rows and columns of **one expert**, not of the bank.
+    pub rows: usize,
+    pub cols: usize,
+    pub n_expert: usize,
+    /// Bytes per expert slice: `rows * row_bytes(cols)`.
+    pub stride: usize,
+}
+
+impl<'a> Experts<'a> {
+    pub fn of(model: &'a Model, name: &str) -> Result<Experts<'a>, String> {
+        let t: &DeviceTensor = model
+            .tensor(name)
+            .ok_or_else(|| format!("model has no tensor {name}"))?;
+        let shape = t.shape();
+        if shape.len() != 3 {
+            return Err(format!("{name}: expected an expert bank, got {shape:?}"));
+        }
+        let (n_expert, rows, cols) = (shape[0] as usize, shape[1] as usize, shape[2] as usize);
+        let entry = gemv_entry(t.ty())?;
+        let stride = t
+            .ty()
+            .nbytes((rows * cols) as u64)
+            .ok_or_else(|| format!("{name}: one expert is not a whole number of blocks"))?;
+        Ok(Experts {
+            w: t.buffer(),
+            entry,
+            rows,
+            cols,
+            n_expert,
+            stride: stride as usize,
+        })
+    }
+
+    /// The device pointer of expert `e`'s matrix. The caller reads `rows` rows
+    /// of `cols` values from it with `entry`'s GEMV kernel.
+    pub fn slice(&self, e: usize) -> usize {
+        assert!(e < self.n_expert, "expert {e} of {}", self.n_expert);
+        self.w.device_ptr() + e * self.stride
+    }
+
+    /// The GEMV entry that reads one slice.
+    pub fn entry(&self) -> &'static str {
+        self.entry
+    }
+}
+
 /// Compare the batched GEMV against `rows` single launches on a resident
 /// tensor, bit for bit.
 ///
