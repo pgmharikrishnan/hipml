@@ -11,6 +11,7 @@ mod tests {
         {%- if content is string %}{{- content }}{%- endif %}{%- endmacro %}\
         {%- set reasoning_instructions = '' %}\
         {%- if preserve_thinking is undefined or preserve_thinking is true %}{%- endif %}\
+        {%- if enable_thinking is undefined or enable_thinking is true %}{%- endif %}\
         {%- if add_generation_prompt %}{{- '<|im_start|>assistant' }}{%- endif %}\
         {{- '<|im_end|>' }}{{- '<think>' }}";
 
@@ -114,6 +115,66 @@ mod tests {
         ])];
         let out = render(TEMPLATE, &msgs, &ChatOptions::default()).unwrap();
         assert!(out.contains("<|im_start|>user\nhello world<|im_end|>\n"));
+    }
+
+    /// MiniCPM-V-4.7's template: ChatML turns and a thinking tag, no
+    /// `preserve_thinking`, no `reasoning_instructions`, and thinking hard
+    /// disabled at the generation prompt.
+    const MINICPM: &str = "{%- macro render_content(content) %}{{- content -}}{%- endmacro %}\
+        {%- if add_generation_prompt %}{{- '<|im_start|>assistant' }}{%- endif %}\
+        {{- '<|im_end|>' }}{{- '<think>' }}";
+
+    #[test]
+    fn template_without_preserve_thinking_renders() {
+        // The 400 this fixes: `preserve_thinking` was a hard-required marker,
+        // so every MiniCPM-V-4.7 request failed before the model was reached.
+        let msgs = [
+            Message::new("user", "q1"),
+            Message::assistant_with_reasoning("a1", "secret"),
+            Message::new("user", "q2"),
+        ];
+        let out = render(MINICPM, &msgs, &ChatOptions::default()).unwrap();
+        assert!(out.contains("<|im_start|>user\nq1<|im_end|>\n"));
+        // No branch keeps a pre-query thinking block, so none is emitted.
+        assert!(!out.contains("secret"));
+        assert!(out.contains("<|im_start|>assistant\na1<|im_end|>\n"));
+    }
+
+    #[test]
+    fn template_with_unknown_marker_renders() {
+        // A marker the engine has never seen must not fail a render: the
+        // validator only inspects the two ChatML delimiters.
+        let template = MINICPM.replace(
+            "{%- macro render_content",
+            "{%- if some_future_flag %}{%- endif %}{%- macro render_content",
+        );
+        let out = render(
+            &template,
+            &[Message::new("user", "hi")],
+            &ChatOptions::default(),
+        )
+        .unwrap();
+        assert!(out.contains("<|im_start|>user\nhi<|im_end|>\n"));
+    }
+
+    #[test]
+    fn template_without_enable_thinking_cannot_open_a_block() {
+        // `enable_thinking` is the template's knob. MiniCPM's template does not
+        // read it and hard-codes the closed block, so asking for thinking must
+        // still render the closed one.
+        let out = render(
+            MINICPM,
+            &[Message::new("user", "hi")],
+            &ChatOptions::default(),
+        )
+        .unwrap();
+        assert!(out.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+        let opts = ChatOptions {
+            enable_thinking: false,
+            ..ChatOptions::default()
+        };
+        let off = render(MINICPM, &[Message::new("user", "hi")], &opts).unwrap();
+        assert_eq!(out, off);
     }
 
     #[test]

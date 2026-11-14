@@ -24,6 +24,8 @@ use super::*;
 use crate::gpu_weights::gemv_entry;
 use crate::OUTPUT;
 
+use super::moe::MoeBatch;
+
 /// Per-column scratch, one set shared by every layer.
 pub(crate) struct Cols {
     pub cap: usize,
@@ -68,6 +70,10 @@ pub(crate) struct Cols {
     pub arg_v: Buffer,
     pub arg_i: Buffer,
     pub arg_out: Buffer,
+    /// The routed FFN's per-column scratch, when the FFN is a mixture of
+    /// experts: one slot per verify column, so the column path reuses the
+    /// batched decode step rather than a second copy of the arithmetic.
+    pub moe: Option<MoeBatch>,
 }
 
 /// The recurrent state of every GDN layer after every verify column.
@@ -136,6 +142,10 @@ impl Cols {
             arg_v: zeros(cap * ARGMAX_PARTS)?,
             arg_i: zeros(cap * ARGMAX_PARTS)?,
             arg_out: zeros(cap)?,
+            moe: match cfg.n_expert {
+                0 => None,
+                _ => Some(MoeBatch::new(cfg, cap)?),
+            },
         })
     }
 }
@@ -381,24 +391,34 @@ impl<'a> GpuEngine<'a> {
             l.residual_buf(&c.x, block_out, &c.x1, rows * n)?;
             l.rmsnorm_rows(&c.x1, &block.post_norm, &c.t, n, cfg.eps, rows)?;
             super::trace::mark(&mut self.trace, l, "post_norm")?;
-            let (gate, up, down) = match &block.ffn {
-                Ffn::Dense { gate, up, down, .. } => (gate, up, down),
-                Ffn::Moe(_) => {
-                    return Err(
-                        "column-bench: this file's FFN is a mixture of experts, and the \
-                         column path has no MoE body"
-                            .to_string(),
-                    )
+            let ffn_out: &Buffer = match &block.ffn {
+                Ffn::Dense { gate, up, down, .. } => {
+                    gate.gemv_rows(l, &c.t, &c.gate, rows)?;
+                    super::trace::mark(&mut self.trace, l, "gate")?;
+                    up.gemv_rows(l, &c.t, &c.up, rows)?;
+                    super::trace::mark(&mut self.trace, l, "up")?;
+                    l.silu_mul_buf(&c.gate, &c.up, &c.act, rows * cfg.n_ff)?;
+                    down.gemv_rows(l, &c.act, &c.down, rows)?;
+                    super::trace::mark(&mut self.trace, l, "down")?;
+                    &c.down
+                }
+                // The verify pass is `rows` columns of one weight pass, which is
+                // the shape the batched decode step already runs: `forward_batch`
+                // puts the column on `grid.z` and gives it its own router row,
+                // top-k, expert gather and fold, through the same tile body as
+                // `MoeBlock::forward`. Column `c` is therefore the token a plain
+                // decode of that column produces.
+                Ffn::Moe(m) => {
+                    let mb = c
+                        .moe
+                        .as_ref()
+                        .ok_or_else(|| "moe column scratch not allocated".to_string())?;
+                    super::trace::mark(&mut self.trace, l, "ffn_moe")?;
+                    m.forward_batch(l, &c.t, rows, mb)?;
+                    &mb.out
                 }
             };
-            gate.gemv_rows(l, &c.t, &c.gate, rows)?;
-            super::trace::mark(&mut self.trace, l, "gate")?;
-            up.gemv_rows(l, &c.t, &c.up, rows)?;
-            super::trace::mark(&mut self.trace, l, "up")?;
-            l.silu_mul_buf(&c.gate, &c.up, &c.act, rows * cfg.n_ff)?;
-            down.gemv_rows(l, &c.act, &c.down, rows)?;
-            super::trace::mark(&mut self.trace, l, "down")?;
-            l.residual_buf(&c.down, &c.x1, &c.x, rows * n)?;
+            l.residual_buf(ffn_out, &c.x1, &c.x, rows * n)?;
         }
 
         l.rmsnorm_rows(&c.x, &self.output_norm, &c.final_h, n, cfg.eps, rows)?;

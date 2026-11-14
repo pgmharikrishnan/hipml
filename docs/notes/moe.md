@@ -1138,17 +1138,44 @@ GEMM over any `[n_tok][n_embd]` tile, and both the prompt chunk and the
 multi-sequence row block call it, so a batched prefill and a single prompt cannot
 drift apart.
 
-Speculative verify is the one place with no MoE body: `verify.rs` returns
-`speculative verify has no MoE FFN (MTP is dense-only)`, because the drafter for
-this file does not load (§10).
+Speculative verify had no MoE body in either verify pass: the single-stream
+column path (`columns.rs`) returned *"the column path has no MoE body"* and the
+batch verify (`batch/verify.rs`) returns *"speculative verify has no MoE FFN
+(MTP is dense-only)"*. **The single-stream path now has one** — it runs
+`MoeBlock::forward_batch` with one slot per verify column, so `spec-bench` and
+`column-bench` work on this file; §8.8 has the numbers. The batch verify still
+refuses, so `serve --drafts` on a MoE file remains unavailable (§10).
 
 There was a second blocker behind the first, and it was not in the engine:
-`chat.rs` required every marker in a chat template, and Qwen3.6's template has no
-`reasoning_instructions`, so every request 400'd before the model was reached.
-`render` now treats that one marker as optional and emits no reasoning block when
-it is absent; every other marker is still required, so a template that is missing
-anything else still fails loudly. `cargo test -p hipml-core --test chat_render`
-is 9 passed.
+`chat.rs` required every marker in a chat template. Qwen3.6's template has no
+`reasoning_instructions`, so every request 400'd before the model was reached;
+that one marker was made optional, and then MiniCPM-V-4.7's template 400'd on
+the next marker (`preserve_thinking`) — the same bug one marker later. The
+handling was one-marker-at-a-time and would have broken on the next model, so it
+is now fixed as a class.
+
+`validate_template` requires only the two ChatML turn delimiters, because those
+are what the renderer emits verbatim and a template without them is a different
+format. Every other marker is a branch the renderer implements itself and is
+optional; its absence changes that branch:
+
+| marker | absent |
+| --- | --- |
+| `render_content` | ignored; it names the macro this renderer inlines |
+| `add_generation_prompt` | the caller's flag still appends the turn |
+| `enable_thinking` | thinking is not a knob: the closed block is emitted |
+| `preserve_thinking` | pre-query thinking is dropped (no branch keeps it) |
+| `reasoning_instructions` | no system reasoning block |
+| the opening thinking tag | no thinking block at all |
+
+A marker the engine has never seen is never inspected, so it cannot fail a
+render. `cargo test -p hipml-core --test chat_render` is 12 passed, including a
+template with an unknown marker and a template missing `preserve_thinking`.
+
+The cell: `hipml serve --gguf MiniCPM-V-4_7-35B-A3B-Q4_K_M.gguf` answers
+`/v1/chat/completions` with **200** (18 prompt tokens, 8 completion tokens,
+"Hello there, how are you?"), where the parent binary answers **400** on the
+same request. `/completion` is 200 on both.
 
 #### 8.7.2 Both shapes were measured, and the gather won
 
@@ -1280,6 +1307,61 @@ Making it hold at B=16 means giving the batch back its attention kernel, which i
 the batched engine's whole point on a dense file; that is the owner's call, and
 it is written here rather than papered over with a narrower gate.
 
+## 8.8 Speculative decode on the MoE file (2026-11-14)
+
+The verify pass had no routed FFN, so no speculative decode was possible on any
+mixture-of-experts file. Three changes, all reuse rather than new arithmetic:
+
+* **The column body is `MoeBlock::forward_batch`.** The verify runs `k` columns
+  of one token through attention, GDN and the FFN at once; the FFN needs the
+  router over `k` rows, the top-k per column, the gather and the fold per
+  column. That is exactly the batched decode step §8.7 built for serve, with
+  one slot per verify column: the column index is `grid.z`, each column reads
+  its own router row, ids, activation row and output row, and the tile body is
+  the single-sequence one. `forward_rows` — the bucketed grouped GEMM — is
+  **not** the reuse, because its arithmetic is not the single-token step's
+  (§8.7.2 measured it 1.96x slower at B=8 as well).
+* **The drafter's FFN is a `MoeBlock`** when the file has experts, built from
+  the same `blk.<n>.ffn_*` names the decoder layers use. `blk.40` on this file
+  carries the 256-expert banks, not `ffn_gate`.
+* **BF16 is widened to f32 at upload.** `blk.40.ffn_gate_inp` and
+  `ffn_gate_inp_shexp` are the file's only BF16 tensors and no GEMV reads BF16;
+  they are 1 MB, so the loader expands them (2 MB resident) rather than adding a
+  kernel.
+
+`column-bench --cols 4 --check` is **0 differ** on 7,946,240 logits, hidden and
+residual, at q8 and f32 over 32 columns. `spec-bench --gguf <this file> --mtp
+<the same file>` is **128/128 token-exact at drafts 1, 2 and 3** on both KV
+modes, against plain greedy decode of the same prompt.
+
+| drafts | ms/step | tok/step | tok/s q8 | vs plain | tok/s f32 | acceptance | exact |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| 0 | 7.86 | 1.000 | **127.30** | 1.00x | 124.89 | — | — |
+| 1 | 14.37 | 1.954 | **135.94** | 1.07x | 133.58 | 0.954 | 128/128 |
+| 2 | 19.90 | 2.822 | **141.84** | **1.11x** | 138.59 | 0.956, 0.953 | 128/128 |
+| 3 | 26.67 | 3.528 | **132.28** | 1.04x | 129.82 | 0.917, 0.939, 0.935 | 128/128 |
+
+The verify slope is the finding. A dense verify shares the FFN's weight stream
+across columns (four columns cost 1.33x a one-column pass); a routed FFN cannot,
+because column `c` reads its own 8 of 256 experts. `column-bench` on this file:
+
+| columns | ms/pass | vs 1 col |
+| ---: | ---: | ---: |
+| 1 | 9.01 | 1.00x |
+| 2 | 12.82 | 1.42x |
+| 3 | 16.90 | 1.88x |
+| 4 | 22.34 | **2.48x** |
+
+So the second draft pays (+11.1%) and the third does not: from two drafts to
+three the step buys 0.706 tokens for 6.77 ms, 9.6 ms per marginal token against
+the 7.86 ms a plain token costs. `docs/notes/mtp.md` has the full table and the
+step breakdown (drafts 3: draft 3.90 + verify 22.47 + rollback 0.30 ms).
+
+**Verdict: speculation makes this file faster than plain decode, by 11.1% at two
+drafts (141.84 against 127.30 tok/s), and it is token-exact.** It does not beat
+the 3-draft dense result because the routed verify is the term that does not
+amortise.
+
 ## 9. Gates
 
 On the binary this branch ships, `--features hip`, model paths passed with
@@ -1319,10 +1401,14 @@ anything that was already gated:
 | `spec-bench --drafts 3 --kv q8` | 128/128 exact every row | **128/128** on all four rows |
 | `spec-bench --drafts 3 --kv f32` | 128/128 exact every row | **128/128** on all four rows |
 | `column-bench --check` | 0 differ | **0 differ** on 7,946,240 logits, hidden and residual |
+| `column-bench --check` (Qwen3.6-35B-A3B, routed FFN) | 0 differ | **0 differ** on 7,946,240 logits, hidden and residual, q8 and f32, 32 columns |
+| `spec-bench` Qwen3.6-35B-A3B, drafts 1/2/3, q8 | 128/128 exact, faster than plain | **128/128**, 135.94 / 141.84 / 132.28 tok/s against 127.30 |
+| `spec-bench` Qwen3.6-35B-A3B, drafts 1/2/3, f32 | 128/128 exact | **128/128**, 133.58 / 138.59 / 129.82 tok/s against 124.89 |
+| `serve` `/v1/chat/completions`, MiniCPM-V-4.7 | 200, not the reported 400 | **200**, 18 prompt / 8 completion tokens; the base binary is still **400** |
 | `probe_exact.py --ctx 32768` | PASS | PASS, 48 replies id-for-id across drafts 1,2,3 |
-| `ppl` (Arete-27B) | 2.1824 vs llama 2.1791 | **2.1824**, unchanged |
-| dense decode, depth 0, 200 tokens | ~33.2 tok/s | **33.44 tok/s** (29.90 ms/token) |
-| `cargo test --workspace` | clean | **98 passed, 0 failed** (local and on the GPU host) |
+| `ppl` (Arete-27B) | 2.1824 vs llama 2.1791 | unchanged: **2.0384** on `C:\mm\moe-matrix\corpus.ids` on both this binary and the parent, where 2.1824 is the `calib_longctx` 4-window corpus (no ids dump for it on the box) |
+| dense decode, depth 0, 200 tokens | ~33.2 tok/s | **33.44 tok/s** (29.90 ms/token), three reps 33.39–33.49 |
+| `cargo test --workspace` | clean | **101 passed, 0 failed** (local and on the GPU host) |
 | `cargo fmt --all -- --check` | clean | clean |
 | `scripts/check-public-tree.sh` | clean | clean |
 | `scripts/check-doc-links.py` | all links resolve | 283 links in 53 files |
@@ -1333,9 +1419,12 @@ dense forward pass.
 
 ## 10. What is not verified, and what is out of scope
 
-* **MTP.** `blk.40` is a MoE block and `mtp.rs:129-131` requires a dense
-  `ffn_gate`, so the drafter cannot load this file. The two BF16 tensors are
-  MTP-only; the type exists so the file opens, not so the block runs.
+* **MTP.** `blk.40` is a MoE block; `mtp.rs` now builds the drafter's FFN as
+  a `MoeBlock` when the file has experts, so the block loads and runs. The two
+  BF16 router tensors are widened to f32 at upload (2 MB) because no GEMV reads
+  BF16. §8.8 is the measurement. What is *not* done: the batch engine's drafter
+  (`batch/mtp.rs`) still requires a dense `ffn_gate`, and `batch/verify.rs` still
+  refuses a MoE FFN, so `serve --drafts` is not available on a MoE file.
 * **Grouped GEMM / bucketed prefill: shipped, at 79% of llama.cpp's warm 512
   cell.** §7.4 and §8.6 are the path and the numbers; §8.6.1 is why the baseline
   is 3,588.74 and not 3,375.05 or 4,529.55, and §8.6.2 is the tile sweep. What is
@@ -1362,12 +1451,17 @@ dense forward pass.
   same launches in the same order, and the token is byte-identical to the
   parent commit.
 * **Batch/serve.** The batched decode engine now serves a MoE file (§8.7): the
-  routed FFN runs as one gather launch per bank with the slot on `grid.z`, and
-  `column-bench` still refuses a MoE file, naming the reason. The per-slot id
-  gate holds at B=1..4 and not above, because the batched step is not the
-  single-stream step from B=2 (the batched attention kernel is a different one,
-  by design) and routing amplifies the difference — §8.7.5 is the measurement
-  and the decision that is owed.
+  routed FFN runs as one gather launch per bank with the slot on `grid.z`. The
+  per-slot id gate holds at B=1..4 and not above, because the batched step is
+  not the single-stream step from B=2 (the batched attention kernel is a
+  different one, by design) and routing amplifies the difference — §8.7.5 is
+  the measurement and the decision that is owed.
+* **`serve --drafts` on a MoE file is still unavailable.** The single-stream
+  verify has a routed body (§8.8) and `spec-bench`/`column-bench` use it, but
+  the batch engine's verify (`batch/verify.rs`) still returns *"speculative
+  verify has no MoE FFN"* and its drafter (`batch/mtp.rs`) still requires a
+  dense `ffn_gate`. Both are the same two edits as §8.8 against the batch
+  scratch, and neither is in this slice.
 * **The bandwidth instrument prices reads, not kernels.** `bw-probe` has no
   dequant and no dot, so its 0.59 MB number is a ceiling the token never pays.
   §8.5's neutral A/B is the evidence that the two are not the same question. The
