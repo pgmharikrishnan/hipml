@@ -413,6 +413,13 @@ impl<'a> Proj<'a> {
         self.w.len()
     }
 
+    /// The weight payload's device address, for the launches that take a raw
+    /// pointer rather than a `ByteBuffer` (the grouped expert GEMM, the
+    /// warp-per-output f32 GEMM).
+    pub(crate) fn ptr(&self) -> usize {
+        self.w.device_ptr()
+    }
+
     /// Whether [`Proj::gemm_half`] can serve this format. F32 weights (from
     /// `HIPML_EXPAND_SMALL_QUANTS=1`) have no fp16-activation tile, so the
     /// caller passes the f32 activation to [`Proj::gemm`] instead.

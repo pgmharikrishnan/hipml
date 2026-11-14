@@ -32,12 +32,17 @@ struct Args {
     /// Run the resident GPU engine over the same prompt and fixture instead of
     /// the CPU reference.
     device: bool,
-    /// Chunk size for the GPU prefill. The MoE path ignores it (one decode step
-    /// per prompt token) but `generate` takes one, so the flag stays.
+    /// Chunk size for the GPU prefill. A tile of at least 64 tokens takes the
+    /// bucketed grouped GEMM; a shorter one takes the decode loop, and
+    /// `HIPML_MOE_PREFILL_MIN_TOKENS` moves the threshold (which is how this
+    /// gate forces the bucketed path onto a 9-token prompt).
     chunk: usize,
     /// Also diff every layer's router decision against the CPU reference at the
     /// last prompt token.
     routes: bool,
+    /// Print the last prefill tile's per-expert slot counts: how many distinct
+    /// experts the tile selected and how the slots split across them.
+    bucket: bool,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
@@ -48,6 +53,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         device: false,
         chunk: 2048,
         routes: true,
+        bucket: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -79,6 +85,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--no-routes" => {
                 a.routes = false;
+                i += 1;
+            }
+            "--bucket-stats" => {
+                a.bucket = true;
                 i += 1;
             }
             other => return Err(format!("unknown argument {other}")),
@@ -379,11 +389,20 @@ fn run_device(a: &Args, fx: &Fixture, steps: usize, n_ctx: usize) -> i32 {
         }
     };
     let prefill_s = t_prefill.elapsed().as_secs_f64();
+    let bucketed = engine.moe_prefill_bucketed(fx.prompt_ids.len());
     println!(
-        "prefill:   {} ids in {prefill_s:.2}s ({:.1} tok/s, one decode step per token)",
+        "prefill:   {} ids in {prefill_s:.2}s ({:.1} tok/s, {})",
         fx.prompt_ids.len(),
-        fx.prompt_ids.len() as f64 / prefill_s.max(1e-9)
+        fx.prompt_ids.len() as f64 / prefill_s.max(1e-9),
+        if bucketed {
+            "bucketed grouped GEMM"
+        } else {
+            "one decode step per token"
+        }
     );
+    if a.bucket {
+        print_bucket_stats(&engine, fx.prompt_ids.len());
+    }
 
     // Routing at the last prompt token: the step whose logits pick `first`.
     let gpu_routes = match engine.moe_routes() {
@@ -536,4 +555,47 @@ fn cpu_routes(gguf: &str, prompt_ids: &[u32]) -> Result<Vec<hipml_core::moe::Rou
     let mut routes: Vec<hipml_core::moe::Route> = Vec::new();
     let _ = model.forward_hidden_routes(*last, &mut st, &mut routes);
     Ok(routes)
+}
+
+/// The last routed prefill tile's bucketing table: how many experts the tile
+/// selected, how the slots split across them, and the largest runs.
+///
+/// Shared with `gpu-bench --bucket-stats`, which runs the same readback on a
+/// synthetic prompt of any length: the tile a 512-token chunk produces is not
+/// the tile a 9-token gate fixture produces, and the note's table needs both.
+#[cfg(feature = "hip")]
+pub(crate) fn print_bucket_stats(engine: &hipml_model::gpu::GpuEngine<'_>, n_tok: usize) {
+    match engine.moe_run_lengths(n_tok) {
+        Ok(runs) => {
+            let distinct = runs.iter().filter(|&&n| n > 0).count();
+            let mut sorted = runs.clone();
+            sorted.sort_unstable_by(|a, b| b.cmp(a));
+            println!(
+                "bucket:    {} of {} experts selected, {} slots; runs min {} median {} max {}",
+                distinct,
+                runs.len(),
+                runs.iter().sum::<u32>(),
+                sorted.last().copied().unwrap_or(0),
+                sorted.get(runs.len() / 2).copied().unwrap_or(0),
+                sorted.first().copied().unwrap_or(0)
+            );
+            let top: Vec<String> = sorted.iter().take(8).map(|n| n.to_string()).collect();
+            println!("bucket:    largest runs {top:?}");
+            // Every run is rounded up to a whole token tile, so this is the
+            // arithmetic the grouped GEMM actually does: a chunk whose runs are
+            // shorter than a tile pays for slots it does not have.
+            let tile = hipml_kernels::MOE_PREFILL_TOKENS;
+            let padded: usize = runs
+                .iter()
+                .map(|&r| (r as usize).div_ceil(tile) * tile)
+                .sum();
+            let real: usize = runs.iter().map(|&r| r as usize).sum();
+            println!(
+                "bucket:    {real} slots padded to {padded} ({:.2}x) in {} tiles of {tile}",
+                padded as f64 / real.max(1) as f64,
+                padded / tile
+            );
+        }
+        Err(e) => eprintln!("bucket stats: {e}"),
+    }
 }

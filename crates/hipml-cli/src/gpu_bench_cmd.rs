@@ -17,7 +17,12 @@ struct BenchArgs {
     kv: KvMode,
     kv_set: bool,
     prefill: Option<usize>,
+    /// Read the prefill prompt from a token-id file instead of the synthetic
+    /// `100 + i % 1000` one: the real-text cell and its bucket table.
+    prefill_ids: Option<String>,
     chunk: Option<usize>,
+    /// Print the last prefill tile's per-expert slot counts.
+    bucket: bool,
     /// Report the prefill stage breakdown (adds a sync per stage).
     split: bool,
     graph_probe: bool,
@@ -33,7 +38,9 @@ fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
         kv: KvMode::Q8,
         kv_set: false,
         prefill: None,
+        prefill_ids: None,
         chunk: None,
+        bucket: false,
         split: false,
         graph_probe: false,
         graph: false,
@@ -72,12 +79,21 @@ fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
                 );
                 i += 2;
             }
+            "--prefill-ids-file" => {
+                a.prefill_ids = Some(need(i)?.to_string());
+                a.prefill.get_or_insert(0);
+                i += 2;
+            }
             "--chunk" => {
                 a.chunk = Some(need(i)?.parse().map_err(|e| format!("bad --chunk: {e}"))?);
                 i += 2;
             }
             "--prefill-split" => {
                 a.split = true;
+                i += 1;
+            }
+            "--bucket-stats" => {
+                a.bucket = true;
                 i += 1;
             }
             "--prefill-f32" => {
@@ -139,14 +155,28 @@ pub fn bench(args: &[String]) -> i32 {
         report.upload_secs
     );
 
+    // The prompt, before the engine is sized: a token-id file replaces the
+    // synthetic one, and its length is what `n_ctx` has to hold.
+    let prefill_ids: Option<Vec<u32>> = match &a.prefill_ids {
+        Some(path) => match crate::device_cmd::read_ids_file(path) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!("gpu-bench: --prefill-ids-file: {e}");
+                return 1;
+            }
+        },
+        None => None,
+    };
+    let prefill_n = prefill_ids.as_ref().map(|v| v.len()).or(a.prefill);
+
     // A prompt tile appends to the f32 cache; the quantized caches are the
     // decode-at-depth path.
-    let kv = if a.prefill.is_some() && !a.kv_set {
+    let kv = if prefill_n.is_some() && !a.kv_set {
         KvMode::F32
     } else {
         a.kv
     };
-    let n_ctx = if let Some(n) = a.prefill { n } else { a.depth } + a.tokens + 8;
+    let n_ctx = a.depth + prefill_n.unwrap_or(0) + a.tokens + 8;
     let mut engine = match GpuEngine::new(&model, n_ctx, kv) {
         Ok(e) => e,
         Err(e) => {
@@ -161,17 +191,34 @@ pub fn bench(args: &[String]) -> i32 {
         engine.weight_bytes() as f64 / (1u64 << 30) as f64,
         engine.kv_mode.name(),
         kv_bytes as f64 / (1u64 << 30) as f64,
-        if a.prefill.is_some() {
-            a.prefill.unwrap()
-        } else {
-            a.depth
-        },
+        prefill_n.unwrap_or(a.depth),
     );
     println!("build: {:.1}s", t0.elapsed().as_secs_f64());
 
     let mut st = engine.new_state();
-    if let Some(n) = a.prefill {
-        let prompt: Vec<u32> = (0..n).map(|i| 100 + (i % 1000) as u32).collect();
+    if let Some(n) = prefill_n {
+        // `--depth` pre-fills the caches with valid blocks and starts the tile
+        // at that position, so the cell is "N tokens into a D-deep context"
+        // rather than "N tokens cold". It needs a quantized cache: the f32
+        // path has no synthetic filler.
+        if a.depth > 0 {
+            if kv == KvMode::F32 {
+                eprintln!(
+                    "gpu-bench: --prefill with --depth needs a quantized cache (--kv q8 or q4)"
+                );
+                return 2;
+            }
+            if let Err(e) = engine.fill_synthetic(a.depth) {
+                eprintln!("gpu-bench: synthetic fill: {e}");
+                return 1;
+            }
+            st = engine.state_at(a.depth);
+        }
+        let prompt: Vec<u32> = match &prefill_ids {
+            Some(v) => v.clone(),
+            None => (0..n).map(|i| 100 + (i % 1000) as u32).collect(),
+        };
+        let n = prompt.len();
         let chunk = a.chunk.unwrap_or(2048);
         let t = Instant::now();
         let sink = if a.split {
@@ -211,13 +258,30 @@ pub fn bench(args: &[String]) -> i32 {
             }
         };
         let s = t.elapsed().as_secs_f64();
+        if a.bucket {
+            // Read the bucket before `chunk_bytes`, which reallocates the
+            // scratch when the tile did not ask for the split one. The
+            // readback is the last tile's: `tokens.chunks(chunk)` leaves the
+            // remainder last, which is the full chunk when it divides evenly.
+            let c = chunk.min(n).max(1);
+            let last = n - (n - 1) / c * c;
+            crate::moe_gate::print_bucket_stats(&engine, last);
+        }
+        let scratch = engine.chunk_bytes(chunk);
         println!(
             "prefill: {n} tokens in {:.2}s ({:.2} tok/s, {:.2} ms/token) [chunk {chunk}, {:.1} MiB scratch, last id {sink}]",
             s,
             n as f64 / s,
             s * 1e3 / n as f64,
-            engine.chunk_bytes(chunk) as f64 / (1024.0 * 1024.0)
+            scratch as f64 / (1024.0 * 1024.0)
         );
+        if let Ok((free, total)) = model.device_mem_info() {
+            println!(
+                "vram: {:.2} GiB held of {:.2} GiB (peak: nothing is freed before this read)",
+                (total - free) as f64 / (1u64 << 30) as f64,
+                total as f64 / (1u64 << 30) as f64
+            );
+        }
         return 0;
     }
 

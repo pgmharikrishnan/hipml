@@ -9,7 +9,7 @@ plus one inline MTP block, 256 experts with 8 used. Every attention and
 gated-delta-net tensor in it is shaped exactly like the 27B's; the FFN is the
 only new thing.
 
-This note covers three slices. The first settled the numerical conventions on the
+This note covers four slices. The first settled the numerical conventions on the
 CPU, before any kernel existed, because four independent conventions (softmax
 domain, top-k order, renormalisation, where the router weight is applied) can
 each leave the ids subtly wrong, and a kernel built on a wrong one is the wrong
@@ -18,14 +18,16 @@ expert GEMV that resolves the gather on the device, device-side top-k, and a
 prefill loop — and it is the first time this file produces tokens on the GPU.
 The third measured the file against llama.cpp on the same box (§8.4) and built a
 bandwidth instrument to find why the small expert reads run at a third of the
-large-read rate (§8.5).
+large-read rate (§8.5). The fourth replaced the prefill loop with a bucketed
+grouped GEMM, one launch per expert bank per chunk (§7.4, §8.6).
 
 **Result: the CPU reference reproduces llama.cpp's 64 greedy ids on a fixed
 prompt, 64/64, first try; the device path reproduces the same 64 ids, 64/64, at
-125.76 tok/s decode and 143.99 tok/s prefill.** Against llama.cpp on the same
-file, hipml decodes **33.5% faster at depth 0 and 24.0% faster at depth 8,192**
-and prefills **95.6–96.7% slower**; the 8-slot serve cell is `n/a` because the
-batched engine has no routed FFN. The bandwidth instrument finds the memory
+125.76 tok/s decode and 143.99 tok/s prefill, and 2,871 tok/s prefill on the
+bucketed path.** Against llama.cpp on the same file, hipml decodes **33.5%
+faster at depth 0 and 24.0% faster at depth 8,192** and prefills at **85% and
+91%** of its rate (§8.6); the 8-slot serve cell is `n/a` because the batched
+engine has no routed FFN. The bandwidth instrument finds the memory
 system can read 0.59 MB at 495 GB/s where the shipped tile gets 182, and
 installing the wider tile is **neutral end to end**, so 150 tok/s stays out of
 reach (§8.5). The file loads: 753 tensors, 0 unsupported, 21.41 GiB resident
@@ -384,20 +386,63 @@ ids would end capture. So the router decision is device data end to end:
 `MoeBlock::route_host` exists for the routing gate and says so: it is a
 synchronising readback and nothing on the decode path calls it.
 
-### 7.4 Prefill is the decode path, once per token
+### 7.4 Prefill: the bucketed grouped GEMM, and the token loop below it
 
-A routed chunk has no grouped GEMM, so `forward_chunk` hands a MoE model to
-`forward_chunk_token_loop`: one `run_token` per prompt token, in order, with
-`head = false` for all but the last. `head = false` still runs `output_norm`
-(so a capture has every row) and skips only the 540 MB `lm_head` projection,
-which is worth about 1 ms a token. `capture` still works — each token's row is
-copied into the capture buffer after its step, which is what `ppl` reads.
-`ensure_chunk` is a no-op for a MoE model: the chunk scratch would be hundreds
-of MiB that this path never touches.
+A token reads 8 of 256 experts. A chunk of `T` tokens reads
+`256 * (1 - (1 - 1/256)^(8T))` distinct ones — 212 at `T = 512`, 252 at
+`T = 2,048` — so the token loop streams the 2.56 GiB bank once per prompt token
+while a grouped GEMM reads each expert once per chunk. `prefill_moe.hip` is that
+GEMM, and `MoeBlock::forward_chunk` is the path around it.
 
-That makes a MoE layer 17 launches a token — residual, rmsnorm, and 15 in the
-FFN, of which 14 are the routed path — and the whole token 1,103. §8 reports
-what that costs.
+The shape is llama.cpp's `ggml_mul_mat_id`: `n_expert` blocks, each one
+compacting the slots that selected its expert and running one dense GEMM. The
+compaction is a counting sort (`moe_bucket_f32`) rather than a pass over the
+activation tile: `off[e]..off[e+1]` is expert `e`'s run in a slot-major list,
+`xtok` maps a slot to its activation row and `yslot` to its output row, and both
+are gather indices, so the activation tile is read where it lies.
+
+One tile is **64 slots x 128 rows**, 256 threads, 32-value k tiles — the shipped
+`prefill_wmma2.hip` fragment layout and `pf_dequant8` decoders with the row
+indices moved. 64 and not the dense tile's 256 because an expert's run is short:
+at `T = 512` the median run is **5 slots** (§8.6), so a 256-slot tile would
+compute 51× the arithmetic the chunk needs.
+
+Per layer, on one chunk:
+
+1. `router.gemm` writes `[T][n_expert]` logits, and `moe_topk_rows_f32` — the
+   same softmax / top-k / renormalise body as `moe_topk_f32`, one block per
+   token — writes `[T][n_used]` ids and weights. The two paths cannot drift
+   apart on a convention because it is one body.
+2. `moe_bucket_f32` counts, scans and scatters: `off`, `xtok`, `yslot`.
+3. `moe_prefill_gemm` runs the gate bank and `moe_prefill_gemm_silu` the up
+   bank, whose epilogue is `silu(gate) * acc` and whose fp16 copy is the down
+   projection's activation. Both write slot-major `[T*n_used][n_ff_exp]`.
+4. `moe_prefill_gemm` runs the down bank with `ymap = yslot`, so each expert's
+   rows land straight in the token-major `[T][n_used][n_embd]` layout
+   llama.cpp writes. `moe_combine_rows_f32` is then the same left fold in
+   rank order the decode path does, and `moe_shared_add_rows_f32` adds the
+   shared expert's sigmoid outside it.
+
+The slot-major layout is what makes steps 3 and 4 cheap: the fold never needs a
+second pass, because the scatter index is the fold's own address.
+
+**Below 64 tokens the token loop is still the path.**
+`HIPML_MOE_PREFILL_MIN_TOKENS` moves the threshold, which is how `moe-gate`
+forces the bucketed path onto a 9-token prompt. The gate is the measurement
+that picked 64: on that fixture the bucketed path pads 72 slots into 2,624
+(36.4x) across 41 experts, so it reads more than the 8-of-256 gather the token
+loop already does. §8.6 has the padding factors that matter.
+
+The token loop is unchanged and still the fallback: `forward_chunk_token_loop`
+runs one `run_token` per prompt token, in order, with `head = false` for all but
+the last. `head = false` still runs `output_norm` (so a capture has every row)
+and skips only the 540 MB `lm_head` projection. That makes a MoE layer 17
+launches a token and the whole token 1,103.
+
+`capture` works on both paths: the post-`output_norm` rows are written by the
+same block at the end of `forward_chunk`, which is what `ppl` reads, and `ppl`
+on this file returns the same number through either path (§8.6).
+
 
 ## 8. What the device path measures
 
@@ -423,7 +468,10 @@ the gate's per-step bookkeeping, two reps:
 | 1 | **143.99 tok/s** (169 tokens in 1173.7 ms) | **125.76 tok/s** (15 steps, 119.3 ms, **7.95 ms/token**) |
 
 Prefill is faster than decode because the loop runs `lm_head` once for the
-whole prompt instead of once per token (§7.4).
+whole prompt instead of once per token (§7.4). This section is the loop's
+measurement and is kept as the baseline §8.6 compares against; a 169-token
+prompt now takes the bucketed path (the threshold is 64), so the loop has to be
+asked for with `HIPML_MOE_PREFILL_MIN_TOKENS`.
 
 ### 8.1 Against the roofline
 
@@ -660,13 +708,14 @@ for hipml.
 depth 0 and 24.0% at depth 8,192. Both engines lose speed as the KV cache grows
 (hipml −10.3%, llama −3.4%), so the win narrows with depth but does not close.
 
-**Prefill: hipml loses by an order of magnitude.** 147 tok/s against 3,375 and
-138 against 4,204. The cause is §7.4: a MoE chunk runs the decode path once per
-prompt token, so prefill re-streams 2.56 GiB per prompt token. At 147 tok/s that
+**Prefill: hipml lost by an order of magnitude.** 147 tok/s against 3,375 and
+138 against 4,204. The cause was §7.4: a MoE chunk ran the decode path once per
+prompt token, so prefill re-streamed 2.56 GiB per prompt token. At 147 tok/s that
 is a ~405 GB/s effective stream, the same wall as decode — llama.cpp's grouped
-GEMM reads each expert once per tile instead of once per token. This is the one
-cell where the engine is not competitive, and it is a missing kernel, not a
-missing convention.
+GEMM reads each expert once per tile instead of once per token. It was a missing
+kernel, not a missing convention, and §8.6 is the kernel: **2,871 and 3,830
+tok/s**, 85% and 91% of the two numbers above. The table is left as it was
+measured, so the delta in this section is the before.
 
 Peak VRAM is 3.9% higher than llama.cpp at both depths:
 
@@ -785,6 +834,96 @@ re-shaping the existing GEMVs; it needs the down-bank tiles re-cut (Q5_K/Q6_K,
 not touched here) and less arithmetic per byte, and neither is a load-width
 change.** Measured wall: 126–128 tok/s.
 
+### 8.6 The bucketed prefill, measured
+
+Same box, same file, one GPU-lock hold per cell, q8 KV, `hipml` at this branch
+with `built with hip feature: true`. Real text is the calibration corpus's first
+ids (`C:\mx\matrix\corpus.ids`), fed through `--prefill-ids-file`, so the routing
+is a prompt's and not a synthetic ramp's.
+
+| cell | prompt | chunk | tok/s (3 reps) | median |
+| --- | ---: | ---: | ---: | ---: |
+| real text, 512 | 511 | 512 | 2863.99 / 2877.86 / 2870.95 | **2870.95** |
+| real text, 8,192 | 8,184 | 2,048 | 3837.78 / 3830.13 / 3829.71 | **3830.13** |
+| real text, 8,192 | 8,184 | 512 | 2838.95 | 2838.95 |
+| synthetic, 512 | 512 | 512 | 2845.82 | 2845.82 |
+| synthetic, 8,192 | 8,192 | 2,048 | 3811.18 / 3803.93 / 3807.45 | **3807.45** |
+| synthetic, 512 @ depth 8,192 | 512 | 512 | 2592.45 / 2599.64 / 2599.00 | **2599.64** |
+
+The token loop on the same 511-token real-text prompt is **146.89 tok/s**
+(511 tokens in 3478.8 ms), which reproduces §8.4's 147.10 — so the 512 cell is a
+**19.5x** improvement, and the id out of the prefill is the same `37986` on both
+paths.
+
+Peak VRAM, read from `hipMalloc`'s own accounting after the prefill (nothing is
+freed before the read, so it is the peak): **22.02 GiB** at 512 with the
+287.4 MiB chunk scratch, **22.94 GiB** at 8,184 with the 1,140.8 MiB one.
+Decode is unchanged: **128.2 tok/s** at depth 0 (128.22 / 128.29 / 128.06
+against the parent's 128.24), because the decode path is untouched.
+
+**Where it landed, against §8.4's llama.cpp.** 2,871 against 3,375.05 is
+**85.1%**, and 3,830 against 4,203.73 is **91.1%**. Both cells are the same
+prompt on both engines, so the ratio is the engine, not the prompt.
+
+The 512 cell is the short one and the reason is measured, not guessed. Every
+expert's run is rounded up to a whole 64-slot tile, and `--bucket-stats` prints
+the factor:
+
+| chunk | distinct experts | slots | runs (min / median / max) | padded | tiles |
+| ---: | ---: | ---: | --- | ---: | ---: |
+| 512 real text | 212 of 256 | 4,088 | 0 / **5** / 163 | 14,784 (**3.62x**) | 231 |
+| 2,048 real text | 252 of 256 | 16,320 | 0 / **31** / 675 | 25,728 (**1.58x**) | 402 |
+| 512 synthetic | 116 of 256 | 4,096 | 0 / 0 / 357 | 10,048 (2.45x) | 157 |
+| 2,048 synthetic | 186 of 256 | 16,384 | 0 / 5 / 1,274 | 24,832 (1.52x) | 388 |
+| 9 (the gate fixture) | 41 of 256 | 72 | 0 / 0 / 5 | 2,624 (**36.44x**) | 41 |
+
+A 512-token chunk has a **median run of 5 slots**: 212 experts each get a whole
+64-slot tile for a handful of rows, so the grouped GEMM does 3.62x the chunk's
+arithmetic. At 2,048 the median run is 31 and the factor falls to 1.58x. That,
+not weight traffic, is what separates the two cells — and it is why the 512 cell
+sits at 85% while 8,192 sits at 91%.
+
+The FFN's own rate at 512, from `--prefill-split`: `gemm ffn` is 108.7 ms of a
+182 ms synthetic 512 chunk. 14,784 padded slots x 3,145,728 MACs x 40 layers is
+3.72 TFLOP, so the routed bank runs at **34 TFLOPS** and reads
+212 x 1.9 MB x 40 = 16.1 GB in that 108.7 ms, **148 GB/s**. Neither is a wall on
+this card (95 TFLOPS fp16, ~633 GB/s), which is the same conclusion §8.1 and
+§8.5 reached from the other direction: at these run lengths the tile's padding,
+not the memory system, is the ceiling. The remaining 62 ms of the chunk is the
+dense path's SSM and attention sequence work (`seq ssm` 41.8, `seq attn` 10.0),
+which this slice does not touch.
+
+**What the recon got wrong.** Three things, all of them now measured:
+
+1. It priced the grouped GEMM on the dense prefill's 256-token tile. At a median
+   run of 5 slots that is 51x the arithmetic; the tile has to be 64, and even
+   then the padding is 3.62x at 512.
+2. It assumed the bucket had to compact the activation tile into slot order
+   before the GEMM. It does not: `xtok` is a gather index, so the tile is read
+   where it lies and the compaction is only the 4,096-entry sort.
+3. It read "each expert is read once per tile" as the win. That is true and it
+   is why 8,192 is at 91%, but at 512 the win is bounded by padding, so a tile
+   change and not a read change is what a faster 512 cell needs.
+
+**A second llama.cpp reference, for honesty.** `llama-bench -ngl 99 -p 512 -n 0
+-r 5` on the same box reads **4,529.55 +/- 115.06** for pp512, **3,954.80 +/-
+84.91** for pp512 at depth 8,192, 4,560.51 for pp2048 and 4,361.76 for pp8192,
+against §8.4's 3,375.05 and 4,203.73. The two are not the same measurement:
+`llama-bench` loops over one synthetic prompt with the graph already built, and
+§8.4's protocol is a fresh process per rep on the real fixture, whose cold rep
+it records at 1,528. Against the `llama-bench` figure the 512 cell is 63% and
+the 8,192 cell 88%. The number this note stands behind for the 512 cell is
+**85% of 3,375.05**, because that is the same prompt through the same shape of
+process on both engines; the `llama-bench` figure is recorded so nobody has to
+rediscover that the baseline moves by 34% with the harness.
+
+**Perplexity.** `ppl` on this file, `--ctx 512 --chunks 4`, is **2.2275** through
+the token loop (unchanged from §8.2) and **2.2263** through the bucketed path, a
+0.054% move over 1,020 scored positions. `oracle-gate` over 20 steps on the
+bucketed path is 20/20, and `moe-gate --device` with the path forced onto its
+9-token prompt is 64/64 with the routing diff at 34 identical / 3 rank-order /
+3 set-difference against the token loop's 30 / 8 / 2.
+
 ## 9. Gates
 
 On the binary this branch ships, `--features hip`, model paths passed with
@@ -795,10 +934,12 @@ and `--mtp` passed literally where a drafter is wanted.
 | --- | --- | --- |
 | `moe-gate` CPU (Qwen3.6-35B-A3B) | 64/64 ids | **PASS 64/64**, 0.69 s/token |
 | `moe-gate --device` | 64/64 ids | **PASS 64/64**, 127.39 tok/s, 21.69 GiB |
+| `moe-gate --device --bucket-stats`, `HIPML_MOE_PREFILL_MIN_TOKENS=1` | 64/64 ids, bucketed path | **PASS 64/64**, 196.3 tok/s prefill, 41 of 256 experts |
+| `oracle-gate` (Qwen3.6-35B-A3B), bucketed chunk 2048 | 20/20 ids | **PASS 20/20** |
 | `row-dequant` | 10 formats exact | **10/10 exact**, 2048/2048 values each |
 | `load` (Qwen3.6-35B-A3B) | 0 unsupported, 256/8/512/512 | **0 unsupported**, 21.41 GiB, 20/20 round-trip, Q8_0 rows exact |
-| `generate --device`, 169-token prompt | tokens on the GPU | **143.0 tok/s prefill, 125.5 tok/s decode** |
-| `ppl` (Qwen3.6-35B-A3B) | close to llama | **2.2275** vs 2.2228 (+0.21%) |
+| `generate --device`, 511-token prompt | tokens on the GPU | **2870.95 tok/s prefill** (146.89 through the token loop), 128.2 tok/s decode |
+| `ppl` (Qwen3.6-35B-A3B) | close to llama | **2.2275** token loop, **2.2263** bucketed, vs 2.2228 (+0.21% / +0.16%) |
 
 Dense path, same binary, so the new `Ffn` enum and the row gather did not move
 anything that was already gated:
@@ -831,13 +972,13 @@ dense forward pass.
 * **MTP.** `blk.40` is a MoE block and `mtp.rs:129-131` requires a dense
   `ffn_gate`, so the drafter cannot load this file. The two BF16 tensors are
   MTP-only; the type exists so the file opens, not so the block runs.
-* **Grouped GEMM / bucketed prefill.** A MoE chunk runs the decode path once per
-  prompt token (§7.4). That is correct and it is 143.99 tok/s, but it re-streams
-  the whole model per prompt token: a 2,000-token prompt takes about 14 s, where
-  the bucket-sort + grouped-GEMM path the recon describes would read each expert
-  once per tile. §8.4 prices the cost of not having it: **147 tok/s against
-  llama.cpp's 3,375**, the one cell in the head-to-head where the engine is not
-  competitive.
+* **Grouped GEMM / bucketed prefill: shipped, at 85% and 91% of llama.cpp.**
+  §7.4 and §8.6 are the path and the numbers. What is left out of scope here:
+  a 32-slot tile (it would cut the 3.62x padding at 512 and halve the WMMA row
+  count, so it is a tile experiment, not a read one), a fused gate/up launch
+  (two launches and two weight streams per expert now), and the dense path's
+  `seq ssm` 41.8 ms of a 512-token chunk, which is 23% of that cell and belongs
+  to the SSM note.
 * **No fusion is retained, and no tile change either.** Four node-count
   reductions were built and measured (§8.1) and all four were reverted: they
   removed 40 to 90 launches and did not move the token. The instruments that

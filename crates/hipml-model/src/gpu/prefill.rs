@@ -130,6 +130,8 @@ pub(crate) struct Chunk {
     /// Key splits the deep chunks use, from `HIPML_ATTN_SPLITS` (default 8,
     /// 1 disables).
     pub attn_splits: usize,
+    /// The routed FFN's scratch, present only for a mixture-of-experts model.
+    pub moe: Option<super::moe::MoeChunk>,
 }
 
 impl Chunk {
@@ -185,6 +187,10 @@ impl Chunk {
             apart: zeros(part_len(attn_splits).max(1))?,
             apart_ml: zeros((attn_splits * qslots * cfg.n_head * 2).max(2))?,
             attn_splits,
+            moe: match cfg.n_expert {
+                0 => None,
+                _ => Some(super::moe::MoeChunk::new(cfg, tokens)?),
+            },
         })
     }
 
@@ -210,6 +216,7 @@ impl Chunk {
             + self.apart_ml.len())
             * 4
             + self.ssm.bytes()
+            + self.moe.as_ref().map_or(0, |m| m.bytes())
     }
 }
 
@@ -408,11 +415,12 @@ impl<'a> GpuEngine<'a> {
         if n_tok == 0 {
             return Err("empty chunk".to_string());
         }
-        if self.cfg.n_expert > 0 {
-            // A mixture-of-experts chunk runs the decode path once per token:
-            // the routed gather has no chunked GEMM yet, and a per-token loop
-            // is the correct path that costs no new code. `docs/notes/moe.md`
-            // records what it costs (a whole weight stream per prompt token).
+        if self.cfg.n_expert > 0 && n_tok < moe_prefill_min_tokens() {
+            // A tile this short pads so hard that the bucketed path reads more
+            // than the 8-of-256 gather the decode step already does: on
+            // `moe-gate`'s 9-token prompt it rounds 72 slots up to 2,624 across
+            // 41 experts, 36.4x. The token loop is the fallback, and it is the
+            // path `moe-gate` pins. `docs/notes/moe.md` §8.6 has the factors.
             return self.forward_chunk_token_loop(tokens, st, rep, capture);
         }
         let cfg = self.cfg.clone();
@@ -502,10 +510,31 @@ impl<'a> GpuEngine<'a> {
 
             let (ffn_gate, ffn_up, ffn_down) = match &block.ffn {
                 Ffn::Dense { gate, up, down, .. } => (gate, up, down),
-                // `forward_chunk_capture` returns above when the model has
-                // experts, so a MoE block never reaches the chunked GEMMs.
-                Ffn::Moe(_) => {
-                    return Err("prefill: a MoE chunk must take the token loop".to_string())
+                Ffn::Moe(m) => {
+                    // The routed FFN is its own chunked path: route the tile,
+                    // bucket by expert, one grouped GEMM per bank. It writes
+                    // `c.down`, which is what the residual below reads.
+                    m.forward_chunk(l, c, n_tok)?;
+                    if let Some(r) = rep.as_mut() {
+                        r.lap(l, |r| &mut r.ffn_gemm_ms);
+                    }
+                    match self.layers.get(i + 1) {
+                        Some(next) => l.residual_rmsnorm_or_pair(
+                            &c.down,
+                            &c.x1,
+                            &next.attn_norm,
+                            &c.x,
+                            &c.t,
+                            n,
+                            cfg.eps,
+                            n_tok,
+                        )?,
+                        None => l.residual_buf(&c.down, &c.x1, &c.x, n_tok * n)?,
+                    }
+                    if let Some(r) = rep.as_mut() {
+                        r.lap(l, |r| &mut r.elementwise_ms);
+                    }
+                    continue;
                 }
             };
             if ::hipml_kernels::prefill_v2() {
@@ -627,7 +656,6 @@ impl<'a> GpuEngine<'a> {
     }
 
     /// Whether any chunk of a `tokens`-long prompt reaches the split gate.
-    ///
     /// The last chunk starts at `tokens - 1` when the prompt is one token past
     /// a multiple of the chunk size, so an 8192-token prompt (whose last chunk
     /// starts at 6144) must not allocate the split scratch.
@@ -637,12 +665,6 @@ impl<'a> GpuEngine<'a> {
 
     /// Allocate (or grow) the chunk scratch. Called by `prefill_chunked`.
     fn ensure_chunk(&mut self, tokens: usize, deep: bool) -> Result<(), String> {
-        // A MoE chunk is the decode path per token, so it reads none of this
-        // scratch. Allocating it would add hundreds of MiB to a model whose
-        // whole point is that it streams 8 of 256 experts.
-        if self.cfg.n_expert > 0 {
-            return Ok(());
-        }
         let have = match &self.chunk {
             Some((cap, c)) => *cap >= tokens && (c.attn_splits > 1) == deep,
             None => false,
@@ -660,13 +682,61 @@ impl<'a> GpuEngine<'a> {
             Err(_) => 0,
         }
     }
+
+    /// Whether a tile of `n_tok` prompt tokens takes the bucketed path rather
+    /// than the decode loop. The routing gate reports it so a run cannot claim
+    /// one path and measure the other.
+    pub fn moe_prefill_bucketed(&self, n_tok: usize) -> bool {
+        self.cfg.n_expert > 0 && n_tok >= moe_prefill_min_tokens()
+    }
+
+    /// Per-expert slot counts of the last routed prefill tile, read back to the
+    /// host. This is the routing diagnostic's bucketing table and nothing on
+    /// the forward path calls it: `off[e+1] - off[e]` is how many of the
+    /// tile's slots selected expert `e`.
+    pub fn moe_run_lengths(&self, n_tok: usize) -> Result<Vec<u32>, String> {
+        // A prefill does not sync, and the readback is a legacy memcpy that
+        // need not wait on the engine's stream: synchronise before reading, or
+        // the bucket can be read before `moe_bucket` has run.
+        self.model.launcher().synchronize()?;
+        let (_, c) = self
+            .chunk
+            .as_ref()
+            .ok_or_else(|| "no chunk scratch: prefill first".to_string())?;
+        let mc = c
+            .moe
+            .as_ref()
+            .ok_or_else(|| "not a mixture-of-experts chunk".to_string())?;
+        mc.run_lengths(self.cfg.n_expert, n_tok, self.cfg.n_expert_used)
+    }
+}
+
+/// Below this many prompt tokens a mixture-of-experts chunk takes the decode
+/// loop instead of the bucketed path.
+///
+/// The bucketed path reads each selected expert once per chunk; the token loop
+/// reads 8 experts per token. At `T` tokens the chunk's union is
+/// `256 * (1 - (1 - 1/256)^(8T))` experts, so the two are equal when the union
+/// is `8T` — about 8 tokens — and the bucketing only pays once the union
+/// saturates. 64 is where the union is 224 of 256 (87%) and the counting sort
+/// is under 1% of the chunk; below it the machinery costs more than it saves.
+/// `HIPML_MOE_PREFILL_MIN_TOKENS` overrides it, which is how the routing gate
+/// forces the bucketed path onto a 9-token prompt.
+fn moe_prefill_min_tokens() -> usize {
+    static MIN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MIN.get_or_init(|| {
+        std::env::var("HIPML_MOE_PREFILL_MIN_TOKENS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(64)
+    })
 }
 
 /// One v2-path ffn projection: the fp16-activation GEMM when the format has a
 /// converted-tile kernel, else the raw-f32 tile. The F32 case is the loader's
 /// expansion of a Q3_K / IQ3_S tensor, and `xf` is the same activation `xh`
 /// was converted from.
-fn gemm_v2(
+pub(super) fn gemm_v2(
     l: &Launcher,
     proj: &Proj<'_>,
     xf: &Buffer,
