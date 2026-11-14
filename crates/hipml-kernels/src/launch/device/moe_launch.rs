@@ -21,7 +21,29 @@ pub const MOE_PREFILL_ROWS: usize = 128;
 /// Prompt tokens (slots) per block of the grouped expert GEMM. Mirrors `MG_TT`.
 /// An expert's run is padded up to a multiple of this, so it is also the number
 /// the bucketing diagnostic uses to price the padding.
+///
+/// 64 is measured, not assumed: the sweep in `docs/notes/moe.md` §8.6 runs the
+/// same chunk at 16, 32, 64 and 128 slots a tile, and 64 is the fastest at both
+/// 511 and 8,184 tokens. A shorter tile cuts the padding — 3.68x to 1.48x at
+/// 511 tokens — and is 28% slower, because the cost of a tile is the 128 rows
+/// of weights it stages and dequantises, not the slots it computes.
 pub const MOE_PREFILL_TOKENS: usize = 64;
+
+/// The slot tiles the padding table prices a run-length distribution at. The
+/// shipped height is `MOE_PREFILL_TOKENS`; the others are there so a reader can
+/// see what the choice was between.
+pub const MOE_PREFILL_TILES: [usize; 3] = [16, 32, 64];
+
+/// The padding a run-length table pays at a given tile height:
+/// `(padded slots, tiles)`.
+pub fn moe_prefill_padding(runs: &[u32], tile: usize) -> (usize, usize) {
+    let padded = runs
+        .iter()
+        .map(|&r| (r as usize).div_ceil(tile) * tile)
+        .sum();
+    let tiles = runs.iter().map(|&r| (r as usize).div_ceil(tile)).sum();
+    (padded, tiles)
+}
 
 /// Threads per block of the grouped expert GEMM. Mirrors `MG_THREADS`.
 pub const MOE_PREFILL_THREADS: usize = 256;
