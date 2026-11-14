@@ -598,3 +598,82 @@ One lock hold, 3 reps per cell, 64 tokens per request, no drafter for b and c;
 Zero request errors; rep spread 0.19 (b), 0.66 (c) and 0.29 (a plain) tok/s.
 The diff adds one measurement hook and no engine change, which is why the cells
 sit on their previous numbers.
+
+## A routed drafter: MTP on a mixture-of-experts file (2026-11-14)
+
+`Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf` carries an inline MTP block too
+(`nextn_predict_layers = 1`, `blk.40`), and it is **itself MoE**: 256 experts,
+8 used, expert ffn 512, a shared expert, and a BF16 router. Two gaps stood
+between the file and a speculative number, and neither was in the drafter's
+attention or glue:
+
+1. **The verify had no routed FFN.** `columns.rs` returned *"the column path has
+   no MoE body"*, so no file with a mixture of experts could verify a single
+   column. The column path now runs `MoeBlock::forward_batch` — the batched
+   decode step `fd9e55c` built for serve — with one slot per verify column. It
+   is the right reuse and it is the one that was used; `forward_rows` is *not*,
+   because its bucketed grouped GEMM is a different arithmetic from the
+   single-token step (a tile pads 8 slots x 8 ranks into 41-64 runs, and
+   `docs/notes/moe.md` §8.7.2 measures it 1.96x slower). `forward_batch` puts
+   the column on `grid.z` and reuses the single-sequence tile body, so column
+   `c` is the token a plain decode of that column produces.
+2. **The drafter required a dense `ffn_gate`.** `MtpGpu` held three `Proj`s;
+   it now holds a `DraftFfn` that is either the dense SwiGLU or a `MoeBlock`
+   built from the same `blk.<n>.ffn_*` names the decoder's layers use, so the
+   routed step is `MoeBlock::forward` and there is no second router, top-k,
+   gather or fold to drift.
+3. **The BF16 router had no GEMV.** `blk.40.ffn_gate_inp` and
+   `ffn_gate_inp_shexp` are BF16 (type 30), which the loader kept resident and
+   no kernel reads. They are 1 MB; the loader now widens BF16 to f32 at upload
+   (2 MB resident) the same way `HIPML_EXPAND_SMALL_QUANTS` widens Q3_K. That
+   is what makes the block runnable, and it is the only load-path change.
+
+### Measured
+
+One lock hold, `spec-bench --gguf <the file> --mtp <the same file>
+--ids-file bench/fixtures/p2_math_169.ids --tokens 128 --drafts 3`, q8 KV, then
+f32 KV. Two q8 passes; the second is quoted.
+
+| drafts | ms/step | tok/step | tok/s (q8) | vs plain | tok/s (f32) | acceptance per position | exact |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| 0 | 7.86 | 1.000 | **127.30** | 1.00x | 124.89 | — | — |
+| 1 | 14.37 | 1.954 | **135.94** | 1.07x | 133.58 | 0.954 | 128/128 |
+| 2 | 19.90 | 2.822 | **141.84** | **1.11x** | 138.59 | 0.956, 0.953 | 128/128 |
+| 3 | 26.67 | 3.528 | **132.28** | 1.04x | 129.82 | 0.917, 0.939, 0.935 | 128/128 |
+
+The first q8 pass read 127.44 / 136.08 / 141.63 / 131.93 tok/s, so the spread is
+under 0.4%. Every row is token-exact against plain greedy decode at both KV
+modes; the id gate is the feature, not a tolerance.
+
+`column-bench --cols 4 --check` on the same file is **0 differ** on 7,946,240
+logits, and on hidden and residual, at q8 and f32 over 32 columns: the routed
+column body is bit-identical to the one-column pass.
+
+| columns | ms/pass | ms/column | vs 1 col |
+| ---: | ---: | ---: | ---: |
+| 1 | 9.01 | 9.01 | 1.00x |
+| 2 | 12.82 | 6.41 | 1.42x |
+| 3 | 16.90 | 5.63 | 1.88x |
+| 4 | 22.34 | 5.58 | 2.48x |
+
+### Why two drafts and not three
+
+The step split at drafts 3 is 26.67 ms = draft 3.90 + verify 22.47 + rollback
+0.30. Going from two drafts to three buys 0.706 tokens and costs 6.77 ms — 9.6
+ms per marginal token against the 7.86 ms a plain token costs. **The third
+draft is worth less than the token it replaces.** At one draft the step is 1.83x
+a plain step and only returns 1.954 tokens, so it barely pays; at two it is
+2.53x and returns 2.822.
+
+The cause is structural, and it is the difference between this file and the
+dense one. A dense verify shares the whole FFN weight stream across its columns
+— four columns cost 1.33x a one-column pass (`docs/notes/mtp.md` above). A
+routed FFN does not share: column `c` reads *its own* 8 of 256 experts, so `k`
+columns read `k x 8` expert slices and the routed FFN scales linearly with the
+column count. Four columns cost **2.48x** here against 1.33x on the dense file.
+What still amortises is the attention, the GDN chain, the router and the shared
+expert, and that residue is enough for +11% at two drafts — but not for three.
+
+The dense path is unchanged by this slice: Orca's inline block reads 68.38 tok/s
+at drafts 3 (68.60 before), and the stock file with its sidecar reads 64.90 q8 /
+63.28 f32, 128/128 exact on every row.

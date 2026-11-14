@@ -28,7 +28,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use hipml_core::gguf::Gguf;
-use hipml_core::quant::{dequant_iq3_s, dequant_q3_k, TensorType, QK_K};
+use hipml_core::quant::{dequant_bf16, dequant_iq3_s, dequant_q3_k, TensorType, BF16_BYTES, QK_K};
 use hipml_hip::ByteBuffer;
 use hipml_kernels::Launcher;
 
@@ -205,6 +205,27 @@ fn expand_small_quants() -> bool {
     *ON.get_or_init(|| std::env::var_os("HIPML_EXPAND_SMALL_QUANTS").is_some())
 }
 
+/// Host widening of a BF16 tensor to little-endian f32.
+///
+/// BF16 is one value per two bytes, so unlike [`expand_to_f32`] there is no
+/// block structure to walk: every 2-byte group is one value, widened by the
+/// same shift `dequant_bf16` uses.
+fn expand_bf16(raw: &[u8]) -> Result<Vec<u8>, String> {
+    if raw.len() % BF16_BYTES != 0 {
+        return Err(format!(
+            "BF16: {} bytes is not a whole number of 2-byte values",
+            raw.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(raw.len() * 2);
+    for v in raw.chunks_exact(BF16_BYTES) {
+        let mut f = [0.0f32; 1];
+        dequant_bf16(v, &mut f);
+        out.extend_from_slice(&f[0].to_le_bytes());
+    }
+    Ok(out)
+}
+
 /// Host dequant to little-endian f32 for the debug expansion path. The payload
 /// is still block-laid-out, so one call per 256-value block.
 fn expand_to_f32(ty: TensorType, raw: &[u8]) -> Result<Vec<u8>, String> {
@@ -276,12 +297,19 @@ impl Model {
                 ));
             }
             let disk_ty = info.ty;
-            let (ty, payload) =
-                if matches!(disk_ty, TensorType::Q3K | TensorType::IQ3S) && expand_small_quants() {
-                    (TensorType::F32, expand_to_f32(disk_ty, &raw)?)
-                } else {
-                    (disk_ty, raw)
-                };
+            let (ty, payload) = if disk_ty == TensorType::BF16 {
+                // BF16 has no GEMV kernel, and the only BF16 tensors in these
+                // files are the MTP block's router rows (`ffn_gate_inp` and
+                // `ffn_gate_inp_shexp`, 1 MB). Widening them at load is what
+                // makes a MoE file's inline MTP block runnable: 2 MB of VRAM
+                // for a router the drafter cannot otherwise read.
+                (TensorType::F32, expand_bf16(&raw)?)
+            } else if matches!(disk_ty, TensorType::Q3K | TensorType::IQ3S) && expand_small_quants()
+            {
+                (TensorType::F32, expand_to_f32(disk_ty, &raw)?)
+            } else {
+                (disk_ty, raw)
+            };
             let resident_bytes = payload.len() as u64;
             let buffer = ByteBuffer::from_host(&payload).map_err(|e| {
                 format!(
@@ -399,12 +427,19 @@ impl Model {
                 ));
             }
             let disk_ty = info.ty;
-            let (ty, payload) =
-                if matches!(disk_ty, TensorType::Q3K | TensorType::IQ3S) && expand_small_quants() {
-                    (TensorType::F32, expand_to_f32(disk_ty, &raw)?)
-                } else {
-                    (disk_ty, raw)
-                };
+            let (ty, payload) = if disk_ty == TensorType::BF16 {
+                // BF16 has no GEMV kernel, and the only BF16 tensors in these
+                // files are the MTP block's router rows (`ffn_gate_inp` and
+                // `ffn_gate_inp_shexp`, 1 MB). Widening them at load is what
+                // makes a MoE file's inline MTP block runnable: 2 MB of VRAM
+                // for a router the drafter cannot otherwise read.
+                (TensorType::F32, expand_bf16(&raw)?)
+            } else if matches!(disk_ty, TensorType::Q3K | TensorType::IQ3S) && expand_small_quants()
+            {
+                (TensorType::F32, expand_to_f32(disk_ty, &raw)?)
+            } else {
+                (disk_ty, raw)
+            };
             let resident_bytes = payload.len() as u64;
             let buffer = ByteBuffer::from_host(&payload).map_err(|e| {
                 format!(

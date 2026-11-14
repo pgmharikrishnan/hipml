@@ -30,6 +30,10 @@
 //! the default `xhigh` reasoning instruction even when the caller supplies no
 //! system message; that is part of the template, not a default added here.
 
+/// The opening thinking tag this template family carries. Templates are
+/// matched on it as a literal, so a template without the tag gets no block.
+const THINK_OPEN: &str = "<think>";
+
 pub use crate::tool_json::ToolCall;
 
 /// One entry of an OpenAI-style content array.
@@ -179,9 +183,12 @@ with your current knowledge and do not tell the user about function calls\n</IMP
 
 /// Render `messages` with the template stored in the GGUF.
 ///
-/// `template` must be the file's `tokenizer.chat_template` string. The text-only
-/// Qwen3.5/Qwen3.8 template is recognised by the markers below; anything
-/// else is an error rather than a best-effort guess.
+/// `template` must be the file's `tokenizer.chat_template` string. Only the two
+/// ChatML turn delimiters are structural — they are what the renderer emits
+/// verbatim — so a template without them is a different format and is refused.
+/// Every other marker is a branch this renderer implements itself, and its
+/// absence changes that branch rather than failing the request: see
+/// [`validate_template`].
 pub fn render(
     template: &str,
     messages: &[Message],
@@ -201,6 +208,20 @@ pub fn render(
         // minus that branch; every other marker below is the same.
         String::new()
     };
+    // A template with no `<think>` at all is not a thinking model: emitting
+    // the tag would put a token in the prompt the template never produces.
+    let thinking = template.contains(THINK_OPEN);
+    // `enable_thinking` is the template's own knob. A template that hard-codes
+    // the empty thinking block (MiniCPM-V-4.7's does, with a comment saying
+    // thinking is disabled) does not read the variable, so asking for thinking
+    // cannot open a block: render the closed one it does produce.
+    let thinking_knob = template.contains("enable_thinking");
+    // A template with no `preserve_thinking` branch has no way to keep a
+    // pre-query thinking block, so the renderer must not emit one — the model
+    // never saw that turn shape. Qwen's templates carry the marker and keep the
+    // caller's choice; MiniCPM-V-4.7's keeps reasoning only on the post-query
+    // turn, which is the same rule.
+    let preserve = opts.preserve_thinking && template.contains("preserve_thinking");
     let contents: Vec<String> = messages
         .iter()
         .map(Message::content_text)
@@ -273,7 +294,7 @@ pub fn render(
             "assistant" => {
                 out.push_str("<|im_start|>assistant\n");
                 let reasoning_content = message.reasoning_content.as_deref().unwrap_or("").trim();
-                if opts.preserve_thinking || i > last_query {
+                if thinking && (preserve || i > last_query) {
                     out.push_str("<think>\n");
                     out.push_str(reasoning_content);
                     out.push_str("\n</think>\n\n");
@@ -310,9 +331,9 @@ pub fn render(
 
     if opts.add_generation_prompt {
         out.push_str("<|im_start|>assistant\n");
-        if opts.enable_thinking {
+        if thinking && opts.enable_thinking && thinking_knob {
             out.push_str("<think>\n");
-        } else {
+        } else if thinking {
             out.push_str("<think>\n\n</think>\n\n");
         }
     }
@@ -355,23 +376,32 @@ pub fn tojson(raw: &str) -> String {
     out
 }
 
-/// Reject a template this renderer was not written against. The markers are
-/// the branch points used above; they are all present in the Qwen3.8 template
-/// and absent from a plain ChatML template.
+/// Reject a template this renderer was not written against.
 ///
-/// `reasoning_instructions` is the one optional marker: it is Qwen3.8's system
-/// reasoning block, and a template without that branch (Qwen3.6) has no block
-/// to emit. [`render`] checks for it separately and renders none when absent.
+/// Only the two ChatML turn delimiters are structural. [`render`] emits them
+/// verbatim, so a template without them is a different format and rendering it
+/// would produce a prompt the model cannot read.
+///
+/// Every other marker is a branch this renderer implements itself, and each is
+/// optional: its absence changes that one branch instead of failing the
+/// request. That is deliberate — a hard-required list made the engine refuse a
+/// whole model per marker (`reasoning_instructions` in Qwen3.6, then
+/// `preserve_thinking` in MiniCPM-V-4.7), one model at a time. The markers and
+/// what an absent one does:
+///
+/// | marker | absent |
+/// | --- | --- |
+/// | `render_content` | ignored; only names the macro this renderer inlines |
+/// | `add_generation_prompt` | the caller's `add_generation_prompt` still appends the turn |
+/// | `enable_thinking` | thinking is not a knob: the closed `<think>` block is emitted |
+/// | `preserve_thinking` | pre-query thinking is dropped (the template has no branch to keep it) |
+/// | `reasoning_instructions` | no system reasoning block |
+/// | `<think>` | no thinking block is emitted at all |
+///
+/// A marker the engine does not know is never inspected, so it cannot fail a
+/// render: the check below is presence-only, and only for the two delimiters.
 fn validate_template(template: &str) -> Result<(), ChatError> {
-    let required = [
-        "render_content",
-        "preserve_thinking",
-        "add_generation_prompt",
-        "<|im_start|>",
-        "<|im_end|>",
-        "<think>",
-    ];
-    for marker in required {
+    for marker in ["<|im_start|>", "<|im_end|>"] {
         if !template.contains(marker) {
             return Err(ChatError::Unsupported(format!(
                 "template has no {marker:?} marker"

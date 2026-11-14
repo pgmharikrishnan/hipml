@@ -22,6 +22,27 @@ use super::*;
 use crate::gpu_weights::{gemv_entry, Proj};
 use crate::OUTPUT;
 
+use super::moe::MoeBlock;
+
+/// The MTP block's feed-forward network: the dense SwiGLU of a `qwen35` file,
+/// or the routed FFN of a `qwen35moe` one.
+///
+/// A MoE base's inline MTP block is itself MoE — `blk.40` on
+/// Qwen3.6-35B-A3B carries the 256-expert banks, not `ffn_gate` — so the
+/// drafter needs the same body the decoder's FFN runs. It reuses
+/// [`MoeBlock::forward`], which is the single-token routed step, rather than a
+/// second copy of the router/top-k/gather/fold.
+enum DraftFfn<'a> {
+    Dense {
+        gate: Proj<'a>,
+        up: Proj<'a>,
+        down: Proj<'a>,
+    },
+    /// Boxed: the expert bank views plus the step scratch are larger than the
+    /// three dense projections.
+    Moe(Box<MoeBlock<'a>>),
+}
+
 /// The MTP sidecar's block index is the base model's decoder depth, i.e.
 /// `block_count - nextn_predict_layers`. It was `64` for the 64-layer
 /// fine-tune; the stock file also names its inline MTP block `blk.64`, but
@@ -39,9 +60,7 @@ pub struct MtpGpu<'a> {
     head_norm: Buffer,
     eh_proj: Proj<'a>,
     attn: AttnLayer<'a>,
-    gate: Proj<'a>,
-    up: Proj<'a>,
-    down: Proj<'a>,
+    ffn: DraftFfn<'a>,
     emb: Buffer,
     cat: Buffer,
     x: Buffer,
@@ -112,6 +131,17 @@ impl<'a> MtpGpu<'a> {
             (embed.nbytes() / embed.rows()) as usize,
             embed.ty(),
         );
+        // The drafter's FFN is whatever the base's is. `MoeBlock::new` reads
+        // `blk.<n>.ffn_*` with the same names and shapes the decoder's layers
+        // use, so the inline MTP block on a MoE file needs no separate reader.
+        let ffn = match cfg.n_expert {
+            0 => DraftFfn::Dense {
+                gate: p("ffn_gate.weight")?,
+                up: p("ffn_up.weight")?,
+                down: p("ffn_down.weight")?,
+            },
+            _ => DraftFfn::Moe(Box::new(MoeBlock::new(model, &cfg, blk)?)),
+        };
         let head_t = model
             .tensor(OUTPUT)
             .ok_or_else(|| "model has no output.weight".to_string())?;
@@ -126,9 +156,7 @@ impl<'a> MtpGpu<'a> {
             head_norm: Buffer::from_host(&v("nextn.shared_head_norm.weight")?)?,
             eh_proj: p("nextn.eh_proj.weight")?,
             attn,
-            gate: p("ffn_gate.weight")?,
-            up: p("ffn_up.weight")?,
-            down: p("ffn_down.weight")?,
+            ffn,
             emb: zeros(n)?,
             cat: zeros(2 * n)?,
             x: zeros(n)?,
@@ -156,9 +184,10 @@ impl<'a> MtpGpu<'a> {
     pub fn weight_bytes(&self) -> usize {
         self.eh_proj.bytes()
             + self.attn.weight_bytes()
-            + self.gate.bytes()
-            + self.up.bytes()
-            + self.down.bytes()
+            + match &self.ffn {
+                DraftFfn::Dense { gate, up, down } => gate.bytes() + up.bytes() + down.bytes(),
+                DraftFfn::Moe(m) => m.bytes(),
+            }
     }
 
     /// Bytes of the drafter's f32 KV cache.
@@ -213,11 +242,19 @@ impl<'a> MtpGpu<'a> {
         self.attn.forward_buf(l, &self.t, pos)?;
         l.residual_buf(&self.x, self.attn.output(), &self.x1, n)?;
         l.rmsnorm_buf(&self.x1, &self.post_norm, &self.t, n, cfg.eps)?;
-        self.gate.gemv(l, &self.t, &self.gate_b)?;
-        self.up.gemv(l, &self.t, &self.up_b)?;
-        l.silu_mul_buf(&self.gate_b, &self.up_b, &self.act, cfg.n_ff)?;
-        self.down.gemv(l, &self.act, &self.down_b)?;
-        l.residual_buf(&self.down_b, &self.x1, &self.out, n)?;
+        match &self.ffn {
+            DraftFfn::Dense { gate, up, down } => {
+                gate.gemv(l, &self.t, &self.gate_b)?;
+                up.gemv(l, &self.t, &self.up_b)?;
+                l.silu_mul_buf(&self.gate_b, &self.up_b, &self.act, cfg.n_ff)?;
+                down.gemv(l, &self.act, &self.down_b)?;
+                l.residual_buf(&self.down_b, &self.x1, &self.out, n)?;
+            }
+            DraftFfn::Moe(m) => {
+                m.forward(l, &self.t, Ablate::none())?;
+                l.residual_buf(m.out(), &self.x1, &self.out, n)?;
+            }
+        }
         l.rmsnorm_buf(&self.out, &self.head_norm, &self.hnext, n, cfg.eps)?;
         l.run_quant_resident(
             gemv_entry(self.head_ty)?,
