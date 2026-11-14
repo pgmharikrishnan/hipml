@@ -9,18 +9,27 @@ plus one inline MTP block, 256 experts with 8 used. Every attention and
 gated-delta-net tensor in it is shaped exactly like the 27B's; the FFN is the
 only new thing.
 
-This note covers two slices. The first settled the numerical conventions on the
+This note covers three slices. The first settled the numerical conventions on the
 CPU, before any kernel existed, because four independent conventions (softmax
 domain, top-k order, renormalisation, where the router weight is applied) can
 each leave the ids subtly wrong, and a kernel built on a wrong one is the wrong
 kernel. The second built the device path — a row gather for every format, an
 expert GEMV that resolves the gather on the device, device-side top-k, and a
 prefill loop — and it is the first time this file produces tokens on the GPU.
+The third measured the file against llama.cpp on the same box (§8.4) and built a
+bandwidth instrument to find why the small expert reads run at a third of the
+large-read rate (§8.5).
 
 **Result: the CPU reference reproduces llama.cpp's 64 greedy ids on a fixed
 prompt, 64/64, first try; the device path reproduces the same 64 ids, 64/64, at
-125.76 tok/s decode and 143.99 tok/s prefill.** The file loads: 753 tensors, 0
-unsupported, 21.41 GiB resident (21.69 GiB with the engine's scratch).
+125.76 tok/s decode and 143.99 tok/s prefill.** Against llama.cpp on the same
+file, hipml decodes **33.5% faster at depth 0 and 24.0% faster at depth 8,192**
+and prefills **95.6–96.7% slower**; the 8-slot serve cell is `n/a` because the
+batched engine has no routed FFN. The bandwidth instrument finds the memory
+system can read 0.59 MB at 495 GB/s where the shipped tile gets 182, and
+installing the wider tile is **neutral end to end**, so 150 tok/s stays out of
+reach (§8.5). The file loads: 753 tensors, 0 unsupported, 21.41 GiB resident
+(21.69 GiB with the engine's scratch).
 
 ## 1. Two things stopped the file opening
 
@@ -520,7 +529,7 @@ is the node, 3%.
 
 That is the whole answer to "is the token launch-bound": **no.** The banks read
 566 MB in 1.545 ms = 366 GB/s, and the reason is the size of the read, not the
-count of the launches. Rate is a function of bytes per launch on this card:
+count of the launches. Rate rises with the size of the read on this card:
 
 | launch | bytes | GB/s |
 | --- | ---: | ---: |
@@ -529,7 +538,14 @@ count of the launches. Rate is a function of bytes per launch on this card:
 | one routed bank | 4.7 MB | 366 |
 | one shared-expert GEMV | 0.59 MB | 125 |
 
-The routing structure fixes that size. Gate, up and down are three sequential
+But size is not the only variable, and an earlier version of this note made it
+the whole story. §8.5 sweeps the grid at a fixed byte count and finds the rate
+moving **2.6×** — 182 to 472 GB/s at 0.59 MB — on geometry alone. The honest
+statement is that bytes per launch sets the ceiling and the number of bytes in
+flight sets how close a small read gets to it; the shipped tiles sit low on that
+curve, and widening them does not move the token (§8.5).
+
+The routing structure fixes the size. Gate, up and down are three sequential
 launches of eight scattered expert slices each — 4.7 MB, then 4.7 MB, then
 4.7 MB — and no merge changes what the DRAM sees, which is what the fusion
 table below measured.
@@ -566,7 +582,11 @@ it. What is left, in order of size:
   projections read 476 GB/s with nothing else on the card, because the reads are
   0.59–4.7 MB. Closing this is a kernel-shape question — more bytes in flight per
   launch at a fixed read size — and the four launch merges above are evidence
-  that it is not a merge-count question.
+  that it is not a merge-count question. §8.5 measures the shape directly and
+  finds the headroom is real in isolation (0.59 MB: 182 → 472 GB/s on geometry)
+  and **not taken by the token**: installing the wider tile was neutral, so the
+  remaining work is on the tiles that were not re-cut (the Q5_K/Q6_K down banks)
+  and on the arithmetic, not on the load width of the Q4_K path.
 * **The GDN block, 2.697 ms** for 30 layers, of which 0.406 is the recurrence and
   the rest is five projections and four elementwise steps a layer.
 * **The shared expert, 0.734 ms** for 71 MB: seven launches a layer reading
@@ -613,6 +633,158 @@ like when the GPU GEMV and the CPU GEMV sum in a different order: the weights
 differ by at most 5.6e-3 and the ids do not. A convention error would move the
 whole set, not the last rank.
 
+### 8.4 Against llama.cpp, on this file
+
+The dense matrix measured the 27B against llama.cpp; this is the same protocol on
+the MoE file. One GPU-lock hold, one model resident at a time, the two engines
+interleaved per depth (hipml, llama, llama, hipml) so a drift in the box lands on
+both, three reps per process and six per cell, q8 KV on both, the same 512-token
+fixture. Peak VRAM comes from the same external WDDM sampler for both engines.
+hipml is `786b8c88…`, 3,111,424 B, `built with hip feature: true`; llama.cpp is
+`0.7.0-dev (build 11820, commit d7725699)` with `-ngl 99`.
+
+| cell | hipml tok/s | llama.cpp tok/s | delta | ranges separate |
+| --- | ---: | ---: | ---: | --- |
+| prefill 512 @ depth 0 | 147.10 (146.70–148.39) | 3375.05 (1528.65–3665.29) | **−95.6%** | yes |
+| decode @ depth 0 | **128.24** (127.81–129.02) | 96.04 (94.20–96.50) | **+33.5%** | yes |
+| prefill 512 @ depth 8192 | 137.66 (136.17–138.60) | 4203.73 (3934.29–4232.96) | **−96.7%** | yes |
+| decode @ depth 8192 | **115.05** (113.99–115.56) | 92.79 (91.96–93.31) | **+24.0%** | yes |
+
+Every value is a median of six reps and the parentheses are min–max. llama.cpp's
+prefill rep 0 is a cold outlier at both depths (1,528 and 1,886 tok/s); its reps
+1–2 are 3,300–3,660 at depth 0 and about 4,200 at depth 8,192, so the ranges
+above include the cold rep and dropping it would make the delta slightly worse
+for hipml.
+
+**Decode: hipml wins, at both depths, and the ranges do not overlap.** 33.5% at
+depth 0 and 24.0% at depth 8,192. Both engines lose speed as the KV cache grows
+(hipml −10.3%, llama −3.4%), so the win narrows with depth but does not close.
+
+**Prefill: hipml loses by an order of magnitude.** 147 tok/s against 3,375 and
+138 against 4,204. The cause is §7.4: a MoE chunk runs the decode path once per
+prompt token, so prefill re-streams 2.56 GiB per prompt token. At 147 tok/s that
+is a ~405 GB/s effective stream, the same wall as decode — llama.cpp's grouped
+GEMM reads each expert once per tile instead of once per token. This is the one
+cell where the engine is not competitive, and it is a missing kernel, not a
+missing convention.
+
+Peak VRAM is 3.9% higher than llama.cpp at both depths:
+
+| depth | hipml | llama.cpp |
+| ---: | ---: | ---: |
+| 0 | 22,372 MiB | 21,526 MiB |
+| 8,192 | 22,459 MiB | 21,614 MiB |
+
+Serve cell b is 8 slots at 16K context, a 2,384-token prompt and 64 tokens a
+request, three reps:
+
+| engine | aggregate tok/s p50 | per-stream tok/s p50 | TTFT p50 | peak VRAM |
+| --- | ---: | ---: | ---: | ---: |
+| llama.cpp | 379.0 | 47.5 | 324 ms | 23,548 MiB |
+| hipml | **n/a** | — | — | 22,542 MiB |
+
+hipml's cell is `n/a` for a reason in the engine, not a missing measurement:
+`BatchEngine::new` refuses a MoE file — *"batch decode has no MoE FFN yet (256
+experts, 8 used): the batched engine runs a dense FFN per block; the
+single-sequence decode path does have the expert gather"* — so all 24 requests
+fail and there is nothing to compare. llama.cpp's cell fits (23,548 MiB of
+31.86 GiB) and is the number an 8-slot MoE server would have to beat.
+
+### 8.5 The bandwidth wall, measured
+
+`hipml bw-probe` is new in this slice. It asks §8.1's question with nothing else
+in the kernel: at the byte count of each read the token issues, what does the
+memory system deliver? It launches one read kernel `--launches` times back to
+back with a single event pair around the burst, sweeps read size × bytes per load
+(4/8/16) × independent loads per thread (1/2/4/8) × workgroups (32…4,096), and
+subtracts the same grid's empty-kernel span. Small reads rotate over distinct
+windows of one 2 GB allocation, so a burst never re-reads bytes still in the
+64 MB Infinity Cache; a rate measured out of cache is not the rate decode sees.
+The kernel has no dequant, no staging and no reduction — one XOR chain per
+accumulator — so what it reports is memory and dispatch only.
+
+Calibration and the two floor numbers the sweep has to respect:
+
+* 540 MB reads at **639.1 GB/s** against the card's 640 GB/s.
+* Host issue is **0.476 µs/launch** (queue only, no sync); the empty-kernel GPU
+  span at 32 blocks is **0.539 µs**, which matches the 0.43 µs node §8.1 reports.
+* A burst carries a **~80 µs fixed cost**, so `--launches` had to be raised to
+  400+ before a 0.59 MB burst was above the noise. The table below is 128
+  launches with the floor subtracted and 3 reps a cell, 624 cells in all.
+
+Best cell per read size, out of 84 cells a size (`raw` is what one launch of that
+shape delivers):
+
+| read | bytes | best GB/s | geometry |
+| --- | ---: | ---: | --- |
+| shared-expert GEMV | 0.59 MB | 494.7 | 16 B, 1 in flight, 512 blocks |
+| one expert down (q5_k) | 0.72 MB | 510.0 | 16 B, 8 in flight, 512 blocks |
+| one expert down (q6_k) | 0.86 MB | 527.8 | 16 B, 1 in flight, 512 blocks |
+| the router | 2.1 MB | 443.4 | 4 B, 4 in flight, 64 blocks |
+| one routed bank | 4.7 MB | 526.4 | 16 B, 1 in flight, 1,024 blocks |
+| one layer's banks | 18.9 MB | 597.8 | 16 B, 4 in flight, 1,024 blocks |
+| `lm_head` | 540 MB | 639.1 | 16 B, 8 in flight, 4,096 blocks |
+
+Two things fall out. First, **0.59 MB can be read at 495 GB/s**, four times the
+125 GB/s §8.1 inferred for the shipped shared-expert GEMV: at that size the
+memory system is not the limit. Second, **the sweep is not monotonic in any one
+lever** — the best cell at 2.1 MB is 4-byte loads and 64 blocks, and at 0.59 MB
+the 4,096-block grid is the worst cell in the whole sweep (105.9 GB/s) because
+36,864 vectors cannot fill a million threads and the tail retires without work.
+The levers only mean something together, which is what "bytes in flight" is.
+
+The GEMV's own shape is the decisive table. It is 512 rows of a Q4_K gate/up tile
+(0.59 MB), issued one warp per row and up, the same lane-strided body
+`q4k_tile` runs; `raw` GB/s:
+
+| rows/warp | warps | blocks | 4 B | 8 B | 16 B |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1 | 512 | 287.3 | 363.1 | **471.7** |
+| 1 | 2 | 256 | 283.1 | 357.2 | 396.7 |
+| 1 | 4 | 128 | 311.8 | 353.1 | 396.2 |
+| 1 | 8 | 64 | 280.4 | 349.2 | 391.2 |
+| 2 | 8 | 32 | 182.2 | 231.4 | 314.6 |
+| 4 | 8 | 16 | 85.3 | 109.1 | 187.2 |
+
+The shipped tile is the 32-block row — 8 warps, 2 rows a warp — and at 4-byte
+loads it is **182.2 GB/s**: the shipped configuration, and below every
+one-row-per-warp cell in the table. One workgroup per row at 16 bytes is
+**471.7 GB/s, 2.6× faster, at the same byte count.** The Q5_K down tile has the
+same shape of headroom: 2,048 rows, 223 GB/s at its shipped geometry against
+454.6 at one row per block and 16 bytes.
+
+So the tile was re-cut: `gemv_q4_k`'s stream entry now takes the 16-byte load and
+`q4k_tile<1, true, false>` — one row per warp. It is bit-exact by construction
+(same tile body, same order, wider loads). Measured against the base binary,
+three reps a cell, cells interleaved, two rounds, one lock hold:
+
+| cell | base ms/token | 16-byte tile ms/token |
+| --- | ---: | ---: |
+| `full` | 7.729 / 7.792 | 7.785 / 7.797 |
+| `gemv_only` | 5.688 / 5.745 | 5.744 / 5.754 |
+| `-moe_shared` | 6.963 / 7.026 | 7.017 / 7.023 |
+
+and untraced `generate`, four reps each: base **125.10–126.86 tok/s**, new
+**125.48–126.95 tok/s**. Every range overlaps. The change is **neutral and is
+not kept** — the shipped decode path is byte-identical to the parent commit.
+
+That is the result, and it is worth stating plainly: the instrument found 2.6× of
+headroom in the read and the token did not take any of it. The reason is that the
+probe prices a read and the kernel does not only read. The shared expert's group
+is 2.6 µs a launch of which 0.54 µs is the node; the rest is Q4_K unpack, the dot
+and the elementwise chain around it, none of which a wider load shortens. Where
+the kernel is arithmetic- or launch-bound, no geometry reaches the read rate, and
+that is the wall on this card at these read sizes.
+
+For 150 tok/s: the isolated GEMV set is 5.688 ms at 483.6 GB/s over 2.562 GiB. At
+the 632 GB/s the large reads reach it would be 4.35 ms, which would put the token
+at 6.4 ms, **156 tok/s** — but that requires every read to run at the large-read
+rate, and the one change that was supposed to move the small ones moved the token
+by nothing. **150 tok/s is not reachable from this card's memory system by
+re-shaping the existing GEMVs; it needs the down-bank tiles re-cut (Q5_K/Q6_K,
+not touched here) and less arithmetic per byte, and neither is a load-width
+change.** Measured wall: 126–128 tok/s.
+
 ## 9. Gates
 
 On the binary this branch ships, `--features hip`, model paths passed with
@@ -622,7 +794,7 @@ and `--mtp` passed literally where a drafter is wanted.
 | gate | expected | observed |
 | --- | --- | --- |
 | `moe-gate` CPU (Qwen3.6-35B-A3B) | 64/64 ids | **PASS 64/64**, 0.69 s/token |
-| `moe-gate --device` | 64/64 ids | **PASS 64/64**, 127.70 tok/s, 21.69 GiB |
+| `moe-gate --device` | 64/64 ids | **PASS 64/64**, 127.39 tok/s, 21.69 GiB |
 | `row-dequant` | 10 formats exact | **10/10 exact**, 2048/2048 values each |
 | `load` (Qwen3.6-35B-A3B) | 0 unsupported, 256/8/512/512 | **0 unsupported**, 21.41 GiB, 20/20 round-trip, Q8_0 rows exact |
 | `generate --device`, 169-token prompt | tokens on the GPU | **143.0 tok/s prefill, 125.5 tok/s decode** |
@@ -644,7 +816,7 @@ anything that was already gated:
 | `column-bench --check` | 0 differ | **0 differ** on 7,946,240 logits, hidden and residual |
 | `probe_exact.py --ctx 32768` | PASS | PASS, 48 replies id-for-id across drafts 1,2,3 |
 | `ppl` (Arete-27B) | 2.1824 vs llama 2.1791 | **2.1824**, unchanged |
-| dense decode, depth 0, 200 tokens | ~33.2 tok/s | **33.46 tok/s** (29.888 ms/token) |
+| dense decode, depth 0, 200 tokens | ~33.2 tok/s | **33.47 tok/s** (29.879 ms/token) |
 | `cargo test --workspace` | clean | **98 passed, 0 failed** (local and on the GPU host) |
 | `cargo fmt --all -- --check` | clean | clean |
 | `scripts/check-public-tree.sh` | clean | clean |
@@ -663,12 +835,17 @@ dense forward pass.
   prompt token (§7.4). That is correct and it is 143.99 tok/s, but it re-streams
   the whole model per prompt token: a 2,000-token prompt takes about 14 s, where
   the bucket-sort + grouped-GEMM path the recon describes would read each expert
-  once per tile.
-* **No fusion is retained.** Four node-count reductions were built and measured
-  (§8.1) and all four were reverted: they removed 40 to 90 launches and did not
-  move the token. The instruments that refuted the launch hypothesis are kept.
-  The decode number is therefore the same 125.5 tok/s, and §8.1 names what a
-  150 tok/s token would have to come from instead.
+  once per tile. §8.4 prices the cost of not having it: **147 tok/s against
+  llama.cpp's 3,375**, the one cell in the head-to-head where the engine is not
+  competitive.
+* **No fusion is retained, and no tile change either.** Four node-count
+  reductions were built and measured (§8.1) and all four were reverted: they
+  removed 40 to 90 launches and did not move the token. The instruments that
+  refuted the launch hypothesis are kept. The 16-byte, one-row-per-warp tile
+  §8.5 measured 2.6× faster in isolation was installed, A/B'd interleaved, found
+  **neutral** and reverted for the same reason. The decode number is therefore
+  the same 125.5 tok/s, and §8.1 and §8.5 name what a 150 tok/s token would have
+  to come from instead.
 * **The MoE ablation groups are a diagnostic.** `moe_router`, `moe_topk`,
   `moe_bank`, `moe_act`, `moe_combine` and `moe_shared` are default-off and
   exist so `decode-ablate` can price the routed FFN by removal. They add a
@@ -677,7 +854,13 @@ dense forward pass.
   parent commit.
 * **Batch/serve and `column-bench`.** Both refuse a MoE file up front, naming
   the reason: neither has a routed FFN body. The single-sequence decode path is
-  the one that does.
+  the one that does. This is why §8.4's 8-slot serve cell is `n/a` rather than a
+  measurement, and it is the first thing an 8-slot MoE server needs.
+* **The bandwidth instrument prices reads, not kernels.** `bw-probe` has no
+  dequant and no dot, so its 0.59 MB number is a ceiling the token never pays.
+  §8.5's neutral A/B is the evidence that the two are not the same question. The
+  Q5_K/Q6_K down banks and the F32 router were not re-tiled; only `gemv_q4_k`
+  was.
 * **One prompt, one seed, 64 ids.** The gate says the conventions are right; it
   does not bound how often a near-tie would flip a token between the f32 CPU
   reference, this GPU path and llama's GPU kernels. The margin print in

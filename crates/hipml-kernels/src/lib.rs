@@ -946,6 +946,86 @@ pub const KERNELS: &[KernelSpec] = &[
         kind: KernelKind::Linear { block: 256 },
     },
     KernelSpec {
+        name: "bw_empty",
+        entry: "bw_empty",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_flat_v4_o1",
+        entry: "bw_flat_v4_o1",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_flat_v4_o2",
+        entry: "bw_flat_v4_o2",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_flat_v4_o4",
+        entry: "bw_flat_v4_o4",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_flat_v4_o8",
+        entry: "bw_flat_v4_o8",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_flat_v8_o1",
+        entry: "bw_flat_v8_o1",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_flat_v8_o2",
+        entry: "bw_flat_v8_o2",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_flat_v8_o4",
+        entry: "bw_flat_v8_o4",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_flat_v8_o8",
+        entry: "bw_flat_v8_o8",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_flat_v16_o1",
+        entry: "bw_flat_v16_o1",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_flat_v16_o2",
+        entry: "bw_flat_v16_o2",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_flat_v16_o4",
+        entry: "bw_flat_v16_o4",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_flat_v16_o8",
+        entry: "bw_flat_v16_o8",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_rows_v4",
+        entry: "bw_rows_v4",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_rows_v8",
+        entry: "bw_rows_v8",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_rows_v16",
+        entry: "bw_rows_v16",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
         name: "rmsnorm_f32",
         entry: "rmsnorm_f32",
         kind: KernelKind::PerRow { block: 256 },

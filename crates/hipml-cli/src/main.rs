@@ -17,6 +17,8 @@ mod chat_cmd;
 #[cfg(feature = "hip")]
 mod batch_cmd;
 #[cfg(feature = "hip")]
+mod bw_cmd;
+#[cfg(feature = "hip")]
 mod cache_cmd;
 #[cfg(feature = "hip")]
 mod cache_gate;
@@ -229,6 +231,15 @@ fn main() {
                 std::process::exit(2);
             }
         }
+        "bw-probe" => {
+            #[cfg(feature = "hip")]
+            std::process::exit(bw_cmd::run(&args[1..]));
+            #[cfg(not(feature = "hip"))]
+            {
+                eprintln!("bw-probe needs a build with `--features hip`");
+                std::process::exit(2);
+            }
+        }
         "gpu-profile" => {
             #[cfg(feature = "hip")]
             std::process::exit(profile_cmd::profile(&args[1..]));
@@ -306,6 +317,8 @@ fn help() {
          \x20           multi-row tail prefill vs the single-sequence path\n\
          \x20 row-dequant [--row N]  the embedding row gather on device vs the\n\
          \x20           host reference, for every format it decodes\n\
+         \x20 bw-probe  read size x vector width x outstanding loads x workgroups,\n\
+         \x20           as a pure-read bandwidth table (--sizes/--launches/--csv)\n\
          \x20 serve     HTTP server: continuous batching, MTP, prefix cache\n\
          \n\
          build with `--features hip` on a machine with the ROCm/HIP runtime.",
