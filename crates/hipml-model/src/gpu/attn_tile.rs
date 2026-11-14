@@ -246,8 +246,10 @@ pub(super) fn deep_attention_cols(
     acc_slot: usize,
     ml_slot: usize,
 ) -> Result<bool, String> {
-    // Only the whole-group warp entries have a `_b` form (dk.kernel 4/5).
-    if !matches!(dk.kernel, 4 | 5) {
+    // Only the warp entries have a `_b` form: `w2`/`w4` (whole group in one
+    // warp) and `s2` (three heads per warp, the body the one-column step runs
+    // at a GQA group of 8).
+    if !matches!(dk.kernel, 4 | 5 | 7) {
         return Ok(false);
     }
     let qw = cfg.n_head * cfg.head_dim;

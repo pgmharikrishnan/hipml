@@ -44,9 +44,28 @@ impl DeepKv {
         let f32s = bytes.div_ceil(4);
         // head_dim 256 and a GQA group of at most 8 is exactly the shape the
         // warp kernel's lane map covers; every other case keeps the staged one.
+        //
+        // The whole-group body (`w2`, id 4) holds every query head of the group
+        // in one warp. At group 8 that is 128 query+accumulator registers before
+        // a K/V byte is loaded, and a two-KV-head file issues only two tasks per
+        // split, so the kernel runs four warps to a CU and is latency-bound. The
+        // three-heads-per-warp body (`s2`, id 7) splits the group over three
+        // warps: measured 1.05 -> 0.58 ms of the 8K decode attention and
+        // 5.96 -> 4.34 ms at 100K, with the whole token 114.4 -> 121.6 tok/s at
+        // 8,192. Group 6 keeps `w2`, the measured best there.
+        //
+        // The selector also decides the verify's batched entry: a `_b` form
+        // exists per body (`w2_b`, `w4_b`, `s2_b`), and a body without one
+        // drops the multi-column pass to one launch and one position upload per
+        // column. `s2` therefore ships with `s2_b`; picking `s2` without it cost
+        // the q8 speculative verify 13% (175.4 -> 152.3 tok/s at one draft).
         let group = cfg.n_head / cfg.n_head_kv;
         let kernel = if dtype == KvDtype::Q8 && cfg.head_dim == 256 && group <= 8 {
-            4
+            if group >= 7 {
+                7
+            } else {
+                4
+            }
         } else {
             dtype.id()
         };

@@ -1686,6 +1686,183 @@ before: still flat, because the flatness is §8.10's dispatch — a wave does no
 take `Mode::Spec`, only a lone request does. Making the verify faster does not
 change which requests speculate.
 
+## 8.12 The depth gap is the decode attention core, not the gather (2026-11-15)
+
+The census put this file at 125.45 tok/s at depth 0 and 113.55 at 8,192 — a
+**9.5% drop** — while the dense `Qwen3.8-27B-UD-Q4_K_M` drops 3.8% over the same
+range and llama.cpp's Vulkan build drops 3.4% on the same file. A mixture of
+experts streams 8 of 256 expert banks per token, so the obvious suspect was the
+gather: more KV, a bigger routing table, more expert traffic. The stage budget
+says it is none of those.
+
+`decode-ablate --gguf <this file> --depth {0,8192} --tokens 200 --reps 3 --kv q8
+--cells full,gemv_only,gemv+attn_reduce,-attn_reduce,-attn_front,-kv_append,-moe_bank,-moe_router,-moe_topk,-moe_combine,-moe_shared,-moe_act,-norm,-ssm_rec`,
+one process per depth, cells interleaved across reps. Each row is the marginal
+cost of that stage, `full` minus the cell that removes it, ms per token:
+
+| stage removed | depth 0 | depth 8,192 | growth |
+| --- | ---: | ---: | ---: |
+| `attn_reduce` (the decode attention core) | 0.232 | **1.097** | **+0.865** |
+| `moe_bank` (the routed expert FFN) | 1.525 | 1.589 | +0.064 |
+| `moe_shared` (shared expert) | 0.729 | 0.695 | −0.034 |
+| `moe_topk` | 0.664 | 0.668 | +0.004 |
+| `ssm_rec` (GDN recurrence) | 0.391 | 0.385 | −0.006 |
+| `moe_router` | 0.215 | 0.262 | +0.047 |
+| `norm` | 0.175 | 0.238 | +0.063 |
+| `attn_front` (qkv, rope) | 0.092 | 0.116 | +0.024 |
+| `moe_combine` | 0.089 | 0.128 | +0.039 |
+| `kv_append` | 0.040 | 0.069 | +0.029 |
+| `moe_act` | 0.040 | 0.043 | +0.003 |
+| **`full`** | **7.770** | **8.672** | **+0.902** |
+| `gemv_only` (every weight stream, no attention, no SSM, no norm) | 5.733 | 5.764 | +0.031 |
+
+The gather is flat: the expert banks, the router, top-k and the combine move
+0.03 ms between depth 0 and 8,192, and the whole weight stream moves 0.03 ms.
+`attn_reduce` alone grows 0.865 ms, which is **96% of the 0.902 ms** the token
+grows. The dense file, same cells, same hold, has the same shape — `full`
+30.109 → 31.307 ms (+1.198), `attn_reduce` 0.118 → 1.301 (+1.183, 99%), every
+other stage inside 0.05 — which is the control that says the method is measuring
+the attention and not the file.
+
+**Why the shipped kernel is the slow one.** For `q8` KV, `head_dim` 256 and a
+GQA group of at most 8, `DeepKv::new` pins kernel 4, `attn_decode_kv_w2`, which
+keeps the *whole group* in one warp: eight query vectors plus eight accumulator
+vectors per warp, ~180 VGPRs before a K/V byte is loaded. This file has
+`head_count` 16 and `head_count_kv` 2, so a group is 8 and a split is only two
+KV heads — two warps per split, 64 blocks at 8,192, i.e. **four warps resident
+per CU**, and the warp spends the split waiting on its own loads. The `s2` body
+(kernel 7) puts three heads in a warp and spreads the group over three warps, so
+the same split issues 768 warps in 192 blocks — **twelve warps per CU** — and
+the latency hides behind them.
+
+Every body in the file, forced one per run at 8,192 with `decode-ablate ...
+--cells full,gemv_only,-attn_reduce`, ms/token:
+
+| kernel | body | splits | `full` | tok/s |
+| --- | --- | ---: | ---: | ---: |
+| 4 | `w2`, whole group per warp | default | 8.619 | 116.02 |
+| 4 | `w2` | 256 | 8.401 | 119.03 |
+| 5 | `w4`, four heads per warp | 128 | 9.029 | 110.75 |
+| 13 | `s4`, four heads per warp | 128 | 8.182 | 122.22 |
+| 7 | `s2`, three heads per warp | 128 | 8.186 | 122.15 |
+| 14 | `s1`, one head per warp | 128 | 8.212 | 121.77 |
+| 6 | staged q8 tile | default | 8.202 | 121.92 |
+| 8 | `lab_full`, staged with vectorised loads | default | 8.167 | 122.44 |
+| 11 | `lab_stage`, staging only, **both compute phases removed** | default | 7.814 | 127.98 |
+| **7** | **`s2`** | **default** | **8.090** | **123.61** |
+
+The sweep ran as one ordered list and the machine drifted downward across it (the
+baseline is its first row), so it ranks bodies loosely; kernel 7 with its default
+split count is the best row in it and the confirmation below is the measurement
+that holds. Kernel 11 is not a candidate — it is the lab kernel with the score
+and PV phases deleted — but it is the read floor: 0.24 ms of the 0.575 ms.
+
+**The fix is one branch.** In `DeepKv::new`, `q8` + `head_dim` 256 + `group >= 7`
+selects kernel 7; everything else, including the dense file's group 6, keeps
+kernel 4. Same kernel source, same split count, same reduce, so the arithmetic
+is unchanged and only the lane map differs.
+
+`decode-ablate --depth {0,8192} --tokens 200 --reps 3 --kv q8 --cells
+full,gemv_only,-attn_reduce`, one hold, kernel 7 measured before kernel 4 at each
+depth:
+
+| | depth 0 | depth 8,192 | drop |
+| --- | ---: | ---: | ---: |
+| kernel 4 | 7.796 ms (128.26 tok/s) | 8.591 ms (116.40 tok/s) | **−10.2%** |
+| kernel 7 | 7.674 ms (130.32 tok/s) | 8.090 ms (123.61 tok/s) | **−5.4%** |
+| attention marginal, 4 → 7 | 0.213 → 0.096 | 1.047 → 0.575 | |
+
+**End to end, interleaved A/B against the parent.** `generate --device --gguf
+<this file> --tokens 33 --reps 3 --json --kv q8 --ids-file <512 ids | 8192 ids>
+--ctx <576 | 8256>`, three passes, the two trees alternating order each pass
+(pass 1 old→new, pass 2 new→old, pass 3 old→new), median of the nine decode
+samples per cell:
+
+| cell | parent `e89eede` | this branch | delta |
+| --- | ---: | ---: | ---: |
+| 512 ids | 126.10 | 128.05 | **+1.5%** |
+| 8,192 ids | 114.38 | 121.67 | **+6.4%** |
+| depth 0 → 8,192 | **−9.29%** | **−4.98%** | |
+
+The per-pass medians are 125.76 / 125.88 / 126.34 and 128.19 / 127.89 / 128.22 at
+512, 114.37 / 114.40 / 114.63 and 122.05 / 122.12 / 121.31 at 8,192; the
+interleaving is why the +6.4% is readable at all, since the same kernel measures
+8.09–8.24 ms depending on where in a session it lands. The generated ids are
+identical between the two trees at both depths.
+
+It is not a long-context-only win. `decode-ablate --tokens 120 --reps 3`, one
+hold, kernel 7 unless stated:
+
+| depth | `full` ms | attention ms | tok/s |
+| ---: | ---: | ---: | ---: |
+| 0 | 7.672 | 0.109 | 130.34 |
+| 8,192 | 8.090 | 0.575 | 123.61 |
+| 16,384 | 8.487 | 0.924 | 117.83 |
+| 32,768 | 9.098 | 1.537 | 109.92 |
+| 100,000 | 11.901 | 4.337 | 84.03 |
+| 100,000, kernel 4 | 13.526 | 5.958 | 73.93 |
+
+At 100K the same branch is **+13.7%** (73.93 → 84.03 tok/s) because the attention
+core is 27% of the token there.
+
+**The selector also owns the verify's batched entry, and that cost 13% until it
+had one.** `columns.rs` runs a multi-column pass as one launch per split-count
+group only when the selected body has a `_b` wrapper (`w2_b`, `w4_b`, `s2_b`);
+otherwise it falls back to one launch and one position upload per column. `s2`
+had none, so the q8 speculative verify — the one place this file decodes several
+columns at once — read 152.30 / 162.10 / 152.44 tok/s at drafts 1/2/3 in the
+first gate run, against 175.40 / 182.55 / 172.85 on the parent, while the f32 KV
+path (which does not use `DeepKv` at all) held at 171.32 / 178.43 / 169.12.
+`attn_decode_kv_s2_b` is the same `grid.y`-per-column wrapper around the same
+body, so a column's partials are still the ones the one-column launch writes, and
+`launch_cols_ptrs` grows the `ceil(group/3)` warp factor the one-column launch
+already applies. Interleaved A/B of the two binaries, two passes with the order
+alternated, 128/128 exact on every row of both:
+
+| drafts | `s2` without `_b` | `s2` with `_b` | delta |
+| ---: | ---: | ---: | ---: |
+| 1 | 152.3 | 177.6 | **+16.6%** |
+| 2 | 161.3 | 183.5 | **+13.8%** |
+| 3 | 152.4 | 173.9 | **+14.1%** |
+
+The verify term at two columns goes 11.47 → 9.62 ms, and the row is back at the
+parent's level rather than below it because the two-column pass now runs the same
+body as the plain step.
+
+**What is left, measured, and not attempted.** At 8,192 the ten full-attention
+layers read 89.1 MB of q8 KV per token (2 × 8,192 positions × 2 KV heads × 272 B
+× 10 layers). Kernel 7 spends 0.575 ms on it, an effective 155 GB/s; the same
+card streams an 18.9 MB read at 642 GB/s in `bw-probe`, and kernel 11's
+staging-only body gets the read itself to 0.24 ms (371 GB/s). So the split is
+roughly **0.24 ms of read, 0.33 ms of score/PV plus the split reduce**, and the
+read is already 1.7x off the wall on its own. llama.cpp's Vulkan build decodes
+this file at 8,192 in 7.90 ms against this branch's 8.22, and the 0.32 ms
+difference is that 0.33 ms.
+
+That is the whole of what remains: the token still loses **4.98%** (A/B; 5.7% on
+the `gpu-bench` cell) where the dense file loses 3.8% and llama.cpp 3.4%, so
+about **1.5 points of drop, 0.33 ms**, sit in one kernel's score and PV phases.
+It is fixable in principle — the read alone is 1.7x off the card's rate, and
+llama.cpp does the same 89 MB plus the same arithmetic in ~0.26 ms — but not with
+a launch parameter: every split count, task-warp alignment, reduce shape and body
+in the file was swept (table below) and the best of them is the one shipped. It
+needs a kernel that reads the KV at the card's rate and does the score and PV
+cheaper (vectorised loads, a different lane map, or matrix cores). This slice
+stops at the measured wall.
+
+| experiment | 8,192 `full` ms | verdict |
+| --- | ---: | --- |
+| kernel 7, default splits (shipped) | 8.090 | — |
+| block-aligned task warps in `s2` | 8.179 | worse, reverted |
+| reduce kernel sliced over the head dimension | 8.150 | neutral, reverted |
+| `s2` with splits 128 / 256 | 8.186 / 8.244 | worse than default |
+| `s4` (kernel 13), splits 64/96/128/160/192/256 | 8.359 / 8.249 / 8.182 / 8.227 / 8.238 / 8.316 | equal at best |
+| staged q8 (kernel 6), default / 64 splits | 8.202 / 8.184 | equal, not chosen |
+| `w4` (kernel 5), `s1` (kernel 14) | 9.029 / 8.212 | worse |
+
+Untouched by this slice: the Q8_0 batched-GEMV block sizing from `e89eede`,
+`AC_MAX_COLS`, the prefill path, and the dense file's kernel choice.
+
 ## 9. Gates
 
 On the binary this branch ships, `--features hip`, model paths passed with
@@ -1695,7 +1872,7 @@ and `--mtp` passed literally where a drafter is wanted.
 | gate | expected | observed |
 | --- | --- | --- |
 | `moe-gate` CPU (Qwen3.6-35B-A3B) | 64/64 ids | **PASS 64/64**, 0.69 s/token |
-| `moe-gate --device` | 64/64 ids | **PASS 64/64**, 126.53 tok/s, 21.69 GiB |
+| `moe-gate --device` | 64/64 ids | **PASS 64/64**, 129.80 tok/s, 21.69 GiB |
 | `moe-gate --device --bucket-stats`, `HIPML_MOE_PREFILL_MIN_TOKENS=1` | 64/64 ids, bucketed path | **PASS 64/64**, 195.8 tok/s prefill, 41 of 256 experts, 2,624 padded (36.44x) |
 | `oracle-gate` (Qwen3.6-35B-A3B), bucketed chunk 2048 | 20/20 ids | **PASS 20/20** |
 | `row-dequant` | 10 formats exact | **10/10 exact**, 2048/2048 values each |
@@ -1705,14 +1882,16 @@ and `--mtp` passed literally where a drafter is wanted.
 | `gpu-bench --bucket-stats`, 511 ids | histogram + padding at 16/32/64 | **216 of 256, 4,088 slots, median 5**, 3.68x at the shipped 64 |
 | `ppl` (Qwen3.6-35B-A3B) | close to llama | **2.2263** bucketed, vs 2.2228 (+0.16%) |
 | `ppl`, `moe-matrix` corpus, ctx 512 (Qwen3.6 / MiniCPM / Sage / Arete) | 2.0982 / 2.2761 / 2.1804 / 2.0384 | **2.0982 / 2.2761 / 2.1804 / 2.0384** |
-| MoE decode, depth 0, 200 tokens | 128.2 tok/s, unchanged | **128.18 tok/s** (7.802 ms/token); the single-sequence decode path is untouched by this slice, and the 125.89 recorded here before is the same path on a slower run |
-| `gpu-bench`, 511 ids, chunk 512 | 2,849 tok/s | **2,853.14 tok/s**, last id 248046 |
+| MoE decode, depth 0, 200 tokens | 128.2 tok/s, up a little | **130.11 tok/s** (7.686 ms/token); the interleaved A/B against the parent is 126.10 → 128.05 (§8.12) |
+| MoE decode, depth 8,192, 200 tokens | the drop must shrink | **122.75 tok/s** (8.147 ms/token) |
+| MoE decode 0 → 8,192, interleaved A/B against `e89eede` | the drop must shrink | 126.10 → **128.05** tok/s at 512 ids, 114.38 → **121.67** at 8,192; drop **−9.29% → −4.98%**; three passes, order alternated (§8.12) |
+| `gpu-bench`, 511 ids, chunk 512 | 2,849 tok/s | **2,808.55 tok/s**, last id 248046 (prefill is not touched by this slice; the documented spread on this cell is 2,797–3,002) |
 | `gpu-bench`, 511 real-text ids, chunk 512 | 3,001.84 tok/s | **2,877.21 tok/s** (2,874.62 / 2,877.21 / 2,877.51), last id 37986; §8.6's same cell reads 2,870.95 |
 | `gpu-bench`, 8,184 ids, chunk 2048 | 3,620 tok/s | **3,777.16 tok/s**, last id 284 |
 | `batch-bench --slots 4 --tokens 32 --check --sweep` | every slot, every width | **B=1..=4 all reproduce the B=1 path** (4 slots × 32 ids) |
 | `batch-bench --slots 16 --tokens 16 --check --sweep` | every slot, every width | **15 of 16 slots; slot 4 step 13 (382 vs 290)** — §8.7.5 |
 | serve cell b, 8 slots, drafts 0/1/2 | llama.cpp's faster backend, same hold | **353.5 / 353.3 / 352.8 tok/s** (still flat: a wave does not take `Mode::Spec`); §8.10, §8.11 |
-| `spec-bench` OrcaCyber (dense, Q6_K), drafts 0/1/2/3, q8 | unchanged | **34.02 / 53.64 / 59.83 / 68.12**, 128/128 (§8.11) |
+| `spec-bench` OrcaCyber (dense, Q6_K), drafts 0/1/2/3, q8 | unchanged | **34.12 / 53.64 / 59.82 / 67.68**, 128/128 (§8.12; parent 34.02 / 53.64 / 59.83 / 68.12) |
 | MoE decode / prefill, A/B against `8ab8084` | must not regress | **128.41 vs 128.61**, **2866 vs 2868 tok/s** — identical inside noise, interleaved |
 
 Dense path, same binary, so the new `Ffn` enum and the row gather did not move
@@ -1729,9 +1908,10 @@ anything that was already gated:
 | `spec-bench --drafts 3 --kv q8` | 128/128 exact every row | **128/128** on all four rows |
 | `spec-bench --drafts 3 --kv f32` | 128/128 exact every row | **128/128** on all four rows |
 | `column-bench --check` | 0 differ | **0 differ** on 7,946,240 logits, hidden and residual |
-| `column-bench --check` (Qwen3.6-35B-A3B, routed FFN) | 0 differ | **0 differ** on 7,946,240 logits, hidden and residual, q8 and f32, 32 columns |
-| `spec-bench` Qwen3.6-35B-A3B, drafts 1/2/3, q8 | 128/128 exact, faster than plain | **128/128**, **175.40 / 182.55 / 172.85** tok/s against 127.44 (§8.11; was 136.46 / 141.64 / 132.16) |
-| `spec-bench` Qwen3.6-35B-A3B, drafts 1/2/3, f32 | 128/128 exact | **128/128**, **172.28 / 178.04 / 168.65** tok/s against 124.79 (was 134.74 / 139.43 / 129.79) |
+| `column-bench --check` (Qwen3.6-35B-A3B, routed FFN) | 0 differ | **0 differ** on 7,946,240 logits, hidden and residual, q8 and f32, 32 columns; the q8 four-column pass now runs `attn_decode_kv_s2_b` against the `s2` one-column pass (§8.12) |
+| `spec-bench` Qwen3.6-35B-A3B, drafts 1/2/3, q8 | 128/128 exact, faster than plain | **128/128**, **177.58 / 184.00 / 174.44** tok/s against 129.33 (§8.12; 175.40 / 182.55 / 172.85 on the parent) |
+| `spec-bench` Qwen3.6-35B-A3B, drafts 1/2/3, f32 | 128/128 exact | **128/128**, **172.44 / 178.24 / 168.92** tok/s against 124.80 (parent 172.28 / 178.04 / 168.65) |
+| MoE q8 verify, `s2` with vs without its `_b` entry, interleaved A/B | must not regress | 152.3 → **177.6** / 161.3 → **183.5** / 152.4 → **173.9** tok/s at drafts 1/2/3, 128/128 on both binaries (§8.12) |
 | `column-bench` Qwen3.6-35B-A3B, 4 col / 1 col | ≤ 2.2x (llama.cpp 2.17x) | **2.11x**, 16.84 ms against 7.98, interleaved A/B against `8ab8084`'s 2.93x (§8.11) |
 | `gemv-bench` Qwen3.6 `output.weight` (Q8_0), rows 4 | amortise the weight read | **246.9 GB/s, 2.189 ms** against 137.5 / 3.930 (rows 2: **563.8**, 96% of one row) |
 | `gemv-check` Qwen3.6 `output.weight`, 4 columns | 0 differ | **0 differ**, 993,280 values |
@@ -1741,7 +1921,7 @@ anything that was already gated:
 | `serve` `/v1/chat/completions`, MiniCPM-V-4.7 | 200, not the reported 400 | **200**, 18 prompt / 8 completion tokens; the base binary is still **400** |
 | `probe_exact.py --ctx 32768` | PASS | PASS, 48 replies id-for-id across drafts 1,2,3 |
 | `ppl` (Arete-27B) | 2.1824 vs llama 2.1791 | unchanged: **2.0384** on `C:\mm\moe-matrix\corpus.ids` on both this binary and the parent, where 2.1824 is the `calib_longctx` 4-window corpus (no ids dump for it on the box) |
-| dense decode, depth 0, 200 tokens | ~33.2 tok/s | **33.37 tok/s** (29.967 ms/token) on the UD file this session; the census cell is 33.44 |
+| dense decode, depth 0, 200 tokens | ~33.2 tok/s | **33.31 tok/s** (30.024 ms/token) on the UD file this session; the census cell is 33.44, and the dense kernel choice is unchanged |
 | `cargo test --workspace` | clean | **101 passed, 0 failed** (local and on the GPU host) |
 | `cargo fmt --all -- --check` | clean | clean |
 | `scripts/check-public-tree.sh` | clean | clean |

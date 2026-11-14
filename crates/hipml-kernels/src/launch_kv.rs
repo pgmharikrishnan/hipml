@@ -330,12 +330,21 @@ pub fn launch_cols_ptrs(
     let entry = match dtype {
         4 => "attn_decode_kv_w2_b",
         5 => "attn_decode_kv_w4_b",
+        7 => "attn_decode_kv_s2_b",
         other => return Err(format!("KV dtype {other}: no batched warp kernel")),
     };
     let kernel = module.kernel(entry)?;
-    // `ALL` shape: one warp per (KV head, split), four warps to a block, one
-    // grid.y step per column. Same grid.x a one-column launch computes.
-    let tasks = n_kv * splits;
+    // One warp per (KV head, split, head subset), four warps to a block, one
+    // grid.y step per column. The `w*` bodies keep the whole group in one warp;
+    // the `s*` bodies cover three heads per warp and need `ceil(group/3)` warps
+    // per task — the same factor the one-column launch applies, and missing it
+    // would silently drop the rest of the key range.
+    let wpr = if matches!(dtype, 4 | 5) {
+        1
+    } else {
+        group.div_ceil(group.min(3))
+    };
+    let warps = n_kv * splits * wpr;
     let mut p_q = q_ptr;
     let mut p_k = k.as_ptr();
     let mut p_v = v.as_ptr();
@@ -369,7 +378,7 @@ pub fn launch_cols_ptrs(
         &mut v_qs as *mut _ as *mut std::ffi::c_void,
     ];
     let cfg = LaunchConfig {
-        grid: ((tasks).div_ceil(4) as u32, cols as u32, 1),
+        grid: (warps.div_ceil(4) as u32, cols as u32, 1),
         block: (128, 1, 1),
         shared_mem_bytes: 0,
     };
