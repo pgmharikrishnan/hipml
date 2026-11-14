@@ -466,6 +466,45 @@ binary, and the kernels are byte-identical. Serve cell a — one request at a
 time, 32K context, 5 conversations, 15 requests — lands at 51.84 tok/s p50 with
 0 errors and a 3.12 s TTFT, against 51.91 for the tree it is based on.
 
+### Q8_0 is the format that was missing from the table
+
+The sweep above covers Q4_K, Q5_K, Q6_K, IQ4_XS, IQ4_NL, Q3_K and IQ3_S. **Q8_0
+is not a K-quant and was not in it**, and its `_b` kernel has a different
+geometry from all seven: they tile 16 output rows per block with two rows per
+warp and keep every thread busy, which is why "occupancy does not order the
+numbers" holds for them. `gemv_q8_0_b` is one block per output row and one thread
+per 32-value weight block, so a 256-thread launch only fills `k / 32` threads —
+at `k = 2048`, 64 of 256. Three quarters of every block idled.
+
+That is invisible at one column, where the read saturates the card, and it is the
+whole cost at four: the per-thread FMA chain quadruples with no more parallelism,
+so the "one weight pass" cost what four separate launches did. `gemv-bench` on
+`output.weight` (Q8_0, 248,320 x 2,048, 540 MB), R9700, `moe-verify` lock:
+
+| rows | before ms | before GB/s | after ms | after GB/s | before `ratio` | after `ratio` |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.921 | 586.8 | 0.921 | 586.5 | 0.99x | 1.00x |
+| 2 | 1.972 | 274.0 | 0.958 | **563.8** | 1.10x | **0.53x** |
+| 3 | 2.818 | 191.7 | 1.351 | **400.0** | 1.05x | **0.50x** |
+| 4 | 3.930 | 137.5 | 2.189 | **246.9** | 1.09x | **0.61x** |
+
+`ratio` is the batched launch against `rows` separate one-row launches, so
+`< 1` is the first time this table has amortised anything at all. Two changes:
+size the block to `nblocks` rounded up to a warp (64 threads at `k = 2048`, so
+four times the blocks per CU), and run four rows as two two-row passes, because
+569 GB/s twice still beats 252 GB/s once. Both are exact — a thread still owns
+exactly weight block `t`, the eight-slot reduce adds zeros for the warps that no
+longer exist, and a row's sum order is independent of `B` — which `gemv-check`
+and `column-bench --check` confirm bit for bit.
+
+What is left at four rows (247 GB/s, not 586) is the per-value instruction count
+above, and this does not touch it. On the **dense** UD file the four-column pass
+is unchanged at 1.33–1.35x q8, because its projections are Q6_K, whose kernel is
+already at 525 GB/s and 86% of the read ceiling at `b=4`. The 1.20x target is
+still not met there; on the **MoE** file, where every dense projection is Q8_0,
+the four-column pass goes 2.93x → 2.11x — `docs/notes/moe.md` §8.11 has the
+per-stage profile and the spec-bench grid.
+
 ## The one-slot serve cell and the CLI, like for like
 
 Cell a reads 52.5 tok/s at drafts 3 where `spec-bench` reads 63.7 on the same
@@ -655,6 +694,15 @@ column body is bit-identical to the one-column pass.
 | 2 | 12.82 | 6.41 | 1.42x |
 | 3 | 16.90 | 5.63 | 1.88x |
 | 4 | 22.34 | 5.58 | 2.48x |
+
+**2026-11-15, after the Q8_0 block-geometry fix** (`docs/notes/moe.md` §8.11):
+the four-column pass is **2.11x** (16.84 ms against 7.98) where the same
+interleaved A/B puts the parent commit at 2.93x, and this file reads
+**175.40 / 182.55 / 172.85** tok/s at drafts 1/2/3 (q8, against 127.44 plain),
+still 128/128 exact on every row. Two drafts is still the optimum; the third
+moved from 1.04x to 1.36x. The step at three drafts is now 3.94 draft + 16.17
+verify + 0.30 rollback, so the **drafter is 19% of the step** and is what keeps
+this file below llama.cpp's 213.35 — the verify is no longer the term to attack.
 
 ### Why two drafts and not three
 

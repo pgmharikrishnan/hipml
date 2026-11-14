@@ -1357,6 +1357,12 @@ three the step buys 0.706 tokens for 6.77 ms, 9.6 ms per marginal token against
 the 7.86 ms a plain token costs. `docs/notes/mtp.md` has the full table and the
 step breakdown (drafts 3: draft 3.90 + verify 22.47 + rollback 0.30 ms).
 
+**Superseded:** the paragraph above blames the routed FFN for the slope. §8.11
+profiles the pass stage by stage and finds the routed FFN is the *better*
+amortising stage (2.37x on four times the bytes) while the Q8_0 dense
+projections lose 2.9-4.3x on unchanged bytes; the fix there takes the four-column
+pass from 2.93x to 2.11x and this file from 141.84 to 182.55 tok/s at two drafts.
+
 **Verdict: speculation makes this file faster than plain decode, by 11.1% at two
 drafts (141.84 against 127.30 tok/s), and it is token-exact.** It does not beat
 the 3-draft dense result because the routed verify is the term that does not
@@ -1532,6 +1538,154 @@ session (369.71 in the census) against hipml's 355.0, which is +4.3% here. Its
 own speculative batch is 17% *below* its plain batch on this cell, so quoting
 llama.cpp speculating would flatter us; it is not the right comparison either.
 
+## 8.11 Where the routed verify's 2.9x actually lives (2026-11-15)
+
+§8.8 concluded that the routed verify does not amortise because "a routed FFN
+cannot share its weight stream across columns". That is true of the expert banks
+and it is not where the time was. `column-bench --cols 4 --trace` folds the
+per-stage GPU time of a one-column and a four-column pass, and the stages that
+explode are the ones whose bytes do not change at all.
+
+`column-bench --gguf <this file> --ids-file prose_explanation.ids --cols 4
+--tokens 32 --trace`, three traced passes, ms per pass. `bytes` is the weight
+stream the stage reads, which is identical at 1 and 4 columns unless stated:
+
+| stage | 1 col | 4 col | ratio | bytes |
+| --- | ---: | ---: | ---: | ---: |
+| `out_norm` (lm_head GEMV) | 0.898 | 3.853 | **4.29x** | 540,344,320 |
+| `ssm_in` (GDN projections) | 2.237 | 6.979 | **3.12x** | 817,889,280 |
+| `attn_in` (qkv, rope) | 0.570 | 1.664 | **2.92x** | 289,669,120 |
+| `ssm_proj` | 0.148 | 0.427 | 2.88x | 0 |
+| `attn_mix` | 0.458 | 1.246 | 2.72x | 0 |
+| `ffn_moe` (routed FFN) | 3.016 | 7.154 | 2.37x | ~4x more |
+| `ssm_rec` (GDN recurrence) | 0.734 | 1.487 | 2.03x | 267,386,880 |
+| `attn_wo` | 0.240 | 0.435 | 1.81x | 0 |
+| `post_norm` | 0.387 | 0.646 | 1.67x | 0 |
+| `lm_head` | 0.124 | 0.133 | 1.07x | 0 |
+| **sum** | **8.875** | **24.055** | **2.71x** | |
+
+Four of the top five rows read *the same bytes* at four columns and still cost
+2.9-4.3x. `out_norm` streams its 540 MB at 602 GB/s with one column and 140 GB/s
+with four: the loss is not a read, it is the work done per read. Meanwhile
+`ffn_moe` — the stage the note blamed — reads four times the expert bytes and
+costs 2.37x, i.e. it is *more* efficient per byte at four columns than at one.
+The routed FFN was never the problem.
+
+**The defect is in `gemv_q8_0_b`, and it is occupancy.** Every dense projection
+on this file (attention, GDN, lm_head, the shared expert) is Q8_0. Its batched
+kernel is one block per output row and one thread per 32-value weight block, so
+a 256-thread launch fills only `k / 32` threads: `k = 2048` gives 64 of 256, and
+three quarters of every block idles. At one column the read saturates the card
+anyway; at four columns the per-thread FMA chain is four times longer with no
+more parallelism, so the "one weight pass" cost exactly what four passes cost.
+`gemv-bench` on `output.weight` (248,320 x 2,048, 540 MB) says so directly — the
+`ratio` column is the batched launch against `rows` separate one-row launches:
+
+| rows | batch ms | GB/s | vs `rows` single launches |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.921 | 586.8 | 0.99x |
+| 2 | 1.972 | 274.0 | 1.10x |
+| 3 | 2.818 | 191.7 | 1.05x |
+| 4 | 3.930 | **137.5** | **1.09x** |
+
+This is not §8.5's or `docs/notes/mtp.md`'s "the batched GEMV does not amortise,
+and it is the per-value instruction count" finding — that one is measured on
+Q4_K/Q5_K/Q6_K/IQ4_XS, whose kernels tile 16 output rows per block and keep every
+thread busy. Q8_0 was not in that table because it is not a K-quant, and it is
+the one format whose `_b` kernel has a real occupancy hole.
+
+**The fix, and it is exact.** Size the block to the work: `k / 32` rounded up to
+a warp, clamped to 256. At `k = 2048` that is 64 threads, so four times as many
+blocks fit on each CU. Every thread still owns exactly weight block `t` — the
+launch was already only using the first `nblocks` threads — so each row's
+accumulation order, and its bits, are unchanged; the eight-slot block reduce
+reads warp slots that no longer exist, so they are zeroed once and the tree adds
+zeros, which is exact. Four rows are then run as two two-row passes: the kernel
+still costs more per row at B=4 than at B=2, and reading the weight twice at
+569 GB/s beats reading it once at 252 GB/s by 11%. Three rows stay one pass
+(a 2+1 split is 39% slower), and each row's sum order is independent of `B`.
+
+| rows | before ms | before GB/s | after ms | after GB/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.921 | 586.8 | 0.921 | 586.5 |
+| 2 | 1.972 | 274.0 | 0.958 | **563.8** |
+| 3 | 2.818 | 191.7 | 1.351 | **400.0** |
+| 4 | 3.930 | 137.5 | 2.189 | **246.9** |
+
+Two rows now stream at 96% of the one-row rate. Four rows recover to 247 GB/s,
+not to 586: what is left at four rows is the per-value instruction count
+`docs/notes/mtp.md` describes, which this does not touch.
+
+**End to end, interleaved A/B against the parent commit, one lock hold.**
+`column-bench --cols 4 --tokens 32` on this file, two passes per tree:
+
+| tree | 1 col | 2 cols | 3 cols | 4 cols | 4 col / 1 col |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| base `8ab8084` | 7.97 | 13.11 | 17.60 | 23.34 | **2.93x** |
+| this branch | 7.98 | 9.92 | 13.11 | 16.84 | **2.11x** |
+
+(The 2.48x in §8.8 and the 2.92x here are the same kernel in different sessions;
+the A/B above is the comparison that holds, because both columns are one hold.)
+
+Per stage at four columns, same trace, after:
+
+| stage | 1 col | 4 col | ratio | GB/s at 4 col |
+| --- | ---: | ---: | ---: | ---: |
+| `ffn_moe` | 3.016 | 6.697 | 2.22x | — |
+| `ssm_in` | 2.237 | 4.028 | 1.80x | 203 (406 read) |
+| `out_norm` | 0.898 | 1.903 | 2.12x | 284 (568 read) |
+| `ssm_rec` | 0.734 | 1.405 | 1.91x | 190 |
+| `attn_mix` | 0.458 | 1.231 | 2.69x | — |
+| `attn_in` | 0.570 | 0.948 | 1.66x | 306 |
+| `post_norm` | 0.387 | 0.500 | 1.29x | — |
+| `attn_wo` | 0.240 | 0.409 | 1.70x | — |
+| `ssm_proj` | 0.148 | 0.440 | 2.97x | — |
+| `lm_head` | 0.124 | 0.197 | 1.59x | — |
+| **sum** | **8.875** | **17.783** | **2.00x** | |
+
+The two-row split means `ssm_in` and `out_norm` now read their weights twice, so
+their GB/s against unique bytes understates them; the parenthesised figure is
+the real traffic. That is why the stage ratios and the 2.00x trace sum sit below
+the 2.11x wall number — the trace brackets launches, not the split.
+
+`spec-bench --gguf <this file> --mtp <the same file> --ids-file p2_math_169.ids
+--tokens 128`, 128/128 exact on every row, before → after:
+
+| drafts | ms/step | tok/step | tok/s q8 before | tok/s q8 after | tok/s f32 after | accept | exact |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| 0 | 7.85 | 1.000 | 127.30 | 127.44 | 124.79 | — | — |
+| 1 | 11.14 | 1.954 | 135.94 | **175.40** | 172.28 | 0.954 | 128/128 |
+| 2 | 15.46 | 2.822 | 141.84 | **182.55** | 178.04 | 0.956, 0.953 | 128/128 |
+| 3 | 20.41 | 3.528 | 132.28 | **172.85** | 168.65 | 0.917, 0.939, 0.935 | 128/128 |
+
+**The optimum does not move: two drafts still wins.** What moves is the third
+draft, from 1.04x to 1.36x, because the four-column pass is now cheap enough for
+the marginal token to pay. The step breakdown at three drafts was 3.90 draft +
+22.47 verify + 0.30 rollback = 26.67 ms; it is now 3.94 + 16.17 + 0.30 = 20.41 ms.
+The verify fell 28% and the **drafter is now 19% of the step**: at 3.94 ms for
+three draft tokens it is 1.31 ms per draft token against a 7.85 ms plain token,
+and it is the term that now keeps this file at 172.85 rather than llama.cpp's
+213.35. That is `docs/notes/mtp.md`'s problem, not the verify's.
+
+The dense Orca file is **unchanged** — 34.02 / 53.64 / 59.83 / 68.12 against
+34.06 / 53.67 / 59.85 / 68.12, 128/128 at drafts 3 on both KV modes — and that
+is the expected result: its projections are Q6_K, whose `_b` kernel tiles 16 rows
+per block and already streams 492 GB/s at four rows (1.24x the one-row time).
+Q8_0 was the MoE file's problem specifically.
+
+**The multi-slot path gains too**, because it makes the same call. `batch-bench`
+plain on this file, interleaved A/B: B=4 178.07 → 248.83 tok/s (+40%), batch
+efficiency 0.34x → 0.46x of 4x; B=8 0.19x → 0.27x of 8x. `mtp-batch-bench`
+B=4 drafts 1: 156.5 → 223.5 tok/s aggregate (+43%), step 46.60 → 32.63 ms, exact
+on all four slots; the spec/plain ratio is unchanged (2.07x → 2.03x), so the
+batch optimum still does not move.
+
+**The 8-slot serve cell does not become viable.** Cell b on this file reads
+353.5 / 353.3 / 352.8 tok/s at drafts 0/1/2 against 355.0 / 354.9 / 353.8
+before: still flat, because the flatness is §8.10's dispatch — a wave does not
+take `Mode::Spec`, only a lone request does. Making the verify faster does not
+change which requests speculate.
+
 ## 9. Gates
 
 On the binary this branch ships, `--features hip`, model paths passed with
@@ -1557,7 +1711,9 @@ and `--mtp` passed literally where a drafter is wanted.
 | `gpu-bench`, 8,184 ids, chunk 2048 | 3,620 tok/s | **3,777.16 tok/s**, last id 284 |
 | `batch-bench --slots 4 --tokens 32 --check --sweep` | every slot, every width | **B=1..=4 all reproduce the B=1 path** (4 slots × 32 ids) |
 | `batch-bench --slots 16 --tokens 16 --check --sweep` | every slot, every width | **15 of 16 slots; slot 4 step 13 (382 vs 290)** — §8.7.5 |
-| serve cell b, 8 slots, drafts 0/1/2 | llama.cpp's faster backend, same hold | **355.0 / 354.9 / 353.8 tok/s** (flat: a wave does not take `Mode::Spec`); against Vulkan plain 340.3 in the same session (+4.3%), against the census 369.71 (−4.0%); §8.10 |
+| serve cell b, 8 slots, drafts 0/1/2 | llama.cpp's faster backend, same hold | **353.5 / 353.3 / 352.8 tok/s** (still flat: a wave does not take `Mode::Spec`); §8.10, §8.11 |
+| `spec-bench` OrcaCyber (dense, Q6_K), drafts 0/1/2/3, q8 | unchanged | **34.02 / 53.64 / 59.83 / 68.12**, 128/128 (§8.11) |
+| MoE decode / prefill, A/B against `8ab8084` | must not regress | **128.41 vs 128.61**, **2866 vs 2868 tok/s** — identical inside noise, interleaved |
 
 Dense path, same binary, so the new `Ffn` enum and the row gather did not move
 anything that was already gated:
@@ -1574,8 +1730,13 @@ anything that was already gated:
 | `spec-bench --drafts 3 --kv f32` | 128/128 exact every row | **128/128** on all four rows |
 | `column-bench --check` | 0 differ | **0 differ** on 7,946,240 logits, hidden and residual |
 | `column-bench --check` (Qwen3.6-35B-A3B, routed FFN) | 0 differ | **0 differ** on 7,946,240 logits, hidden and residual, q8 and f32, 32 columns |
-| `spec-bench` Qwen3.6-35B-A3B, drafts 1/2/3, q8 | 128/128 exact, faster than plain | **128/128**, 136.46 / 141.64 / 132.16 tok/s against 127.50 |
-| `spec-bench` Qwen3.6-35B-A3B, drafts 1/2/3, f32 | 128/128 exact | **128/128**, 134.74 / 139.43 / 129.79 tok/s against 125.05 |
+| `spec-bench` Qwen3.6-35B-A3B, drafts 1/2/3, q8 | 128/128 exact, faster than plain | **128/128**, **175.40 / 182.55 / 172.85** tok/s against 127.44 (§8.11; was 136.46 / 141.64 / 132.16) |
+| `spec-bench` Qwen3.6-35B-A3B, drafts 1/2/3, f32 | 128/128 exact | **128/128**, **172.28 / 178.04 / 168.65** tok/s against 124.79 (was 134.74 / 139.43 / 129.79) |
+| `column-bench` Qwen3.6-35B-A3B, 4 col / 1 col | ≤ 2.2x (llama.cpp 2.17x) | **2.11x**, 16.84 ms against 7.98, interleaved A/B against `8ab8084`'s 2.93x (§8.11) |
+| `gemv-bench` Qwen3.6 `output.weight` (Q8_0), rows 4 | amortise the weight read | **246.9 GB/s, 2.189 ms** against 137.5 / 3.930 (rows 2: **563.8**, 96% of one row) |
+| `gemv-check` Qwen3.6 `output.weight`, 4 columns | 0 differ | **0 differ**, 993,280 values |
+| `batch-bench` Qwen3.6, B=4 / B=8 plain | no regression | **248.83 / 276 tok/s**, +40% on both (A/B against `8ab8084`) |
+| `mtp-batch-bench` Qwen3.6, B=4, drafts 1 | exact to B≤4 | **exact, 4/4 slots**, 223.5 tok/s aggregate (was 156.5) |
 | `mtp-batch-bench` Qwen3.6-35B-A3B, drafts 1/2 | exact to B≤4 | **B=1 and B=4 exact**, 4/4 slots; B=8 not exact (slot 5 @101, slot 6 @42 at d1) — §8.10 |
 | `serve` `/v1/chat/completions`, MiniCPM-V-4.7 | 200, not the reported 400 | **200**, 18 prompt / 8 completion tokens; the base binary is still **400** |
 | `probe_exact.py --ctx 32768` | PASS | PASS, 48 replies id-for-id across drafts 1,2,3 |
