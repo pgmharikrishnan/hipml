@@ -67,6 +67,11 @@ pub(super) struct VerifyScratch {
     part_ml: Buffer,
     parts: usize,
     ml_parts: usize,
+    /// The routed FFN's scratch, present only for a mixture of experts. One
+    /// set for every layer, sized for the whole `[M]` tile: each verify column
+    /// is one slot of a batched decode step, which is the shape
+    /// [`MoeBlock::forward_batch`] already runs.
+    moe: Option<MoeBatch>,
 }
 
 impl VerifyScratch {
@@ -114,6 +119,10 @@ impl VerifyScratch {
             part_ml: Buffer::alloc(1)?,
             parts: 0,
             ml_parts: 0,
+            moe: match cfg.n_expert {
+                0 => None,
+                _ => Some(MoeBatch::new(cfg, cap)?),
+            },
         })
     }
 }
@@ -407,10 +416,17 @@ impl<'a> BatchEngine<'a> {
                     down.gemm_batched(l, &s.act, &s.down, m)?;
                     l.residual_buf(&s.down, &s.x1, &s.x, m * n)?;
                 }
-                // MTP is dense-only: its drafter's `ffn_gate` is a dense
-                // projection, so a MoE file never reaches this path.
-                BatchFfn::Moe(_) => {
-                    return Err("speculative verify has no MoE FFN (MTP is dense-only)".to_string())
+                // The routed FFN is the same call the plain batched step makes
+                // on the same row: the verify tile is `M` tokens, each with
+                // its own router row, top-k, expert gather and fold, so column
+                // `c` is the token a plain decode of that column produces.
+                BatchFfn::Moe(moe) => {
+                    let mb = s
+                        .moe
+                        .as_ref()
+                        .ok_or_else(|| "moe verify scratch not allocated".to_string())?;
+                    moe.forward_batch(l, &s.t, m, mb)?;
+                    l.residual_buf(&mb.out, &s.x1, &s.x, m * n)?;
                 }
             }
         }

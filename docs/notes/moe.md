@@ -1362,6 +1362,176 @@ drafts (141.84 against 127.30 tok/s), and it is token-exact.** It does not beat
 the 3-draft dense result because the routed verify is the term that does not
 amortise.
 
+## 8.9 llama.cpp speculates too (2026-11-15)
+
+The comparison in §8.4 and in `40629ff` is against llama.cpp's **plain** decode,
+and that is not the honest baseline: both files carry an inline MTP block and
+both llama.cpp builds on the box can drive it. Build 11820 (ROCm, `d7725699`)
+and 11836 (Vulkan, `f5027fb21`) expose the same flag set:
+
+```
+--spec-type none,draft-simple,draft-eagle3,draft-mtp,draft-dflash,draft-dspark,...
+--spec-draft-model, -md, --model-draft FNAME
+--spec-draft-n-max N                 (default 3)
+--spec-draft-n-min N
+--spec-draft-p-min, --draft-p-min P
+--spec-draft-sampling {greedy,probabilistic}
+```
+
+**The inline block needs no `-md`.** `--spec-type draft-mtp` alone makes the
+server build the drafter out of the target's own MTP layer, and its log says so:
+
+```
+common_speculative_init_result: creating MTP draft context against the target model 'Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf'
+```
+
+With `-md` it loads a separate sidecar instead (that is how the dense 27B cell
+in [`benchmarks.md`](../benchmarks.md) was run). So the reference command for a
+file with an inline block is:
+
+```powershell
+llama-server -m <file> -ngl 99 -c 512 --parallel 1 -ctk q8_0 -ctv q8_0 `
+  --no-webui --no-cache-idle-slots --spec-type draft-mtp --spec-draft-n-max 3
+```
+
+`p2_math_169.ids` as the prompt, 128 greedy tokens, `ignore_eos`, three reps per
+cell, one process per cell, both backends. The same fixture and token count as
+`spec-bench`, so the columns are comparable; hipml's rows are `spec-bench` on
+this branch (q8 KV, same prompt).
+
+### OrcaCyber-Nano-1.0-AI-Defense-Mix-15.7G (dense, inline `blk.64`)
+
+| engine | plain | d1 | d2 | d3 | accept at d3 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| llama.cpp ROCm 11820 | 33.94 | 53.08 | 66.76 | **75.75** | 0.885 (92/104) |
+| llama.cpp Vulkan 11836 | 34.43 | 55.88 | 70.38 | **82.09** | 0.885 (92/104) |
+| hipml | 34.06 | 53.67 | 59.85 | **68.12** | 0.971 / 0.912 / 0.903 |
+
+### Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL (MoE, inline `blk.40`)
+
+| engine | plain | d1 | d2 | d3 | accept at d3 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| llama.cpp ROCm 11820 | 99.18 | 137.98 | 164.88 | **175.79** | 0.858 (91/106) |
+| llama.cpp Vulkan 11836 | 132.02 | 169.99 | 198.93 | **213.35** | 0.885 (92/104) |
+| hipml | 127.50 | 136.46 | 141.64 | **132.16** | 0.917 / 0.939 / 0.935 |
+
+**We are behind llama.cpp speculating, on both files.** Orca: 68.12 against
+82.09 (−17.0%) on its faster backend, −10.1% against the ROCm build. This file:
+141.64 at our best depth against 213.35 (−33.6%), −19.4% against ROCm. Even
+against the slower backend we lose, so the verdict does not depend on which
+build is quoted.
+
+The cause is the same term §8.8 names, and llama.cpp's numbers price it. On this
+file at three drafts both engines emit almost the same number of tokens per
+step — 3.528 for us, 3.53 for llama.cpp (`mean len`, acceptance 0.858) — so the
+difference is the **step cost**: 26.69 ms for our 4-column verify against
+16.7 ms for llama.cpp's (128 tokens in 0.6 s). llama.cpp's routed verify
+amortises; ours is 2.48× a one-column pass at four columns (§8.8). Our plain
+decode is faster than its ROCm plain (127.50 against 99.18) and level with its
+Vulkan plain (132.02), so the whole deficit is the verify, not the token.
+
+Two further observations, both about llama.cpp rather than us:
+
+* **Its speculative ids are not its plain ids on this file.** The ROCm plain
+  stream and the ROCm d3 stream diverge at token 53 (72 of 128 ids differ); the
+  Vulkan d3 stream happens to equal the ROCm plain stream exactly. So its
+  213.35 tok/s is a different token stream from its own plain decode, while
+  every hipml row above is 128/128 identical to plain. Its Orca cells are
+  identical across all eight (same sha), so the drift is MoE-specific — the same
+  router amplification §8.7.5 measured in our own batch path.
+* **The two drafter files were not worth taking.** Orca + the DFlash2 drafter
+  (`--spec-type draft-dflash -md ...DFlash2-Q8_0.gguf --spec-draft-n-max 7`,
+  Vulkan) reads 66.92 tok/s at acceptance 0.709 / mean len 5.77 — below the
+  inline block's own d2 (70.38) and d3 (82.09). MiniCPM-V-4.7 + the DSpark
+  drafter (`--spec-type draft-dspark`, n-max 7, Vulkan) reads 142.56 against
+  159.32 plain (0.90×), acceptance 0.368. Declining both was right.
+
+## 8.10 Speculative batch on the MoE file (2026-11-15)
+
+`serve --drafts` on a MoE file already worked for a lone request, because the
+server's speculative mode runs the single-stream `MtpGpu`, which has had a
+routed body since §8.8; `probe_exact.py --ctx 32768` on this file is **PASS, 48
+replies id-for-id across drafts 1,2,3**. What was missing was the *batch*
+drafter and verify: `batch/verify.rs` returned *"speculative verify has no MoE
+FFN"* and `batch/mtp.rs` hardcoded `blk.64` and a dense `ffn_gate`, so
+`mtp-batch-bench` on this file died at setup with *"model has no tensor
+blk.64.attn_q.weight"*.
+
+Two edits, both reuse:
+
+* `batch/verify.rs`: the `BatchFfn::Moe` arm now runs `MoeBlock::forward_batch`
+  over the `[M]` verify tile with a `MoeBatch` sized for it, then the residual
+  add — the same call the plain batched step makes on the same row.
+* `batch/mtp.rs`: the drafter's block index is `mtp_blk(&cfg)` (= `n_layer`, so
+  40 here and 64 on the dense files), its FFN is a `MtpFfn::{Dense,Moe}` built
+  the way the single-stream drafter builds it, and the routed step is
+  `MoeBlock::forward_batch` over the `B` slot rows.
+
+### Where it is exact, and the bound
+
+`mtp-batch-bench` (this file, `p2_math_169.ids` rotated per slot, 128 tokens,
+q8 KV, serve's `--skinny` dispatch) compares every slot's speculative stream
+with that slot's plain batched stream:
+
+| B | drafts | exact | note |
+| ---: | ---: | --- | --- |
+| 1 | 1, 2 | **yes**, 1/1 slots | |
+| 4 | 1, 2 | **yes**, 4/4 slots | |
+| 8 | 1 | no | slot 5 matches to token 101, slot 6 to token 42 |
+| 8 | 2 | no | slot 1 matches to token 52, slot 5 to token 101 |
+
+**The per-slot bound is unchanged at B≤4, and speculative batch does not widen
+it.** `batch-bench --slots 16 --check --sweep` on this file still reports the
+documented `slot 4 step 13: batch 382 vs single 290`, 15 of 16 slots clean. At
+B=8 the verify runs `M = 16` rows where the plain reference runs `B = 8`, which
+crosses the 8-row `_b` group boundary; on a routed FFN that is enough to move a
+last-rank expert and flip an argmax later, exactly the amplification §8.7.5
+describes. A dense file at B=8 is exact (`mtp-batch.md`), so this is the MoE
+router, not the verify.
+
+### Throughput: the batch optimum is not the single-stream one
+
+| B | plain agg | d1 agg | d2 agg | best |
+| ---: | ---: | ---: | ---: | --- |
+| 1 | 120.50 | 139.76 (**1.16×**) | 150.43 (**1.25×**) | d2 |
+| 4 | 292.13 | 330.3 (**1.13×**) | 324.2 (1.11×) | d1 |
+| 8 | 412.18 | 400.1 (0.97×) | 360.9 (0.88×) | **none (drafts 0)** |
+
+The single-stream optimum is d2 (§8.8); at 4 slots it is d1 and at 8 slots there
+is no win at all. The verify is the reason and the numbers are the same shape as
+§8.8's: at B=8 one draft costs a 36.28 ms step against 19.41 ms plain (1.87×)
+and two drafts 53.11 ms (2.73×); at B=1 two drafts cost 19.63 ms against 8.30 ms
+(2.37×). `M = B(1+R)` crosses a weight-pass boundary as B grows, and the routed
+FFN adds its per-column expert reads on top, so the schedule that wins alone
+loses at 8 slots. **Drafts 2 winning single-stream and drafts 1 winning at 4
+slots is the same finding as §8.8's "the routed verify does not amortise", not
+an inconsistency.**
+
+### The 8-slot serve cell, and why it is flat
+
+`serve_bench.py --cell b` (8 slots, 16K per slot, 2,384-token prompt, 64 tokens
+a request, 3 waves), this file, q8 KV:
+
+| engine | drafts | agg p50 | per-stream p50 | TTFT p50 | peak VRAM |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| hipml | 0 | **355.0** | 49.17 | 232.7 ms | 25,213.5 MiB |
+| hipml | 1 | 354.9 | 49.10 | 232.4 ms | 25,284.1 MiB |
+| hipml | 2 | 353.8 | 48.97 | 233.4 ms | 25,284.1 MiB |
+| llama.cpp Vulkan | plain | 340.3 (best 352.9) | 44.52 | 271.1 ms | 22,971.0 MiB |
+| llama.cpp Vulkan | `--spec-type draft-mtp --spec-draft-n-max 2` | 283.3 | 37.91 | 218.7 ms | 24,849.8 MiB |
+
+The hipml rows are flat because the server only speculates a request that is
+**alone** (`serve/sched/run.rs`: `Mode::Spec` iff no other active slot and an
+empty queue). An 8-slot wave never takes that branch, so `--drafts 1/2` cost
+the drafter's 70 MiB and change nothing; the gain is on cell a, not here. That
+wiring is deliberate and unchanged — and §8.10's own B=8 row says wiring it
+would not pay anyway (0.97× at d1, 0.88× at d2).
+
+So the honest 8-slot baseline is llama.cpp's **plain** number: 340.3 in this
+session (369.71 in the census) against hipml's 355.0, which is +4.3% here. Its
+own speculative batch is 17% *below* its plain batch on this cell, so quoting
+llama.cpp speculating would flatter us; it is not the right comparison either.
+
 ## 9. Gates
 
 On the binary this branch ships, `--features hip`, model paths passed with
@@ -1380,12 +1550,14 @@ and `--mtp` passed literally where a drafter is wanted.
 | `gpu-bench`, 511 ids, token loop | same id as the bucketed path | **140.72 tok/s** (was 146.89 when §8.6 was written), last id 37986 |
 | `gpu-bench --bucket-stats`, 511 ids | histogram + padding at 16/32/64 | **216 of 256, 4,088 slots, median 5**, 3.68x at the shipped 64 |
 | `ppl` (Qwen3.6-35B-A3B) | close to llama | **2.2263** bucketed, vs 2.2228 (+0.16%) |
-| MoE decode, depth 0, 200 tokens | 128.2 tok/s, unchanged | **128.50 tok/s** (7.782 ms/token); the single-sequence decode path is untouched by this slice, and the 125.89 recorded here before is the same path on a slower run |
+| `ppl`, `moe-matrix` corpus, ctx 512 (Qwen3.6 / MiniCPM / Sage / Arete) | 2.0982 / 2.2761 / 2.1804 / 2.0384 | **2.0982 / 2.2761 / 2.1804 / 2.0384** |
+| MoE decode, depth 0, 200 tokens | 128.2 tok/s, unchanged | **128.18 tok/s** (7.802 ms/token); the single-sequence decode path is untouched by this slice, and the 125.89 recorded here before is the same path on a slower run |
 | `gpu-bench`, 511 ids, chunk 512 | 2,849 tok/s | **2,853.14 tok/s**, last id 248046 |
+| `gpu-bench`, 511 real-text ids, chunk 512 | 3,001.84 tok/s | **2,877.21 tok/s** (2,874.62 / 2,877.21 / 2,877.51), last id 37986; §8.6's same cell reads 2,870.95 |
 | `gpu-bench`, 8,184 ids, chunk 2048 | 3,620 tok/s | **3,777.16 tok/s**, last id 284 |
 | `batch-bench --slots 4 --tokens 32 --check --sweep` | every slot, every width | **B=1..=4 all reproduce the B=1 path** (4 slots × 32 ids) |
 | `batch-bench --slots 16 --tokens 16 --check --sweep` | every slot, every width | **15 of 16 slots; slot 4 step 13 (382 vs 290)** — §8.7.5 |
-| serve cell b, 8 slots | llama.cpp's faster backend, same hold | **355.9 tok/s** against Vulkan 369.7 (−3.7%) and 379.0 (−6.1%); §8.7.4 |
+| serve cell b, 8 slots, drafts 0/1/2 | llama.cpp's faster backend, same hold | **355.0 / 354.9 / 353.8 tok/s** (flat: a wave does not take `Mode::Spec`); against Vulkan plain 340.3 in the same session (+4.3%), against the census 369.71 (−4.0%); §8.10 |
 
 Dense path, same binary, so the new `Ffn` enum and the row gather did not move
 anything that was already gated:
@@ -1402,12 +1574,13 @@ anything that was already gated:
 | `spec-bench --drafts 3 --kv f32` | 128/128 exact every row | **128/128** on all four rows |
 | `column-bench --check` | 0 differ | **0 differ** on 7,946,240 logits, hidden and residual |
 | `column-bench --check` (Qwen3.6-35B-A3B, routed FFN) | 0 differ | **0 differ** on 7,946,240 logits, hidden and residual, q8 and f32, 32 columns |
-| `spec-bench` Qwen3.6-35B-A3B, drafts 1/2/3, q8 | 128/128 exact, faster than plain | **128/128**, 135.94 / 141.84 / 132.28 tok/s against 127.30 |
-| `spec-bench` Qwen3.6-35B-A3B, drafts 1/2/3, f32 | 128/128 exact | **128/128**, 133.58 / 138.59 / 129.82 tok/s against 124.89 |
+| `spec-bench` Qwen3.6-35B-A3B, drafts 1/2/3, q8 | 128/128 exact, faster than plain | **128/128**, 136.46 / 141.64 / 132.16 tok/s against 127.50 |
+| `spec-bench` Qwen3.6-35B-A3B, drafts 1/2/3, f32 | 128/128 exact | **128/128**, 134.74 / 139.43 / 129.79 tok/s against 125.05 |
+| `mtp-batch-bench` Qwen3.6-35B-A3B, drafts 1/2 | exact to B≤4 | **B=1 and B=4 exact**, 4/4 slots; B=8 not exact (slot 5 @101, slot 6 @42 at d1) — §8.10 |
 | `serve` `/v1/chat/completions`, MiniCPM-V-4.7 | 200, not the reported 400 | **200**, 18 prompt / 8 completion tokens; the base binary is still **400** |
 | `probe_exact.py --ctx 32768` | PASS | PASS, 48 replies id-for-id across drafts 1,2,3 |
 | `ppl` (Arete-27B) | 2.1824 vs llama 2.1791 | unchanged: **2.0384** on `C:\mm\moe-matrix\corpus.ids` on both this binary and the parent, where 2.1824 is the `calib_longctx` 4-window corpus (no ids dump for it on the box) |
-| dense decode, depth 0, 200 tokens | ~33.2 tok/s | **33.44 tok/s** (29.90 ms/token), three reps 33.39–33.49 |
+| dense decode, depth 0, 200 tokens | ~33.2 tok/s | **33.37 tok/s** (29.967 ms/token) on the UD file this session; the census cell is 33.44 |
 | `cargo test --workspace` | clean | **101 passed, 0 failed** (local and on the GPU host) |
 | `cargo fmt --all -- --check` | clean | clean |
 | `scripts/check-public-tree.sh` | clean | clean |
@@ -1422,9 +1595,8 @@ dense forward pass.
 * **MTP.** `blk.40` is a MoE block; `mtp.rs` now builds the drafter's FFN as
   a `MoeBlock` when the file has experts, so the block loads and runs. The two
   BF16 router tensors are widened to f32 at upload (2 MB) because no GEMV reads
-  BF16. §8.8 is the measurement. What is *not* done: the batch engine's drafter
-  (`batch/mtp.rs`) still requires a dense `ffn_gate`, and `batch/verify.rs` still
-  refuses a MoE FFN, so `serve --drafts` is not available on a MoE file.
+  BF16. §8.8 is the single-stream measurement and §8.10 the batch one; the
+  batch drafter and verify are built and exact at B≤4.
 * **Grouped GEMM / bucketed prefill: shipped, at 79% of llama.cpp's warm 512
   cell.** §7.4 and §8.6 are the path and the numbers; §8.6.1 is why the baseline
   is 3,588.74 and not 3,375.05 or 4,529.55, and §8.6.2 is the tile sweep. What is
@@ -1456,12 +1628,14 @@ dense forward pass.
   not the single-stream step from B=2 (the batched attention kernel is a
   different one, by design) and routing amplifies the difference — §8.7.5 is
   the measurement and the decision that is owed.
-* **`serve --drafts` on a MoE file is still unavailable.** The single-stream
-  verify has a routed body (§8.8) and `spec-bench`/`column-bench` use it, but
-  the batch engine's verify (`batch/verify.rs`) still returns *"speculative
-  verify has no MoE FFN"* and its drafter (`batch/mtp.rs`) still requires a
-  dense `ffn_gate`. Both are the same two edits as §8.8 against the batch
-  scratch, and neither is in this slice.
+* **`serve --drafts` on a MoE file: the batch path is built, the server does not
+  use it in a wave.** A lone request has speculated on a MoE file since §8.8
+  (`MtpGpu` has a routed body; `probe_exact.py` is 48 replies id-for-id). Since
+  §8.10 the batch drafter (`batch/mtp.rs`) and verify (`batch/verify.rs`) load
+  and run on the file too, and are token-exact at B≤4. What is still true is
+  that `serve` chooses `Mode::Spec` only when a request is alone, so the 8-slot
+  cell does not speculate; §8.10 measures that and prices it (0.97× at d1,
+  0.88× at d2 at B=8), so the wiring is not the missing win.
 * **The bandwidth instrument prices reads, not kernels.** `bw-probe` has no
   dequant and no dot, so its 0.59 MB number is a ceiling the token never pays.
   §8.5's neutral A/B is the evidence that the two are not the same question. The
