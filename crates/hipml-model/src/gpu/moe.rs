@@ -189,85 +189,122 @@ impl<'a> MoeBlock<'a> {
     }
 
     /// One token through the FFN, writing the block output into [`Self::out`].
-    pub(crate) fn forward(&self, l: &Launcher, x: &Buffer) -> Result<(), String> {
+    ///
+    /// `drop` is the decode ablation set. Each group below is one launch site
+    /// or a short run of them, so `decode-ablate` can remove a group and time
+    /// the rest untraced. Nothing on the shipped path drops anything.
+    pub(crate) fn forward(&self, l: &Launcher, x: &Buffer, drop: Ablate) -> Result<(), String> {
+        let skip = |s: Stage| drop.dropped(s);
+
         // Router: one GEMV to n_expert logits, then softmax + top-k on device.
-        self.router.gemv(l, x, &self.logits)?;
-        l.moe_topk(
-            &self.logits,
-            self.n_expert,
-            self.n_used,
-            &self.ids,
-            &self.weights,
-        )?;
+        if !skip(Stage::MoeRouter) {
+            self.router.gemv(l, x, &self.logits)?;
+        }
+        if !skip(Stage::MoeTopk) {
+            l.moe_topk(
+                &self.logits,
+                self.n_expert,
+                self.n_used,
+                &self.ids,
+                &self.weights,
+            )?;
+        }
 
         // The gather. `x_stride` is 0: every rank reads the same activation.
-        let g = &self.gate_exps;
-        l.moe_gemv(
-            g.base(),
-            &self.ids,
-            g.stride,
-            x,
-            0,
-            &self.gate,
-            self.n_ff_exp,
-            self.n_embd,
-            self.kind_gate,
-            self.n_used,
-        )?;
-        let u = &self.up_exps;
-        l.moe_gemv(
-            u.base(),
-            &self.ids,
-            u.stride,
-            x,
-            0,
-            &self.up,
-            self.n_ff_exp,
-            self.n_embd,
-            self.kind_up,
-            self.n_used,
-        )?;
-        l.silu_mul_buf(&self.gate, &self.up, &self.act, self.n_used * self.n_ff_exp)?;
+        if !skip(Stage::MoeBank) {
+            let g = &self.gate_exps;
+            l.moe_gemv(
+                g.base(),
+                &self.ids,
+                g.stride,
+                x,
+                0,
+                &self.gate,
+                self.n_ff_exp,
+                self.n_embd,
+                self.kind_gate,
+                self.n_used,
+            )?;
+            let u = &self.up_exps;
+            l.moe_gemv(
+                u.base(),
+                &self.ids,
+                u.stride,
+                x,
+                0,
+                &self.up,
+                self.n_ff_exp,
+                self.n_embd,
+                self.kind_up,
+                self.n_used,
+            )?;
+        }
+        if !skip(Stage::MoeAct) {
+            l.silu_mul_buf(&self.gate, &self.up, &self.act, self.n_used * self.n_ff_exp)?;
+        }
 
         // Down: rank j reads its own expert's activation row.
-        let d = &self.down_exps;
-        l.moe_gemv(
-            d.base(),
-            &self.ids,
-            d.stride,
-            &self.act,
-            self.n_ff_exp,
-            &self.down,
-            self.n_embd,
-            self.n_ff_exp,
-            self.kind_down,
-            self.n_used,
-        )?;
+        if !skip(Stage::MoeBank) {
+            let d = &self.down_exps;
+            l.moe_gemv(
+                d.base(),
+                &self.ids,
+                d.stride,
+                &self.act,
+                self.n_ff_exp,
+                &self.down,
+                self.n_embd,
+                self.n_ff_exp,
+                self.kind_down,
+                self.n_used,
+            )?;
+            if drop.doubled(Stage::MoeBank) {
+                // The same launch again at the same site: its marginal cost is
+                // what one more 4.7 MB bank read costs where it runs, which is
+                // the launch-price control for a routed FFN.
+                l.moe_gemv(
+                    d.base(),
+                    &self.ids,
+                    d.stride,
+                    &self.act,
+                    self.n_ff_exp,
+                    &self.down,
+                    self.n_embd,
+                    self.n_ff_exp,
+                    self.kind_down,
+                    self.n_used,
+                )?;
+            }
+        }
         // The weight applies after the down projection, and the sum is a left
         // fold in rank order.
-        l.moe_combine(
-            &self.out,
-            &self.down,
-            &self.weights,
-            self.n_embd,
-            self.n_used,
-        )?;
+        if !skip(Stage::MoeCombine) {
+            l.moe_combine(
+                &self.out,
+                &self.down,
+                &self.weights,
+                self.n_embd,
+                self.n_used,
+            )?;
+        }
 
         // The shared expert: a dense SwiGLU scaled by one sigmoid scalar, added
         // outside the routed sum.
-        if let (Some((sg, su, sd)), Some(gate_in)) = (&self.shexp, &self.gate_inp_shexp) {
-            sg.gemv(l, x, &self.shexp_gate)?;
-            su.gemv(l, x, &self.shexp_up)?;
-            l.silu_mul_buf(
-                &self.shexp_gate,
-                &self.shexp_up,
-                &self.shexp_act,
-                self.n_ff_shexp,
-            )?;
-            sd.gemv(l, &self.shexp_act, &self.shexp_out)?;
-            gate_in.gemv(l, x, &self.shexp_dot)?;
-            l.sigmoid_buf(&self.shexp_dot, &self.shexp_scale, 1)?;
-            l.moe_shared_add(&self.out, &self.shexp_out, &self.shexp_scale, self.n_embd)?;
+        if !skip(Stage::MoeShared) {
+            if let (Some((sg, su, sd)), Some(gate_in)) = (&self.shexp, &self.gate_inp_shexp) {
+                sg.gemv(l, x, &self.shexp_gate)?;
+                su.gemv(l, x, &self.shexp_up)?;
+                l.silu_mul_buf(
+                    &self.shexp_gate,
+                    &self.shexp_up,
+                    &self.shexp_act,
+                    self.n_ff_shexp,
+                )?;
+                sd.gemv(l, &self.shexp_act, &self.shexp_out)?;
+                gate_in.gemv(l, x, &self.shexp_dot)?;
+                l.sigmoid_buf(&self.shexp_dot, &self.shexp_scale, 1)?;
+                l.moe_shared_add(&self.out, &self.shexp_out, &self.shexp_scale, self.n_embd)?;
+            }
         }
         Ok(())
     }

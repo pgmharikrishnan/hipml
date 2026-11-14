@@ -420,54 +420,160 @@ whole prompt instead of once per token (§7.4).
 
 The recon projected **176 tok/s** at 4,096 context from 2.921 GB/token at
 514.6 GB/s (the engine's measured 80.4% of 640 GB/s), and **≈24.5 GB** peak
-VRAM. Measured: 125.76 tok/s, 21.69 GiB (23.29 GB).
+VRAM. Measured: 125.5 tok/s (7.97 ms/token), 21.69 GiB (23.29 GB). That is 71%
+of the prediction, and this subsection is about the other 29%.
 
-That is 71% of the prediction, and the profile says where it went rather than
-leaving it as "the gather is slow":
+An earlier version of this note answered that question with a **stage trace**
+and got it wrong. It read the trace's 1,103 launches at the `gpu-profile`
+"cached launch" figure of 2.605 µs and concluded a 2.873 ms launch floor, 35% of
+the token. Three measurements since say that number is not a GPU cost at all.
 
-| quantity | value |
-| --- | ---: |
-| streamed per token | 2,750,765,568 B (2.56 GiB) |
-| token, captured graph | 8.102 ms (warm 8.553 ms) |
-| effective bandwidth | 346 GB/s |
-| weight stream inside the token | 4.352 ms at **632 GB/s** |
-| overhead (launch + elementwise) | 3.749 ms |
-| launches/token | 1,103 |
-| launch cost (cached) | 2.605 µs, so a 2.873 ms floor |
+#### The launch is not the node
 
-The GEMV stream inside the token runs at 632 GB/s — the sequential rate the
-engine already reaches, and above the 514.6 GB/s the projection assumed. The
-shortfall is the other 3.749 ms: 1,103 launches at 2.605 µs are 2.873 ms of it,
-35% of the token. The MoE FFN is 560 of those launches, and the trace puts it
-first:
+`probe_launch.cpp` launches N kernels that do nothing, N = 64 … 4096, eager and
+captured, and times them end to end:
 
-| stage | ms/token | share | launches | GB/s |
-| --- | ---: | ---: | ---: | ---: |
-| `ffn_moe` | 2.846 | 32.7% | 560 | 292.2 |
-| `ssm_proj` | 2.099 | 24.1% | 120 | 389.7 |
-| `lm_head` | 0.789 | 9.1% | 2 | 684.6 |
-| `ssm_out` | 0.627 | 7.2% | 30 | 426.6 |
-| `attn_qkv` | 0.606 | 7.0% | 20 | 478.2 |
-| `post_norm` | 0.459 | 5.3% | 40 | |
-| `ssm_step` | 0.295 | 3.4% | 150 | |
-| `residual_out` | 0.265 | 3.0% | 40 | |
-| `residual_in` | 0.238 | 2.7% | 40 | |
-| `attn_wo` | 0.219 | 2.5% | 20 | |
-| `attn_kv` | 0.134 | 1.5% | 10 | |
-| `attn_core` | 0.088 | 1.0% | 20 | |
-| `attn_norm` | 0.033 | 0.4% | 40 | |
-| `embed` | 0.019 | 0.2% | 1 | |
-| `out_norm` | −0.005 | −0.1% | 1 | |
-| sum | 8.712 | 100% | 1,094 | |
+| N | empty, eager µs/node | empty, graph µs/node | 4 KiB read, graph µs/node |
+| ---: | ---: | ---: | ---: |
+| 64 | 0.474 | 0.418 | 0.492 |
+| 256 | 0.573 | 0.507 | 0.454 |
+| 512 | 0.594 | 0.437 | 0.445 |
+| 1024 | 0.486 | 0.436 | 0.496 |
+| 2048 | 0.588 | 0.436 | 0.473 |
+| 4096 | 0.486 | 0.489 | 0.482 |
 
-So `ffn_moe`'s apparent 292 GB/s is not a gather-bandwidth problem: the stage is
-14 launches a layer, each a few microseconds of work, and the launch cost is
-most of its 2.846 ms. Fusing the router and the shared-expert scalars into
-`gemv_jobs`, and the 8 ranks of a bank into one launch, is the tuning the recon
-lists and this slice does **not** do — the number is reported, not chased.
-(The launch floor is measured with empty launches, so in a real token part of it
-hides behind execution; the split above is the profile's attribution, not
-something this slice proved kernel by kernel.)
+A node costs **0.43 µs** on the GPU timeline, flat from 64 to 4,096, and a node
+that reads a page costs the same as one that reads nothing. Eager submission is
+0.58 µs. So the token's 1,103 launches are worth **0.47 ms, 6% of the token**,
+not 2.873 ms and 35%. The 2.605 µs `gpu-profile` reports is the host's cost to
+issue a launch, and the host is a token ahead of the GPU, so it is not on the
+critical path at all.
+
+The same probe found the number that matters more. A single `hipGraphLaunch` of
+a **one-node** graph takes **1.04 ms** on this runtime. The token's captured
+graph therefore costs more than the 0.64 ms of host issue it replaces, and the
+engine's own two paths agree: the same 200 tokens through the same engine, one
+lock hold, three reps each:
+
+| path | ms/token | tok/s |
+| --- | ---: | ---: |
+| eager | **7.838** | 128.77 |
+| one captured `hipGraphLaunch` | 8.853 | 112.96 |
+
+**Capturing the token makes it 13% slower.** That is why the shipped decode path
+is eager, and it retires "put the token in one graph" as a lever on this card for
+this file. (The dense path reaches the same verdict from the other side:
+[`decode-dispatch.md`](decode-dispatch.md) §2a measured graph replay +0.37 ms
+against 1,299 eager launches, and [`decode-ablation.md`](decode-ablation.md) §3
+measured the whole GEMV set as one launch at 28.548 ms against 28.524 eager.)
+
+#### The ablation, not the trace
+
+`hipml decode-ablate` now carries the routed FFN as six ablation groups
+(`moe_router`, `moe_topk`, `moe_bank`, `moe_act`, `moe_combine`, `moe_shared`)
+instead of one, and `--cells` accepts any ablation spec so a stage can be priced
+inside a confound. A dropped stage issues no launch and records no event, so it
+cannot contribute to the number it is used to price. Depth 0, 200 tokens, three
+reps, cells interleaved in one process:
+
+| cell | ms/token | tok/s | what it prices |
+| --- | ---: | ---: | --- |
+| `full` | **7.838** | 128.77 | the token |
+| `gemv_only` | **5.777** | 173.09 | every projection and nothing else — 476 GB/s |
+| `-moe` | 4.891 | 204.48 | the whole routed FFN, 560 launches |
+| `-ssm` | 5.141 | 194.53 | the whole GDN block, weights included |
+| `-attn` | 6.998 | 142.90 | the whole attention block, weights included |
+| `-lmhead` | 6.893 | 145.07 | `output.weight`, 540 MB in 2 launches, 571 GB/s |
+| `-ssm_rec` | 7.433 | 134.54 | the delta-net recurrence, 30 launches |
+| `-attn_reduce` | 7.611 | 131.39 | the decode attention core, 20 launches |
+| `-norm` | 7.613 | 131.35 | the 81 RMS norms, 2.8 µs a launch |
+| `-ew` | 7.789 | 128.39 | 80 residual adds and `silu`, **0.6 µs a launch** |
+
+`full` is 5.777 ms of weight stream plus 2.061 ms of everything else, and the
+2.061 is kernels. The `-ew` row is the sharpest statement of that: **80 elementwise
+launches cost 0.049 ms between them**, a sixteenth of what the trace attributed
+to `residual_in` + `residual_out` alone. A launch in this stream is worth
+0.6 µs where the kernel is 8 KB wide, and 12.9 µs where it reads 4.7 MB, and
+0.43 µs of either is the node.
+
+#### The routed FFN, group by group
+
+The six groups sum to 2.947 ms. Priced against `-moe_bank` rather than `full`,
+because dropping the top-k alone leaves every routed rank reading expert 0 and
+the L2 then serves seven of the eight — the naive `-moe_topk` cell reads 0.74 ms
+and is 60% confound:
+
+| group | launches | ms | µs/launch |
+| --- | ---: | ---: | ---: |
+| the three bank GEMVs | 120 | **1.545** | 12.9 |
+| the shared expert (3 GEMVs + silu + dot + sigmoid + add) | 280 | **0.734** | 2.6 |
+| the top-k, one block, eight selection passes | 40 | **0.326** | 8.2 |
+| the router GEMV, 2.1 MB of F32 | 40 | **0.204** | 5.1 |
+| the rank fold | 40 | 0.150 | 3.8 |
+| `silu_mul` on the ranks | 40 | 0.088 | 2.2 |
+
+The banks are the largest single item in the token after the stream itself, and
+they are **not** dispatch-bound. `gemv+moe_bank*2` issues the down-bank launch a
+second time at its own site: +0.570 ms for 40 more 4.7 MB reads, i.e. 14.3 µs a
+launch and **342 GB/s**. One more launch there costs 14.3 µs and 0.43 µs of that
+is the node, 3%.
+
+That is the whole answer to "is the token launch-bound": **no.** The banks read
+566 MB in 1.545 ms = 366 GB/s, and the reason is the size of the read, not the
+count of the launches. Rate is a function of bytes per launch on this card:
+
+| launch | bytes | GB/s |
+| --- | ---: | ---: |
+| `output.weight` | 540 MB | 571 |
+| the router GEMV | 2.1 MB | 466 |
+| one routed bank | 4.7 MB | 366 |
+| one shared-expert GEMV | 0.59 MB | 125 |
+
+The routing structure fixes that size. Gate, up and down are three sequential
+launches of eight scattered expert slices each — 4.7 MB, then 4.7 MB, then
+4.7 MB — and no merge changes what the DRAM sees, which is what the fusion
+table below measured.
+
+#### The fusions: four built, four measured, none kept
+
+The card's hypothesis was that cutting graph node count closes the gap. Four
+node-count reductions were built and each was measured **end to end, untraced,
+alternating inside one lock hold** against a base binary of the parent commit.
+
+| fusion | launches | arithmetic | measured |
+| --- | ---: | --- | --- |
+| shared expert gate+up as one `gemv_jobs` list | −40 | bit-exact: same tile body, each writes its own buffer | +1.1 tok/s in one bisect, **neutral** in the interleaved A/B |
+| gate+up banks in one two-bank launch | −40 | bit-exact: same tile body, rank j still resolves its own expert | **neutral** |
+| the GDN's four projections in one job list (needed an F32 job body for `ssm_alpha`/`ssm_beta`) | −90 | bit-exact | **−4.3 tok/s**: the two 32-row F32 matrices share a 512-tile grid, so 960 blocks a layer retire without work |
+| the top-k's eight 256-way barrier trees as warp reductions | 0 | bit-exact: max is exact and associative, the tie-break is an integer compare | **neutral** — the kernel was never barrier-bound |
+
+None is kept. A fusion that removes 40 to 90 launches and leaves the token where
+it was is not a win, and the shipped decode path is byte-identical to the parent
+commit. The instruments are kept instead: `probe_launch.cpp` and the six-group
+ablation, because they are what refuted the hypothesis and what any later slice
+should re-run before spending a day on launch count.
+
+The one measurement that does move is the graph: **not capturing the token is
+worth 1.02 ms, 13%.** The engine already does not capture it on this path.
+
+#### Where 150 tok/s would have to come from
+
+150 tok/s is 6.67 ms, 1.17 ms below the measured token. The entire dispatch bill
+is 0.47 ms and the graph is already off, so no arrangement of launches reaches
+it. What is left, in order of size:
+
+* **476 GB/s on the stream, not 632.** 2.75 GB at 632 is 4.35 ms; the token's own
+  projections read 476 GB/s with nothing else on the card, because the reads are
+  0.59–4.7 MB. Closing this is a kernel-shape question — more bytes in flight per
+  launch at a fixed read size — and the four launch merges above are evidence
+  that it is not a merge-count question.
+* **The GDN block, 2.697 ms** for 30 layers, of which 0.406 is the recurrence and
+  the rest is five projections and four elementwise steps a layer.
+* **The shared expert, 0.734 ms** for 71 MB: seven launches a layer reading
+  0.59 MB each at 125 GB/s.
+* **The top-k, 0.326 ms** for 40 single-block launches. It is eight dependent
+  selection passes over 256 experts on one CU; only a different algorithm moves
+  it, and the reduction tree is not what it spends its time on.
 
 VRAM is also below the projection: 21.69 GiB with the engine's scratch at the
 gate's 81-token context. The KV cache grows with context, so that is a
@@ -519,7 +625,7 @@ and `--mtp` passed literally where a drafter is wanted.
 | `moe-gate --device` | 64/64 ids | **PASS 64/64**, 127.70 tok/s, 21.69 GiB |
 | `row-dequant` | 10 formats exact | **10/10 exact**, 2048/2048 values each |
 | `load` (Qwen3.6-35B-A3B) | 0 unsupported, 256/8/512/512 | **0 unsupported**, 21.41 GiB, 20/20 round-trip, Q8_0 rows exact |
-| `generate --device`, 169-token prompt | tokens on the GPU | **143.99 tok/s prefill, 125.76 tok/s decode** |
+| `generate --device`, 169-token prompt | tokens on the GPU | **143.0 tok/s prefill, 125.5 tok/s decode** |
 | `ppl` (Qwen3.6-35B-A3B) | close to llama | **2.2275** vs 2.2228 (+0.21%) |
 
 Dense path, same binary, so the new `Ffn` enum and the row gather did not move
@@ -538,10 +644,11 @@ anything that was already gated:
 | `column-bench --check` | 0 differ | **0 differ** on 7,946,240 logits, hidden and residual |
 | `probe_exact.py --ctx 32768` | PASS | PASS, 48 replies id-for-id across drafts 1,2,3 |
 | `ppl` (Arete-27B) | 2.1824 vs llama 2.1791 | **2.1824**, unchanged |
-| `cargo test --workspace` | clean | clean (local and on the GPU host) |
+| dense decode, depth 0, 200 tokens | ~33.2 tok/s | **33.46 tok/s** (29.888 ms/token) |
+| `cargo test --workspace` | clean | **98 passed, 0 failed** (local and on the GPU host) |
 | `cargo fmt --all -- --check` | clean | clean |
 | `scripts/check-public-tree.sh` | clean | clean |
-| `scripts/check-doc-links.py` | all links resolve | 271 links in 52 files |
+| `scripts/check-doc-links.py` | all links resolve | 283 links in 53 files |
 
 The two oracle maxima are the same numbers every slice since the prefill-tile
 note reports, which is the expected result for a change that does not touch the
@@ -557,10 +664,17 @@ dense forward pass.
   the whole model per prompt token: a 2,000-token prompt takes about 14 s, where
   the bucket-sort + grouped-GEMM path the recon describes would read each expert
   once per tile.
-* **No tuning and no fusion.** The router, top-k, combine and shared-expert
-  scalar are separate launches; the 8 ranks of a bank are one launch but the
-  three banks are three. §8.1 names what that costs. Nothing here was tuned to
-  reach the 176 tok/s projection.
+* **No fusion is retained.** Four node-count reductions were built and measured
+  (§8.1) and all four were reverted: they removed 40 to 90 launches and did not
+  move the token. The instruments that refuted the launch hypothesis are kept.
+  The decode number is therefore the same 125.5 tok/s, and §8.1 names what a
+  150 tok/s token would have to come from instead.
+* **The MoE ablation groups are a diagnostic.** `moe_router`, `moe_topk`,
+  `moe_bank`, `moe_act`, `moe_combine` and `moe_shared` are default-off and
+  exist so `decode-ablate` can price the routed FFN by removal. They add a
+  `drop` argument to `MoeBlock::forward`; with nothing dropped it issues the
+  same launches in the same order, and the token is byte-identical to the
+  parent commit.
 * **Batch/serve and `column-bench`.** Both refuse a MoE file up front, naming
   the reason: neither has a routed FFN body. The single-sequence decode path is
   the one that does.

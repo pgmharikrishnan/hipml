@@ -655,13 +655,14 @@ impl<'a> GpuEngine<'a> {
                     }
                 }
                 Ffn::Moe(m) => {
-                    // The whole MoE FFN is one stage: the router, the expert
-                    // gather, the combine and the shared expert have no
-                    // boundaries a trace row could separate, and a host
-                    // readback between them is what the capture forbids.
+                    // The whole MoE FFN is one trace row but five ablation
+                    // groups: the router and top-k, the three bank GEMVs, the
+                    // routed activation, the rank fold, and the shared expert.
+                    // `ffn_moe` keeps the row so `gpu-profile`'s table stays
+                    // comparable across trees.
                     if !drop.dropped(Stage::FfnGemv) {
                         mark(&mut self.trace, l, "ffn_moe")?;
-                        m.forward(l, &self.t)?;
+                        m.forward(l, &self.t, drop)?;
                     }
                     if !drop.dropped(Stage::Ew) {
                         mark(&mut self.trace, l, "residual_out")?;

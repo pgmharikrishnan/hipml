@@ -314,6 +314,43 @@ fn cells() -> Vec<Cell> {
             label: "-ssm",
             drop: only("ssm"),
         },
+        // A routed FFN, one group at a time. On a dense file these cells are
+        // the full token; on a MoE file they price the 14 launches a layer.
+        Cell {
+            label: "-moe_router",
+            drop: only("moe_router"),
+        },
+        Cell {
+            label: "-moe_topk",
+            drop: only("moe_topk"),
+        },
+        Cell {
+            label: "-moe_bank",
+            drop: only("moe_bank"),
+        },
+        Cell {
+            label: "-moe_act",
+            drop: only("moe_act"),
+        },
+        Cell {
+            label: "-moe_combine",
+            drop: only("moe_combine"),
+        },
+        Cell {
+            label: "-moe_shared",
+            drop: only("moe_shared"),
+        },
+        Cell {
+            label: "-moe",
+            drop: only("moe"),
+        },
+        // The launch-price control for a routed FFN: the down bank runs twice at
+        // its own site, so the delta is what one more launch plus its 4.7 MB
+        // read costs there.
+        Cell {
+            label: "gemv+moe_bank*2",
+            drop: only("gemv_only,moe_bank*2"),
+        },
     ]
 }
 
@@ -370,22 +407,40 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     let all = cells();
+    // `--cells` takes a table label, or any ablation spec `Ablate::parse`
+    // accepts, so a cell that isolates one stage inside a confound can be built
+    // without editing the table. A dropped stage leaves its consumer reading
+    // whatever it had, which is why the same stage can price very differently
+    // with and without a neighbour: `-moe_topk` on its own also leaves every
+    // routed rank reading expert 0, so the pair `-moe_bank` and
+    // `-moe_bank+moe_topk` is the one that isolates the top-k kernel. Inside a
+    // spec `+` means "and".
+    let mut owned: Vec<Cell> = Vec::new();
     let picked: Vec<&Cell> = match &a.cells {
         Some(names) => {
-            let mut v = Vec::new();
             for n in names {
-                match all.iter().find(|c| c.label == n) {
-                    Some(c) => v.push(c),
-                    None => {
-                        eprintln!(
-                            "decode-ablate: unknown cell {n}; known: {}",
-                            all.iter().map(|c| c.label).collect::<Vec<_>>().join(",")
-                        );
-                        return 2;
-                    }
-                }
+                let drop = match all.iter().find(|c| c.label == n) {
+                    Some(c) => c.drop,
+                    // `+` joins stages inside one cell: `--cells` is already a
+                    // comma list, so a cell that drops two stages needs its own
+                    // separator.
+                    None => match Ablate::parse(&n.trim_start_matches('-').replace('+', ",")) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            eprintln!(
+                                "decode-ablate: unknown cell {n} ({e}); known: {}",
+                                all.iter().map(|c| c.label).collect::<Vec<_>>().join(",")
+                            );
+                            return 2;
+                        }
+                    },
+                };
+                owned.push(Cell {
+                    label: Box::leak(n.clone().into_boxed_str()),
+                    drop,
+                });
             }
-            v
+            owned.iter().collect()
         }
         None => all.iter().collect(),
     };
