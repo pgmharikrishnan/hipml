@@ -172,7 +172,7 @@ The reference ids came from `llama-server` on the same file, build 11820
 (`d7725699`), greedy:
 
 ```powershell
-llama-server -m C:\models\Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf -ngl 99 -c 4096 `
+llama-server -m <file> -ngl 99 -c 4096 `
   --host 127.0.0.1 --port 8092 -np 1
 # POST /completion
 # {"prompt":"Write a short paragraph about the water cycle.","n_predict":64,
