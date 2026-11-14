@@ -352,7 +352,7 @@ under load. And the deltas are medians from one session; the reproducibility
 check against the run 4.7 hours earlier is the reason to trust them, not a
 second session that would make them stronger.
 
-## The next file is a mixture of experts, and the arithmetic is the story
+## The next file is a mixture of experts
 
 The interesting failure is the mixture-of-experts file.
 `Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf` is 753 tensors, 40 decoder blocks plus an
