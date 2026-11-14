@@ -399,11 +399,20 @@ impl<'a> BatchEngine<'a> {
             };
             l.residual_buf(&s.x, block_out, &s.x1, m * n)?;
             l.rmsnorm_rows(&s.x1, &block.post_norm, &s.t, n, cfg.eps, m)?;
-            block.gate.gemm_batched(l, &s.t, &s.gate, m)?;
-            block.up.gemm_batched(l, &s.t, &s.up, m)?;
-            l.silu_mul_buf(&s.gate, &s.up, &s.act, m * ff)?;
-            block.down.gemm_batched(l, &s.act, &s.down, m)?;
-            l.residual_buf(&s.down, &s.x1, &s.x, m * n)?;
+            match &block.ffn {
+                BatchFfn::Dense { gate, up, down } => {
+                    gate.gemm_batched(l, &s.t, &s.gate, m)?;
+                    up.gemm_batched(l, &s.t, &s.up, m)?;
+                    l.silu_mul_buf(&s.gate, &s.up, &s.act, m * ff)?;
+                    down.gemm_batched(l, &s.act, &s.down, m)?;
+                    l.residual_buf(&s.down, &s.x1, &s.x, m * n)?;
+                }
+                // MTP is dense-only: its drafter's `ffn_gate` is a dense
+                // projection, so a MoE file never reaches this path.
+                BatchFfn::Moe(_) => {
+                    return Err("speculative verify has no MoE FFN (MTP is dense-only)".to_string())
+                }
+            }
         }
 
         l.rmsnorm_rows(&s.x, &self.output_norm, &s.final_h, n, cfg.eps, m)?;

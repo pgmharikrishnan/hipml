@@ -143,6 +143,68 @@ impl Launcher {
         kernel.launch(cfg, &self.stream, &mut params)
     }
 
+    /// The same gather for every slot at once: `grid.z` is the slot, so one
+    /// launch serves the batched decode step instead of one per slot.
+    ///
+    /// `ids` is `[slots][n_used]`, `x` is `[slots][x_slot]` with rank `j`
+    /// reading `x + slot*x_slot + j*x_stride`, and `y` is `[slots][y_slot]`.
+    /// The tile body is [`Launcher::moe_gemv`]'s, so slot `s` is bit-identical
+    /// to the single-sequence launch on that slot's row.
+    #[allow(clippy::too_many_arguments)]
+    pub fn moe_gemv_batch(
+        &self,
+        w: usize,
+        ids: &Buffer,
+        stride: usize,
+        x: &Buffer,
+        x_stride: usize,
+        x_slot: usize,
+        y: &Buffer,
+        y_slot: usize,
+        m: usize,
+        k: usize,
+        kind: i32,
+        n_used: usize,
+        slots: usize,
+    ) -> Result<(), String> {
+        let kernel = self.module.kernel("moe_gemv_batch")?;
+        let mut p_w = w as *mut c_void;
+        let mut p_ids = ids.as_ptr();
+        let mut v_stride = stride as i64;
+        let mut p_x = x.as_ptr();
+        let mut v_x_stride = x_stride as i64;
+        let mut v_x_slot = x_slot as i64;
+        let mut p_y = y.as_ptr();
+        let mut v_y_slot = y_slot as i64;
+        let mut v_m = m as i32;
+        let mut v_k = k as i32;
+        let mut v_kind = kind;
+        let mut params: [*mut c_void; 11] = [
+            &mut p_w as *mut _ as *mut c_void,
+            &mut p_ids as *mut _ as *mut c_void,
+            &mut v_stride as *mut _ as *mut c_void,
+            &mut p_x as *mut _ as *mut c_void,
+            &mut v_x_stride as *mut _ as *mut c_void,
+            &mut v_x_slot as *mut _ as *mut c_void,
+            &mut p_y as *mut _ as *mut c_void,
+            &mut v_y_slot as *mut _ as *mut c_void,
+            &mut v_m as *mut _ as *mut c_void,
+            &mut v_k as *mut _ as *mut c_void,
+            &mut v_kind as *mut _ as *mut c_void,
+        ];
+        let tiles = gemv_job_tiles(kind, m);
+        let cfg = LaunchConfig {
+            grid: (
+                tiles.max(1) as u32,
+                n_used.max(1) as u32,
+                slots.max(1) as u32,
+            ),
+            block: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        kernel.launch(cfg, &self.stream, &mut params)
+    }
+
     /// `y[i] = ((w[0]*d[0][i] + w[1]*d[1][i]) + …)`, left fold in rank order.
     pub fn moe_combine(
         &self,

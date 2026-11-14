@@ -158,6 +158,64 @@ impl MoeChunk {
     }
 }
 
+/// The batched decode step's scratch: one set shared by every layer, sized for
+/// the engine's slot count.
+///
+/// Slot-major throughout, so slot `s` is row `s` of every buffer and the
+/// expert gather addresses it by `grid.z`. The routed tiles are
+/// `[slots * n_used]` rows in (slot, rank) order, which is the layout
+/// `moe_combine_rows_f32` folds over.
+pub(crate) struct MoeBatch {
+    pub slots: usize,
+    /// Router logits, `[slots][n_expert]`.
+    pub logits: Buffer,
+    /// Selected expert ids and renormalised weights, `[slots][n_used]`.
+    pub ids: Buffer,
+    pub weights: Buffer,
+    /// Per-slot, per-rank SwiGLU inputs and output, `[slots * n_used][n_ff_exp]`.
+    pub gate: Buffer,
+    pub up: Buffer,
+    pub act: Buffer,
+    /// Down output, `[slots * n_used][n_embd]`.
+    pub down: Buffer,
+    /// The routed sum, `[slots][n_embd]`.
+    pub out: Buffer,
+    /// Shared expert: `[slots][n_ff_shexp]` twice, the activation, the
+    /// `[slots][n_embd]` output, the `[slots]` gate dot and its sigmoid.
+    pub shexp_gate: Buffer,
+    pub shexp_up: Buffer,
+    pub shexp_act: Buffer,
+    pub shexp_out: Buffer,
+    pub shexp_dot: Buffer,
+    pub shexp_scale: Buffer,
+}
+
+impl MoeBatch {
+    pub(crate) fn new(cfg: &hipml_core::config::Config, slots: usize) -> Result<MoeBatch, String> {
+        let nslot = slots * cfg.n_expert_used;
+        let nff = cfg.n_ff_exp;
+        let shexp = cfg.n_ff_shexp.max(1);
+        let zeros = |n: usize| Buffer::alloc(n.max(1));
+        Ok(MoeBatch {
+            slots,
+            logits: zeros(slots * cfg.n_expert)?,
+            ids: zeros(nslot)?,
+            weights: zeros(nslot)?,
+            gate: zeros(nslot * nff)?,
+            up: zeros(nslot * nff)?,
+            act: zeros(nslot * nff)?,
+            down: zeros(nslot * cfg.n_embd)?,
+            out: zeros(slots * cfg.n_embd)?,
+            shexp_gate: zeros(slots * shexp)?,
+            shexp_up: zeros(slots * shexp)?,
+            shexp_act: zeros(slots * shexp)?,
+            shexp_out: zeros(slots * cfg.n_embd)?,
+            shexp_dot: zeros(slots)?,
+            shexp_scale: zeros(slots)?,
+        })
+    }
+}
+
 /// One layer's router, expert bank, shared expert and the scratch a decode step
 /// writes.
 pub(crate) struct MoeBlock<'a> {
@@ -333,6 +391,130 @@ impl<'a> MoeBlock<'a> {
         b
     }
 
+    /// Bytes this layer streams per batched step: the router and the shared
+    /// expert are read once for every slot, the routed banks once per slot per
+    /// rank (two slots that pick the same expert still read it twice — see
+    /// `docs/notes/moe.md` on why the union is not worth a grouped GEMM here).
+    pub(crate) fn bytes_batched(&self, slots: usize) -> usize {
+        let per_token_expert = |e: &Experts<'_>| e.stride * self.n_used;
+        let routed = per_token_expert(&self.gate_exps)
+            + per_token_expert(&self.up_exps)
+            + per_token_expert(&self.down_exps);
+        let mut b = self.router.bytes() + slots * routed;
+        if let Some((g, u, d)) = &self.shexp {
+            b += g.bytes() + u.bytes() + d.bytes();
+        }
+        if let Some(g) = &self.gate_inp_shexp {
+            b += g.bytes();
+        }
+        b
+    }
+
+    /// The batched decode step: `b` slots through the FFN in one weight pass,
+    /// writing the routed sum plus the shared expert into `s.out`.
+    ///
+    /// Every launch keeps its single-sequence body, with the slot added as a
+    /// grid dimension, so slot `s` is numerically identical to
+    /// [`MoeBlock::forward`] on that slot's row: the router is the same f32
+    /// reduction, the top-k is `moe_topk_rows_f32` (one block per slot, the same
+    /// selection body), the gather resolves `w + ids[s][j] * stride` per slot,
+    /// and the combine is the same left fold in rank order.
+    ///
+    /// The ids stay on the device, so the step is capturable exactly as the
+    /// single-sequence one is.
+    pub(crate) fn forward_batch(
+        &self,
+        l: &Launcher,
+        x: &Buffer,
+        b: usize,
+        s: &MoeBatch,
+    ) -> Result<(), String> {
+        if b == 0 || b > s.slots {
+            return Err(format!("moe batch: {b} slots of {}", s.slots));
+        }
+        let n = self.n_embd;
+        let nff = self.n_ff_exp;
+        let u = self.n_used;
+
+        // Router: `[b][n_expert]` logits, then the same softmax/top-k the
+        // single-sequence step runs, one block per slot.
+        self.router.gemm_batched_f32(l, x, &s.logits, b)?;
+        l.moe_topk_rows(&s.logits, self.n_expert, u, b, &s.ids, &s.weights)?;
+
+        // The gather: rank `j` of slot `s` reads `x + s*n + j*0` (gate, up) or
+        // its own SwiGLU row (down).
+        let g = &self.gate_exps;
+        l.moe_gemv_batch(
+            g.base(),
+            &s.ids,
+            g.stride,
+            x,
+            0,
+            n,
+            &s.gate,
+            u * nff,
+            nff,
+            n,
+            self.kind_gate,
+            u,
+            b,
+        )?;
+        let up = &self.up_exps;
+        l.moe_gemv_batch(
+            up.base(),
+            &s.ids,
+            up.stride,
+            x,
+            0,
+            n,
+            &s.up,
+            u * nff,
+            nff,
+            n,
+            self.kind_up,
+            u,
+            b,
+        )?;
+        l.silu_mul_buf(&s.gate, &s.up, &s.act, b * u * nff)?;
+        let d = &self.down_exps;
+        l.moe_gemv_batch(
+            d.base(),
+            &s.ids,
+            d.stride,
+            &s.act,
+            nff,
+            u * nff,
+            &s.down,
+            u * n,
+            n,
+            nff,
+            self.kind_down,
+            u,
+            b,
+        )?;
+        // The weight applies after the down projection; the sum is the same
+        // left fold in rank order.
+        l.moe_combine_rows(&s.out, &s.down, &s.weights, n, u, b)?;
+
+        // The shared expert: one dense SwiGLU per slot, scaled by that slot's
+        // sigmoid and added outside the routed sum.
+        if let (Some((sg, su, sd)), Some(gate_in)) = (&self.shexp, &self.gate_inp_shexp) {
+            sg.gemm_batched(l, x, &s.shexp_gate, b)?;
+            su.gemm_batched(l, x, &s.shexp_up, b)?;
+            l.silu_mul_buf(
+                &s.shexp_gate,
+                &s.shexp_up,
+                &s.shexp_act,
+                b * self.n_ff_shexp,
+            )?;
+            sd.gemm_batched(l, &s.shexp_act, &s.shexp_out, b)?;
+            gate_in.gemm_batched_f32(l, x, &s.shexp_dot, b)?;
+            l.sigmoid_buf(&s.shexp_dot, &s.shexp_scale, b)?;
+            l.moe_shared_add_rows(&s.out, &s.shexp_out, &s.shexp_scale, n, b)?;
+        }
+        Ok(())
+    }
+
     /// One token through the FFN, writing the block output into [`Self::out`].
     ///
     /// `drop` is the decode ablation set. Each group below is one launch site
@@ -476,6 +658,27 @@ impl<'a> MoeBlock<'a> {
             .moe
             .as_ref()
             .ok_or_else(|| "moe chunk scratch not allocated".to_string())?;
+        self.forward_rows(l, &c.t, &c.xh, &c.down, &c.sk, mc, n_tok)
+    }
+
+    /// The same grouped-GEMM FFN over any `[n_tok][n_embd]` activation tile:
+    /// the prompt chunk and the multi-sequence row block share it, because both
+    /// are "M rows through one bucketed pass" and must not drift apart.
+    ///
+    /// `xh` is the fp16 copy of `t` (this method converts it), `down` receives
+    /// the block output, and `sk` is the split-K scratch the shared expert's
+    /// dense GEMMs may touch.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_rows(
+        &self,
+        l: &Launcher,
+        t: &Buffer,
+        xh: &Buffer,
+        down: &Buffer,
+        sk: &Buffer,
+        mc: &MoeChunk,
+        n_tok: usize,
+    ) -> Result<(), String> {
         if mc.cap < n_tok {
             return Err(format!(
                 "moe chunk of {n_tok} tokens exceeds scratch {}",
@@ -487,11 +690,11 @@ impl<'a> MoeBlock<'a> {
 
         // One fp16 copy of the block input: every projection below reads it,
         // and the grouped GEMM stages it a row at a time.
-        ::hipml_kernels::prefill_xhalf(l.module(), l.stream(), &c.t, &c.xh, n_tok * n)?;
+        ::hipml_kernels::prefill_xhalf(l.module(), l.stream(), t, xh, n_tok * n)?;
 
         // 1. Route the whole tile: `[n_tokens][n_expert]` logits, then the
         //    same softmax / top-k / renormalise the decode step runs.
-        self.router.gemm(l, &c.t, &mc.logits, n_tok)?;
+        self.router.gemm(l, t, &mc.logits, n_tok)?;
         l.moe_topk_rows(
             &mc.logits,
             self.n_expert,
@@ -519,7 +722,7 @@ impl<'a> MoeBlock<'a> {
             self.gate_exps.base(),
             self.gate_exps.stride,
             &mc.off,
-            &c.xh,
+            xh,
             &mc.xtok,
             &mc.gate,
             &mc.ident,
@@ -535,7 +738,7 @@ impl<'a> MoeBlock<'a> {
             self.up_exps.base(),
             self.up_exps.stride,
             &mc.off,
-            &c.xh,
+            xh,
             &mc.xtok,
             &mc.act,
             &mc.ident,
@@ -566,26 +769,19 @@ impl<'a> MoeBlock<'a> {
         )?;
 
         // 5. `out[t] = fold_rank(w[t][j] * down[t][j])`.
-        l.moe_combine_rows(&c.down, &mc.down, &mc.weights, n, self.n_used, n_tok)?;
+        l.moe_combine_rows(down, &mc.down, &mc.weights, n, self.n_used, n_tok)?;
 
         // 6. The shared expert: a dense SwiGLU over the whole tile, scaled by
         //    one sigmoid per token and added outside the routed sum.
         if let (Some((sg, su, sd)), Some(gate_in)) = (&self.shexp, &self.gate_inp_shexp) {
             let nsh = self.n_ff_shexp;
-            let sk = &c.sk;
             // `up`'s fused epilogue reads the gate tile, so the gate runs
             // first either way.
-            gemm_v2(l, sg, &c.t, &c.xh, &mc.shexp_gate, sk, n_tok)?;
-            let fused = su.gemm_half_silu(
-                l,
-                &c.xh,
-                &mc.shexp_gate,
-                &mc.shexp_act,
-                &mc.shexp_acth,
-                n_tok,
-            )?;
+            gemm_v2(l, sg, t, xh, &mc.shexp_gate, sk, n_tok)?;
+            let fused =
+                su.gemm_half_silu(l, xh, &mc.shexp_gate, &mc.shexp_act, &mc.shexp_acth, n_tok)?;
             if !fused {
-                gemm_v2(l, su, &c.t, &c.xh, &mc.shexp_up, sk, n_tok)?;
+                gemm_v2(l, su, t, xh, &mc.shexp_up, sk, n_tok)?;
                 l.silu_mul_buf(&mc.shexp_gate, &mc.shexp_up, &mc.shexp_act, n_tok * nsh)?;
                 ::hipml_kernels::prefill_xhalf(
                     l.module(),
@@ -608,14 +804,14 @@ impl<'a> MoeBlock<'a> {
                 l.module(),
                 l.stream(),
                 gate_in.ptr() as *mut std::ffi::c_void,
-                c.t.as_ptr(),
+                t.as_ptr(),
                 mc.shexp_dot.as_ptr(),
                 n_tok,
                 1,
                 n,
             )?;
             l.sigmoid_buf(&mc.shexp_dot, &mc.shexp_scale, n_tok)?;
-            l.moe_shared_add_rows(&c.down, &mc.shexp_out, &mc.shexp_scale, n, n_tok)?;
+            l.moe_shared_add_rows(down, &mc.shexp_out, &mc.shexp_scale, n, n_tok)?;
         }
 
         // The routing diagnostic (`moe-gate --routes`) reads the decode step's

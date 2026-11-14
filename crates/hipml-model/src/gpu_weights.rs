@@ -221,6 +221,21 @@ impl<'a> Proj<'a> {
         l.gemv_batched(kind, self.w, x, y, self.rows, self.cols, rows)
     }
 
+    /// The same projection over `rows` x-rows (`[rows][cols]`) for an f32
+    /// weight: the batched MoE FFN's router and shared-expert gate. The block
+    /// formats use [`Proj::gemm_batched`]; f32 has no `_b` kind id, so this is
+    /// the f32 kernel's own batched launch (`gemv_f32_b`), whose reduction is
+    /// `gemv_f32`'s and therefore bit-identical row by row.
+    pub(crate) fn gemm_batched_f32(
+        &self,
+        l: &Launcher,
+        x: &Buffer,
+        y: &Buffer,
+        rows: usize,
+    ) -> Result<(), String> {
+        l.gemv_f32_rows(self.w, x, y, self.rows, self.cols, rows)
+    }
+
     /// The same projection over `rows` x-rows (`[rows][cols]`) with one weight
     /// pass: the speculative verify's projection. Falls back to a GEMV per row
     /// for formats with no `_b` kernel.

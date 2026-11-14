@@ -164,11 +164,23 @@ impl<'a> BatchEngine<'a> {
             };
             l.residual_buf(&self.x, block_out, &self.x1, b * n)?;
             l.rmsnorm_rows(&self.x1, &block.post_norm, &self.t, n, cfg.eps, b)?;
-            block.gate.gemm_batched(l, &self.t, &self.gate, b)?;
-            block.up.gemm_batched(l, &self.t, &self.up, b)?;
-            l.silu_mul_buf(&self.gate, &self.up, &self.act, b * cfg.n_ff)?;
-            block.down.gemm_batched(l, &self.act, &self.down, b)?;
-            l.residual_buf(&self.down, &self.x1, &self.x, b * n)?;
+            match &block.ffn {
+                BatchFfn::Dense { gate, up, down } => {
+                    gate.gemm_batched(l, &self.t, &self.gate, b)?;
+                    up.gemm_batched(l, &self.t, &self.up, b)?;
+                    l.silu_mul_buf(&self.gate, &self.up, &self.act, b * cfg.n_ff)?;
+                    down.gemm_batched(l, &self.act, &self.down, b)?;
+                    l.residual_buf(&self.down, &self.x1, &self.x, b * n)?;
+                }
+                BatchFfn::Moe(m) => {
+                    let sc = self
+                        .moe
+                        .as_ref()
+                        .ok_or_else(|| "moe batch scratch not allocated".to_string())?;
+                    m.forward_batch(l, &self.t, b, sc)?;
+                    l.residual_buf(&sc.out, &self.x1, &self.x, b * n)?;
+                }
+            }
         }
         for &slot in &self.active {
             self.positions[slot] += 1;

@@ -19,6 +19,7 @@
 //! to the single-sequence path on the same input.
 
 use super::layers::{build_attn, build_ssm};
+use super::moe::{MoeBatch, MoeBlock};
 use super::*;
 
 #[path = "batch/adopt.rs"]
@@ -78,10 +79,22 @@ impl SlotPool {
 struct BatchBlock<'a> {
     attn_norm: Buffer,
     post_norm: Buffer,
-    gate: Proj<'a>,
-    up: Proj<'a>,
-    down: Proj<'a>,
+    ffn: BatchFfn<'a>,
     kind: BatchKind<'a>,
+}
+
+/// A block's feed-forward network: three dense projections, or a mixture of
+/// experts. Same split as the single-sequence engine's `Ffn`, and for the same
+/// reason — a MoE layer has no `ffn_gate.weight` at all, so every caller has to
+/// say which one it means.
+enum BatchFfn<'a> {
+    Dense {
+        gate: Proj<'a>,
+        up: Proj<'a>,
+        down: Proj<'a>,
+    },
+    /// Boxed: the expert bank views are larger than the three projections.
+    Moe(Box<MoeBlock<'a>>),
 }
 
 enum BatchKind<'a> {
@@ -155,6 +168,9 @@ pub struct BatchEngine<'a> {
     pub stages: [f64; 9],
     /// Row-block scratch, allocated on the first `prefill_rows`.
     rows: Option<rows::RowScratch>,
+    /// The routed FFN's per-step scratch, present only for a mixture of
+    /// experts. One set for every layer, sized for this engine's slots.
+    moe: Option<MoeBatch>,
     /// Rows the last row block ran and its wall time in ms.
     row_login: usize,
     row_ms: f64,
@@ -182,17 +198,8 @@ impl<'a> BatchEngine<'a> {
             let mut g = Gguf::open(model.path()).map_err(|e| format!("{e}"))?;
             Config::from_gguf(&mut g).map_err(|e| format!("config: {e}"))?
         };
-        // The batched path's FFN is three dense projections per block. A MoE
-        // file has no `ffn_gate.weight`, so this fails here, naming the reason,
-        // rather than at the first `Proj::of` with a missing-tensor message.
-        if cfg.n_expert > 0 {
-            return Err(format!(
-                "batch decode has no MoE FFN yet ({} experts, {} used): the batched \
-                 engine runs a dense FFN per block; the single-sequence decode path does \
-                 have the expert gather",
-                cfg.n_expert, cfg.n_expert_used
-            ));
-        }
+        // The batched path's FFN is three dense projections per block, or the
+        // routed FFN when the file is a mixture of experts.
         let l = model.launcher();
         let n = cfg.n_embd;
         let dims = SsmDims::from_config(&cfg);
@@ -214,9 +221,15 @@ impl<'a> BatchEngine<'a> {
                 Buffer::from_host(&model.f32_vec(&format!("blk.{i}.attn_norm.weight"))?)?;
             let post_norm =
                 Buffer::from_host(&model.f32_vec(&format!("blk.{i}.post_attention_norm.weight"))?)?;
-            let gate = Proj::of(model, &format!("blk.{i}.ffn_gate.weight"))?;
-            let up = Proj::of(model, &format!("blk.{i}.ffn_up.weight"))?;
-            let down = Proj::of(model, &format!("blk.{i}.ffn_down.weight"))?;
+            let ffn = if cfg.n_expert > 0 {
+                BatchFfn::Moe(Box::new(MoeBlock::new(model, &cfg, i)?))
+            } else {
+                BatchFfn::Dense {
+                    gate: Proj::of(model, &format!("blk.{i}.ffn_gate.weight"))?,
+                    up: Proj::of(model, &format!("blk.{i}.ffn_up.weight"))?,
+                    down: Proj::of(model, &format!("blk.{i}.ffn_down.weight"))?,
+                }
+            };
             let kind = if cfg.is_recr[i] {
                 let conv_state = zeros(slots * (dims.d_conv - 1) * dims.conv_ch)?;
                 let s_state = zeros(slots * dims.n_v * dims.head_v * dims.head_v)?;
@@ -257,9 +270,7 @@ impl<'a> BatchEngine<'a> {
             layers.push(BatchBlock {
                 attn_norm,
                 post_norm,
-                gate,
-                up,
-                down,
+                ffn,
                 kind,
             });
         }
@@ -290,6 +301,10 @@ impl<'a> BatchEngine<'a> {
             trace: false,
             stages: [0.0; 9],
             rows: None,
+            moe: match cfg.n_expert {
+                0 => None,
+                _ => Some(MoeBatch::new(&cfg, slots)?),
+            },
             row_login: 0,
             row_ms: 0.0,
             verify: None,
@@ -360,12 +375,23 @@ impl<'a> BatchEngine<'a> {
         Ok(())
     }
 
+    /// Host copy of every slot's logits row, `[slots][n_vocab]`. Diagnostics
+    /// only (`batch-bench --diff-slot`), never on the serve path.
+    pub fn logits_host(&self) -> Result<Vec<f32>, String> {
+        self.logits.to_host()
+    }
+
     /// Bytes streamed from the resident weights per decode step (one pass,
-    /// shared by every slot).
+    /// shared by every slot). A routed FFN is counted the way it streams: the
+    /// router and the shared expert once, the expert banks once per slot per
+    /// rank.
     pub fn weight_bytes(&self) -> usize {
         let mut b = 0usize;
         for l in &self.layers {
-            b += l.gate.bytes() + l.up.bytes() + l.down.bytes();
+            b += match &l.ffn {
+                BatchFfn::Dense { gate, up, down } => gate.bytes() + up.bytes() + down.bytes(),
+                BatchFfn::Moe(m) => m.bytes_batched(self.slots),
+            };
             b += match &l.kind {
                 BatchKind::Full(f) => f.attn.weight_bytes(),
                 BatchKind::Ssm(s) => s.inst.weight_bytes(),

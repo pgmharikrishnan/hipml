@@ -46,6 +46,9 @@ pub(crate) struct RowScratch {
     pub xh: Buffer,
     /// Split-K scratch for the ffn GEMMs; only touched for short blocks.
     pub sk: Buffer,
+    /// The routed FFN's bucketed scratch, present only for a mixture of
+    /// experts: the row block runs the same grouped GEMM as a prompt chunk.
+    pub moe: Option<super::super::moe::MoeChunk>,
     pub ssm: SsmChunk,
 }
 
@@ -76,6 +79,10 @@ impl RowScratch {
             y: zeros(cap * n)?,
             xh: zeros((cap * wide + 1) / 2)?,
             sk: zeros(::hipml_kernels::prefill_split_scratch_cap(cap, wide))?,
+            moe: match cfg.n_expert {
+                0 => None,
+                _ => Some(super::super::moe::MoeChunk::new(cfg, cap)?),
+            },
             ssm: SsmChunk::new(&sd, cap)?,
         })
     }
@@ -97,7 +104,7 @@ impl RowScratch {
             + self.y.len()
             + self.xh.len()
             + self.sk.len();
-        f32s * 4 + self.ssm.bytes()
+        f32s * 4 + self.ssm.bytes() + self.moe.as_ref().map_or(0, |m| m.bytes())
     }
 }
 
@@ -413,26 +420,40 @@ impl<'a> BatchEngine<'a> {
             };
             l.residual_buf(&r.x, block_out, &r.x1, m * n)?;
             l.rmsnorm_rows(&r.x1, &block.post_norm, &r.t, n, cfg.eps, m)?;
-            if ::hipml_kernels::prefill_v2() {
-                ::hipml_kernels::prefill_xhalf(l.module(), l.stream(), &r.t, &r.xh, m * n)?;
-                block.gate.gemm_half(l, &r.xh, &r.t, &r.gate, &r.sk, m)?;
-                block.up.gemm_half(l, &r.xh, &r.t, &r.up, &r.sk, m)?;
-                l.silu_mul_buf(&r.gate, &r.up, &r.act, m * cfg.n_ff)?;
-                ::hipml_kernels::prefill_xhalf(
-                    l.module(),
-                    l.stream(),
-                    &r.act,
-                    &r.xh,
-                    m * cfg.n_ff,
-                )?;
-                block.down.gemm_half(l, &r.xh, &r.act, &r.down, &r.sk, m)?;
-            } else {
-                block.gate.gemm(l, &r.t, &r.gate, m)?;
-                block.up.gemm(l, &r.t, &r.up, m)?;
-                l.silu_mul_buf(&r.gate, &r.up, &r.act, m * cfg.n_ff)?;
-                block.down.gemm(l, &r.act, &r.down, m)?;
+            match &block.ffn {
+                BatchFfn::Dense { gate, up, down } => {
+                    if ::hipml_kernels::prefill_v2() {
+                        ::hipml_kernels::prefill_xhalf(l.module(), l.stream(), &r.t, &r.xh, m * n)?;
+                        gate.gemm_half(l, &r.xh, &r.t, &r.gate, &r.sk, m)?;
+                        up.gemm_half(l, &r.xh, &r.t, &r.up, &r.sk, m)?;
+                        l.silu_mul_buf(&r.gate, &r.up, &r.act, m * cfg.n_ff)?;
+                        ::hipml_kernels::prefill_xhalf(
+                            l.module(),
+                            l.stream(),
+                            &r.act,
+                            &r.xh,
+                            m * cfg.n_ff,
+                        )?;
+                        down.gemm_half(l, &r.xh, &r.act, &r.down, &r.sk, m)?;
+                    } else {
+                        gate.gemm(l, &r.t, &r.gate, m)?;
+                        up.gemm(l, &r.t, &r.up, m)?;
+                        l.silu_mul_buf(&r.gate, &r.up, &r.act, m * cfg.n_ff)?;
+                        down.gemm(l, &r.act, &r.down, m)?;
+                    }
+                    l.residual_buf(&r.down, &r.x1, &r.x, m * n)?;
+                }
+                BatchFfn::Moe(mo) => {
+                    // The same bucketed pass a prompt chunk runs: route every
+                    // row, bucket the slots by expert, one read per expert.
+                    let mc = r
+                        .moe
+                        .as_ref()
+                        .ok_or_else(|| "row block: moe scratch not allocated".to_string())?;
+                    mo.forward_rows(l, &r.t, &r.xh, &r.down, &r.sk, mc, m)?;
+                    l.residual_buf(&r.down, &r.x1, &r.x, m * n)?;
+                }
             }
-            l.residual_buf(&r.down, &r.x1, &r.x, m * n)?;
             // Fold the next layer's input norm into the bottom residual, the
             // way `prefill` does: `t` is then that layer's projection input.
             if let Some(next) = self.layers.get(i + 1) {
