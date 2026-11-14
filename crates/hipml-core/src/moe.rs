@@ -132,19 +132,48 @@ pub fn router_weights(probs: &[f32], selected: &[usize]) -> Vec<f32> {
     selected.iter().map(|&e| probs[e] / sum).collect()
 }
 
+/// The router's decision for one token: the selected experts in rank order and
+/// their renormalised weights.
+///
+/// This is what a GPU-vs-CPU gate compares to separate "the device routed
+/// differently" from "the arithmetic differs": a wrong expert id explains a
+/// token flip, a weight that is off in the last bit does not.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Route {
+    pub ids: Vec<usize>,
+    pub weights: Vec<f32>,
+}
+
+/// The router's decision for one activation row.
+pub fn route_f32(x: &[f32], w: &MoeW, cfg: &Config) -> Route {
+    let probs = softmax_experts(&w.router.gemv(x));
+    let selected = top_k(&probs, cfg.n_expert_used);
+    let weights = router_weights(&probs, &selected);
+    Route {
+        ids: selected,
+        weights,
+    }
+}
+
 /// The whole MoE FFN for one token: routed experts plus shared expert.
 ///
 /// Returns `n_embd` values, the FFN block's output before the residual add.
 pub fn moe_ffn_f32(x: &[f32], w: &MoeW, cfg: &Config) -> Vec<f32> {
+    moe_ffn_routed(x, w, cfg, &mut None)
+}
+
+/// [`moe_ffn_f32`], also handing back the router's decision when asked.
+pub fn moe_ffn_routed(x: &[f32], w: &MoeW, cfg: &Config, route: &mut Option<Route>) -> Vec<f32> {
     let n_embd = cfg.n_embd;
     let n_ff_exp = cfg.n_ff_exp;
     let k = cfg.n_expert_used;
     assert_eq!(x.len(), n_embd, "moe: x must be n_embd");
     assert!(k > 0 && k <= cfg.n_expert, "moe: bad expert_used_count");
 
-    let probs = softmax_experts(&w.router.gemv(x));
-    let selected = top_k(&probs, k);
-    let weights = router_weights(&probs, &selected);
+    let r = route_f32(x, w, cfg);
+    *route = Some(r.clone());
+    let selected = &r.ids;
+    let weights = &r.weights;
 
     // Left fold in rank order, starting from the first expert's output.
     let mut moe: Option<Vec<f32>> = None;

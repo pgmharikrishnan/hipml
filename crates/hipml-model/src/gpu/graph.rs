@@ -20,15 +20,21 @@ pub struct GraphTiming {
 
 /// Launches one token issues, from the graph's structure (kept here so the
 /// probe and `gpu-profile` cannot disagree).
-pub fn launches_per_token(n_layer: usize, is_recr: &[bool]) -> usize {
+pub fn launches_per_token(n_layer: usize, is_recr: &[bool], moe: bool) -> usize {
     let mut n = 1; // embedding dequant
     for &recr in is_recr.iter().take(n_layer) {
         // attn_norm, the block, then the ffn. The GDN block's four input
         // projections are one job-list launch and the attention block's q/k/v
-        // are one (12 -> 9 and 13 -> 11); ffn gate+up is one as well (7 -> 6).
+        // are one (12 -> 9 and 13 -> 11); a dense ffn gate+up is one as well
+        // (7 -> 6), while a MoE ffn is 17 launches because the router, top-k,
+        // gather, combine and shared expert are each their own.
         n += 1;
         n += if recr { 9 } else { 11 };
-        n += 6;
+        // Dense: residual, rmsnorm, gate+up, silu, down, residual.
+        // MoE: residual, rmsnorm, router, top-k, gate, up, silu, down,
+        // combine, shared gate, shared up, shared silu, shared down, shared
+        // gate dot, sigmoid, shared add, residual.
+        n += if moe { 17 } else { 6 };
     }
     n + 2
 }
@@ -97,7 +103,7 @@ impl GpuEngine<'_> {
         st: &mut GpuState,
         set_step: bool,
     ) -> Result<(), String> {
-        self.run_token(token, st, set_step)?;
+        self.run_token(token, st, set_step, true)?;
         let l = self.model.launcher();
         l.argmax_buf(
             &self.logits,
@@ -127,7 +133,7 @@ impl GpuEngine<'_> {
         let t = std::time::Instant::now();
         for _ in 0..reps {
             let h = std::time::Instant::now();
-            self.run_token(token, &mut work, true)?;
+            self.run_token(token, &mut work, true, true)?;
             submit += h.elapsed().as_secs_f64();
         }
         l.synchronize()?;
@@ -152,7 +158,11 @@ impl GpuEngine<'_> {
             eager_submit_ms: submit * 1e3 / reps as f64,
             graph_ms: graph_s * 1e3 / reps as f64,
             graph_submit_ms: submit_g * 1e3 / reps as f64,
-            launches: launches_per_token(self.cfg.n_layer, &self.cfg.is_recr),
+            launches: launches_per_token(
+                self.cfg.n_layer,
+                &self.cfg.is_recr,
+                self.cfg.n_expert > 0,
+            ),
         })
     }
 }

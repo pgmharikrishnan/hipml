@@ -381,12 +381,22 @@ impl<'a> GpuEngine<'a> {
             l.residual_buf(&c.x, block_out, &c.x1, rows * n)?;
             l.rmsnorm_rows(&c.x1, &block.post_norm, &c.t, n, cfg.eps, rows)?;
             super::trace::mark(&mut self.trace, l, "post_norm")?;
-            block.gate.gemv_rows(l, &c.t, &c.gate, rows)?;
+            let (gate, up, down) = match &block.ffn {
+                Ffn::Dense { gate, up, down, .. } => (gate, up, down),
+                Ffn::Moe(_) => {
+                    return Err(
+                        "column-bench: this file's FFN is a mixture of experts, and the \
+                         column path has no MoE body"
+                            .to_string(),
+                    )
+                }
+            };
+            gate.gemv_rows(l, &c.t, &c.gate, rows)?;
             super::trace::mark(&mut self.trace, l, "gate")?;
-            block.up.gemv_rows(l, &c.t, &c.up, rows)?;
+            up.gemv_rows(l, &c.t, &c.up, rows)?;
             super::trace::mark(&mut self.trace, l, "up")?;
             l.silu_mul_buf(&c.gate, &c.up, &c.act, rows * cfg.n_ff)?;
-            block.down.gemv_rows(l, &c.act, &c.down, rows)?;
+            down.gemv_rows(l, &c.act, &c.down, rows)?;
             super::trace::mark(&mut self.trace, l, "down")?;
             l.residual_buf(&c.down, &c.x1, &c.x, rows * n)?;
         }

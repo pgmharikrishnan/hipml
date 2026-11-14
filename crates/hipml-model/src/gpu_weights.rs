@@ -144,6 +144,28 @@ impl<'a> Proj<'a> {
         self.gemv_on(l, "stream", x, y)
     }
 
+    /// A 1-D tensor as a one-row projection.
+    ///
+    /// `ffn_gate_inp_shexp` is a `[n_embd]` vector and the shared expert's gate
+    /// is one dot product, so `m = 1` is the honest shape: the same GEMV, with
+    /// one output. A 1-D tensor is not a matrix, which is why [`Proj::of`]
+    /// refuses it; this is the one place a vector is a projection.
+    pub(crate) fn vector(model: &'a Model, name: &str) -> Result<Proj<'a>, String> {
+        let t: &DeviceTensor = model
+            .tensor(name)
+            .ok_or_else(|| format!("model has no tensor {name}"))?;
+        let shape = t.shape();
+        if shape.len() != 1 {
+            return Err(format!("{name}: expected a vector, got {shape:?}"));
+        }
+        Ok(Proj {
+            w: t.buffer(),
+            entry: gemv_entry(t.ty())?,
+            rows: 1,
+            cols: shape[0] as usize,
+        })
+    }
+
     /// This projection as one entry of a `gemv_jobs` list, or `None` when the
     /// format has no job body. The body is the same tile function the
     /// standalone entry runs, so a row written this way is bit-identical.
@@ -448,6 +470,12 @@ impl<'a> Experts<'a> {
     pub fn slice(&self, e: usize) -> usize {
         assert!(e < self.n_expert, "expert {e} of {}", self.n_expert);
         self.w.device_ptr() + e * self.stride
+    }
+
+    /// The bank's own base pointer: what a kernel that resolves
+    /// `base + ids[j] * stride` on the device needs.
+    pub fn base(&self) -> usize {
+        self.w.device_ptr()
     }
 
     /// The GEMV entry that reads one slice.

@@ -49,6 +49,9 @@ mod attn_tile;
 mod deep_kv;
 #[path = "gpu/layers.rs"]
 mod layers;
+/// The mixture-of-experts FFN: router, expert gather, combine, shared expert.
+#[path = "gpu/moe.rs"]
+mod moe;
 /// Chunked prefill (a prompt tile as batched GEMMs). A child module so it can
 /// reach the engine's private scratch and layer list.
 #[path = "gpu/prefill.rs"]
@@ -73,6 +76,7 @@ mod prefix;
 mod spec;
 
 use layers::{build_attn, build_ssm};
+use moe::MoeBlock;
 use trace::mark;
 
 pub use columns::Snap;
@@ -87,14 +91,39 @@ pub use trace::Trace;
 struct Block<'a> {
     attn_norm: Buffer,
     post_norm: Buffer,
-    gate: Proj<'a>,
-    up: Proj<'a>,
-    down: Proj<'a>,
+    ffn: Ffn<'a>,
     kind: BlockKind<'a>,
-    /// `ffn_gate` and `ffn_up` read the same `t` and have no ordering between
-    /// them, so when both formats have a job body they are one launch. Planned
-    /// by `plan_ffn_jobs` once `t` exists; `None` keeps the two launches.
-    ffn_jobs: Option<(Buffer, usize)>,
+}
+
+/// A block's feed-forward network: three dense projections, or a mixture of
+/// experts.
+///
+/// The two are one enum rather than three `Option<Proj>`s because the shapes
+/// are genuinely different — a MoE layer has no `ffn_gate.weight` at all — and
+/// every caller has to say which one it means.
+enum Ffn<'a> {
+    Dense {
+        gate: Proj<'a>,
+        up: Proj<'a>,
+        down: Proj<'a>,
+        /// `ffn_gate` and `ffn_up` read the same `t` and have no ordering
+        /// between them, so when both formats have a job body they are one
+        /// launch. Planned once `t` exists; `None` keeps the two launches.
+        jobs: Option<(Buffer, usize)>,
+    },
+    /// Boxed: the expert bank views plus the step scratch are larger than the
+    /// three dense projections.
+    Moe(Box<MoeBlock<'a>>),
+}
+
+impl<'a> Ffn<'a> {
+    /// Bytes this FFN streams per token, dense or routed.
+    fn bytes(&self) -> usize {
+        match self {
+            Ffn::Dense { gate, up, down, .. } => gate.bytes() + up.bytes() + down.bytes(),
+            Ffn::Moe(m) => m.bytes(),
+        }
+    }
 }
 
 /// Attention-cache choice. `F32` is the short-depth oracle path; `Q8`/`Q4` use
@@ -234,15 +263,11 @@ impl<'a> GpuEngine<'a> {
         let embed = model
             .tensor(crate::TOKEN_EMBD)
             .ok_or_else(|| "model has no token_embd.weight".to_string())?;
-        if embed.ty() != hipml_core::quant::TensorType::Q4K
-            && embed.ty() != hipml_core::quant::TensorType::Q6K
-        {
-            return Err(format!(
-                "{}: expected Q4_K or Q6_K, found {}",
-                crate::TOKEN_EMBD,
-                embed.ty().name()
-            ));
-        }
+        // Any format with a row decoder will do: `token_embd` is a row gather,
+        // so there is no shape argument for restricting the type. A type the
+        // kernel has no body for fails here, naming the type, instead of at the
+        // first token.
+        hipml_kernels::row_kind(embed.ty())?;
         let embed = (
             embed.buffer(),
             (embed.nbytes() / embed.rows()) as usize,
@@ -255,9 +280,16 @@ impl<'a> GpuEngine<'a> {
                 Buffer::from_host(&model.f32_vec(&format!("blk.{i}.attn_norm.weight"))?)?;
             let post_norm =
                 Buffer::from_host(&model.f32_vec(&format!("blk.{i}.post_attention_norm.weight"))?)?;
-            let gate = Proj::of(model, &format!("blk.{i}.ffn_gate.weight"))?;
-            let up = Proj::of(model, &format!("blk.{i}.ffn_up.weight"))?;
-            let down = Proj::of(model, &format!("blk.{i}.ffn_down.weight"))?;
+            let ffn = if cfg.n_expert > 0 {
+                Ffn::Moe(Box::new(MoeBlock::new(model, &cfg, i)?))
+            } else {
+                Ffn::Dense {
+                    gate: Proj::of(model, &format!("blk.{i}.ffn_gate.weight"))?,
+                    up: Proj::of(model, &format!("blk.{i}.ffn_up.weight"))?,
+                    down: Proj::of(model, &format!("blk.{i}.ffn_down.weight"))?,
+                    jobs: None,
+                }
+            };
 
             let kind = if cfg.is_recr[i] {
                 BlockKind::Ssm(build_ssm(model, l, &cfg, i, false)?)
@@ -277,11 +309,8 @@ impl<'a> GpuEngine<'a> {
             layers.push(Block {
                 attn_norm,
                 post_norm,
-                gate,
-                up,
-                down,
+                ffn,
                 kind,
-                ffn_jobs: None,
             });
         }
 
@@ -327,11 +356,13 @@ impl<'a> GpuEngine<'a> {
             if let BlockKind::Full { attn, .. } = &mut eng.layers[i].kind {
                 attn.bind_qkv_input(&eng.t)?;
             }
-            let pair = {
-                let b = &eng.layers[i];
-                ffn_pair_jobs(&b.gate, &b.up, &eng.t, &eng.gate, &eng.up)?
+            let pair = match &eng.layers[i].ffn {
+                Ffn::Dense { gate, up, .. } => ffn_pair_jobs(gate, up, &eng.t, &eng.gate, &eng.up)?,
+                Ffn::Moe(_) => None,
             };
-            eng.layers[i].ffn_jobs = pair;
+            if let Ffn::Dense { jobs, .. } = &mut eng.layers[i].ffn {
+                *jobs = pair;
+            }
         }
         Ok(eng)
     }
@@ -360,7 +391,7 @@ impl<'a> GpuEngine<'a> {
     pub fn weight_bytes(&self) -> usize {
         let mut b = 0usize;
         for l in &self.layers {
-            b += l.gate.bytes() + l.up.bytes() + l.down.bytes();
+            b += l.ffn.bytes();
             b += match &l.kind {
                 BlockKind::Full { attn, .. } => attn.weight_bytes(),
                 BlockKind::Ssm(s) => s.weight_bytes(),
@@ -375,7 +406,7 @@ impl<'a> GpuEngine<'a> {
 
     /// One token through the whole graph; returns the `n_vocab` logits.
     pub fn forward_token(&mut self, token: u32, st: &mut GpuState) -> Result<Vec<f32>, String> {
-        self.run_token(token, st, true)?;
+        self.run_token(token, st, true, true)?;
         self.model.launcher().synchronize()?;
         self.logits.to_host()
     }
@@ -384,7 +415,7 @@ impl<'a> GpuEngine<'a> {
     /// back. This is the decode loop; `forward_token` stays for the oracle
     /// comparison, which needs the whole logit vector.
     pub fn forward_token_id(&mut self, token: u32, st: &mut GpuState) -> Result<u32, String> {
-        self.run_token(token, st, true)?;
+        self.run_token(token, st, true, true)?;
         let l = self.model.launcher();
         if !self.ablate.dropped(Stage::Argmax) {
             l.argmax_buf(
@@ -408,11 +439,22 @@ impl<'a> GpuEngine<'a> {
     /// launch time, so the host writes it once per token instead and the captured
     /// launch has no host arguments left.
     ///
+    /// `head` is false for a prompt token that is not the last: it still
+    /// produces `final_h` (so a capture reads every row), but skips the
+    /// `n_vocab`-wide projection, which on this file is 540 MB of weights per
+    /// token and only the last token's id is sampled.
+    ///
     /// Every stage below is skippable through `self.ablate`, which
     /// `decode-ablate` sets and nothing else does. A dropped stage issues no
     /// launch at all, so the difference between two runs is the stage's real
     /// in-situ cost and cannot include an instrument's.
-    fn run_token(&mut self, token: u32, st: &mut GpuState, set_step: bool) -> Result<(), String> {
+    fn run_token(
+        &mut self,
+        token: u32,
+        st: &mut GpuState,
+        set_step: bool,
+        head: bool,
+    ) -> Result<(), String> {
         let l = self.model.launcher();
         let cfg = &self.cfg;
         let drop = self.ablate;
@@ -577,31 +619,55 @@ impl<'a> GpuEngine<'a> {
                 l.rmsnorm_buf(&self.x1, &block.post_norm, &self.t, cfg.n_embd, cfg.eps)?;
             }
 
-            if !drop.dropped(Stage::FfnGemv) {
-                // `ffn_up` keeps its trace mark even when the pair is one
-                // launch: the row then reads as the tail of `ffn_gate`, which
-                // is what the token does, and `gpu-profile` keeps its shape.
-                mark(&mut self.trace, l, "ffn_gate")?;
-                match &block.ffn_jobs {
-                    Some((jobs, tiles)) => l.gemv_jobs(jobs, 2, *tiles)?,
-                    None => block.gate.gemv(l, &self.t, &self.gate)?,
+            match &block.ffn {
+                Ffn::Dense {
+                    gate,
+                    up,
+                    down,
+                    jobs,
+                } => {
+                    if !drop.dropped(Stage::FfnGemv) {
+                        // `ffn_up` keeps its trace mark even when the pair is one
+                        // launch: the row then reads as the tail of `ffn_gate`,
+                        // which is what the token does, and `gpu-profile` keeps
+                        // its shape.
+                        mark(&mut self.trace, l, "ffn_gate")?;
+                        match jobs {
+                            Some((jobs, tiles)) => l.gemv_jobs(jobs, 2, *tiles)?,
+                            None => gate.gemv(l, &self.t, &self.gate)?,
+                        }
+                        mark(&mut self.trace, l, "ffn_up")?;
+                        if jobs.is_none() {
+                            up.gemv(l, &self.t, &self.up)?;
+                        }
+                    }
+                    if !drop.dropped(Stage::Ew) {
+                        mark(&mut self.trace, l, "ffn_act")?;
+                        l.silu_mul_buf(&self.gate, &self.up, &self.act, cfg.n_ff)?;
+                    }
+                    if !drop.dropped(Stage::FfnGemv) {
+                        mark(&mut self.trace, l, "ffn_down")?;
+                        down.gemv(l, &self.act, &self.down)?;
+                    }
+                    if !drop.dropped(Stage::Ew) {
+                        mark(&mut self.trace, l, "residual_out")?;
+                        l.residual_buf(&self.down, &self.x1, &self.x, cfg.n_embd)?;
+                    }
                 }
-                mark(&mut self.trace, l, "ffn_up")?;
-                if block.ffn_jobs.is_none() {
-                    block.up.gemv(l, &self.t, &self.up)?;
+                Ffn::Moe(m) => {
+                    // The whole MoE FFN is one stage: the router, the expert
+                    // gather, the combine and the shared expert have no
+                    // boundaries a trace row could separate, and a host
+                    // readback between them is what the capture forbids.
+                    if !drop.dropped(Stage::FfnGemv) {
+                        mark(&mut self.trace, l, "ffn_moe")?;
+                        m.forward(l, &self.t)?;
+                    }
+                    if !drop.dropped(Stage::Ew) {
+                        mark(&mut self.trace, l, "residual_out")?;
+                        l.residual_buf(m.out(), &self.x1, &self.x, cfg.n_embd)?;
+                    }
                 }
-            }
-            if !drop.dropped(Stage::Ew) {
-                mark(&mut self.trace, l, "ffn_act")?;
-                l.silu_mul_buf(&self.gate, &self.up, &self.act, cfg.n_ff)?;
-            }
-            if !drop.dropped(Stage::FfnGemv) {
-                mark(&mut self.trace, l, "ffn_down")?;
-                block.down.gemv(l, &self.act, &self.down)?;
-            }
-            if !drop.dropped(Stage::Ew) {
-                mark(&mut self.trace, l, "residual_out")?;
-                l.residual_buf(&self.down, &self.x1, &self.x, cfg.n_embd)?;
             }
         }
 
@@ -616,7 +682,7 @@ impl<'a> GpuEngine<'a> {
                 cfg.eps,
             )?;
         }
-        if drop.dropped(Stage::LmHead) {
+        if !head || drop.dropped(Stage::LmHead) {
             return Ok(());
         }
         mark(&mut self.trace, l, "lm_head")?;
@@ -675,6 +741,9 @@ impl<'a> GpuEngine<'a> {
                 BlockKind::Full { attn, .. } => attn.zero_activations()?,
                 BlockKind::Ssm(s) => s.zero_activations()?,
             }
+            if let Ffn::Moe(m) = &b.ffn {
+                m.zero_scratch()?;
+            }
         }
         self.model.launcher().synchronize()
     }
@@ -706,6 +775,21 @@ impl<'a> GpuEngine<'a> {
     /// The post-`output_norm` hidden row of the last plain decode step.
     pub fn final_hidden(&self) -> &Buffer {
         &self.final_h
+    }
+
+    /// Every MoE layer's router decision from the last step, in block order.
+    ///
+    /// The routing gate's readback: it synchronises and copies 8 ids and 8
+    /// weights per layer, so it is a diagnostic, not part of a token.
+    pub fn moe_routes(&self) -> Result<Vec<(Vec<u32>, Vec<f32>)>, String> {
+        self.model.launcher().synchronize()?;
+        let mut out = Vec::new();
+        for b in &self.layers {
+            if let Ffn::Moe(m) = &b.ffn {
+                out.push(m.route_host()?);
+            }
+        }
+        Ok(out)
     }
 
     /// Resident attention-cache bytes at the configured depth.
