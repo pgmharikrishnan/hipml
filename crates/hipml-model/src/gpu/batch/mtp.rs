@@ -14,6 +14,20 @@
 use super::*;
 use crate::gpu_weights::{gemv_entry, Proj};
 
+/// The drafter block's feed-forward: the dense SwiGLU of a `blk.64` sidecar, or
+/// the routed FFN of an inline MTP block on a mixture-of-experts file. The same
+/// split, and the same reason, as the decoder's `BatchFfn`: a MoE layer has no
+/// `ffn_gate.weight` at all.
+enum MtpFfn<'a> {
+    Dense {
+        gate: Proj<'a>,
+        up: Proj<'a>,
+        down: Proj<'a>,
+    },
+    /// Boxed: the expert bank views are larger than the three projections.
+    Moe(Box<MoeBlock<'a>>),
+}
+
 /// One MTP block's weights and per-slot state.
 pub struct MtpBatch<'a> {
     cfg: Config,
@@ -25,9 +39,10 @@ pub struct MtpBatch<'a> {
     head_norm: Buffer,
     eh_proj: Proj<'a>,
     attn: AttnLayer<'a>,
-    gate: Proj<'a>,
-    up: Proj<'a>,
-    down: Proj<'a>,
+    ffn: MtpFfn<'a>,
+    /// The routed FFN's scratch, present only for a mixture of experts: one row
+    /// per slot, which is the shape `MoeBlock::forward_batch` runs.
+    moe: Option<MoeBatch>,
     kv: kv::BatchKv,
     emb: Buffer,
     en: Buffer,
@@ -74,7 +89,7 @@ impl<'a> MtpBatch<'a> {
         let ff = cfg.n_ff;
         let qw = cfg.n_head * cfg.head_dim;
         let w = cfg.n_head_kv * cfg.head_dim;
-        let blk = 64usize;
+        let blk = super::super::mtp::mtp_blk(&cfg);
         let p = |name: &str| Proj::of(model, &format!("blk.{blk}.{name}"));
         let m = |name: &str| -> Result<(&'a ByteBuffer, usize, usize, Kind), String> {
             let t = model
@@ -122,11 +137,28 @@ impl<'a> MtpBatch<'a> {
         let cap = (slots * 4).max(16);
         let z = |len: usize| Buffer::alloc((len * cap).max(1));
         let eh_proj = p("nextn.eh_proj.weight")?;
-        let gate = p("ffn_gate.weight")?;
-        let up = p("ffn_up.weight")?;
-        let down = p("ffn_down.weight")?;
-        let weight_bytes =
-            eh_proj.bytes() + attn.weight_bytes() + gate.bytes() + up.bytes() + down.bytes();
+        // The drafter's FFN is whatever the base's is, exactly as the
+        // single-stream drafter builds it: `MoeBlock` reads `blk.<n>.ffn_*`
+        // with the names and shapes the decoder's layers use, so an inline MTP
+        // block on a MoE file needs no separate reader.
+        let ffn = match cfg.n_expert {
+            0 => MtpFfn::Dense {
+                gate: p("ffn_gate.weight")?,
+                up: p("ffn_up.weight")?,
+                down: p("ffn_down.weight")?,
+            },
+            _ => MtpFfn::Moe(Box::new(MoeBlock::new(model, &cfg, blk)?)),
+        };
+        let moe = match cfg.n_expert {
+            0 => None,
+            _ => Some(MoeBatch::new(&cfg, slots)?),
+        };
+        let weight_bytes = eh_proj.bytes()
+            + attn.weight_bytes()
+            + match &ffn {
+                MtpFfn::Dense { gate, up, down } => gate.bytes() + up.bytes() + down.bytes(),
+                MtpFfn::Moe(m) => m.bytes(),
+            };
         Ok(MtpBatch {
             cfg: cfg.clone(),
             slots,
@@ -137,9 +169,8 @@ impl<'a> MtpBatch<'a> {
             head_norm: Buffer::from_host(&v("nextn.shared_head_norm.weight")?)?,
             eh_proj,
             attn,
-            gate,
-            up,
-            down,
+            ffn,
+            moe,
             kv: kv::BatchKv::new(&cfg, n_ctx, KvDtype::Q8, slots)?,
             emb: z(n)?,
             en: z(n)?,
@@ -302,11 +333,26 @@ impl<'a> MtpBatch<'a> {
             .out_rows(l, &self.aout, &self.gate_b, &self.y, b)?;
         l.residual_buf(&self.x, &self.y, &self.x1, b * n)?;
         l.rmsnorm_rows(&self.x1, &self.post_norm, &self.t, n, cfg.eps, b)?;
-        self.gate.gemm_batched(l, &self.t, &self.g, b)?;
-        self.up.gemm_batched(l, &self.t, &self.u, b)?;
-        l.silu_mul_buf(&self.g, &self.u, &self.act, b * ff)?;
-        self.down.gemm_batched(l, &self.act, &self.d, b)?;
-        l.residual_buf(&self.d, &self.x1, &self.out, b * n)?;
+        match &self.ffn {
+            MtpFfn::Dense { gate, up, down } => {
+                gate.gemm_batched(l, &self.t, &self.g, b)?;
+                up.gemm_batched(l, &self.t, &self.u, b)?;
+                l.silu_mul_buf(&self.g, &self.u, &self.act, b * ff)?;
+                down.gemm_batched(l, &self.act, &self.d, b)?;
+                l.residual_buf(&self.d, &self.x1, &self.out, b * n)?;
+            }
+            // The routed step is `MoeBlock::forward_batch`, the same call a
+            // plain batched decode makes: slot `i` is row `i` of the tile, so
+            // the drafted id is the token that row would have produced.
+            MtpFfn::Moe(m) => {
+                let sc = self
+                    .moe
+                    .as_ref()
+                    .ok_or_else(|| "moe drafter scratch not allocated".to_string())?;
+                m.forward_batch(l, &self.t, b, sc)?;
+                l.residual_buf(&sc.out, &self.x1, &self.out, b * n)?;
+            }
+        }
         l.rmsnorm_rows(&self.out, &self.head_norm, &self.hnext, n, cfg.eps, b)?;
         let kind = crate::gpu_weights::batch_kind(gemv_entry(self.head.1)?)
             .ok_or_else(|| "drafter head has no batched GEMV".to_string())?;

@@ -677,3 +677,158 @@ expert, and that residue is enough for +11% at two drafts — but not for three.
 The dense path is unchanged by this slice: Orca's inline block reads 68.38 tok/s
 at drafts 3 (68.60 before), and the stock file with its sidecar reads 64.90 q8 /
 63.28 f32, 128/128 exact on every row.
+
+## llama.cpp speculates on its own inline block (2026-11-15)
+
+Every comparison in this note before now used llama.cpp's **plain** decode as
+the reference, and that is not the honest one: both files carry an inline MTP
+block and both llama.cpp builds on the box can drive it. The 141.84 against
+127.30 in the section above is a win over its token loop, not over its
+speculative decode.
+
+Build 11820 (ROCm, `d7725699`) and 11836 (Vulkan, `f5027fb21`) expose the same
+flags: `--spec-type {none,draft-simple,draft-eagle3,draft-mtp,draft-dflash,
+draft-dspark,...}`, `--spec-draft-n-max N` (default 3), `--spec-draft-n-min`,
+`--spec-draft-p-min` and `--spec-draft-sampling {greedy,probabilistic}`.
+**The inline block needs no `-md`.** `--spec-type draft-mtp` alone makes the
+server build the drafter from the target's own MTP layer, and its log says so:
+
+```
+common_speculative_init_result: creating MTP draft context against the target model 'Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf'
+```
+
+With `-md` it loads a separate sidecar instead, which is how the dense 27B cell
+in [`benchmarks.md`](../benchmarks.md) was run. The reference command for a file
+with an inline block is therefore:
+
+```powershell
+llama-server -m <file> -ngl 99 -c 512 --parallel 1 -ctk q8_0 -ctv q8_0 `
+  --no-webui --no-cache-idle-slots --spec-type draft-mtp --spec-draft-n-max 3
+```
+
+`p2_math_169.ids`, 128 greedy tokens, `ignore_eos`, three reps per cell, one
+process per cell, both backends. tok/s is `/completion`'s
+`timings.predicted_per_second`; acceptance is the server's own
+`draft acceptance = 0.885 (92 accepted / 104 generated), mean len = 3.63`.
+hipml's rows are `spec-bench` on this branch, q8 KV, the same prompt and token
+count.
+
+### OrcaCyber-Nano-1.0-AI-Defense-Mix-15.7G (dense, inline `blk.64`)
+
+| engine | plain | d1 | d2 | d3 | accept at d3 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| llama.cpp ROCm 11820 | 33.94 | 53.08 | 66.76 | **75.75** | 0.885 (92/104) |
+| llama.cpp Vulkan 11836 | 34.43 | 55.88 | 70.38 | **82.09** | 0.885 (92/104) |
+| hipml | 34.06 | 53.67 | 59.85 | **68.12** | 0.971 / 0.912 / 0.903 |
+
+### Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL (MoE, inline `blk.40`)
+
+| engine | plain | d1 | d2 | d3 | accept at d3 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| llama.cpp ROCm 11820 | 99.18 | 137.98 | 164.88 | **175.79** | 0.858 (91/106) |
+| llama.cpp Vulkan 11836 | 132.02 | 169.99 | 198.93 | **213.35** | 0.885 (92/104) |
+| hipml | 127.50 | 136.46 | 141.64 | **132.16** | 0.917 / 0.939 / 0.935 |
+
+**We are behind llama.cpp speculating, on both files.** Orca reads 68.12
+against 82.09 (−17.0%) on its faster backend and 75.75 on ROCm (−10.1%); this
+file reads 141.64 at its best depth against 213.35 (−33.6%) and 175.79 (−19.4%).
+The loss survives against the slower backend on both files, so the verdict does
+not depend on which build is quoted.
+
+The cause is the term the MoE section above names, and llama.cpp's numbers price
+it. On this file at three drafts both engines emit almost the same number of
+tokens per step — 3.528 for us, 3.53 for llama.cpp (`mean len`, acceptance
+0.858) — so the whole difference is the **step cost**: 26.69 ms for our
+four-column verify against 16.7 ms for its (128 tokens in 0.6 s). Our plain
+decode is faster than its ROCm plain (127.50 against 99.18) and level with its
+Vulkan plain (132.02), so the deficit is the routed verify, not the token.
+
+Two further observations, both about llama.cpp rather than us:
+
+* **Its speculative ids are not its plain ids on this file.** The ROCm plain
+  stream and the ROCm d3 stream diverge at token 53 (72 of 128 ids differ); the
+  Vulkan d3 stream happens to equal the ROCm plain stream exactly. So its
+  213.35 is a different token stream from its own plain decode, while every
+  hipml row above is 128/128 identical to plain. Its Orca cells are identical
+  across all eight (same sha), so the drift is MoE-specific — the router
+  amplification the batch section below measures in our own path.
+* **The two drafter files were not worth taking.** Orca + the DFlash2 drafter
+  (`--spec-type draft-dflash -md ...DFlash2-Q8_0.gguf --spec-draft-n-max 7`,
+  Vulkan) reads 66.92 tok/s at acceptance 0.709 / mean len 5.77 — below the
+  inline block's own d2 (70.38) and d3 (82.09). MiniCPM-V-4.7 + the DSpark
+  drafter (`--spec-type draft-dspark`, n-max 7, Vulkan) reads 142.56 against
+  159.32 plain (0.90×) at acceptance 0.368. Declining both was right.
+
+## The batch optimum is not the single-stream optimum (2026-11-15)
+
+The batch engine could not speculate a routed file at all: `batch/verify.rs`
+returned *"speculative verify has no MoE FFN"* and `batch/mtp.rs` hardcoded
+`blk.64` and a dense `ffn_gate`, so `mtp-batch-bench` died at setup with
+*"model has no tensor blk.64.attn_q.weight"*. Two edits close it, both reuse:
+
+* `batch/verify.rs`: the `BatchFfn::Moe` arm runs `MoeBlock::forward_batch` over
+  the `[M]` verify tile with a `MoeBatch` sized for it, then the residual add —
+  the same call the plain batched step makes on the same row.
+* `batch/mtp.rs`: the drafter's block index is `mtp_blk(&cfg)` (= `n_layer`, so
+  40 here and 64 on the dense files), its FFN is a `MtpFfn::{Dense,Moe}` built
+  the way the single-stream drafter builds it, and the routed step is
+  `MoeBlock::forward_batch` over the `B` slot rows.
+
+`mtp-batch-bench` on this file (`p2_math_169.ids` rotated per slot, 128 tokens,
+q8 KV, serve's `--skinny` dispatch), every slot compared with that slot's plain
+batched stream:
+
+| B | drafts | exact | note |
+| ---: | ---: | --- | --- |
+| 1 | 1, 2 | **yes**, 1/1 slots | |
+| 4 | 1, 2 | **yes**, 4/4 slots | |
+| 8 | 1 | no | slot 5 matches to token 101, slot 6 to token 42 |
+| 8 | 2 | no | slot 1 matches to token 52, slot 5 to token 101 |
+
+**The per-slot bound stays at B≤4, and speculative batch does not widen it.**
+`batch-bench --slots 16 --check --sweep` still reports the documented
+`slot 4 step 13: batch 382 vs single 290`, 15 of 16 slots clean. At B=8 the
+verify runs `M = 16` rows where the plain reference runs `B = 8`, which crosses
+the 8-row `_b` group boundary; on a routed FFN that is enough to move a
+last-rank expert and flip an argmax later, exactly the amplification the MoE
+note's §8.7.5 describes. A dense file at B=8 is exact, so this is the router,
+not the verify.
+
+Throughput, same-run plain in every row:
+
+| B | plain agg | d1 agg | d2 agg | best |
+| ---: | ---: | ---: | ---: | --- |
+| 1 | 120.50 | 139.76 (**1.16×**) | 150.43 (**1.25×**) | d2 |
+| 4 | 292.13 | 330.3 (**1.13×**) | 324.2 (1.11×) | d1 |
+| 8 | 412.18 | 400.1 (0.97×) | 360.9 (0.88×) | **none (drafts 0)** |
+
+The single-stream optimum is d2; at 4 slots it is d1 and at 8 slots there is no
+win at all. The verify is the reason, and the step costs have the same shape as
+the single-stream section: at B=8 one draft costs 36.28 ms against 19.41 plain
+(1.87×) and two 53.11 ms (2.73×); at B=1 two drafts cost 19.63 ms against 8.30
+(2.37×). `M = B(1+R)` crosses a weight-pass boundary as B grows, and the routed
+FFN adds its per-column expert reads on top, so the schedule that wins alone
+loses at 8 slots.
+
+`serve --drafts` on this file is flat for a second reason: the server chooses
+`Mode::Spec` only when a request is **alone** (`serve/sched/run.rs`), so an
+8-slot wave never takes the branch. Measured on cell b (8 slots, 16K per slot,
+2,384-token prompt, 64 tokens a request, 3 waves):
+
+| engine | drafts | agg p50 | per-stream p50 | TTFT p50 | peak VRAM |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| hipml | 0 | **355.0** | 49.17 | 232.7 ms | 25,213.5 MiB |
+| hipml | 1 | 354.9 | 49.10 | 232.4 ms | 25,284.1 MiB |
+| hipml | 2 | 353.8 | 48.97 | 233.4 ms | 25,284.1 MiB |
+| llama.cpp Vulkan | plain | 340.3 (best 352.9) | 44.52 | 271.1 ms | 22,971.0 MiB |
+| llama.cpp Vulkan | `draft-mtp`, n-max 2 | 283.3 | 37.91 | 218.7 ms | 24,849.8 MiB |
+
+The honest 8-slot baseline is llama.cpp's **plain** number: 340.3 in this
+session (369.71 in the census) against hipml's 355.0, +4.3% here. Its own
+speculative batch is 17% *below* its plain batch on this cell, so quoting it
+would flatter us and is not the right comparison either. The wiring is
+deliberately unchanged: the B=8 row above says speculating a wave would lose
+(0.97× at d1, 0.88× at d2).
+
+[`moe.md`](moe.md) §8.9 and §8.10 are the routed-file view of both halves of
+this section.
