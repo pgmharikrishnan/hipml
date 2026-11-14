@@ -1,28 +1,40 @@
-# Eight files, six axes, one session — and the axis we lose on all eight
+# Eight files, six axes, one session — and the two axes we lose on every file
 
 *The claim under test was that the engine is at or above llama.cpp on every
 axis, for every model it can run. This is the session that tested it across
-sixteen files: the speed axes go one way on most of them, quality is a tie, and
-peak VRAM goes the other way on eight of eight.*
+sixteen files: prefill goes one way, quality is a tie, and peak VRAM and decode
+at 8,192 go the other way on eight of eight — the second one visible only once
+the baseline is the faster of llama.cpp's two backends.*
 
 The claim was simple enough to write down: **at or above llama.cpp on every
 axis, for every model we can run.** This is the run that tested it across a
 whole model directory, and the run that refuted it.
 
 The refutation is not a collapse. Prefill at 512 tokens is faster on 8 of 8
-files, by +7.71% to +58.33%. Decode at depth 0 is faster on 8 of 8, by +0.63% to
-+3.02%. Eight-slot serve is faster on 7 of 8, by +6.55% to +38.84%, with the
-eighth gated out. Perplexity on a fixed corpus agrees with `llama-perplexity` to
-within 0.23% on every comparable file, and repeated runs of the same file return
-the same number to four decimals. Then peak VRAM is higher than llama.cpp on
-8 of 8 files, by +10.09% to +13.52%.
+files, by +7.71% to +58.33%. Eight-slot serve is faster on 7 of 8, by +4.71% to
++18.64%, with the eighth gated out. Perplexity on a fixed corpus agrees with
+`llama-perplexity` to within 0.23% on every comparable file, and repeated runs
+of the same file return the same number to four decimals. Peak VRAM is higher
+than llama.cpp on 8 of 8 files, by +10.09% to +13.52%. Decode is not a win:
+against llama.cpp's faster backend the engine is below on 6 of 8 files at depth
+0 and on 8 of 8 at 8,192.
 
-That last sentence is the verdict. A claim that says "at or above on every axis"
-fails on the one axis where the engine does not win a single cell in the
-session, and no amount of prefill throughput answers it. The rest of this
-article is the table that says so, the losses named with their margins, and the
-one result that most articles would leave out: the gate that decides which rows
-are allowed to be compared is shallower than it looks.
+The VRAM column is the verdict. A claim that says "at or above on every axis"
+fails on the axis where the engine does not win a single cell, and no amount of
+prefill throughput answers it. The rest of this article is the table that says
+so, the losses named with their margins, and the one result that most articles
+would leave out: the gate that decides which rows are allowed to be compared is
+shallower than it looks.
+
+**Correction, 14 November.** The first version of this table compared the engine
+against llama.cpp's ROCm build only, and reported decode as a win on 8 of 8. On
+this card llama.cpp also has a Vulkan build, and on decode it is 2.07% to 5.05%
+faster than the ROCm build at both depths, outside every cell's spread. A reader
+choosing an engine can choose a backend, so the decode and serve columns below
+are now measured against the faster of the two, and each cell says which one it
+used. Prefill is unchanged, because there the ROCm build is the faster one by
+13.69% to 33.48%; quality and VRAM are unchanged.
+
 
 ## Sixteen files, eight of which run
 
@@ -84,8 +96,11 @@ list. A count is not a set.
 released at 02:23:00Z, 127 minutes later, with no lost-lock event. Every number
 below came from a binary of 3,044,864 bytes, sha256 `ef5b66bd…`, built from tree
 `433bfbe`, on one Radeon AI PRO R9700 reporting 31.9 GiB. The reference is
-llama.cpp build 11820, commit `d7725699`, byte-identical to the build the
-previous session used.
+llama.cpp's ROCm build, 11820, commit `d7725699`, byte-identical to the build
+the previous session used. There is a second llama.cpp build on the same card —
+the Vulkan one, 11836, commit `f5027fb21` — and the method below explains why
+the baseline is the faster of the two rather than the one the session happened
+to run.
 
 **The same file, prompt and corpus on both engines.** Both engines were given
 the same `.gguf` path literally on the command line, not through an environment
@@ -99,14 +114,38 @@ opposite order — hipml-then-llama in one, llama-then-hipml in the other — an
 file was interleaved with another inside a stage. The llama.cpp cells are not a
 block measured after the engine was finished for the day.
 
-**Three reps, a median and a spread.** Every CLI cell is three reps in each of
-two processes, so six values; every serve cell is six waves. The number quoted
-is the median of the cell, and the spread is max−min as a percentage of that
-median. Twenty-five cells exceed 3%: all sixteen prefill-at-512 cells, all eight
-llama.cpp serve cells, and one hipml serve cell, the gated file. The matrix
-marks those columns `†`. The worst are llama.cpp's prefill at 512 tokens, which
-ranges from 6.16% to 26.37% across files because its first request of each
-process is cold.
+**Three reps, a median and a spread.** Every CLI cell in the session is three
+reps in each of two processes, so six values; every serve cell is six waves. The
+backend check that supplies the decode and serve baselines is one process per
+cell, one discarded warm-up request and three timed reps, and three waves for
+serve. The number quoted is the median of the cell, and the spread is max−min as
+a percentage of that median. Twenty-four cells exceed 3%: all sixteen
+prefill-at-512 cells, seven of the eight llama.cpp serve cells, and one hipml
+serve cell, the gated file. The matrix marks those columns `†`. The worst are
+llama.cpp's prefill at 512 tokens, which ranges from 6.16% to 26.37% across
+files because its first request of each process is cold.
+
+**llama.cpp is two builds on this card, and the baseline is the faster one.**
+Both builds take the flags the matrix uses — `-ctk q8_0 -ctv q8_0 -ngl 99 -c …
+--parallel 8` — and both see the same 31.9 GiB card. They are not the same
+engine. Vulkan is **2.07% to 5.05% faster on decode** at both depths and
+**13.69% to 33.48% slower on prefill**, so the faster backend is not the same
+one on every axis, and "llama.cpp" without a backend is an ambiguous baseline.
+
+The decode and serve columns below therefore use the faster backend per cell,
+and the cell carries the mark: `r` for the ROCm build, `v` for the Vulkan build.
+Prefill stays on ROCm, where the ROCm build is the faster one, and the session's
+prefill numbers are unchanged. The check was one hold, one process per cell, the
+same fixture ids, q8 KV on both engines, `-ngl 99`, one warm-up request
+discarded, then three timed reps. The warm-up is not decoration: the previous
+slice measured a 257 ms cold first request on this box, which is what made the
+session's prefill-at-512 spreads as wide as 26%. The Vulkan build was pinned to
+the R9700 with `-dev Vulkan1`, because it enumerates the integrated GPU first
+and the default would have measured the wrong device.
+
+hipml was re-measured in the same hold on three of the eight files as a control.
+Its decode agreed with the table to 0.04%–0.86% and its serve to 0.17%–0.99%, so
+the engine column stands and only the baseline moved.
 
 **VRAM measured from outside both engines.** Peak memory is WDDM dedicated
 usage for the whole process, sampled by the same external PowerShell script for
@@ -127,20 +166,21 @@ not.
 ## The matrix
 
 `Δ` is (hipml − llama.cpp) on the medians, so a negative number means the engine
-is below. Each cell is hipml / llama.cpp · Δ. File names are shortened; every
-row is the `.gguf` named in the attempt table. `†` marks a column that contains
-a cell whose spread exceeds 3% of its median.
+is below. Each cell is hipml / llama.cpp · Δ, and the llama.cpp number is the
+faster of its two backends on that cell, marked `r` (ROCm) or `v` (Vulkan). File
+names are shortened; every row is the `.gguf` named in the attempt table. `†`
+marks a column that contains a cell whose spread exceeds 3% of its median.
 
 | file | prefill @512 † | prefill @8,192 | decode @0 | decode @8,192 | serve b † | peak VRAM |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Arete-27B-Q4_K_M` | 1,417.50 / 1,066.24 · +32.94% | 1,367.85 / 1,185.93 · +15.34% | 31.26 / 30.56 · +2.28% | 30.20 / 29.84 · +1.22% | 133.98 / 96.50 · +38.84% | 25,003 / 22,490 · +11.18% |
-| `OrcaCyber-…-Mix-15.7G` | 1,326.45 / 1,231.50 · +7.71% | 1,325.76 / 1,376.98 · −3.72% | 33.80 / 33.59 · +0.63% | 32.60 / 32.75 · −0.46% | 127.93 / 120.07 · +6.55% | 23,504 / 20,705 · +13.52% |
-| `Qwen3.8-27B-Q4_K_M` | 1,362.67 / 1,038.76 · +31.18% | 1,351.40 / 1,160.14 · +16.49% | 32.41 / 31.73 · +2.15% | 31.29 / 30.93 · +1.16% | 129.00 / 93.29 · +38.28% | 24,571 / 21,736 · +13.05% |
-| `Qwen3.8-27B-UD-Q4_K_M` | 1,335.29 / 1,203.89 · +10.91% | 1,327.13 / 1,351.43 · −1.80% | 33.16 / 32.19 · +3.02% | 32.02 / 31.44 · +1.85% | 131.99 / 114.56 · +15.21% | 24,288 / 21,429 · +13.34% |
-| `Qwen3.8-27B-UD-Q4_K_XL` | 1,334.29 / 1,133.48 · +17.72% | 1,319.83 / 1,272.25 · +3.74% | 31.54 / 30.64 · +2.93% | 30.51 / 29.91 · +2.02% | 131.56 / 105.37 · +24.86% | 25,263 / 22,367 · +12.94% |
-| `Qwen3.8-27B-UD-Q6_K` | 1,304.31 / 823.80 · +58.33% | 1,292.58 / 904.63 · +42.88% | 26.07 / 25.40 · +2.63% | 25.33 / 24.89 · +1.75% | 119.95 / 94.48 · +26.96% | 29,500 / 26,279 · +12.26% |
-| `Qwen3.8-27B-UD-Q6_K_XL` | 1,318.80 / 884.78 · +49.05% | 1,320.77 / 990.30 · +33.37% | 23.01 / 22.34 · +3.01% | 22.45 / 22.01 · +2.01% | 68.90 / 100.70 · −31.57% | 32,436 / 29,462 · +10.09% |
-| `Swift-1.5-Qwen3.8-27B-Q4_K_M` | 1,399.81 / 1,054.35 · +32.77% | 1,361.03 / 1,183.00 · +15.05% | 31.16 / 30.55 · +1.99% | 30.13 / 29.81 · +1.08% | 132.43 / 95.72 · +38.36% | 25,226 / 22,477 · +12.23% |
+| `Arete-27B-Q4_K_M` | 1,417.50 / 1,066.24 r · +32.94% | 1,367.85 / 1,185.93 r · +15.34% | 31.26 / 31.49 v · −0.75% | 30.20 / 30.91 v · −2.27% | 133.98 / 126.05 v · +6.29% | 25,003 / 22,490 · +11.18% |
+| `OrcaCyber-…-Mix-15.7G` | 1,326.45 / 1,231.50 r · +7.71% | 1,325.76 / 1,376.98 r · −3.72% | 33.80 / 34.30 v · −1.45% | 32.60 / 33.45 v · −2.56% | 127.93 / 120.07 r · +6.55% | 23,504 / 20,705 · +13.52% |
+| `Qwen3.8-27B-Q4_K_M` | 1,362.67 / 1,038.76 r · +31.18% | 1,351.40 / 1,160.14 r · +16.49% | 32.41 / 32.75 v · −1.02% | 31.29 / 32.07 v · −2.43% | 129.00 / 123.19 v · +4.71% | 24,571 / 21,736 · +13.05% |
+| `Qwen3.8-27B-UD-Q4_K_M` | 1,335.29 / 1,203.89 r · +10.91% | 1,327.13 / 1,351.43 r · −1.80% | 33.16 / 32.92 v · +0.74% | 32.02 / 32.25 v · −0.70% | 131.99 / 114.56 r · +15.21% | 24,288 / 21,429 · +13.34% |
+| `Qwen3.8-27B-UD-Q4_K_XL` | 1,334.29 / 1,133.48 r · +17.72% | 1,319.83 / 1,272.25 r · +3.74% | 31.54 / 31.62 v · −0.25% | 30.51 / 30.81 v · −0.95% | 131.56 / 110.89 v · +18.64% | 25,263 / 22,367 · +12.94% |
+| `Qwen3.8-27B-UD-Q6_K` | 1,304.31 / 823.80 r · +58.33% | 1,292.58 / 904.63 r · +42.88% | 26.07 / 26.08 v · −0.03% | 25.33 / 25.61 v · −1.11% | 119.95 / 101.65 v · +18.01% | 29,500 / 26,279 · +12.26% |
+| `Qwen3.8-27B-UD-Q6_K_XL` | 1,318.80 / 884.78 r · +49.05% | 1,320.77 / 990.30 r · +33.37% | 23.01 / 22.92 v · +0.39% | 22.45 / 22.56 v · −0.49% | 68.90 / 96.86 v · −28.87% | 32,436 / 29,462 · +10.09% |
+| `Swift-1.5-Qwen3.8-27B-Q4_K_M` | 1,399.81 / 1,054.35 r · +32.77% | 1,361.03 / 1,183.00 r · +15.05% | 31.16 / 31.60 v · −1.39% | 30.13 / 31.04 v · −2.95% | 132.43 / 125.97 v · +5.13% | 25,226 / 22,477 · +12.23% |
 
 Read by column, the six axes say six different things.
 
@@ -160,22 +200,38 @@ prefill does not care which quant the file is. llama.cpp's does, and the biggest
 wins in the column (+58.33% and +42.88%) are not the engine getting faster; they
 are llama.cpp falling to 823.80 and 904.63 on the two Q6 files.
 
-**Decode at depth 0 is a narrow, consistent win.** 8 of 8, +0.63% to +3.02%, on
-spreads of 0.18% to 1.23%. The engine is 0.2 to 0.97 tokens per second ahead.
-That is a real gap at this precision and a small one in absolute terms; it is
-also the axis where both engines are closest to the bandwidth ceiling, which
-[article 04](04-roofline-first.md) argues is where the ceiling is.
+**Decode at depth 0 is not a win once the baseline is the faster backend.**
+Against the ROCm build it was 8 of 8, +0.63% to +3.02%. Against the Vulkan
+build it is 2 of 8: `UD-Q4_K_M` at +0.74% (33.16 against 32.92 tok/s) and
+`UD-Q6_K_XL` at +0.39% (23.01 against 22.92), with `UD-Q6_K` level at −0.03%.
+The other five are below, from −0.25% to −1.45%, which is −0.08 to −0.50 tokens
+per second. The whole column spans 0.74 tok/s, so this is a near-tie either
+way. What it is not is a win, and the previous version of this table said it was
+because it compared against the slower backend.
 
-**Decode at 8,192 is the same win, slightly smaller.** 7 of 8, +1.08% to +2.02%,
-and one cell at −0.46% whose ranges overlap. It is not a loss that can be
-resolved at this precision, and it is not counted as a win either.
+**Decode at 8,192 is below on 8 of 8.** −0.49% to −2.95%, or −0.11 to −0.92
+tokens per second, on cell spreads of 0.06% to 0.65%. The Vulkan build is 2.11%
+to 5.05% faster than the ROCm build at this depth on every file, and that gap is
+larger than every cell's spread, so the sign is not in doubt. The engine loses
+2.4% to 3.6% of its own decode between the two depths; the Vulkan build loses
+1.6% to 2.6%, so the gap widens with context rather than closing.
 
-**Eight-slot serve is the widest absolute win.** 7 of 8, +6.55% to +38.84% on
-aggregate goodput, which is 7.9 to 37.5 tokens per second across eight streams.
-The eighth is the gated file at −31.57%, and it is below. The same cell records
-median time to first token: lower on 7 of 8, by 3.92% to 36.45%, and 15.79%
-higher on the gated file. The table's serve column is throughput; the latency
-moved the same way on every comparable file.
+**Eight-slot serve is still a win, and a much narrower one.** 7 of 8, +4.71% to
++18.64% on aggregate goodput, which is 5.81 to 20.67 tokens per second across
+eight streams. The eighth is the gated file at −28.87%, and it is below. The
+Vulkan build is the faster serve backend on six of the eight files — by 2.88% on
+`UD-Q6_K_XL`, 7.33% on `UD-Q6_K`, 11.71% on `UD-Q4_K_XL`, 25.61% on
+`Qwen3.8-27B-Q4_K_M`, 27.64% on `Arete` and 39.91% on `Swift` — and the ROCm
+build is faster on two, `OrcaCyber` by 28.74% and `UD-Q4_K_M` by 7.92%. Those
+two rows keep the ROCm number. The previous version of this column quoted
++6.55% to +38.84%; the top of that range was `Arete` against the ROCm build, and
+against Vulkan the same cell is +6.29%.
+
+The same cell records median time to first token, for the same server the
+throughput baseline uses: lower on 6 of 8, by 0.82% to 38.22%, and higher on two
+— +21.55% on `Qwen3.8-27B-Q4_K_M` and +18.61% on the gated file. Against the
+ROCm build it was lower on 7 of 8. The Vulkan build's prefill is the slow part
+of that server, and the latency no longer tracks the throughput on every row.
 
 **Peak VRAM is lost on 8 of 8.** +10.09% to +13.52%, which is 2,514 to 3,221
 MiB on the files where both engines ran. There is no cell in the session where
@@ -245,19 +301,24 @@ inside the engine's own 5.7% band at this depth. These are the two files with
 llama.cpp's two highest prefill-at-8,192 numbers in the session. The engine did
 not get slower; llama.cpp got faster.
 
-**Decode at 8,192: one cell below, unresolved.** `OrcaCyber-…-Mix-15.7G` is
-−0.46%, 32.60 against 32.75 tok/s. The engine's six values run 32.54 to 32.67
-and llama.cpp's run 32.59 to 32.83, so the ranges overlap between 32.59 and
-32.67. The cell is not separated. It is recorded as a loss because the medians
-say so, and it is not used as evidence for anything else.
+**Decode: eight of eight below at 8,192, and six of eight at depth 0.** The
+largest is `Swift-1.5` at 8,192, −2.95%, 30.13 against 31.04 tok/s, on spreads
+of 0.41% and 0.15% — separated. The smallest is `UD-Q6_K_XL` at 8,192, −0.49%,
+22.45 against 22.56, on spreads of 0.57% and 0.24% — also separated, and small
+in absolute terms. At depth 0 the two wins are `UD-Q4_K_M` at +0.74% (33.16
+against 32.92) and `UD-Q6_K_XL` at +0.39% (23.01 against 22.92), and `UD-Q6_K`
+is level at −0.03%. Neither win is larger than 0.24 tokens per second. The
+column is a tie in magnitude and a loss in sign, and the reason the first
+version read it the other way is the backend, not the engine.
 
 **Serve b: one cell below by a wide margin, and gated out.** On
-`UD-Q6_K_XL` the engine does 68.90 tok/s against llama.cpp's 100.70, −31.57%,
-with the engine's own six waves spanning 62.12 to 69.00 (9.99%) and llama.cpp's
-90.03 to 100.91 (10.81%). The cell sits at 32,436 MiB, the largest peak anywhere
-in the session. The cause is **unexplained**: all 65 server and gate logs were
-scanned for seven markers — `failed to allocate`, `out of memory`, `to cpu`,
-`cpu buffer`, `hipMalloc`, `hip_out_of_memory` and `page fault` — and none
+`UD-Q6_K_XL` the engine does 68.90 tok/s against llama.cpp's Vulkan build at
+96.86, −28.87%, with the engine's own six waves spanning 62.12 to 69.00 (9.99%)
+and the Vulkan server's three spanning 90.5 to 96.9 (6.56%). The cell sits at
+32,436 MiB, the largest peak anywhere in the session. The cause is
+**unexplained**: all 65 server and gate logs were scanned for seven markers —
+`failed to allocate`, `out of memory`, `to cpu`, `cpu buffer`, `hipMalloc`,
+`hip_out_of_memory` and `page fault` — and none
 matched. It
 is not called paging, because the logs do not say paging; it is called
 unexplained, and the row is gated out of the comparison because the file
@@ -328,12 +389,13 @@ a correctness certificate is taking it further than this run supports, and the
 
 ## What this does not claim
 
-It does not claim the engine is faster. It wins prefill at 512 and decode at
-depth 0 on every file, wins the other three speed cells on six or seven of
-eight, ties on quality, and loses memory on all eight. Any summary that leads
-with the prefill column without the VRAM column is not this table.
+It does not claim the engine is faster. It wins prefill at 512 on every file,
+wins serve on seven of eight, is level or behind on decode, ties on quality, and
+loses memory on all eight. Any summary that leads with the prefill column
+without the VRAM column is not this table.
 
-It is one engine, one card and one session. The card is a 31.9 GiB R9700 and
+It is one engine, one card and one session, plus the backend check that
+re-measured the llama.cpp baseline. The card is a 31.9 GiB R9700 and
 every file here fits in 32 GB; nothing in this run says what happens on a
 smaller card, a different vendor, or a file that needs offload. The context
 lengths are two: 576 and 8,256 tokens for the CLI cells, 16,384 per slot for
@@ -348,9 +410,10 @@ score the same weights the same way.
 
 The serve cell is aggregate goodput at eight slots on one prompt distribution.
 It is not a claim about sixteen slots, other arrival patterns, or tail latency
-under load. And the deltas are medians from one session; the reproducibility
-check against the run 4.7 hours earlier is the reason to trust them, not a
-second session that would make them stronger.
+under load. And the deltas are medians from one session — two, for the decode
+and serve columns, whose baseline was re-measured — and the reproducibility
+check against the run 4.7 hours earlier is the reason to trust the engine
+column, not a second session that would make it stronger.
 
 ## The next file is a mixture of experts
 
@@ -361,10 +424,20 @@ uploads — and generation stops at its embedding table, which is Q8_0 where the
 graph takes Q4_K or Q6_K. The MoE forward pass itself is the work in progress,
 and that is why the file is not in the matrix.
 
-What it would cost is arithmetic, not measurement. **There is no MoE throughput
-number in this article, because none exists yet.** The GPU path is being built
-now, and everything in this section is a prediction from the file's tensor
-inventory and the bandwidth the dense model already achieves, not a result.
+What it would cost is arithmetic, not measurement. **There is no hipml MoE
+throughput number in this article, because none exists yet.** The GPU path is
+being built now, and everything in this section is a prediction from the file's
+tensor inventory and the bandwidth the dense model already achieves, not a
+result.
+
+llama.cpp already runs the file, and it is the bar the engine's MoE path will be
+measured against. Warm, q8 KV, 33 greedy tokens: **96.35 tok/s decode on its
+ROCm build and 131.23 on Vulkan** at depth 0, 93.40 and 126.39 at 8,192; prefill
+3,526 and 3,331 at 512 tokens, 4,259 and 3,825 at 8,192. That is 3.0× to 4.0×
+the dense model's decode on the same card, in the same direction the arithmetic
+below predicts. It also re-prices the prediction: the engine's 176 tok/s would
+be **1.34×** llama.cpp's faster backend, not the 5.30× it is against the dense
+model.
 
 Per token at 4,096 context, the file would stream **2.92 GB** (2,921,190,016
 bytes), against **15.48 GB** for the 27B dense model — a ratio of **5.30**. At
