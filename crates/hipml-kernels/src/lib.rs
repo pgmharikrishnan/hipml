@@ -1029,6 +1029,51 @@ pub const KERNELS: &[KernelSpec] = &[
         kind: KernelKind::Linear { block: 256 },
     },
     KernelSpec {
+        name: "bw_tile_v4_o1",
+        entry: "bw_tile_v4_o1",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_tile_v4_o2",
+        entry: "bw_tile_v4_o2",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_tile_v4_o4",
+        entry: "bw_tile_v4_o4",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_tile_v8_o1",
+        entry: "bw_tile_v8_o1",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_tile_v8_o2",
+        entry: "bw_tile_v8_o2",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_tile_v8_o4",
+        entry: "bw_tile_v8_o4",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_tile_v16_o1",
+        entry: "bw_tile_v16_o1",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_tile_v16_o2",
+        entry: "bw_tile_v16_o2",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
+        name: "bw_tile_v16_o4",
+        entry: "bw_tile_v16_o4",
+        kind: KernelKind::Linear { block: 256 },
+    },
+    KernelSpec {
         name: "rmsnorm_f32",
         entry: "rmsnorm_f32",
         kind: KernelKind::PerRow { block: 256 },

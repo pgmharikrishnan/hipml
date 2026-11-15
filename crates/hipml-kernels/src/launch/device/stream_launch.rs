@@ -180,6 +180,47 @@ impl Launcher {
         kernel.launch(cfg, &self.stream, &mut params)
     }
 
+    /// The grouped-GEMM staging's own read: `rows` rows of `tile` bytes from a
+    /// `row_bytes` row, `npass` column passes, `BPT` bytes per load and `OUT`
+    /// column tiles in flight, as baked into `entry` (`bw_tile_v16_o2`).
+    pub fn bw_tile(
+        &self,
+        entry: &str,
+        buf: &ByteBuffer,
+        rows: usize,
+        row_bytes: usize,
+        tile: usize,
+        npass: usize,
+        row0: usize,
+        blocks: usize,
+        threads: usize,
+        out: &Buffer,
+    ) -> Result<(), String> {
+        let kernel = self.module.kernel(entry)?;
+        let mut p = buf.device_ptr() as *const std::ffi::c_void;
+        let mut v_rows = rows as i32;
+        let mut v_rb = row_bytes as i32;
+        let mut v_tile = tile as i32;
+        let mut v_npass = npass as i32;
+        let mut v_row0 = row0 as i32;
+        let mut p_out = out.as_ptr();
+        let mut params: [*mut std::ffi::c_void; 7] = [
+            &mut p as *mut _ as *mut std::ffi::c_void,
+            &mut v_rows as *mut _ as *mut std::ffi::c_void,
+            &mut v_rb as *mut _ as *mut std::ffi::c_void,
+            &mut v_tile as *mut _ as *mut std::ffi::c_void,
+            &mut v_npass as *mut _ as *mut std::ffi::c_void,
+            &mut v_row0 as *mut _ as *mut std::ffi::c_void,
+            &mut p_out as *mut _ as *mut std::ffi::c_void,
+        ];
+        let cfg = LaunchConfig {
+            grid: (blocks.max(1) as u32, 1, 1),
+            block: (threads.max(32) as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        kernel.launch(cfg, &self.stream, &mut params)
+    }
+
     /// An empty kernel at the same grid, for the node cost on its own.
     pub fn bw_empty(&self, blocks: usize, threads: usize, out: &Buffer) -> Result<(), String> {
         let kernel = self.module.kernel("bw_empty")?;

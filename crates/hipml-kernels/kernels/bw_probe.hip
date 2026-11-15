@@ -154,6 +154,78 @@ BW_ROWS(4)
 BW_ROWS(8)
 BW_ROWS(16)
 
+// The grouped expert GEMM's staging geometry, on its own.
+//
+// `prefill_moe.hip` stages a weight tile as `rows` rows of `tile` bytes taken
+// from a row `row_bytes` long, with thread `t` on row `t / per_row` and column
+// `(t % per_row) * BPT` — four threads a row for a 32-value k tile, two for a
+// 64-value one. The tile is read once per k pass, so a row is delivered as
+// `row_bytes / tile` pieces of `tile` bytes, `row_bytes` apart.
+//
+// Nothing here dequantises or stages: this is the read the tile issues and
+// nothing else, so its rate is the ceiling the staging term can reach. `OUT`
+// column tiles are issued before the first is consumed, which is the lever a
+// wider `MG_KW` would pull.
+template <int BPT, int OUT>
+static __device__ __forceinline__ void bw_tile_body(const unsigned char* __restrict__ p,
+                                                    int rows,
+                                                    int row_bytes,
+                                                    int tile,
+                                                    int npass,
+                                                    int row0,
+                                                    float* __restrict__ out)
+{
+    using vec_t = typename BwVec<BPT>::type;
+    const int per_row = tile / BPT;
+    const int rpp = (int)blockDim.x / per_row;
+    const int r0 = (int)threadIdx.x / per_row;
+    const int col = ((int)threadIdx.x % per_row) * BPT;
+    const unsigned char* bp =
+        p + (size_t)(row0 + blockIdx.x * rows) * (size_t)row_bytes + col;
+
+    unsigned acc = 0;
+    for (int r = r0; r < rows; r += rpp) {
+        const unsigned char* rp = bp + (size_t)r * (size_t)row_bytes;
+        int base = 0;
+#pragma unroll 1
+        for (; base + OUT <= npass; base += OUT) {
+            vec_t v[OUT];
+#pragma unroll
+            for (int k = 0; k < OUT; ++k)
+                v[k] = *reinterpret_cast<const vec_t*>(rp + (size_t)(base + k) * tile);
+#pragma unroll
+            for (int k = 0; k < OUT; ++k) acc ^= bw_xor<BPT>(v[k]);
+        }
+        for (; base < npass; ++base) {
+            const vec_t v = *reinterpret_cast<const vec_t*>(rp + (size_t)base * tile);
+            acc ^= bw_xor<BPT>(v);
+        }
+    }
+    if (acc == 0xFFFFFFFFu) out[blockIdx.x] = 1.0f;
+}
+
+#define BW_TILE(BPT, OUT)                                                                          \
+    extern "C" __global__ void bw_tile_v##BPT##_o##OUT(const unsigned char* __restrict__ p,        \
+                                                       int rows,                                    \
+                                                       int row_bytes,                               \
+                                                       int tile,                                    \
+                                                       int npass,                                   \
+                                                       int row0,                                    \
+                                                       float* __restrict__ out)                     \
+    {                                                                                              \
+        bw_tile_body<BPT, OUT>(p, rows, row_bytes, tile, npass, row0, out);                        \
+    }
+
+BW_TILE(4, 1)
+BW_TILE(4, 2)
+BW_TILE(4, 4)
+BW_TILE(8, 1)
+BW_TILE(8, 2)
+BW_TILE(8, 4)
+BW_TILE(16, 1)
+BW_TILE(16, 2)
+BW_TILE(16, 4)
+
 // The node cost on its own: one launch, no memory traffic, so a measured span
 // minus N times this is the kernel and not the dispatch.
 extern "C" __global__ void bw_empty(float* __restrict__ out)
