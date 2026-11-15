@@ -250,6 +250,27 @@ extern "C" __global__ void embed_row_any(
     out[(size_t)b * DR_VALUES + l] = dr_value(bp, kind, l);
 }
 
+// Embedding row named by a device buffer (`row[0]`): the MTP draft loop hands
+// each argmax to the next draft's lookup without a device copy and without a
+// host round-trip. `dr_value` is the same decode, so the row is bit-identical
+// to `embed_row_any`'s and to the host-addressed `dequant_row_any`'s.
+extern "C" __global__ void embed_row_idx(
+    const unsigned char* __restrict__ w,
+    float* __restrict__ out,
+    int nblocks,
+    int row_bytes,
+    const int* __restrict__ row,
+    int kind)
+{
+    const int b = blockIdx.x;
+    const int l = threadIdx.x;
+    if (b >= nblocks || l >= DR_VALUES) return;
+
+    const unsigned char* bp = w + (size_t)row[0] * (size_t)row_bytes
+                            + (size_t)b * (size_t)dr_unit_bytes(kind);
+    out[(size_t)b * DR_VALUES + l] = dr_value(bp, kind, l);
+}
+
 // The same decode with the row address on the host: the loader's
 // `embedding_row` probe and the chunked prefill's row-at-a-time embedding.
 extern "C" __global__ void dequant_row_any(

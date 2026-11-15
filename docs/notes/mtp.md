@@ -36,6 +36,11 @@ themselves, so there `load_sidecar` skips all 15 names and adds 0 bytes.
   (3.4 MiB at ctx 429, 64.0 MiB at 8K),
 * `shared_head_norm` + the target's head for the next-token logits.
 
+The recursion stays on the device: `draft_chain` writes each draft's argmax into
+its own slot and the next draft reads its embedding row from that slot, so a
+three-draft chain costs one host readback instead of three (see *The drafter's
+step cost* below).
+
 The drafter's prompt KV is built with a KV-only pass (`append_kv_only`: K/V
 projections, k norm+rope, append), not a full block pass, so it costs one
 projection per prompt token instead of a whole layer.
@@ -886,3 +891,177 @@ deliberately unchanged: the B=8 row above says speculating a wave would lose
 
 [`moe.md`](moe.md) §8.9 and §8.10 are the routed-file view of both halves of
 this section.
+
+## The drafter's step cost, priced against its own traffic (2026-11-15)
+
+The drafter had never been profiled on its own. The number everyone quoted came
+from §8.8's step split for the MoE file at three drafts — *"draft 3.90 + verify
+22.47 + rollback 0.30 ms"* — and it was read as 3.90 ms **per draft step**. It is
+the sum of **three** drafts: 1.30 ms each. The estimate that followed (the
+drafter "runs at an eighth of its weight traffic", so it should cost ~0.5 ms)
+counted the 58 MB `blk.40` block and not the **full-vocabulary head**, which a
+draft has to run because the next draft's embedding row is the argmax over all
+`n_vocab` logits.
+
+### The instrument: `spec-bench --trace`
+
+`MtpGpu` now carries an optional `Trace`, and `spec-bench --trace` marks each
+draft step's stages (`draft_proj`, `draft_attn`, `draft_ffn`, `draft_head`,
+`draft_argmax`, `draft_sync`) and prints ms, launches, weight MB and the GB/s
+those bytes imply, per draft step:
+
+```
+drafter stages at 3 drafts (100 draft steps, ranked by GPU time):
+  stage            ms/step   launch    MB/step    GB/s
+  between_steps      5.840    580.9        0.0       0
+  draft_head         0.971      2.2      540.3     556
+  draft_attn         0.103     11.9       29.0     281
+  draft_argmax       0.092      2.2        1.0      11
+  draft_ffn          0.086     16.2       20.7     241
+  draft_proj         0.042      5.4        8.9     210
+  draft_sync         0.040      0.0        0.0       0
+  sum                1.335
+```
+
+`--trace` turns on the launch timeline `gpu-profile --trace` uses, so `launch`
+is real (it counts launches, it does not time them); `between_steps` is the
+verify and rollback between two draft steps and is not part of the sum. A mark
+is a **start** boundary, so a stage also absorbs the wait for the one before
+it. That is why `draft_argmax` reads 0.09 ms here and 0.001 ms at one draft: it
+is holding the 32-byte position upload of the next draft, which costs ~55 µs on
+this box (the same small-copy cost measured below). The trace also adds an event
+per mark, so its `sum` sits ~5% over the untraced drafter (1.283 ms/draft in the
+same run); the trace is for the split, the A/B is for the cost.
+
+### The profile, both files
+
+MoE, `Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL` (inline `blk.40`, Q8_0 head), d3:
+
+| stage | ms/draft | launches | MB/draft | GB/s |
+| --- | ---: | ---: | ---: | ---: |
+| `draft_head` | 0.971 | 2.2 | 540.3 | 556 |
+| `draft_attn` | 0.103 | 11.9 | 29.0 | 281 |
+| `draft_argmax` | 0.092 | 2.2 | 1.0 | — |
+| `draft_ffn` | 0.086 | 16.2 | 20.7 | 241 |
+| `draft_proj` | 0.042 | 5.4 | 8.9 | 210 |
+| `draft_sync` | 0.040 | — | 4 B | — |
+| **sum** | **1.335** | **37.9** | **599.9** | **449** |
+
+Dense, `OrcaCyber-Nano-1.0-AI-Defense-Mix-15.7G` (inline `blk.64`, Q6_K head), d3:
+
+| stage | ms/draft | launches | MB/draft | GB/s |
+| --- | ---: | ---: | ---: | ---: |
+| `draft_head` | 1.777 | 2.1 | 1,042.9 | 587 |
+| `draft_ffn` | 0.289 | 5.2 | 150.4 | 521 |
+| `draft_attn` | 0.204 | 11.6 | 59.0 | 290 |
+| `draft_argmax` | 0.089 | 2.1 | 1.0 | — |
+| `draft_proj` | 0.083 | 5.2 | 29.5 | 355 |
+| `draft_sync` | 0.041 | — | 4 B | — |
+| **sum** | **2.482** | **26.2** | **1,282.8** | **517** |
+
+The head is **90% (MoE) / 81% (dense) of a draft's bytes and 73% / 72% of its
+GPU time**. Isolated with `gemv-bench --tensor output.weight --rows 1` it reads
+540.3 MB in 0.922 ms (585.9 GB/s) and 1,042.9 MB in 1.701 ms (613.3 GB/s),
+against the 632 GB/s this card reads a large stream at (`moe.md` §8.1). So the
+one stage that matters is at **93–97% of the card's stream rate**, and the
+drafter as a whole is at 75% (MoE) / 84% (dense) of the floor its own traffic
+implies (600 MB / 632 GB/s = 0.95 ms; 1,283 MB = 2.03 ms).
+
+### What that says about the targets
+
+Both targets were set against llama.cpp's Vulkan build, and neither is
+reachable from the drafter:
+
+* **MoE at two drafts, 198.93 tok/s.** At this file's 2.822 tokens per step that
+  is a 14.19 ms step. The trace prices the other two terms at verify 12.85 +
+  rollback 0.20 = 13.05, which leaves **1.14 ms for two drafts, 0.57 ms each**.
+  The head alone is 0.855 ms at the card's 632 GB/s, so even with every other
+  stage free the drafter is 1.71 ms and the step is 14.76 ms — **191.2 tok/s**,
+  and 188.8 at the drafter's 0.95 ms/draft floor. The target needs the verify
+  ~4% cheaper *and* a 1.6× faster head; it is not a drafter change.
+* **Dense at three drafts, 82.09 tok/s.** At 3.629 tokens per step that is a
+  44.21 ms step, and the verify alone is **45.88** (rollback 0.53). A *free*
+  drafter lands at 3.629 / 0.04641 = **78.2 tok/s**. The drafter cannot reach
+  this target at any speed, because the step has to be 1.67 ms cheaper than the
+  verify.
+
+The honest summary of the premise this card started from: the vocab projection
+**is** the drafter (2.9 ms of the 3.85 ms three-draft total — 76% of its time,
+90% of its bytes), it is at the
+card's read rate, and it is irreducible — a draft needs the full-vocabulary
+argmax to name the next draft's embedding row, so a reduced head or a logits
+pass shared across drafts changes which token is drafted (llama.cpp's
+`common/speculative.cpp` samples per draft for the same reason).
+
+### What shipped: the chain stays on the device
+
+The profile did show one cost that is not weight traffic: the draft loop stopped
+at the host between drafts, one `synchronize` and a 4-byte readback each (the
+0.043 ms `draft_sync` row, 0.115 ms on the dense file). `draft_chain` now runs
+the whole recursion on the device:
+
+* `argmax_buf_at` writes draft `k`'s id into its own device slot instead of the
+  shared `arg_out`, so a chain costs **one** readback instead of one per draft;
+* `embed_row_idx` (new kernel, same `dr_value` decode as `dequant_row_any`)
+  reads draft `k+1`'s embedding row index **from that slot**, so the id never
+  reaches the host;
+* `set_step_pos` moves the position with one 32-byte upload and leaves the token
+  field zero, which the chain never reads.
+
+No device copies: a 4-byte D2D `hipMemcpyAsync` costs ~40 µs here and a small
+H2D upload 40–65 µs (copy-engine handoff on this box), so a version that copied
+the id between buffers measured as no win and was not shipped. `prefill_kv` and
+`step` keep `Row::Step`, because a per-position upload in the drafter's prompt
+pass added 6.4 ms (14.5 → 20.9 ms).
+
+Interleaved A/B against the parent, three pairs, order alternated
+(`temp/ab2.sh`, `spec-bench --json`, q8 KV, 128 tokens, `p2_math_169.ids`):
+
+MoE:
+
+| drafts | tok/s parent | tok/s this | Δ | drafter ms/draft | Δ | accept (both) |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 0 | 129.12 | 129.07 | −0.04% | — | — | — |
+| 1 | 176.82 | 176.72 | −0.06% | 1.297 → 1.318 | +1.7% | 0.954 |
+| 2 | 182.39 | **183.45** | +0.58% | 1.299 → 1.252 | −3.5% | 0.956, 0.953 |
+| 3 | 173.35 | **174.61** | +0.73% | 1.312 → 1.258 | −4.1% | 0.917, 0.939, 0.935 |
+
+Dense:
+
+| drafts | tok/s parent | tok/s this | Δ | drafter ms/draft | Δ | accept (both) |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 0 | 33.94 | 33.91 | −0.09% | — | — | — |
+| 1 | 53.33 | 53.28 | −0.11% | 2.499 → 2.575 | +3.0% | 0.969 |
+| 2 | 59.48 | **59.56** | +0.14% | 2.476 → 2.447 | −1.2% | 0.957, 0.886 |
+| 3 | 67.53 | **67.78** | +0.37% | 2.474 → 2.410 | −2.6% | 0.971, 0.912, 0.903 |
+
+Acceptance rates are identical to four decimals and every row is 128/128
+token-exact on both binaries, so the chain changes when the drafter runs, not
+what it drafts. The per-pass drafter readings are tight (MoE parent
+1.307 / 1.317 / 1.311, this 1.256 / 1.259 / 1.261 ms/draft at d3).
+
+**At one draft the chain is slightly worse** (+0.02 ms MoE, +0.08 ms dense):
+there is nothing to chain, and the first draft reads its embedding row from the
+step buffer (`embed_row_any`) instead of a host-addressed `dequant_row_any`,
+which costs one upload dependency. From two drafts the removed sync+readback is
+the larger term: −0.15 ms per three-draft chain on the MoE file, −0.19 on the
+dense one.
+
+### What is left in the drafter
+
+Three terms, all measured, worth ~0.3 ms/draft together — the gap between 1.26
+and the 0.95 ms floor, and still 1.6× short of the 0.57 ms the MoE target needs:
+
+* **The position upload, ~55 µs per draft**, visible as the `draft_argmax` span
+  at two and three drafts. One upload of the chain's positions plus a per-draft
+  index in the attn/rope kernels would remove it.
+* **The small stages read at 199–296 GB/s.** 58.6 MB of the MoE draft
+  (`attn` 29.0, `ffn` 20.7, `proj` 8.9) takes 0.230 ms where the card's rate
+  would take 0.093. These are 8–20 block launches of a few MB each, so the
+  launch and dependency floor is larger than the read.
+* **The head's last 6%.** 585.9 against 632 GB/s is 0.06 ms/draft; a single-row
+  Q8_0 GEMV launched with 256 threads where only `nblocks` = 64 do the work is
+  the candidate, and it needs the same shared-slot clear that `q80_row_b` got in
+  `e89eede`.
+
+[`moe.md`](moe.md) §8.14 is the routed-file view and §9 the gate re-run.

@@ -171,6 +171,23 @@ pub(crate) mod device {
             self.step_side.upload_bytes_async(0, &bytes, &self.side)
         }
 
+        /// Write `[pos, seq, 0, 0, p0..p3]` — the position and the M-RoPE
+        /// section positions, in one upload.
+        ///
+        /// The MTP draft chain reads its token from a device slot instead of
+        /// `step[2]`, so the token field is written as zero and never read;
+        /// what matters is that the position moves between drafts without a
+        /// second upload, because a host-to-device copy of a few bytes costs
+        /// more than the launch it feeds.
+        pub fn set_step_pos(&self, pos: usize, seq: usize) -> Result<(), String> {
+            let p = pos as i32;
+            let mut bytes = [0u8; 32];
+            for (i, v) in [p, seq as i32, 0, 0, p, p, p, p].iter().enumerate() {
+                bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            self.step.upload_bytes_async(0, &bytes, &self.stream)
+        }
+
         pub fn step_side_buf(&self) -> &Buffer {
             &self.step_side
         }
