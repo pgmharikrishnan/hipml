@@ -313,11 +313,29 @@ fn utf8_len(b: u8) -> usize {
 /// `tojson` for a non-string argument value, as llama.cpp emits it.
 pub fn tojson(v: &Arg) -> String {
     let mut out = String::new();
-    write_arg(&mut out, v);
+    write_arg(&mut out, v, ", ", ": ");
     out
 }
 
-fn write_arg(out: &mut String, v: &Arg) {
+/// The `arguments` field of an OpenAI tool call: compact JSON, keys in the
+/// order the model emitted them (`{"city":"Paris"}`).
+pub fn arguments_json(fields: &[(String, Arg)]) -> String {
+    let mut out = String::from("{");
+    for (i, (k, v)) in fields.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        write_string(&mut out, k);
+        out.push(':');
+        write_arg(&mut out, v, ",", ":");
+    }
+    out.push('}');
+    out
+}
+
+/// `sep` and `colon` are `", "`/`": "` for the template's `tojson` and `","`/
+/// `":"` for a tool call's `arguments`, which is compact.
+fn write_arg(out: &mut String, v: &Arg, sep: &str, colon: &str) {
     match v {
         Arg::Null => out.push_str("null"),
         Arg::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -330,9 +348,9 @@ fn write_arg(out: &mut String, v: &Arg) {
             out.push('[');
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
-                    out.push_str(", ");
+                    out.push_str(sep);
                 }
-                write_arg(out, item);
+                write_arg(out, item, sep, colon);
             }
             out.push(']');
         }
@@ -340,11 +358,11 @@ fn write_arg(out: &mut String, v: &Arg) {
             out.push('{');
             for (i, (k, item)) in fields.iter().enumerate() {
                 if i > 0 {
-                    out.push_str(", ");
+                    out.push_str(sep);
                 }
                 write_string(out, k);
-                out.push_str(": ");
-                write_arg(out, item);
+                out.push_str(colon);
+                write_arg(out, item, sep, colon);
             }
             out.push('}');
         }
@@ -399,6 +417,85 @@ fn write_string(out: &mut String, s: &str) {
         }
     }
     out.push('"');
+}
+
+const CALL_OPEN: &str = "<tool_call>";
+const CALL_CLOSE: &str = "</tool_call>";
+
+/// Parse the `<tool_call>` block(s) a model emits in this template's format,
+/// returning the text around them and the calls in the order they appeared.
+///
+/// A block is the mirror of [`render_calls`]:
+///
+/// ```text
+/// <tool_call>
+/// <function=name>
+/// <parameter=key>
+/// value
+/// </parameter>
+/// </function>
+/// </tool_call>
+/// ```
+///
+/// A block that does not have that shape is left in the text: it is something
+/// the model wrote, not a call the template defines.
+pub fn parse_calls(text: &str) -> (String, Vec<ToolCall>) {
+    let mut rest = String::with_capacity(text.len());
+    let mut calls = Vec::new();
+    let mut at = 0;
+    while let Some(rel) = text[at..].find(CALL_OPEN) {
+        let start = at + rel;
+        let Some(end_rel) = text[start..].find(CALL_CLOSE) else {
+            break;
+        };
+        let end = start + end_rel + CALL_CLOSE.len();
+        match parse_call(&text[start + CALL_OPEN.len()..start + end_rel]) {
+            Some(call) => {
+                rest.push_str(&text[at..start]);
+                calls.push(call);
+            }
+            None => rest.push_str(&text[at..end]),
+        }
+        at = end;
+    }
+    rest.push_str(&text[at..]);
+    (rest, calls)
+}
+
+/// One block body: `<function=name>` then one `<parameter=key>` per argument.
+/// A value that parses as JSON keeps its type (`45` is a number, `true` a
+/// bool); anything else is the string the model wrote.
+fn parse_call(body: &str) -> Option<ToolCall> {
+    let name_at = body.find("<function=")? + "<function=".len();
+    let name_end = name_at + body[name_at..].find('>')?;
+    let name = body[name_at..name_end].trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let mut arguments = Vec::new();
+    let mut at = name_end;
+    while let Some(rel) = body[at..].find("<parameter=") {
+        let key_at = at + rel + "<parameter=".len();
+        let Some(key_end_rel) = body[key_at..].find('>') else {
+            break;
+        };
+        let key_end = key_at + key_end_rel;
+        let key = body[key_at..key_end].trim().to_string();
+        let Some(close_rel) = body[key_end..].find("</parameter>") else {
+            break;
+        };
+        // The value sits on its own line between the tags.
+        let value = &body[key_end + 1..key_end + close_rel];
+        let value = value.strip_prefix('\n').unwrap_or(value);
+        let value = value.strip_suffix('\n').unwrap_or(value);
+        arguments.push((key, parse_value(value)));
+        at = key_end + close_rel + "</parameter>".len();
+    }
+    Some(ToolCall { name, arguments })
+}
+
+fn parse_value(s: &str) -> Arg {
+    parse(s).unwrap_or_else(|_| Arg::Str(s.to_string()))
 }
 
 /// Append the `<tool_call>` block(s) the template emits after an assistant
