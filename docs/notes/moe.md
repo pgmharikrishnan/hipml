@@ -9,7 +9,7 @@ plus one inline MTP block, 256 experts with 8 used. Every attention and
 gated-delta-net tensor in it is shaped exactly like the 27B's; the FFN is the
 only new thing.
 
-This note covers five slices. The first settled the numerical conventions on the
+This note covers six slices. The first settled the numerical conventions on the
 CPU, before any kernel existed, because four independent conventions (softmax
 domain, top-k order, renormalisation, where the router weight is applied) can
 each leave the ids subtly wrong, and a kernel built on a wrong one is the wrong
@@ -22,7 +22,8 @@ large-read rate (§8.5). The fourth replaced the prefill loop with a bucketed
 grouped GEMM, one launch per expert bank per chunk (§7.4, §8.6). The fifth
 settled which of llama.cpp's two published 512-token numbers that kernel should
 be compared against, and swept the tile height to show the padding is not what
-limits it (§8.6).
+limits it (§8.6). The sixth priced the staged expert read against its own
+geometry and ablated the tile (§8.13).
 
 **Result: the CPU reference reproduces llama.cpp's 64 greedy ids on a fixed
 prompt, 64/64, first try; the device path reproduces the same 64 ids, 64/64, at
@@ -37,7 +38,11 @@ note used before charges llama.cpp for its cold first request (§8.6.1). The
 bandwidth instrument finds the memory system can read 0.59 MB at 495 GB/s where
 the shipped tile gets 182, and installing the wider tile is **neutral end to
 end**, so 150 tok/s stays out of reach (§8.5). The file loads: 753 tensors, 0
-unsupported, 21.41 GiB resident (21.69 GiB with the engine's scratch).
+unsupported, 21.41 GiB resident (21.69 GiB with the engine's scratch). The sixth
+slice went back to the 512-token cell's 173 GB/s staging term with a new
+instrument and an ablation, and found that the read is not what costs the time:
+the same geometry reaches 612 GB/s on its own, and five candidate causes for the
+gap are measured and excluded (§8.13).
 
 ## 1. Two things stopped the file opening
 
@@ -1863,6 +1868,204 @@ stops at the measured wall.
 Untouched by this slice: the Q8_0 batched-GEMV block sizing from `e89eede`,
 `AC_MAX_COLS`, the prefill path, and the dense file's kernel choice.
 
+## 8.13 The staged expert read, measured against its own geometry (2026-11-15)
+
+§8.6.2 read the routed FFN's cost as `ffn_ms = 0.383 x tiles + 0.000873 x
+padded_slots`, concluded that 87% of it is per-tile weight staging, and priced
+that staging at **173 GB/s** — 235 tiles x 1.9 MB x 40 layers = 17.9 GB in
+103.1 ms, against the ~633 GB/s this card reads large streams at and the 495
+GB/s `bw-probe` reports for a 0.59 MB read. This slice asked whether that is a
+defect or a wall, and it is neither: **the read is not what costs the time.**
+
+Re-measured on the same box today, the cell is `gemm ffn` **108.8 ms** of a
+189 ms chunk at 511 real-text ids, chunk 512 — 17.87 GB at **164 GB/s**. The
+108.8 against §8.6's 103.1 is this box's session spread for identical source
+(§8.6's own control records 4–8% on this cell); the ratio is what the rest of
+this section is about.
+
+### The instrument: `bw-probe`'s tile section
+
+`bw-probe` already prices a read of a given size, a GEMV's row geometry and the
+`lm_head` stream, but not the geometry the grouped GEMM actually issues: `rows`
+rows of `tile` bytes taken from a row `row_bytes` long, once per k pass. The new
+`bw_tile` kernel is that read and nothing else — no dequant, no staging, no
+barrier — with `prefill_moe.hip`'s own thread map: thread `t` on row
+`t / per_row` and column `(t % per_row) * BPT`, four threads a row for a
+32-value k tile. `--vecs` is bytes per load and `--outs` is column tiles issued
+before the first is consumed, which is the lever a wider `MG_KW` would pull.
+
+The shipped tile is 128 rows. One expert's gate is `512 x 1152` (589,824 B) and
+its down is `2048 x 352` (720,896 B), so a gate is four workgroups of 128 rows
+and a down sixteen, and the routed bank launches 1,024 gate workgroups and 4,096
+down ones for a chunk. The sweep brackets that.
+
+`--launches 128 --reps 3`, node cost subtracted, best cell per shape:
+
+| shape | tile B | best vec | best out | blocks | GB/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `gate_up_128x2048_q4k` | 32 | 16 | 4 | 2,048 | **634.0** |
+| `gate_up_128x2048_q4k` | 144 | 8 | 4 | 2,048 | **634.5** |
+| `gate_up_128x2048_q4k` | 1,152 (row) | 16 | 1 | 2,048 | **631.0** |
+| `down_128x512_q5k` | 32 | 8 | 4 | 2,048 | **629.2** |
+| `down_128x512_q5k` | 176 | 16 | 1 | 2,048 | **629.2** |
+| `down_128x512_q5k` | 352 (row) | 16 | 1 | 2,048 | **626.1** |
+
+At the block counts the kernel actually launches, the same table:
+
+| shape | tile B | 1,024 blocks (gate's own grid) | best at 1,024 |
+| --- | ---: | ---: | ---: |
+| `gate_up_128x2048_q4k` | 32 | **612.0** (4 B, 1 out) | 626.1 (16 B, 4 out) |
+| `gate_up_128x2048_q4k` | 144 | **606.3** (4 B, 1 out) | 627.3 (8 B, 4 out) |
+| `gate_up_128x2048_q4k` | 1,152 | **621.0** (16 B, 1 out) | 621.0 |
+| `down_128x512_q5k` | 32 | **595.5** (4 B, 1 out) | 623.8 (8 B, 4 out) |
+| `down_128x512_q5k` | 176 | **604.3** (4 B, 1 out) | 620.5 (16 B, 1 out) |
+| `down_128x512_q5k` | 352 | **587.0** (4 B, 1 out) | 612.8 (16 B, 1 out) |
+
+Three things fall out, and they close the obvious doors.
+
+**The access pattern costs nothing.** A 32-byte column tile at a 1,152-byte row
+stride — 128 scattered 32-byte sectors per pass, which is exactly what
+`prefill_moe.hip` asks for — delivers 612 GB/s against 621 for reading the whole
+row contiguously. The scattered tile is 1.5% slower, not 3.7x slower. Every
+shorter tile is faster at some cell and slower at another; there is no ordering
+in this table at all.
+
+**The load width costs nothing either.** 4-byte loads reach 612 and 16-byte
+loads reach 626 at the same grid. The 4 B / 16 B difference §8.5 measured on the
+GEMV's row geometry (182.2 against 471.7) does not exist here, because a staged
+tile already has eight rows' worth of sectors in flight per instruction.
+
+**The floor is the dispatch, not the read.** The per-workgroup read — 147,456 B
+for a gate block and 45,056 B for a down block — is *not measurable* by this
+instrument: every cell's span is within 0.2 us of the empty-kernel span at the
+same grid, and `bw-probe` prints `-` for the net rate because there is no excess
+to divide. Whatever the staging term is, it is not a per-launch cost.
+
+The flat reader, for the sizes that do resolve, best cell per size:
+
+| read | bytes | best vec | best out | blocks | GB/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| one expert body (gate+up+down) | 1,900,544 | 8 | 1 | 1,024 | **498.0** |
+| the router | 2,097,152 | 16 | 2 | 512 | **446.3** |
+| one expert's down (q5_k) | 720,896 | 16 | 8 | 512 | **498.9** |
+| one expert's gate (q4_k) | 589,824 | 16 | 2 | 512 | **473.2** |
+
+So the number the brief called the target — the best cell for a 1.9 MB read —
+is **498.0 GB/s**, and the pattern the kernel issues reaches **612 GB/s**. The
+staging runs at 164. There is 3.7x of headroom in the read and the read is not
+the constraint.
+
+### The ablation: where the 108.8 ms goes
+
+`prefill_moe.hip` carries no probe switches, so two were added to `mg_body` for
+this measurement and reverted: `MG_PROBE_NO_W` drops the weight tile's read and
+dequant, `MG_PROBE_NO_MMA` drops the matrix product. `gemm ffn` at 511 ids,
+chunk 512, two reps a cell, one lock hold:
+
+| variant | weight tile | matrix product | `gemm ffn` |
+| --- | :---: | :---: | ---: |
+| A shipped | yes | yes | **107.5** |
+| B | no | yes | **47.8** |
+| C | yes | no | **31.3** |
+| D | no | no | **31.5** |
+
+A − D is 76.0 ms for the weight tile and the product together. B − D is
+**16.3 ms for the product alone**. C − D is nothing — and that is not a result,
+it is the compiler: with the product removed nothing reads `shw`, so the whole
+weight staging is dead code and C is D. The usable split is therefore
+
+```
+108.8 ms = 31.5 scaffolding + 16.3 matrix product + 59.7 weight tile
+```
+
+where the scaffolding is the activation tile's staging, the two barriers a k
+tile, and the epilogue. The weight tile's 59.7 ms over 17.87 GB is **299 GB/s**,
+against the 612 the same read reaches on its own.
+
+### Five candidates, measured and excluded
+
+The brief's list, in the order it gave, each built and measured. None moves the
+cell.
+
+| candidate | change | result |
+| --- | --- | ---: |
+| 4 B loads where 16 B is possible | `pf_dequant8`'s eight per-value `pf_ld8` replaced by one 64-bit load per run, in every format | **neutral**: 2,868 at 512 against the parent's 2,877; the ISA already had `global_load_b32` merged loads, not eight byte loads |
+| the lane to value map | the tile probe's own table | 612 GB/s at 1,024 blocks, i.e. the map is not the constraint |
+| more loads in flight | `MG_BUF 2`: two shared k tiles, one barrier a tile instead of two, the next tile staged under this tile's product | **worse**: `gemm ffn` 98.2 against 96.6 |
+| block count sized to the read | 64 / 128 / 256 / 512 / 1,024 / 2,048 blocks in the probe | monotone in blocks and flat past 1,024; the kernel already launches 1,024 and 4,096 |
+| occupancy | `__launch_bounds__(MG_THREADS, 3)` and `(256, 4)` against the default 2 blocks a CU at 101 VGPRs | **neutral**: 96.6 / 96.9 / 96.7 |
+| the header re-read | `d`, `dmin` and the scales hoisted out of the k loop, since a 256-value block's header is constant across its eight 32-value k tiles | **much worse**: 150.5 against 96.7 |
+
+The last one is worth keeping because it was the most promising and it inverted.
+A Q4_K superblock is 144 bytes and a thread's 8-value run reads a 64-bit qs word
+plus a header; eight k tiles read 128 bytes of qs for 128 useful bytes and the
+16-byte header eight times, so the staging *issues* about 2.7x the bytes it
+needs. Hoisting the header — which removes a third of that — makes the cell 56%
+slower, so issued bytes are not the currency either.
+
+What is left is stated as a question rather than a conclusion, because it was not
+answered: **59.7 ms of `gemm ffn` is spent inside the weight tile's staging loop,
+and it is not the memory system (612 GB/s available, 299 achieved), not the
+barrier structure (pipelining it is worse), not the occupancy (three and four
+blocks a CU are identical), not the issued bytes (removing a third of them is
+worse), and not the dequant's arithmetic, which is 159 G ALU operations against
+a ~20 T op/s budget — 8 ms.** The two things this slice did not have are a
+profiler (`rocprof` is not on the box) and a shared-memory bank-conflict model;
+the staging's `ds_store_b128` writes go to `shw` at an 80-byte row stride, eight
+rows a warp, which is the one remaining candidate that fits every measurement
+above and was not tested.
+
+### The cell, and the sweep
+
+Interleaved A/B against the parent, three reps a cell, one lock hold, order
+alternated — and the two binaries are the same source for the kernel, so this is
+a control that the instrument did not move anything:
+
+| cell | parent | this tree | delta |
+| --- | --- | --- | ---: |
+| prefill 511 real ids, chunk 512 | 2,816.71 / 2,838.87 / 2,841.23 | 2,824.17 / 2,831.32 / 2,845.63 | **−0.3%** |
+| prefill 8,184 real ids, chunk 2,048 | 3,803.66 / 3,800.37 / 3,799.56 | 3,801.03 / 3,794.15 / 3,793.88 | **−0.2%** |
+
+Against llama.cpp's 3,588.74 at 512 and 4,116.16 at 8,184 (§8.6.1) that is
+**79.0%** and **92.2%**. The 3,566 the brief names as the target is `llama-bench`'s
+fresh-process figure from §8.6.1's table; either way this slice does not reach it.
+
+**The tile-height sweep was not re-run, and cannot move.** §8.6.2's fit is
+`ffn_ms = a x tiles + b x padded_slots` with `a` and `b` measured from the same
+kernel this branch ships — `prefill_moe.hip` is byte-identical to the parent
+commit, so `a` and `b` are unchanged, so the function of the tile height is
+unchanged and its minimum is still 64. The brief's premise for re-sweeping was
+that staging might get cheaper and the balance move; staging did not get cheaper.
+The shipped binary's own `--bucket-stats` still prints the two terms for the
+cell the fit was calibrated on:
+
+| chunk | tile | padded slots | tiles | `a x tiles` | `b x padded` | fitted |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 512 | 16 | 6,064 (1.48x) | 379 | 145.2 | 5.3 | 150.5 |
+| 512 | 32 | 8,928 (2.18x) | 279 | 106.9 | 7.8 | 114.7 |
+| 512 | **64** | 15,040 (3.68x) | 235 | 90.0 | 13.1 | **103.1** |
+
+The fit is a 512-cell fit and this slice found it does not extrapolate: at
+chunk 2,048 it predicts 177.7 ms a chunk where `--prefill-split` measures
+**263.4**, because the shared expert, the router and the activation tile all
+scale with tokens and the 512 fit folds them into the tile coefficient. That is
+a further reason not to re-sweep from the fit: the height at 2,048 was decided
+by measurement in §8.6.2 (128 is 1.7% faster, inside the box's spread), and the
+kernel that would have to change has not.
+
+**What shipped: the instrument, and nothing in the kernel.** `bw-probe` gains a
+`tile` section (`bw_tile` and its nine variants, a launcher, a manifest row each,
+and `--sizes` entries for one expert body and for a 128-row gate and down tile),
+so the tables above reproduce from the binary:
+
+```
+hipml bw-probe --launches 128 --reps 3
+```
+
+`prefill_moe.hip`, `prefill_common.inc` and `prefill_wmma2.hip` are byte-identical
+to the parent commit, so every gate below is the parent's. The next slice on this
+cell should start at the shared-memory store, not at the read.
+
 ## 9. Gates
 
 On the binary this branch ships, `--features hip`, model paths passed with
@@ -1930,6 +2133,47 @@ anything that was already gated:
 The two oracle maxima are the same numbers every slice since the prefill-tile
 note reports, which is the expected result for a change that does not touch the
 dense forward pass.
+
+### Re-run on this branch (§8.13)
+
+`prefill_moe.hip`, `prefill_common.inc` and `prefill_wmma2.hip` are byte-identical
+to `99bbe3e`, so these are the parent's numbers reproduced, not a new pass. The
+one thing the branch changes is the code object: nine unused `bw_tile` kernels
+are now in the amalgamated unit, so the table is also the control for that.
+
+| gate | expected | observed |
+| --- | --- | --- |
+| `parity --deep` | 74 passed | **74 passed**, 0 failed, 1 skipped |
+| `parity prefill --deep` | 15 passed | **15 passed**, 0 failed, 0 skipped |
+| `moe-gate --device` | 64/64 | **PASS 64/64** |
+| `moe-gate` CPU | 64/64 | **PASS 64/64** |
+| `column-bench --check` (Qwen3.8-27B-UD) | 0 differ | **0 differ** hidden and residual, max \|d\| 0 |
+| `column-bench --check` (Qwen3.6-35B-A3B) | 0 differ | **0 differ** hidden and residual, max \|d\| 0 |
+| `ppl` moe-matrix ctx 512, Qwen3.6 / MiniCPM / Sage / Arete | 2.0982 / 2.2761 / 2.1804 / 2.0384 | **2.0982 / 2.2761 / 2.1804 / 2.0384** |
+| `oracle-gate` UD, 20 steps, chunk 2048, q8 | PASS 20/20 | **PASS 20/20**, 373 prompt tokens |
+| `oracle-gate` stock, 20 steps | PASS 20/20 | **PASS 20/20** |
+| greedy 12 ids, stock | `11751 13 198 760 6511 314 9564 369 19241 13 198 760` | **identical** |
+| `batch-bench --slots 16 --check` stock | every slot reproduces B=1 | **all slots, full stream** |
+| `batch-bench --slots 16 --check` MoE | 15/16, slot 4 step 13 | **slot 4 step 13: batch 382 vs single 290**, as recorded |
+| `spec-bench` MoE q8, drafts 1/2/3 | 128/128 exact | **128/128** on all three, 168.47 / 168.93 / 162.09 tok/s |
+| `spec-bench` MoE f32, drafts 1/2/3 | 128/128 exact | **128/128** on all three, 165.74 / 169.15 / 158.29 tok/s |
+| `spec-bench` dense OrcaCyber d3 q8 | 128/128 exact | **128/128**, 63.60 tok/s |
+| `spec-bench` MoE d3 q8, interleaved A/B against the parent | must not regress | **162.31 / 162.27 against 162.63 / 162.15** — identical |
+| `spec-bench` dense d3 q8, interleaved A/B against the parent | must not regress | **63.47 / 63.59 against 63.57 / 63.62** — identical |
+| MoE decode, depth 0, 200 tokens | 130.11 | **129.93** (7.696 ms/token) |
+| MoE decode, depth 8,192, 200 tokens | 122.75 | **122.78** (8.145 ms/token) |
+| dense decode, depth 0, 200 tokens | 33.31 | **33.30** (30.030 ms/token) |
+| prefill 511 real ids, chunk 512 | 2,877 | **2,831.32** median of three, parent 2,838.87 in the same hold |
+| prefill 8,184 real ids, chunk 2048 | 3,777 | **3,794.15** median of three, parent 3,800.37 in the same hold |
+| `probe_exact.py --ctx 32768` | PASS | **PASS**, 48 replies id-for-id across drafts 1,2,3 |
+| `cargo test --workspace` | 101 | **101 passed, 0 failed** |
+| `cargo fmt --all -- --check` | clean | clean |
+| `scripts/check-public-tree.sh` | clean | clean |
+| `scripts/check-doc-links.py` | all links resolve | **286 links in 53 files** |
+
+The spec-bench rates read 6% under the values recorded above (177.58 / 184.00 /
+174.44 and 67.68) on **both** binaries in the same hold, so that is this
+session's box and not the branch; the interleaved A/B is the number to trust.
 
 ## 10. What is not verified, and what is out of scope
 

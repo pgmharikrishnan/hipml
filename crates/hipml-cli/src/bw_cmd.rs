@@ -38,6 +38,12 @@ const SIZES: &[(&str, usize)] = &[
     ("one_bank", 4_718_592),
     ("layer_banks", 18_874_368),
     ("lm_head", 540_344_320),
+    // The routed FFN's own reads. One expert body is its gate, up and down
+    // banks — 589,824 + 589,824 + 720,896 — and the grouped GEMM takes it 128
+    // rows at a time, which is what one workgroup of the staging issues.
+    ("moe_expert_body", 1_900_544),
+    ("moe_gate_tile_128row", 147_456),
+    ("moe_down_tile_128row", 45_056),
 ];
 
 const VECS: &[usize] = &[4, 8, 16];
@@ -54,6 +60,26 @@ const SHAPES: &[(usize, usize, &str)] = &[
 /// (warps, rows per warp) -> rows per block. The first four are "one workgroup
 /// per row" and up; the last two are the 8-row and 16-row tiles the engine uses.
 const GEOMS: &[(usize, usize)] = &[(1, 1), (2, 1), (4, 1), (8, 1), (8, 2), (8, 4)];
+
+/// (label, row_bytes, tile_bytes, rows per block) for the grouped expert GEMM's
+/// staging. The shipped tile is 128 rows, and it takes `tile` bytes of a row per
+/// k pass: 32 for a Q4_K sub-block pair, 144 for a whole Q4_K superblock, and
+/// the whole row for a staging pass wide enough to read it contiguously. One
+/// expert's gate is `512 x 1152` (589,824 B) and its down is `2048 x 352`
+/// (720,896 B), so a 4-block gate and a 16-block down cover one expert.
+const TILES: &[(&str, usize, usize, usize)] = &[
+    ("gate_up_128x2048_q4k_t32", 1152, 32, 128),
+    ("gate_up_128x2048_q4k_t144", 1152, 144, 128),
+    ("gate_up_128x2048_q4k_row", 1152, 1152, 128),
+    ("down_128x512_q5k_t32", 352, 32, 128),
+    ("down_128x512_q5k_t176", 352, 176, 128),
+    ("down_128x512_q5k_row", 352, 352, 128),
+];
+
+/// Workgroup counts for the staging sweep. The routed bank issues 1,024 blocks
+/// for a gate (4 row blocks x 256 experts) and 4,096 for a down, so the range
+/// brackets what the kernel actually launches.
+const TILE_BLOCKS: &[usize] = &[64, 128, 256, 512, 1024, 2048];
 
 struct Args {
     reps: usize,
@@ -468,6 +494,82 @@ pub fn run(args: &[String]) -> i32 {
                         gbps(bytes, span),
                         rate(bytes, excess)
                     ));
+                }
+            }
+        }
+    }
+
+    if !a.flat_only && !a.rows_only {
+        println!("\n=== tile: the grouped GEMM's staging geometry, on its own ===");
+        println!(
+            "{:<26} {:>3} {:>4} {:>6} {:>8} {:>8} {:>8} {:>9} {:>9} {:>5}",
+            "shape",
+            "vec",
+            "out",
+            "blocks",
+            "floor us",
+            "span us",
+            "excess",
+            "raw GB/s",
+            "net GB/s",
+            "lim"
+        );
+        for &(label, row_bytes, tile, nrows) in TILES {
+            let npass = row_bytes / tile;
+            for &vec in VECS {
+                if tile % vec != 0 || tile / vec > a.threads {
+                    continue;
+                }
+                for &outstanding in OUTS {
+                    if npass < outstanding || outstanding > 4 {
+                        continue;
+                    }
+                    let entry = format!("bw_tile_v{vec}_o{outstanding}");
+                    for &blocks in TILE_BLOCKS {
+                        let bytes = blocks * nrows * row_bytes;
+                        if bytes > ALLOC {
+                            continue;
+                        }
+                        let windows = ((ALLOC - bytes.min(ALLOC)) / bytes).max(0) + 1;
+                        let mut cursor = 0usize;
+                        let span = match burst(a.launches, a.reps, &ev, &l, |_| {
+                            let row0 = (cursor % windows) * blocks * nrows;
+                            cursor += 1;
+                            l.bw_tile(
+                                &entry, &buf, nrows, row_bytes, tile, npass, row0, blocks,
+                                a.threads, &out,
+                            )
+                        }) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                eprintln!("bw-probe: {entry}: {e}");
+                                return 1;
+                            }
+                        };
+                        let floor = floor_of(blocks, a.threads, &node);
+                        let excess = span - floor;
+                        let lim = if span < host_us * 1.10 { "host" } else { "gpu" };
+                        println!(
+                            "{:<26} {:>3} {:>4} {:>6} {:>8.3} {:>8.3} {:>8.3} {:>9.1} {:>9} {:>5}",
+                            label,
+                            vec,
+                            outstanding,
+                            blocks,
+                            floor,
+                            span,
+                            excess.max(0.0),
+                            gbps(bytes, span),
+                            rate(bytes, excess),
+                            lim
+                        );
+                        rows.push(format!(
+                            "tile,{label},{bytes},{vec},{outstanding},{blocks},{},{floor:.4},{span:.4},{:.4},{:.1},{},{lim}",
+                            a.threads,
+                            excess.max(0.0),
+                            gbps(bytes, span),
+                            rate(bytes, excess)
+                        ));
+                    }
                 }
             }
         }
