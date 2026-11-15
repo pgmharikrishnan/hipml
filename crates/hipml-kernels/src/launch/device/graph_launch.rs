@@ -729,6 +729,45 @@ impl Launcher {
         self.embed_row_at(ty, w, row, row_bytes, out, 0, out.len())
     }
 
+    /// Dequantise the embedding row named by the device int at `row` into
+    /// `out`: the MTP draft chain writes each draft's argmax into its own slot
+    /// and the next draft's lookup reads that slot, with no device copy and no
+    /// host round-trip in between.
+    ///
+    /// `row` is the address of that int, so the caller can hold a mutable
+    /// borrow of the drafter while it launches.
+    pub fn embed_row_idx(
+        &self,
+        ty: hipml_core::quant::TensorType,
+        w: &ByteBuffer,
+        row_bytes: usize,
+        out: &Buffer,
+        n_embd: usize,
+        row: *mut c_void,
+    ) -> Result<(), String> {
+        let nblocks = row_blocks(n_embd)?;
+        let kernel = self.module.kernel("embed_row_idx")?;
+        let mut p_w = w.as_ptr();
+        let mut p_out = out.as_ptr();
+        let mut v_blocks = nblocks as i32;
+        let mut v_row_bytes = row_bytes as i32;
+        let mut p_rows = row;
+        let mut v_kind = row_kind(ty)?;
+        let mut params: [*mut c_void; 6] = [
+            &mut p_w as *mut _ as *mut c_void,
+            &mut p_out as *mut _ as *mut c_void,
+            &mut v_blocks as *mut _ as *mut c_void,
+            &mut v_row_bytes as *mut _ as *mut c_void,
+            &mut p_rows as *mut _ as *mut c_void,
+            &mut v_kind as *mut _ as *mut c_void,
+        ];
+        kernel.launch(
+            LaunchConfig::per_row(nblocks, 256),
+            &self.stream,
+            &mut params,
+        )
+    }
+
     /// Same, writing the dequantized row at float offset `dst` of `out`: the
     /// chunked prefill embeds a whole tile into one `[tokens][n_embd]` buffer.
     pub fn embed_row_at(
@@ -774,6 +813,23 @@ impl Launcher {
         n: usize,
         parts: usize,
     ) -> Result<(), String> {
+        self.argmax_buf_at(x, best_v, best_i, out.as_ptr(), n, parts)
+    }
+
+    /// Device argmax writing its one result at `out`: the MTP draft chain keeps
+    /// each draft's id in its own slot, so a whole chain costs one readback
+    /// instead of one per draft. `out` is the address of that slot, so the
+    /// caller can hold a mutable borrow of the drafter while it launches.
+    #[allow(clippy::too_many_arguments)]
+    pub fn argmax_buf_at(
+        &self,
+        x: &Buffer,
+        best_v: &Buffer,
+        best_i: &Buffer,
+        out: *mut c_void,
+        n: usize,
+        parts: usize,
+    ) -> Result<(), String> {
         let part = self.module.kernel("argmax_part_f32")?;
         let mut p_x = x.as_ptr();
         let mut p_v = best_v.as_ptr();
@@ -797,7 +853,7 @@ impl Launcher {
         let fin = self.module.kernel("argmax_final_f32")?;
         let mut p_v = best_v.as_ptr();
         let mut p_i = best_i.as_ptr();
-        let mut p_out = out.as_ptr();
+        let mut p_out = out;
         let mut params: [*mut c_void; 4] = [
             &mut p_v as *mut _ as *mut c_void,
             &mut p_i as *mut _ as *mut c_void,

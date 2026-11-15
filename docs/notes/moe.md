@@ -1360,7 +1360,8 @@ because column `c` reads its own 8 of 256 experts. `column-bench` on this file:
 So the second draft pays (+11.1%) and the third does not: from two drafts to
 three the step buys 0.706 tokens for 6.77 ms, 9.6 ms per marginal token against
 the 7.86 ms a plain token costs. `docs/notes/mtp.md` has the full table and the
-step breakdown (drafts 3: draft 3.90 + verify 22.47 + rollback 0.30 ms).
+step breakdown (drafts 3: draft 3.90 + verify 22.47 + rollback 0.30 ms — the
+3.90 is the three drafts, not one; §8.14 prices them).
 
 **Superseded:** the paragraph above blames the routed FFN for the slope. §8.11
 profiles the pass stage by stage and finds the routed FFN is the *better*
@@ -2066,6 +2067,55 @@ hipml bw-probe --launches 128 --reps 3
 to the parent commit, so every gate below is the parent's. The next slice on this
 cell should start at the shared-memory store, not at the read.
 
+## 8.14 The MoE drafter, priced (2026-11-15)
+
+§8.8 splits a three-draft step into *"draft 3.90 + verify 22.47 + rollback 0.30
+ms"*, and that 3.90 has been read as one draft. It is three: 1.30 ms each. The
+drafter had never been profiled on its own, so `spec-bench --trace` now marks
+each draft step's stages and prices them against the bytes they stream
+(`mtp.md`, *The drafter's step cost*).
+
+`Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL`, d3, 100 draft steps:
+
+| stage | ms/draft | MB/draft | GB/s |
+| --- | ---: | ---: | ---: |
+| `draft_head` (Q8_0, full vocab) | 0.971 | 540.3 | 556 |
+| `draft_attn` | 0.103 | 29.0 | 281 |
+| `draft_argmax` | 0.092 | 1.0 | — |
+| `draft_ffn` (routed, 256 experts) | 0.086 | 20.7 | 241 |
+| `draft_proj` | 0.042 | 8.9 | 210 |
+| `draft_sync` | 0.040 | 4 B | — |
+| **sum** | **1.335** | **599.9** | **449** |
+
+The head is 90% of the bytes and 73% of the time, and `gemv-bench --tensor
+output.weight --rows 1` reads it alone at 0.922 ms / **585.9 GB/s** against the
+632 GB/s of §8.1 — 93% of the card's rate. The routed FFN, which is the whole
+story of the *verify* (§8.11), is 6% of the drafter.
+
+**The d2 target is not reachable from here.** 198.93 tok/s at 2.822 tokens per
+step is a 14.19 ms step; verify 12.85 + rollback 0.20 leaves 1.14 ms for two
+drafts, 0.57 each, where the head alone is 0.855 at 632 GB/s. Even with every
+other stage free the drafter costs 1.71 ms and the step 14.76 — **191.2 tok/s**.
+The card's premise (the drafter "runs at an eighth of its weight traffic") is
+what the profile refutes: the drafter is the head, and the head is at the wall.
+
+What ships is the one non-weight term the profile showed, the per-draft host
+round-trip: `draft_chain` keeps the recursion on the device (argmax into a slot,
+embedding row read from that slot, one position upload, one readback), worth
+−4.1% of the drafter at d3. Interleaved A/B, three pairs, order alternated:
+
+| drafts | tok/s parent | tok/s this | Δ | drafter ms/draft | accept (both) |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 0 | 129.12 | 129.07 | −0.04% | — | — |
+| 1 | 176.82 | 176.72 | −0.06% | 1.297 → 1.318 | 0.954 |
+| 2 | 182.39 | **183.45** | +0.58% | 1.299 → 1.252 | 0.956, 0.953 |
+| 3 | 173.35 | **174.61** | +0.73% | 1.312 → 1.258 | 0.917, 0.939, 0.935 |
+
+Every row 128/128 exact on both binaries, acceptance identical to four decimals.
+The remaining drafter terms are the ~55 µs position upload, the small stages at
+199–296 GB/s and the head's last 6%; together ~0.3 ms/draft, which is the
+distance to the 0.95 ms floor and still 1.6× short of 0.57.
+
 ## 9. Gates
 
 On the binary this branch ships, `--features hip`, model paths passed with
@@ -2175,6 +2225,45 @@ The spec-bench rates read 6% under the values recorded above (177.58 / 184.00 /
 174.44 and 67.68) on **both** binaries in the same hold, so that is this
 session's box and not the branch; the interleaved A/B is the number to trust.
 
+### Re-run on this branch (§8.14)
+
+The drafter's block, the head, the verify and every target-path kernel are
+unchanged; what this branch adds is `embed_row_idx`, `argmax_buf_at` and
+`set_step_pos` on the draft chain. Every gate below is the parent's number
+reproduced, and the interleaved A/B in §8.14 is the one that moved.
+
+| gate | expected | observed |
+| --- | --- | --- |
+| `parity --deep` | 74 passed | **74 passed**, 0 failed, 1 skipped |
+| `parity prefill --deep` | 15 passed | **15 passed**, 0 failed, 0 skipped |
+| `moe-gate --device` | 64/64 | **PASS 64/64** |
+| `moe-gate` CPU | 64/64 | **PASS 64/64** |
+| `column-bench --check` (Qwen3.8-27B-UD) | 0 differ | **0 differ**, 7,946,240 logits, hidden and residual |
+| `column-bench --check` (Qwen3.6-35B-A3B) | 0 differ | **0 differ**, 7,946,240 logits, hidden and residual |
+| `ppl` moe-matrix ctx 512, Qwen3.6 / MiniCPM / Sage / Arete | 2.0982 / 2.2761 / 2.1804 / 2.0384 | **2.0982 / 2.2761 / 2.1804 / 2.0384** |
+| `oracle-gate` UD, 20 steps, chunk 2048, q8 | PASS 20/20, 0.1086 at 101748 | **PASS 20/20**, 0.1086 at 101748 |
+| `oracle-gate` stock, 20 steps | PASS 20/20, 0.1481 at 34114 | **PASS 20/20**, 0.1481 at 34114 |
+| greedy 12 ids, stock | `11751 13 198 760 6511 314 9564 369 19241 13 198 760` | **identical** |
+| `batch-bench --slots 16 --check` stock | every slot reproduces B=1 | **all slots, full stream** |
+| `batch-bench --slots 16 --check` MoE | 15/16, slot 4 step 13 | **slot 4 step 13: batch 382 vs single 290**, as recorded |
+| `spec-bench` MoE q8, drafts 1/2/3 | 128/128 exact | **128/128**, 177.60 / 184.23 / 174.94 tok/s |
+| `spec-bench` MoE f32, drafts 1/2/3 | 128/128 exact | **128/128** on all three |
+| `spec-bench` dense Orca q8, drafts 0/1/2/3 | 128/128 exact | **128/128**, 34.14 / 53.89 / 60.40 / 68.84 tok/s |
+| `spec-bench` dense Orca f32, drafts 1/2/3 | 128/128 exact | **128/128** on all three |
+| `spec-bench` UD + sidecar q8, drafts 1/2/3 | 128/128 exact | **128/128** on all three |
+| `spec-bench` MoE d3 q8, interleaved A/B against the parent | must not regress | **174.61 against 173.35** tok/s, drafter 1.312 → **1.258** ms/draft (§8.14) |
+| `spec-bench` dense d3 q8, interleaved A/B against the parent | must not regress | **67.78 against 67.53** tok/s, drafter 2.474 → **2.410** ms/draft (§8.14) |
+| MoE decode, depth 0, 200 tokens | 130.11 | **130.36** (7.67 ms/token) |
+| MoE decode, depth 8,192, 200 tokens | 122.75 | **123.38** (8.105 ms/token) |
+| dense decode, depth 0, 200 tokens | 33.31 | **33.51** (29.843 ms/token) |
+| prefill 511 real ids, chunk 512 | 2,831 | **2,838.30** |
+| `probe_exact.py --ctx 32768`, MoE | PASS | **PASS**, 48 replies id-for-id across drafts 1,2,3 |
+| `probe_exact.py --ctx 32768`, dense Orca | PASS | **PASS**, 48 replies id-for-id across drafts 1,2,3 |
+| `cargo test --workspace` | 101 | **101 passed, 0 failed** |
+| `cargo fmt --all -- --check` | clean | clean |
+| `scripts/check-public-tree.sh` | clean | clean |
+| `scripts/check-doc-links.py` | all links resolve | **287 links in 53 files** |
+
 ## 10. What is not verified, and what is out of scope
 
 * **MTP.** `blk.40` is a MoE block; `mtp.rs` now builds the drafter's FFN as
@@ -2182,6 +2271,12 @@ session's box and not the branch; the interleaved A/B is the number to trust.
   BF16 router tensors are widened to f32 at upload (2 MB) because no GEMV reads
   BF16. §8.8 is the single-stream measurement and §8.10 the batch one; the
   batch drafter and verify are built and exact at B≤4.
+* **The drafter's remaining cost is out of scope.** §8.14 prices it at 1.26
+  ms/draft against a 0.95 ms floor, with the full-vocabulary head at 93% of the
+  card's read rate. The three terms left (the ~55 µs position upload, the small
+  stages at 199–296 GB/s, the head's last 6%) are ~0.3 ms/draft together, and
+  the d2 target needs 0.57 — so it is not a drafter change, and nothing here
+  attempted a reduced head, which would change the drafted ids.
 * **Grouped GEMM / bucketed prefill: shipped, at 79% of llama.cpp's warm 512
   cell.** §7.4 and §8.6 are the path and the numbers; §8.6.1 is why the baseline
   is 3,588.74 and not 3,375.05 or 4,529.55, and §8.6.2 is the tile sweep. What is

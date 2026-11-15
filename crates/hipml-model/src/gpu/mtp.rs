@@ -18,11 +18,27 @@
 //! verify pass, the draft and the head, and no hidden state round-trips
 //! through the host.
 
+use super::trace::mark;
 use super::*;
 use crate::gpu_weights::{gemv_entry, Proj};
 use crate::OUTPUT;
 
 use super::moe::MoeBlock;
+
+/// Address of element `i` of an id buffer: the draft chain hands each argmax
+/// slot to the next draft's embedding lookup without a device copy.
+fn slot_ptr(buf: &Buffer, i: usize) -> *mut std::ffi::c_void {
+    unsafe { (buf.as_ptr() as *mut u8).add(i * 4) as *mut std::ffi::c_void }
+}
+
+/// Where one draft step's input token is.
+enum Row {
+    /// `step[2]`, which `set_step` has just written: a host token, used by the
+    /// prompt KV pass and the single step.
+    Step,
+    /// A device slot holding the previous draft's argmax.
+    At(*mut std::ffi::c_void),
+}
 
 /// The MTP block's feed-forward network: the dense SwiGLU of a `qwen35` file,
 /// or the routed FFN of a `qwen35moe` one.
@@ -75,13 +91,19 @@ pub struct MtpGpu<'a> {
     /// recursive step's `h`.
     hnext: Buffer,
     logits: Buffer,
+    /// One drafted id per chain slot, so a chain costs one readback.
+    draft_ids: Buffer,
+    draft_ids_slots: usize,
     arg_v: Buffer,
     arg_i: Buffer,
     arg_out: Buffer,
     head: &'a ByteBuffer,
     head_ty: hipml_core::quant::TensorType,
+    head_bytes: usize,
     embed: (&'a ByteBuffer, usize, hipml_core::quant::TensorType),
     launcher: &'a Launcher,
+    /// Per-stage timing of the draft step; `None` unless the caller asked.
+    pub trace: Option<Trace>,
 }
 
 impl<'a> MtpGpu<'a> {
@@ -147,6 +169,7 @@ impl<'a> MtpGpu<'a> {
             .ok_or_else(|| "model has no output.weight".to_string())?;
         let head = head_t.buffer();
         let head_ty = head_t.ty();
+        let head_bytes = head_t.nbytes() as usize;
         let zeros = |len: usize| Buffer::alloc(len);
         Ok(MtpGpu {
             enorm: Buffer::from_host(&v("nextn.enorm.weight")?)?,
@@ -169,13 +192,17 @@ impl<'a> MtpGpu<'a> {
             out: zeros(n)?,
             hnext: zeros(n)?,
             logits: zeros(cfg.n_vocab)?,
+            draft_ids: zeros(3)?,
+            draft_ids_slots: 3,
             arg_v: zeros(ARGMAX_PARTS)?,
             arg_i: zeros(ARGMAX_PARTS)?,
             arg_out: zeros(1)?,
             head,
             head_ty,
+            head_bytes,
             embed,
             launcher: l,
+            trace: None,
             cfg,
         })
     }
@@ -188,6 +215,35 @@ impl<'a> MtpGpu<'a> {
                 DraftFfn::Dense { gate, up, down } => gate.bytes() + up.bytes() + down.bytes(),
                 DraftFfn::Moe(m) => m.bytes(),
             }
+    }
+
+    /// Weight bytes one draft step streams, by the stage that streams them, so
+    /// a trace can report GB/s. The head is the target's `output.weight`, read
+    /// once per draft because the draft needs the full-vocabulary argmax.
+    pub fn stage_bytes(&self) -> Vec<(&'static str, usize)> {
+        let head = self.head_bytes;
+        let ffn = match &self.ffn {
+            DraftFfn::Dense { gate, up, down } => gate.bytes() + up.bytes() + down.bytes(),
+            DraftFfn::Moe(m) => m.bytes(),
+        };
+        vec![
+            ("draft_proj", self.eh_proj.bytes()),
+            ("draft_attn", self.attn.weight_bytes()),
+            ("draft_ffn", ffn),
+            ("draft_head", head),
+            ("draft_argmax", self.cfg.n_vocab * 4),
+            ("draft_sync", 4),
+            ("draft_end", 0),
+        ]
+    }
+
+    /// Fold the draft-step timeline. The caller must not be inside a step.
+    pub fn trace_fold(&mut self) -> Result<Vec<hipml_hip::probe::StageRow>, String> {
+        self.attn_launcher().synchronize()?;
+        Ok(match self.trace.as_mut() {
+            Some(t) => t.fold().to_vec(),
+            None => Vec::new(),
+        })
     }
 
     /// Bytes of the drafter's f32 KV cache.
@@ -210,38 +266,43 @@ impl<'a> MtpGpu<'a> {
 
     /// `rmsnorm(x, enorm) ; rmsnorm(h, hnorm)` into the 10240-wide projection
     /// input, then `x = eh_proj cat`.
-    fn project(&self, token: u32) -> Result<(), String> {
+    ///
+    /// The embedding row comes from `rows[row_off]`, a device slot: the draft
+    /// chain writes each draft's argmax there, so the token never has to reach
+    /// the host. The decode is `embed_row_idx`'s, which shares `dr_value` with
+    /// the host-addressed `dequant_row_any`, so the row is bit-identical to
+    /// `embed_row_at`'s.
+    fn project(&self, row: Row) -> Result<(), String> {
         let l = self.attn_launcher();
         let cfg = &self.cfg;
         let n = cfg.n_embd;
-        l.embed_row_at(
-            self.embed.2,
-            self.embed.0,
-            token as usize,
-            self.embed.1,
-            &self.emb,
-            0,
-            n,
-        )?;
+        match row {
+            Row::Step => l.embed_row_dev(self.embed.2, self.embed.0, self.embed.1, &self.emb, n)?,
+            Row::At(p) => {
+                l.embed_row_idx(self.embed.2, self.embed.0, self.embed.1, &self.emb, n, p)?
+            }
+        }
         l.rmsnorm_buf(&self.emb, &self.enorm, &self.cat, n, cfg.eps)?;
         let dst = unsafe { (self.cat.as_ptr() as *mut u8).add(n * 4) as *mut std::ffi::c_void };
         l.rmsnorm_ptr(self.hnext.as_ptr(), &self.hnorm, dst, n, cfg.eps, 1)?;
         self.eh_proj.gemv(l, &self.cat, &self.x)
     }
 
-    /// One drafter step at absolute position `pos` for `token` (the token
-    /// *after* `pos`). Returns the drafted id; leaves `hnext` ready for the
-    /// recursive next draft.
-    pub fn step(&mut self, token: u32, pos: usize) -> Result<u32, String> {
+    /// One draft step at `pos` for the token named by `row` (a device int):
+    /// the whole block plus the full-vocabulary head, leaving the drafted id at
+    /// `id` and `hnext` ready for the recursive next draft.
+    fn step_dev(&mut self, pos: usize, row: Row, id: *mut std::ffi::c_void) -> Result<(), String> {
         let l = self.attn_launcher();
         let cfg = self.cfg.clone();
         let n = cfg.n_embd;
-        self.project(token)?;
+        mark(&mut self.trace, l, "draft_proj")?;
+        self.project(row)?;
         l.rmsnorm_buf(&self.x, &self.attn_norm, &self.t, n, cfg.eps)?;
-        l.set_step(pos, pos + 1, token as usize)?;
+        mark(&mut self.trace, l, "draft_attn")?;
         self.attn.forward_buf(l, &self.t, pos)?;
         l.residual_buf(&self.x, self.attn.output(), &self.x1, n)?;
         l.rmsnorm_buf(&self.x1, &self.post_norm, &self.t, n, cfg.eps)?;
+        mark(&mut self.trace, l, "draft_ffn")?;
         match &self.ffn {
             DraftFfn::Dense { gate, up, down } => {
                 gate.gemv(l, &self.t, &self.gate_b)?;
@@ -255,6 +316,7 @@ impl<'a> MtpGpu<'a> {
                 l.residual_buf(m.out(), &self.x1, &self.out, n)?;
             }
         }
+        mark(&mut self.trace, l, "draft_head")?;
         l.rmsnorm_buf(&self.out, &self.head_norm, &self.hnext, n, cfg.eps)?;
         l.run_quant_resident(
             gemv_entry(self.head_ty)?,
@@ -264,17 +326,66 @@ impl<'a> MtpGpu<'a> {
             cfg.n_vocab,
             n,
         )?;
-        l.argmax_buf(
+        mark(&mut self.trace, l, "draft_argmax")?;
+        l.argmax_buf_at(
             &self.logits,
             &self.arg_v,
             &self.arg_i,
-            &self.arg_out,
+            id,
             cfg.n_vocab,
             ARGMAX_PARTS,
-        )?;
+        )
+    }
+
+    /// One drafter step at absolute position `pos` for `token` (the token
+    /// *after* `pos`). Returns the drafted id; leaves `hnext` ready for the
+    /// recursive next draft.
+    pub fn step(&mut self, token: u32, pos: usize) -> Result<u32, String> {
+        let l = self.attn_launcher();
+        l.set_step(pos, pos + 1, token as usize)?;
+        self.step_dev(pos, Row::Step, self.arg_out.as_ptr())?;
+        mark(&mut self.trace, l, "draft_sync")?;
         l.synchronize()?;
         let b = self.arg_out.download_bytes(0, 4)?;
+        mark(&mut self.trace, l, "draft_end")?;
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    /// Draft `n` tokens recursively from `first` at `pos`.
+    ///
+    /// The recursion stays on the device: draft `k` writes its argmax into
+    /// `draft_ids[k]`, and draft `k+1` reads its embedding row from that slot.
+    /// One readback at the end returns every id, where the per-draft `step`
+    /// pays a sync and a readback on each.
+    pub fn draft_chain(&mut self, first: u32, pos: usize, n: usize) -> Result<Vec<u32>, String> {
+        let l = self.attn_launcher();
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        if n > self.draft_ids_slots {
+            return Err(format!(
+                "draft chain of {n} exceeds {} slots",
+                self.draft_ids_slots
+            ));
+        }
+        for k in 0..n {
+            let id = slot_ptr(&self.draft_ids, k);
+            if k == 0 {
+                // The chain's one host token goes in through the step scalars.
+                l.set_step(pos, pos + 1, first as usize)?;
+                self.step_dev(pos, Row::Step, id)?;
+            } else {
+                l.set_step_pos(pos + k, pos + k + 1)?;
+                self.step_dev(pos + k, Row::At(slot_ptr(&self.draft_ids, k - 1)), id)?;
+            }
+        }
+        mark(&mut self.trace, l, "draft_sync")?;
+        l.synchronize()?;
+        let b = self.draft_ids.download_bytes(0, 4 * n)?;
+        mark(&mut self.trace, l, "draft_end")?;
+        Ok((0..n)
+            .map(|k| u32::from_le_bytes([b[4 * k], b[4 * k + 1], b[4 * k + 2], b[4 * k + 3]]))
+            .collect())
     }
 
     /// Build the drafter's KV cache for one prompt position: only `eh_proj`,
@@ -284,9 +395,9 @@ impl<'a> MtpGpu<'a> {
         let l = self.attn_launcher();
         let cfg = self.cfg.clone();
         let n = cfg.n_embd;
-        self.project(token)?;
-        l.rmsnorm_buf(&self.x, &self.attn_norm, &self.t, n, cfg.eps)?;
         l.set_step(pos, pos + 1, token as usize)?;
+        self.project(Row::Step)?;
+        l.rmsnorm_buf(&self.x, &self.attn_norm, &self.t, n, cfg.eps)?;
         self.attn.append_kv_only(l, &self.t, pos)
     }
 

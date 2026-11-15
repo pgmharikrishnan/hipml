@@ -10,6 +10,11 @@
 //! hipml spec-bench --gguf model.gguf --mtp mtp.gguf --ids-file prompt.ids \
 //!     --tokens 128 --drafts 3 --kv f32
 //! ```
+//!
+//! `--trace` adds the drafter's own per-stage table (`draft_proj`, `draft_attn`,
+//! `draft_ffn`, `draft_head`, `draft_argmax`, `draft_sync`) with the weight
+//! bytes each stage streams, so the draft step can be priced against the rate
+//! its traffic implies.
 
 use std::time::Instant;
 
@@ -26,6 +31,7 @@ struct Args {
     ctx: Option<usize>,
     chunk: usize,
     json: bool,
+    trace: bool,
     stop_ids: Vec<u32>,
     stop_eos: bool,
 }
@@ -41,6 +47,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         ctx: None,
         chunk: 2048,
         json: false,
+        trace: false,
         stop_ids: Vec::new(),
         stop_eos: false,
     };
@@ -86,6 +93,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--json" => {
                 a.json = true;
+                i += 1;
+            }
+            "--trace" => {
+                a.trace = true;
                 i += 1;
             }
             "--stop-eos" => {
@@ -193,7 +204,13 @@ pub fn bench(args: &[String]) -> i32 {
         }
     };
     let drafter_bytes = mtp.weight_bytes();
+    let draft_stage_bytes = mtp.stage_bytes();
     let drafter_kv = mtp.kv_bytes();
+    // The launch counts in the stage table come from the same timeline
+    // `gpu-profile --trace` uses; it counts launches, it does not time them.
+    if a.trace {
+        hipml_hip::probe::set_enabled(true);
+    }
     let mut rows: Vec<Row> = Vec::new();
 
     // 0 drafts: the plain decode reference.
@@ -272,6 +289,7 @@ pub fn bench(args: &[String]) -> i32 {
                 return 1;
             }
         };
+        mtp.trace = a.trace.then(hipml_model::gpu::Trace::default);
         let run: SpecRun =
             match engine.spec_generate(&mut mtp, &prompt, a.tokens, d, chunk, &stop_ids) {
                 Ok(r) => r,
@@ -280,6 +298,54 @@ pub fn bench(args: &[String]) -> i32 {
                     return 1;
                 }
             };
+        // The drafter's own stage table: one row per stage, per draft step.
+        let draft_steps: usize = run.stats.drafted.iter().take(d).sum();
+        let draft_trace = match mtp.trace_fold() {
+            Ok(rows) => rows,
+            Err(e) => {
+                eprintln!("spec-bench: trace sync: {e}");
+                return 1;
+            }
+        };
+        if a.trace {
+            let n = draft_steps.max(1) as f64;
+            println!(
+                "\ndrafter stages at {d} drafts ({draft_steps} draft steps, ranked by GPU time):"
+            );
+            println!(
+                "  {:<14} {:>9} {:>8} {:>10} {:>7}",
+                "stage", "ms/step", "launch", "MB/step", "GB/s"
+            );
+            let mut sum = 0.0f64;
+            for r in &draft_trace {
+                let bytes = draft_stage_bytes
+                    .iter()
+                    .find(|(name, _)| *name == r.name)
+                    .map(|(_, b)| *b)
+                    .unwrap_or(0);
+                let ms = r.span_us / 1e3 / n;
+                // `draft_end` runs from the last mark of a step to the first of
+                // the next, so it is the verify and rollback, not the drafter.
+                let between = r.name == "draft_end";
+                if !between {
+                    sum += ms;
+                }
+                let gbs = if r.span_us > 0.0 {
+                    bytes as f64 * draft_steps as f64 / (r.span_us / 1e6) / 1e9
+                } else {
+                    0.0
+                };
+                println!(
+                    "  {:<14} {:>9.3} {:>8.1} {:>10.1} {:>7.0}",
+                    if between { "between_steps" } else { r.name },
+                    ms,
+                    r.launches as f64 / n,
+                    bytes as f64 / 1e6,
+                    gbs
+                );
+            }
+            println!("  {:<14} {:>9.3}", "sum", sum);
+        }
         let accept: Vec<f64> = (0..d).map(|k| run.stats.accept_rate(k)).collect();
         let steps = run.stats.steps;
         rows.push(Row {

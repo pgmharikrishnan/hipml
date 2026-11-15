@@ -431,6 +431,13 @@ pub const KERNELS: &[KernelSpec] = &[
         kind: KernelKind::PerRow { block: 256 },
     },
     KernelSpec {
+        name: "embed_row_idx",
+        entry: "embed_row_idx",
+        // The same decode with the row index in a buffer of its own: the MTP
+        // draft chain's argmax feeds the next draft's lookup on the device.
+        kind: KernelKind::PerRow { block: 256 },
+    },
+    KernelSpec {
         name: "prefill_f32",
         entry: "prefill_f32",
         // Raw-f32 sibling of prefill_q4_k (the SSM alpha/beta projections):

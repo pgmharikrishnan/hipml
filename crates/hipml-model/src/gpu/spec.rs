@@ -150,15 +150,11 @@ impl<'a> GpuEngine<'a> {
         }
         let drafts = drafts.min(self.n_ctx - st.pos - 1);
 
-        // 1. Draft recursively from the current position's hidden state.
+        // 1. Draft recursively from the current position's hidden state. The
+        //    recursion runs on the device; one readback returns the ids.
         let q = st.pos.saturating_sub(1);
-        let mut draft_ids = Vec::with_capacity(drafts);
-        let mut tok = next;
         let t = Instant::now();
-        for k in 0..drafts {
-            tok = mtp.step(tok, q + k)?;
-            draft_ids.push(tok);
-        }
+        let draft_ids = mtp.draft_chain(next, q, drafts)?;
         let draft_s = t.elapsed().as_secs_f64();
 
         // 2. Verify all R = 1 + drafts columns in one weight pass.
