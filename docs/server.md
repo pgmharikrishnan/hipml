@@ -51,6 +51,42 @@ Requests are greedy only: `temperature` must be 0 and `n`/`n_predict` must be 1,
 or the server answers `400` and says it is greedy-only. `top_p`, `seed` and the
 sampling fields are accepted and ignored so existing clients do not break.
 
+## Logprobs
+
+`/v1/chat/completions` accepts `logprobs` (boolean) and `top_logprobs`
+(0–20, default 20) and answers with `choices[].logprobs.content[]`, one entry per
+generated token, in the shape llama-server emits:
+
+```json
+{"id":279,"token":" the","bytes":[32,116,104,101],"logprob":-0.0412,
+ "top_logprobs":[{"id":279,"token":" the","bytes":[32,116,104,101],"logprob":-0.0412}]}
+```
+
+The logits are the step's own: `BatchEngine` already materialises
+`[slots][n_vocab]` every step, and a logprob request takes **one** host copy of
+that buffer per step, shared by every slot in the step, and computes the
+entries on the CPU with `hipml_core::gen`'s log-softmax. A request that did not
+ask takes none — the download serialises the decode pipeline, so the flag gates
+the copy rather than just the formatting.
+
+Two consequences of where the logits live:
+
+* a logprob request is served by the batched path even when it is alone. The
+  speculative step emits ids from the verify tile without materialising their
+  logits, and a reply with entries for some tokens and not others would be
+  worse than a slower one. Nothing else changes: same logits, same greedy ids.
+* streaming carries the entries in the chunk that delivers their text, so a
+  client sees them in order but not necessarily one chunk per token — the reply
+  shaper decides how text is chunked.
+
+`/completion` does not take `logprobs`; llama's own API asks for probabilities
+with `n_probs`, which this server does not implement.
+
+Two rules are llama-server's own, so the same body cannot mean two things:
+`top_logprobs` without `logprobs` is a `400`, and an omitted `top_logprobs`
+means 20. The depth is bounded at 20, which llama does not enforce, because the
+depth is what the selection costs.
+
 ## Reply shape
 
 A chat reply is split at the template's own markers, the way llama-server's

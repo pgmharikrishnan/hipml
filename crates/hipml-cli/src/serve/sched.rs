@@ -25,7 +25,7 @@ use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::time::Instant;
 
-use hipml_core::gen::argmax_f32;
+use hipml_core::gen::{argmax_f32, logprob_of, top_logprobs};
 use hipml_hip::Buffer;
 use hipml_model::gpu::{GpuEngine, GpuState, Snap, SpecStats};
 
@@ -63,6 +63,9 @@ pub struct Job {
     /// `cache_prompt`: consult the prefix cache for this request. Capture is
     /// unconditional, so a later request can still reuse this one's prefix.
     pub cache: bool,
+    /// `logprobs` / `top_logprobs`. Off means the step takes no host copy of
+    /// the logits at all; see [`LpReq`].
+    pub lp: LpReq,
     pub tx: Sender<Event>,
     /// Set by the connection thread: [`CANCEL_STOP`] when a stop string
     /// matched in the decoded text, [`CANCEL_GONE`] when the client went away.
@@ -87,9 +90,34 @@ impl Job {
 }
 
 pub enum Event {
-    Tokens(Vec<u32>),
+    /// Ids emitted by one step, and — only when the request asked — one
+    /// logprob entry per id, in the same order. The second field is `None` on
+    /// every other path, so the flag-off reply allocates exactly what it did
+    /// before.
+    Tokens(Vec<u32>, Option<Vec<Lp>>),
     Done(Done),
     Error(String),
+}
+
+/// What a request asked of the logprob path.
+///
+/// The cost is not in the arithmetic: `BatchEngine::logits_host` copies the
+/// step's `[rows][n_vocab]` logits back over the bus and serialises the decode
+/// pipeline to do it. So the flag gates the copy, not just the formatting: a
+/// request that did not ask takes none.
+#[derive(Clone, Copy)]
+pub struct LpReq {
+    /// `logprobs`: emit one entry per token.
+    pub on: bool,
+    /// `top_logprobs`: alternatives per entry, 0..=20.
+    pub top: usize,
+}
+
+/// One token's logprob entry: the log-softmax of the id that was emitted, and
+/// of the `top` most likely ids, best first.
+pub struct Lp {
+    pub logprob: f32,
+    pub top: Vec<(u32, f32)>,
 }
 
 pub struct Done {
