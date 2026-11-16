@@ -464,8 +464,12 @@ pub fn chat_completion(
         Ok(m) => m,
         Err(e) => return bad(stream, &e),
     };
+    let opts = match chat::options(&v) {
+        Ok(o) => o,
+        Err(e) => return bad(stream, &e),
+    };
     let tools = chat::tools(&v);
-    let prompt = match chat::chat(&shared.tok, &shared.template, &messages, &tools) {
+    let prompt = match chat::chat(&shared.tok, &shared.template, &messages, &tools, &opts) {
         Ok(p) => p,
         Err(e) => return bad(stream, &e),
     };
