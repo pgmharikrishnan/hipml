@@ -7,7 +7,9 @@
 //! scheduler only ever sees ids.
 
 use hipml_core::chat::{render, ChatOptions, Message};
+use hipml_core::chat_request::{message_from_arg, value_to_arg};
 use hipml_core::tokenizer::Tokenizer;
+use hipml_core::tool_json;
 
 use super::json::Value;
 
@@ -17,9 +19,13 @@ use super::json::Value;
 /// (usually the end of the system turn). A tile may finish on a cut and the
 /// scheduler captures that state, so the next request that shares the prefix
 /// restores instead of recomputing it.
+///
+/// `think` says the prompt ends inside a ` thinking` block, so the reply starts
+/// in reasoning and has to be split at the close marker.
 pub struct Prompt {
     pub ids: Vec<u32>,
     pub cuts: Vec<usize>,
+    pub think: bool,
 }
 
 pub fn messages(v: &Value) -> Result<Vec<Message>, String> {
@@ -34,33 +40,52 @@ pub fn messages(v: &Value) -> Result<Vec<Message>, String> {
     for (i, m) in arr.iter().enumerate() {
         // The CLI's JSON path is the same builder: tool calls, content parts
         // and reasoning all go through one implementation.
-        out.push(hipml_core::chat_request::message_from_arg(
-            &hipml_core::chat_request::value_to_arg(m),
-            i,
-        )?);
+        out.push(message_from_arg(&value_to_arg(m), i)?);
     }
     Ok(out)
 }
 
-fn opts(add_generation_prompt: bool) -> ChatOptions {
+/// The request's `tools` array, each definition as the compact JSON the
+/// template's `tool | tojson` emits. llama.cpp hands the definitions to the
+/// template unchanged, so this is what makes the rendered prompt match.
+pub fn tools(v: &Value) -> Vec<String> {
+    v.get("tools")
+        .and_then(Value::as_arr)
+        .map(|a| {
+            a.iter()
+                .map(|t| tool_json::tojson(&value_to_arg(t)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn opts(add_generation_prompt: bool, tools: &[String]) -> ChatOptions {
     ChatOptions {
         enable_thinking: true,
         reasoning_effort: "xhigh".to_string(),
         preserve_thinking: true,
         add_generation_prompt,
-        tools: Vec::new(),
+        tools: tools.to_vec(),
     }
 }
 
 /// Render and tokenize a conversation, keeping message boundaries that are
 /// exact token prefixes of the whole prompt.
-pub fn chat(tok: &Tokenizer, template: &str, messages: &[Message]) -> Result<Prompt, String> {
-    let base = opts(true);
+pub fn chat(
+    tok: &Tokenizer,
+    template: &str,
+    messages: &[Message],
+    tools: &[String],
+) -> Result<Prompt, String> {
+    let base = opts(true, tools);
     let text = render(template, messages, &base).map_err(|e| format!("chat template: {e}"))?;
     let ids = tok.encode_special(&text);
     if ids.is_empty() {
         return Err("rendered conversation is empty".to_string());
     }
+    // The generation prompt is `<|im_start|>assistant\n`, then the open think
+    // tag when thinking is on: that is the only thing the reply starts inside.
+    let think = text.ends_with("<think>\n");
 
     // Only the last two message boundaries. Every cut ends a prefill tile
     // (one full weight pass, ~150 ms) and captures a state, so cutting at
@@ -68,7 +93,7 @@ pub fn chat(tok: &Tokenizer, template: &str, messages: &[Message]) -> Result<Pro
     // flush the whole prefix cache. The next turn of the same conversation
     // reuses the deepest cut; the one before covers a regenerated reply.
     let mut cuts = Vec::new();
-    let plain = opts(false);
+    let plain = opts(false, tools);
     for k in messages.len().saturating_sub(2).max(1)..messages.len() {
         let Ok(text) = render(template, &messages[..k], &plain) else {
             continue;
@@ -95,7 +120,7 @@ pub fn chat(tok: &Tokenizer, template: &str, messages: &[Message]) -> Result<Pro
     }
     cuts.sort_unstable();
     cuts.dedup();
-    Ok(Prompt { ids, cuts })
+    Ok(Prompt { ids, cuts, think })
 }
 
 /// Byte offset just past the special token that closes the turn carrying
@@ -161,6 +186,7 @@ pub fn completion(tok: &Tokenizer, body: &Value) -> Result<Prompt, String> {
     Ok(Prompt {
         ids,
         cuts: vec![cut.unwrap_or(n)],
+        think: false,
     })
 }
 

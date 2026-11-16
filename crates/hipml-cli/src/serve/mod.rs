@@ -8,15 +8,17 @@
 //!             --port 8093 --slots 16 --ctx 32768
 //! ```
 //!
-//! Modules: `http` is the transport, `api` shapes the two endpoints, `sched`
-//! owns the GPU, `metrics` is the Prometheus text, `chat` renders and
-//! tokenizes, `json` is the tiny reader/writer.
+//! Modules: `http` is the transport, `api` shapes the two endpoints, `reply`
+//! splits a chat reply into reasoning, answer and tool calls, `sched` owns the
+//! GPU, `metrics` is the Prometheus text, `chat` renders and tokenizes, `json`
+//! is the tiny reader/writer.
 
 mod admit;
 mod api;
 mod chat;
 mod http;
 mod metrics;
+mod reply;
 mod sched;
 mod wire;
 

@@ -100,6 +100,11 @@ impl Sse {
 pub struct Text {
     bytes: Vec<u8>,
     taken: usize,
+    /// Decode control tokens as their literal text. A chat reply carries the
+    /// template's own markers (`</parameter>`, `<tool_call>`) as control
+    /// tokens, and the reply split has to see them. Generation stops at the
+    /// turn's end token, so no other control token reaches the text.
+    special: bool,
 }
 
 impl Text {
@@ -107,12 +112,22 @@ impl Text {
         Text {
             bytes: Vec::new(),
             taken: 0,
+            special: false,
+        }
+    }
+
+    /// `new`, keeping control tokens: the `/v1/chat/completions` reply.
+    pub fn chat() -> Text {
+        Text {
+            special: true,
+            ..Text::new()
         }
     }
 
     pub fn push(&mut self, tok: &Tokenizer, ids: &[u32]) -> String {
         for &id in ids {
-            if tok.is_special(id) {
+            // The turn's own end token is never text, whichever mode this is.
+            if id == tok.eos_id || (!self.special && tok.is_special(id)) {
                 continue;
             }
             self.bytes.extend_from_slice(&tok.token_bytes(id));

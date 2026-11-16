@@ -51,6 +51,26 @@ Requests are greedy only: `temperature` must be 0 and `n`/`n_predict` must be 1,
 or the server answers `400` and says it is greedy-only. `top_p`, `seed` and the
 sampling fields are accepted and ignored so existing clients do not break.
 
+## Reply shape
+
+A chat reply is split at the template's own markers, the way llama-server's
+default reasoning format splits it, because llama is the reference the
+benchmark compares against:
+
+* `reasoning_content` holds the think block and `content` the answer. A prompt
+  that ends inside ` thinking` (thinking is on) means the reply starts in
+  reasoning, so everything before `</think>` is reasoning and everything after it is
+  the answer. A block that never closes leaves `content` empty and the whole
+  reply in `reasoning_content`: a truncated reply is not an answer.
+* The request's `tools` array is rendered into the prompt the way llama.cpp
+  renders it, and a `<tool_call>` block in the answer comes back as
+  `choices[].message.tool_calls` with `finish_reason: "tool_calls"` instead of
+  as content. A streamed reply sends reasoning as `delta.reasoning_content` and
+  a call as one `delta.tool_calls` entry with its arguments assembled (llama
+  streams them in fragments; an OpenAI client concatenates either form).
+  `tool_choice` is advisory, as it is in llama-server: it does not change the
+  rendered prompt.
+
 ## Backpressure
 
 Admission is against slots plus `--max-queue`. A request that cannot get in is

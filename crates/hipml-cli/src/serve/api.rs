@@ -15,8 +15,10 @@ use std::time::{Duration, Instant};
 use super::chat;
 use super::http::{new_job, Shared};
 use super::json::{self, Value};
+use super::reply::{self, Delta, Shaper};
 use super::sched::{Done, Event, CANCEL_GONE, CANCEL_STOP};
 use super::wire::{now_unix, write_body_h, write_json, write_json_h, Sse, Text};
+use hipml_core::tool_json;
 
 fn parse(body: &[u8]) -> Result<Value, String> {
     let s = std::str::from_utf8(body).map_err(|e| format!("body is not utf-8: {e}"))?;
@@ -213,11 +215,46 @@ fn bool_field(v: &Value, key: &str, default: bool) -> bool {
     v.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
 
-fn finish_reason(done: &Done) -> &str {
+fn finish_reason(done: &Done, calls: usize) -> &'static str {
+    if calls > 0 {
+        return "tool_calls";
+    }
     match done.finish.as_str() {
         "stop" => "stop",
         _ => "length",
     }
+}
+
+/// `choices[0].message` in the OpenAI shape. `reasoning_content` is present
+/// only when the prompt opened a think block, and `tool_calls` only when the
+/// reply is one — the same fields llama-server's default reasoning format adds.
+fn message(reply: &reply::Reply, id: u64) -> String {
+    let mut m = format!(
+        "{{\"role\":\"assistant\",\"content\":\"{}\"",
+        json::escape(&reply.content)
+    );
+    if let Some(reasoning) = &reply.reasoning {
+        m.push_str(",\"reasoning_content\":\"");
+        m.push_str(&json::escape(reasoning));
+        m.push('"');
+    }
+    if !reply.calls.is_empty() {
+        m.push_str(",\"tool_calls\":[");
+        for (i, call) in reply.calls.iter().enumerate() {
+            if i > 0 {
+                m.push(',');
+            }
+            m.push_str(&format!(
+                "{{\"id\":\"call_{id}_{i}\",\"type\":\"function\",\"function\":\
+                 {{\"name\":\"{}\",\"arguments\":\"{}\"}}}}",
+                json::escape(&call.name),
+                json::escape(&tool_json::arguments_json(&call.arguments))
+            ));
+        }
+        m.push(']');
+    }
+    m.push('}');
+    m
 }
 
 /// This server decodes greedily: `argmax` over the logits, one id a step. A
@@ -298,10 +335,10 @@ fn drain(
     cancel: &AtomicU8,
     mut stops: Stops,
     started: Instant,
+    mut text: Text,
 ) -> Result<Reply, String> {
     let mut ids = Vec::new();
     let mut out = String::new();
-    let mut text = Text::new();
     let mut first_at: Option<Instant> = None;
     let mut peek = Instant::now();
     loop {
@@ -348,10 +385,12 @@ pub fn chat_completion(
         Ok(m) => m,
         Err(e) => return bad(stream, &e),
     };
-    let prompt = match chat::chat(&shared.tok, &shared.template, &messages) {
+    let tools = chat::tools(&v);
+    let prompt = match chat::chat(&shared.tok, &shared.template, &messages, &tools) {
         Ok(p) => p,
         Err(e) => return bad(stream, &e),
     };
+    let think = prompt.think;
     let max = max_tokens(&v, prompt.ids.len(), shared.cfg.ctx);
     let ignore_eos = bool_field(&v, "ignore_eos", false);
     let stop = strings(v.get("stop"));
@@ -371,25 +410,26 @@ pub fn chat_completion(
     let model = json::escape(&shared.model);
     let stops = Stops::new(stop);
     if bool_field(&v, "stream", false) {
-        stream_chat(shared, stream, rx, at, id, &model, &cancel, stops)
+        stream_chat(shared, stream, rx, at, id, &model, &cancel, stops, think)
     } else {
         let (text, _ids, done, ttft, decode_ms) =
-            match drain(shared, stream, &rx, &cancel, stops, at) {
+            match drain(shared, stream, &rx, &cancel, stops, at, Text::chat()) {
                 Ok(x) => x,
                 Err(e) => {
                     let b = format!("{{\"error\":{{\"message\":\"{}\"}}}}", json::escape(&e));
                     return write_json(stream, "500 Internal Server Error", &b);
                 }
             };
+        let reply = reply::shape(&text, think);
         let body = format!(
             "{{\"id\":\"chatcmpl-{id}\",\"object\":\"chat.completion\",\"created\":{},\
-             \"model\":\"{model}\",\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\
-             \"content\":\"{}\"}},\"finish_reason\":\"{}\"}}],\
+             \"model\":\"{model}\",\"choices\":[{{\"index\":0,\"message\":{},\
+             \"finish_reason\":\"{}\"}}],\
              \"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{},\"total_tokens\":{}}},\
              \"timings\":{{{}}}}}",
             now_unix(),
-            json::escape(&text),
-            finish_reason(&done),
+            message(&reply, id),
+            finish_reason(&done, reply.calls.len()),
             done.prompt_tokens,
             done.completion_tokens,
             done.prompt_tokens + done.completion_tokens,
@@ -409,9 +449,12 @@ fn stream_chat(
     model: &str,
     cancel: &AtomicU8,
     mut stops: Stops,
+    think: bool,
 ) -> Result<(), String> {
     let mut sse = Sse::start_h(stream, exact_header(shared))?;
-    let mut text = Text::new();
+    let mut text = Text::chat();
+    let mut shaper = Shaper::new(think);
+    let mut calls = 0usize;
     let mut first_at: Option<Instant> = None;
     let mut last_at = at;
     let role = format!(
@@ -439,27 +482,15 @@ fn stream_chat(
                 last_at = Instant::now();
                 let delta = deliver(shared, &mut text, &mut stops, cancel, &t);
                 if !delta.is_empty() {
-                    let event = format!(
-                        "{{\"id\":\"chatcmpl-{id}\",\"object\":\"chat.completion.chunk\",\
-                         \"created\":{},\"model\":\"{model}\",\"choices\":[{{\"index\":0,\
-                         \"delta\":{{\"content\":\"{}\"}},\"finish_reason\":null}}]}}",
-                        now_unix(),
-                        json::escape(&delta)
-                    );
-                    sse.event(&event)?;
+                    for piece in shaper.feed(&delta) {
+                        chunk(&mut sse, &piece, id, model, &mut calls)?;
+                    }
                 }
             }
             Event::Done(mut done) => {
                 let tail = tail(&mut text, &mut stops, &mut done);
-                if !tail.is_empty() {
-                    let event = format!(
-                        "{{\"id\":\"chatcmpl-{id}\",\"object\":\"chat.completion.chunk\",\
-                         \"created\":{},\"model\":\"{model}\",\"choices\":[{{\"index\":0,\
-                         \"delta\":{{\"content\":\"{}\"}},\"finish_reason\":null}}]}}",
-                        now_unix(),
-                        json::escape(&tail)
-                    );
-                    sse.event(&event)?;
+                for piece in shaper.feed(&tail).into_iter().chain(shaper.finish()) {
+                    chunk(&mut sse, &piece, id, model, &mut calls)?;
                 }
                 let first = first_at.unwrap_or(at);
                 let ttft = first.duration_since(at).as_secs_f64() * 1e3;
@@ -471,7 +502,7 @@ fn stream_chat(
                      \"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{},\
                      \"total_tokens\":{}}},\"timings\":{{{}}}}}",
                     now_unix(),
-                    finish_reason(&done),
+                    finish_reason(&done, calls),
                     done.prompt_tokens,
                     done.completion_tokens,
                     done.prompt_tokens + done.completion_tokens,
@@ -489,6 +520,40 @@ fn stream_chat(
             }
         }
     }
+}
+
+/// One streamed piece as an OpenAI chunk delta: reasoning and answer text carry
+/// their own field, and a tool call carries `index`, `id`, `type` and the whole
+/// `function` (llama streams the arguments in fragments; one piece is the same
+/// call, assembled).
+fn chunk(
+    sse: &mut Sse,
+    piece: &Delta,
+    id: u64,
+    model: &str,
+    calls: &mut usize,
+) -> Result<(), String> {
+    let delta = match piece {
+        Delta::Reasoning(t) => format!("\"reasoning_content\":\"{}\"", json::escape(t)),
+        Delta::Content(t) => format!("\"content\":\"{}\"", json::escape(t)),
+        Delta::Call(call) => {
+            let index = *calls;
+            *calls += 1;
+            format!(
+                "\"tool_calls\":[{{\"index\":{index},\"id\":\"call_{id}_{index}\",\
+                 \"type\":\"function\",\"function\":{{\"name\":\"{}\",\"arguments\":\"{}\"}}}}]",
+                json::escape(&call.name),
+                json::escape(&tool_json::arguments_json(&call.arguments))
+            )
+        }
+    };
+    let event = format!(
+        "{{\"id\":\"chatcmpl-{id}\",\"object\":\"chat.completion.chunk\",\
+         \"created\":{},\"model\":\"{model}\",\"choices\":[{{\"index\":0,\
+         \"delta\":{{{delta}}},\"finish_reason\":null}}]}}",
+        now_unix()
+    );
+    sse.event(&event)
 }
 
 pub fn completion(shared: &Arc<Shared>, stream: &mut TcpStream, body: &[u8]) -> Result<(), String> {
@@ -523,7 +588,7 @@ pub fn completion(shared: &Arc<Shared>, stream: &mut TcpStream, body: &[u8]) -> 
     let stops = Stops::new(stop);
     if !streaming {
         let (text, ids, done, ttft, decode_ms) =
-            match drain(shared, stream, &rx, &cancel, stops, at) {
+            match drain(shared, stream, &rx, &cancel, stops, at, Text::new()) {
                 Ok(x) => x,
                 Err(e) => {
                     let b = format!("{{\"error\":{{\"message\":\"{}\"}}}}", json::escape(&e));
