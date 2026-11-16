@@ -59,11 +59,49 @@ pub fn tools(v: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn opts(add_generation_prompt: bool, tools: &[String]) -> ChatOptions {
+/// The request's `chat_template_kwargs`, starting from the server's defaults
+/// (`true`, `"xhigh"`, `true`). A key that is present but has the wrong type,
+/// or an effort the template does not know, is refused rather than replaced by
+/// the default.
+pub fn options(v: &Value) -> Result<ChatOptions, String> {
+    let mut opts = ChatOptions::default();
+    let Some(k) = v.get("chat_template_kwargs") else {
+        return Ok(opts);
+    };
+    if !matches!(k, Value::Obj(_)) {
+        return Err("chat_template_kwargs must be an object".to_string());
+    }
+    if let Some(x) = k.get("enable_thinking") {
+        opts.enable_thinking = x
+            .as_bool()
+            .ok_or("chat_template_kwargs.enable_thinking must be a boolean")?;
+    }
+    if let Some(x) = k.get("reasoning_effort") {
+        let s = x
+            .as_str()
+            .ok_or("chat_template_kwargs.reasoning_effort must be a string")?;
+        match s {
+            "xhigh" | "medium" | "low" => opts.reasoning_effort = s.to_string(),
+            other => {
+                return Err(format!(
+                    "unexpected reasoning effort {other:?} (xhigh, medium, low)"
+                ))
+            }
+        }
+    }
+    if let Some(x) = k.get("preserve_thinking") {
+        opts.preserve_thinking = x
+            .as_bool()
+            .ok_or("chat_template_kwargs.preserve_thinking must be a boolean")?;
+    }
+    Ok(opts)
+}
+
+fn opts(add_generation_prompt: bool, tools: &[String], knobs: &ChatOptions) -> ChatOptions {
     ChatOptions {
-        enable_thinking: true,
-        reasoning_effort: "xhigh".to_string(),
-        preserve_thinking: true,
+        enable_thinking: knobs.enable_thinking,
+        reasoning_effort: knobs.reasoning_effort.clone(),
+        preserve_thinking: knobs.preserve_thinking,
         add_generation_prompt,
         tools: tools.to_vec(),
     }
@@ -76,8 +114,9 @@ pub fn chat(
     template: &str,
     messages: &[Message],
     tools: &[String],
+    knobs: &ChatOptions,
 ) -> Result<Prompt, String> {
-    let base = opts(true, tools);
+    let base = opts(true, tools, knobs);
     let text = render(template, messages, &base).map_err(|e| format!("chat template: {e}"))?;
     let ids = tok.encode_special(&text);
     if ids.is_empty() {
@@ -93,7 +132,7 @@ pub fn chat(
     // flush the whole prefix cache. The next turn of the same conversation
     // reuses the deepest cut; the one before covers a regenerated reply.
     let mut cuts = Vec::new();
-    let plain = opts(false, tools);
+    let plain = opts(false, tools, knobs);
     for k in messages.len().saturating_sub(2).max(1)..messages.len() {
         let Ok(text) = render(template, &messages[..k], &plain) else {
             continue;

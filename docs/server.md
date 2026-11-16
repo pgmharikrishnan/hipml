@@ -87,6 +87,23 @@ Two rules are llama-server's own, so the same body cannot mean two things:
 means 20. The depth is bounded at 20, which llama does not enforce, because the
 depth is what the selection costs.
 
+## Thinking
+
+`/v1/chat/completions` reads the template knobs from `chat_template_kwargs`:
+`enable_thinking` (default `true`), `reasoning_effort` (`xhigh`, `medium` or
+`low`; default `xhigh`) and `preserve_thinking` (default `true`). A request
+that sets none of them gets the defaults, so existing clients are unchanged.
+A value of the wrong type, or an unknown effort, is a `400` rather than a
+silent fallback to the default.
+
+```json
+{"messages":[{"role":"user","content":"hi"}],
+ "chat_template_kwargs":{"enable_thinking":false},"max_tokens":32}
+```
+
+With thinking off the prompt does not open a ` thinking` block, so the answer
+arrives in `content` and `reasoning_content` is empty.
+
 ## Reply shape
 
 A chat reply is split at the template's own markers, the way llama-server's
