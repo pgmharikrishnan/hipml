@@ -264,6 +264,7 @@ pub fn new_job(
     stop_ids: Vec<u32>,
     drafts: usize,
     cache: bool,
+    lp: super::sched::LpReq,
 ) -> Result<
     (
         u64,
@@ -295,6 +296,7 @@ pub fn new_job(
         stop_ids: stops,
         drafts,
         cache,
+        lp,
         tx,
         cancel: cancel.clone(),
     };

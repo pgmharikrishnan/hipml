@@ -375,8 +375,12 @@ impl<'a> BatchEngine<'a> {
         Ok(())
     }
 
-    /// Host copy of every slot's logits row, `[slots][n_vocab]`. Diagnostics
-    /// only (`batch-bench --diff-slot`), never on the serve path.
+    /// Host copy of every slot's logits row, `[slots][n_vocab]`.
+    ///
+    /// It serialises the decode pipeline, so nothing on the serve path takes it
+    /// unless the request asked for logprobs — once per step, for the whole
+    /// batch, and never when the flag is off. `batch-bench --diff-slot` uses it
+    /// for diagnostics.
     pub fn logits_host(&self) -> Result<Vec<f32>, String> {
         self.logits.to_host()
     }

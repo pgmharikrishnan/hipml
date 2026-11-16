@@ -67,7 +67,9 @@ pub fn gather<'a>(
         let job = queue.pop_front().expect("checked");
         let plen = job.prompt.len();
         let alone = slots.iter().all(|s| s.is_none()) && queue.is_empty() && gathered.is_empty();
-        let mode = if alone && cfg.mtp {
+        // The same rule as the main admission: a logprob request is never
+        // speculative, because the spec step has no host copy of its logits.
+        let mode = if alone && cfg.mtp && !job.lp.on {
             Mode::Spec
         } else {
             Mode::Batch
@@ -158,6 +160,13 @@ fn flush_rows<'a>(
     // (slot, fault, finish reason)
     let mut out: Vec<(usize, Option<String>, &'static str)> = Vec::new();
     let mut blocked: Option<String> = None;
+    // `prefill_rows` leaves one logits row per tail, in tail order. Take the
+    // copy once for the block, and only if a tail asked for entries.
+    let n_vocab = batch.cfg.n_vocab;
+    let logits = match gathered.iter().any(|g| g.job.lp.on) {
+        true => Some(batch.logits_host()?),
+        false => None,
+    };
     for (k, g) in gathered.into_iter().enumerate() {
         if let Some(e) = blocked.take() {
             fail::job(engine, metrics, &g.job, "row activate", &e);
@@ -172,7 +181,14 @@ fn flush_rows<'a>(
             continue;
         }
         let id = ids[k];
-        let _ = g.job.tx.send(Event::Tokens(vec![id]));
+        let lp = match &logits {
+            Some(l) if g.job.lp.on => {
+                let row = &l[k * n_vocab..(k + 1) * n_vocab];
+                Some(vec![step::entry(row, id, g.job.lp.top)])
+            }
+            _ => None,
+        };
+        let _ = g.job.tx.send(Event::Tokens(vec![id], lp));
         let finish = if g.job.stop_ids.contains(&id) {
             "stop"
         } else if g.job.max_tokens <= 1 {

@@ -183,7 +183,11 @@ pub fn run(
         if prefill.is_none() && spec.is_none() && !queue.is_empty() && can_admit {
             let job = queue.pop_front().expect("checked");
             let alone = slots.iter().all(|s| s.is_none()) && queue.is_empty();
-            let mode = if alone && cfg.mtp {
+            // A logprob request takes the batched path even when it is alone:
+            // the speculative step emits ids from the verify tile without ever
+            // materialising that token's logits on the host, and a reply with
+            // entries for some tokens and not others is worse than a slower one.
+            let mode = if alone && cfg.mtp && !job.lp.on {
                 Mode::Spec
             } else {
                 Mode::Batch
@@ -217,6 +221,19 @@ pub fn run(
                 let mut pf = prefill.take().expect("checked");
                 let job = pf.job;
                 let first = pf.first.expect("full prompt has a first token");
+                // The prompt's last row is the distribution `first` came from,
+                // so a logprob request needs one host copy of it. This is the
+                // only copy such a request takes outside a decode step.
+                let first_lp = match job.lp.on {
+                    false => None,
+                    true => match engine.logits_host() {
+                        Ok(l) => Some(vec![step::entry(&l, first, job.lp.top)]),
+                        Err(e) => {
+                            fail::job(&mut engine, &metrics, &job, "logprobs", &e);
+                            continue;
+                        }
+                    },
+                };
                 // A request that joined while this prompt was being prefilled
                 // must not wait for a whole MTP generation.
                 let alone = slots.iter().all(|s| s.is_none()) && queue.is_empty();
@@ -226,13 +243,13 @@ pub fn run(
                     Mode::Batch
                 };
                 if job.stop_ids.contains(&first) {
-                    let _ = job.tx.send(Event::Tokens(vec![first]));
+                    let _ = job.tx.send(Event::Tokens(vec![first], first_lp));
                     send_done(&job.tx, &job, "stop", 1, pf.prefill_ms, pf.hit_tokens);
                     metrics.update(|s| s.requests_done += 1);
                     continue;
                 }
                 if job.max_tokens <= 1 {
-                    let _ = job.tx.send(Event::Tokens(vec![first]));
+                    let _ = job.tx.send(Event::Tokens(vec![first], first_lp));
                     send_done(&job.tx, &job, "length", 1, pf.prefill_ms, pf.hit_tokens);
                     metrics.update(|s| s.requests_done += 1);
                     continue;
@@ -255,7 +272,7 @@ pub fn run(
                                 continue;
                             }
                         };
-                        let _ = job.tx.send(Event::Tokens(vec![first]));
+                        let _ = job.tx.send(Event::Tokens(vec![first], first_lp));
                         metrics.update(|s| {
                             s.mtp_requests += 1;
                             s.generated_tokens += 1;
@@ -273,7 +290,7 @@ pub fn run(
                     }
                     Mode::Batch => match batch.adopt(&engine, pf.st.pos) {
                         Ok(slot) => {
-                            let _ = job.tx.send(Event::Tokens(vec![first]));
+                            let _ = job.tx.send(Event::Tokens(vec![first], first_lp));
                             metrics.update(|s| {
                                 s.batch_requests += 1;
                                 s.generated_tokens += 1;
@@ -376,7 +393,7 @@ pub fn run(
                 // finished on length, not on the stop.
                 let mut finish = None;
                 for id in step.ids {
-                    if sp.job.tx.send(Event::Tokens(vec![id])).is_err() {
+                    if sp.job.tx.send(Event::Tokens(vec![id], None)).is_err() {
                         finish = Some("cancelled");
                         break;
                     }

@@ -57,6 +57,26 @@ impl Faults {
     }
 }
 
+/// The logprob entry for one slot's row of logits: the log-softmax of the id
+/// that was emitted, plus the `top` most likely ids.
+///
+/// Greedy decode makes the emitted id the argmax, so it heads the list, which
+/// is where llama.cpp puts the sampled token too. The arithmetic is
+/// `hipml_core::gen`'s, the same functions `hipml generate --logprobs` prints,
+/// so the server and the CLI cannot disagree about a log-probability.
+pub fn entry(logits: &[f32], id: u32, top: usize) -> Lp {
+    Lp {
+        logprob: logprob_of(logits, id as usize),
+        top: match top {
+            0 => Vec::new(),
+            k => top_logprobs(logits, k)
+                .into_iter()
+                .map(|(i, v)| (i as u32, v))
+                .collect(),
+        },
+    }
+}
+
 /// Deliver `ids[i]` to `order[i]`'s client and retire the slots that finished.
 ///
 /// Returns `Err` only when a slot could not be returned to the pool: the active
@@ -72,6 +92,12 @@ pub fn deliver(
     faults: &mut Faults,
 ) -> Result<(), String> {
     let n_vocab = batch.cfg.n_vocab;
+    // One host copy per step, and only when a slot in it asked: the download
+    // serialises the decode pipeline, so the flag-off step takes none at all.
+    let logits = match slots.iter().flatten().any(|a| a.job.lp.on) {
+        true => Some(batch.logits_host()?),
+        false => None,
+    };
     // (slot, fault, finish reason)
     let mut out: Vec<(usize, Option<String>, &'static str)> = Vec::new();
     for (i, &slot) in order.iter().enumerate() {
@@ -88,7 +114,14 @@ pub fn deliver(
             out.push((slot, Some(why), ""));
             continue;
         }
-        if a.job.tx.send(Event::Tokens(vec![id])).is_err() {
+        let lp = match &logits {
+            Some(l) if a.job.lp.on => {
+                let row = &l[slot * n_vocab..(slot + 1) * n_vocab];
+                Some(vec![entry(row, id, a.job.lp.top)])
+            }
+            _ => None,
+        };
+        if a.job.tx.send(Event::Tokens(vec![id], lp)).is_err() {
             out.push((slot, None, "cancelled"));
             continue;
         }
